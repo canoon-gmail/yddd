@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("y3d", {
     ipcRenderer.invoke("open-file", req) as Promise<{ path: string; data: string | Uint8Array } | null>,
   confirm: (message: string) => ipcRenderer.invoke("confirm", message) as Promise<boolean>,
   setTitle: (title: string) => ipcRenderer.send("set-title", title),
+  setDirty: (dirty: boolean) => ipcRenderer.send("set-dirty", dirty),
+  closeNow: () => ipcRenderer.send("close-now"),
   onMenu: (cb: (cmd: string) => void) => {
     ipcRenderer.on("menu", (_e, cmd: string) => cb(cmd));
   },

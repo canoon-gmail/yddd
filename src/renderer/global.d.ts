@@ -7,6 +7,8 @@ interface Y3DApi {
   openFile(req: { title: string; filters: FileFilter[]; binary: boolean }): Promise<{ path: string; data: string | Uint8Array } | null>;
   confirm(message: string): Promise<boolean>;
   setTitle(title: string): void;
+  setDirty(dirty: boolean): void;
+  closeNow(): void;
   onMenu(cb: (cmd: string) => void): void;
 }
 

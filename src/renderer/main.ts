@@ -177,9 +177,8 @@ class App implements ToolHost {
 
     this.doc.onChange(() => this.onDocChange());
     window.y3d?.onMenu((cmd) => this.run(cmd));
-    window.addEventListener("beforeunload", (e) => {
-      if (this.doc.dirty && this.doc.bodies.length) e.returnValue = false;
-    });
+    // Unsaved-changes prompt on close is handled by the main process (see setDirty);
+    // a beforeunload handler would silently block closing in Electron.
 
     this.onDocChange();
     this.viewport.fit();
@@ -279,6 +278,11 @@ class App implements ToolHost {
       case "file.open": void this.fileOpen(); return;
       case "file.save": void this.fileSave(false); return;
       case "file.saveAs": void this.fileSave(true); return;
+      case "file.saveAndClose":
+        void this.fileSave(false).then(() => {
+          if (!this.doc.dirty) window.y3d.closeNow();
+        });
+        return;
       case "file.importStep": void this.fileImportStep(); return;
       case "file.exportStep": void this.fileExport("step"); return;
       case "file.exportStl": void this.fileExport("stl"); return;
@@ -764,6 +768,7 @@ class App implements ToolHost {
   private updateTitle(): void {
     const name = this.doc.filePath ? this.doc.filePath.split(/[\\/]/).pop() : "Untitled";
     window.y3d?.setTitle(`${name}${this.doc.dirty ? " •" : ""} — Y3D`);
+    window.y3d?.setDirty(this.doc.dirty && (this.doc.bodies.length > 0 || this.doc.filePath !== null));
     document.title = `${name} — Y3D`;
   }
 

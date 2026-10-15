@@ -154,9 +154,41 @@ function registerIpc(): void {
   });
 
   ipcMain.on("set-title", (_e, title: string) => win?.setTitle(title));
+
+  // Renderer reports whether the model has unsaved changes.
+  ipcMain.on("set-dirty", (_e, value: boolean) => (dirty = value));
+  // Renderer finished "Save, then close" (or wants to close unconditionally).
+  ipcMain.on("close-now", () => {
+    forceClose = true;
+    win?.close();
+  });
+}
+
+let dirty = false;
+let forceClose = false;
+
+/** Ask before closing a window with unsaved changes. */
+async function onWindowClose(e: Electron.Event): Promise<void> {
+  if (forceClose || !dirty || !win) return;
+  e.preventDefault();
+  const res = await dialog.showMessageBox(win, {
+    type: "warning",
+    buttons: ["Save", "Don't Save", "Cancel"],
+    defaultId: 0,
+    cancelId: 2,
+    message: "Do you want to save changes before closing?",
+    detail: "Your changes will be lost if you don't save them.",
+  });
+  if (res.response === 0) send("file.saveAndClose");
+  else if (res.response === 1) {
+    forceClose = true;
+    win?.close();
+  }
 }
 
 async function createWindow(): Promise<void> {
+  forceClose = false;
+  dirty = false;
   win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -171,6 +203,7 @@ async function createWindow(): Promise<void> {
       sandbox: true,
     },
   });
+  win.on("close", (e) => void onWindowClose(e));
   win.on("closed", () => (win = null));
   if (DEV_URL) await win.loadURL(DEV_URL);
   else await win.loadURL("app://y3d/index.html");
