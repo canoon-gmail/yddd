@@ -1,0 +1,30 @@
+{
+  "name": "y3d",
+  "productName": "Y3D",
+  "version": "0.1.0",
+  "description": "Y3D - a direct NURBS/B-rep CAD modeler for Linux (Electron + Three.js + OpenCascade)",
+  "main": "dist/main/main.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "npm run typecheck && npm run build:main && npm run build:renderer",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "npm run build && electron .",
+    "dev": "npm run build:main && node scripts/dev.mjs",
+    "smoke": "npm run build && Y3D_SMOKE=/tmp/y3d-smoke electron ."
+  },
+  "dependencies": {
+    "replicad": "^1.1.0",
+    "replicad-opencascadejs": "^1.1.0",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/three": "^0.186.0",
+    "electron": "^44.7.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  }
+}

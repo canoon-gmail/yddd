@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' app:; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' app: ws:" />
+    <title>Y3D</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar"></header>
+      <main id="main">
+        <div id="viewport">
+          <div id="hud" hidden></div>
+          <div id="op-panel" hidden></div>
+          <div id="view-label"></div>
+        </div>
+        <aside id="sidebar">
+          <section class="panel">
+            <h3>Bodies</h3>
+            <div id="outliner"></div>
+          </section>
+          <section class="panel">
+            <h3>Selection</h3>
+            <div id="props"></div>
+          </section>
+        </aside>
+      </main>
+      <footer id="statusbar">
+        <span id="status-hint"></span>
+        <span class="spacer"></span>
+        <span id="status-coords"></span>
+        <label class="snap">Snap
+          <select id="snap-select">
+            <option value="0">Off</option>
+            <option value="0.1">0.1 mm</option>
+            <option value="0.5">0.5 mm</option>
+            <option value="1" selected>1 mm</option>
+            <option value="5">5 mm</option>
+            <option value="10">10 mm</option>
+          </select>
+        </label>
+        <span id="status-mode"></span>
+      </footer>
+    </div>
+    <div id="toasts"></div>
+    <div id="help" hidden></div>
+    <div id="loading"><div class="spinner"></div><div>Loading geometry kernel (OpenCascade)…</div></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
