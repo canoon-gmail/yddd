@@ -123,29 +123,32 @@ export class Viewport {
     this.scene.add(this.selEdges, this.hoverEdges);
 
     this.controls = new OrbitControls(this.camera, this.canvas);
+    // Requirements:
+    // 1) No right mouse drag (disabled)
+    // 2) Middle mouse drag = Orbit (ROTATE)
+    // 3) Shift + Left mouse drag = Pan (PAN)
+    // Normal Left click/drag is reserved for select / draw tools (not camera orbit).
     this.controls.mouseButtons = {
-      LEFT: -1,
+      LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.ROTATE,
       RIGHT: -1,
     } as unknown as OrbitControls["mouseButtons"];
 
-    // Update mouse button bindings dynamically:
-    // If Shift is pressed, Left Button becomes PAN; otherwise Left Button is inactive for camera controls.
-    const updateOrbitButtons = (shiftKey: boolean) => {
-      (this.controls.mouseButtons as unknown as { LEFT: number; MIDDLE: number; RIGHT: number }).LEFT =
-        shiftKey ? THREE.MOUSE.PAN : -1;
-    };
-
+    // Prevent regular Left-drag from rotating the view:
+    // Only allow Left-button actions when Shift is held down (which triggers PAN).
     this.canvas.addEventListener("pointerdown", (e) => {
-      updateOrbitButtons(e.shiftKey);
+      if (e.button === 0 && !e.shiftKey) {
+        // Normal left-click: temporarily disable rotate on OrbitControls for this gesture
+        this.controls.enableRotate = false;
+      } else {
+        this.controls.enableRotate = true;
+      }
     }, { capture: true });
 
-    window.addEventListener("keydown", (e) => {
-      if (e.key === "Shift") updateOrbitButtons(true);
-    });
-    window.addEventListener("keyup", (e) => {
-      if (e.key === "Shift") updateOrbitButtons(false);
-    });
+    window.addEventListener("pointerup", () => {
+      this.controls.enableRotate = true;
+    }, { capture: true });
+
     this.controls.screenSpacePanning = true;
     this.controls.zoomToCursor = true;
     this.controls.addEventListener("change", () => {
