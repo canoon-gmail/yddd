@@ -142,7 +142,7 @@ const KEYMAP: Record<string, string> = {
 };
 
 const MODE_HINTS: Record<SelMode, string> = {
-  body: "Solid mode: click to select solids, Shift+click to add.  Right-drag orbit · Middle-drag pan · Wheel zoom",
+  body: "Solid mode: click to select solids, Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
   face: "Face mode: click faces (P push/pull, T shell).  Shift+click to add",
   edge: "Edge mode: click edges (F fillet, H chamfer).  Shift+click to add",
 };
@@ -938,7 +938,9 @@ class App implements ToolHost {
       return;
     }
     const rows: [string, string][] = [
-      ["Right-drag / Middle-drag / Wheel", "Orbit / Pan / Zoom (Shift+Right-drag also pans)"],
+      ["Middle-drag", "Orbit view"],
+      ["Shift + Left-drag", "Pan view"],
+      ["Wheel", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
       ["B · C · S", "Draw Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],

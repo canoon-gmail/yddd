@@ -29,9 +29,11 @@ npm run smoke    # automated end-to-end test, screenshots in /tmp/y3d-smoke
 Press **F1** in the app for all shortcuts.
 
 ## Mouse
-
-* **Left** click: select / use tool
-* **Right-drag**: orbit · **Middle-drag** or **Shift+Right-drag**: pan · **Wheel**: zoom to cursor
+ 
+* **Middle-drag**: orbit
+* **Shift + Left-drag**: pan
+* **Wheel**: zoom to cursor
+* **Left click**: select / draw / use tool
 
 ## Code layout
 

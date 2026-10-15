@@ -124,10 +124,28 @@ export class Viewport {
 
     this.controls = new OrbitControls(this.camera, this.canvas);
     this.controls.mouseButtons = {
-      LEFT: null,
-      MIDDLE: THREE.MOUSE.PAN,
-      RIGHT: THREE.MOUSE.ROTATE,
+      LEFT: -1,
+      MIDDLE: THREE.MOUSE.ROTATE,
+      RIGHT: -1,
     } as unknown as OrbitControls["mouseButtons"];
+
+    // Update mouse button bindings dynamically:
+    // If Shift is pressed, Left Button becomes PAN; otherwise Left Button is inactive for camera controls.
+    const updateOrbitButtons = (shiftKey: boolean) => {
+      (this.controls.mouseButtons as unknown as { LEFT: number; MIDDLE: number; RIGHT: number }).LEFT =
+        shiftKey ? THREE.MOUSE.PAN : -1;
+    };
+
+    this.canvas.addEventListener("pointerdown", (e) => {
+      updateOrbitButtons(e.shiftKey);
+    }, { capture: true });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Shift") updateOrbitButtons(true);
+    });
+    window.addEventListener("keyup", (e) => {
+      if (e.key === "Shift") updateOrbitButtons(false);
+    });
     this.controls.screenSpacePanning = true;
     this.controls.zoomToCursor = true;
     this.controls.addEventListener("change", () => {
@@ -168,11 +186,16 @@ export class Viewport {
       m.depthWrite = false;
       g.add(grid);
     }
-    const axis = (to: V3, color: number) => {
-      const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(...to)]);
+    const axis = (from: V3, to: V3, color: number) => {
+      const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...from), new THREE.Vector3(...to)]);
       return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
     };
-    g.add(axis([500, 0, 0], 0xd9534f), axis([0, 500, 0], 0x5cb85c), axis([0, 0, 30], 0x4a90e2));
+    // Red (+X), Green (+Y), Blue (+Z upward into positive space)
+    g.add(
+      axis([0, 0, 0], [500, 0, 0], 0xd9534f),
+      axis([0, 0, 0], [0, 500, 0], 0x5cb85c),
+      axis([0, 0, 0], [0, 0, 50000], 0x4a90e2)
+    );
     g.renderOrder = -1;
     return g;
   }
