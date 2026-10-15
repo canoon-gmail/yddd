@@ -22,8 +22,12 @@ import {
   importStep,
   boundingSize,
   findFace,
+  extrudeFace,
+  kindOf,
+  type BodyKind,
   type BooleanOp,
   type Shape,
+  type Solid,
 } from "./kernel";
 import { Doc, type Body } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
@@ -37,16 +41,26 @@ const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt
 interface OpField {
   key: string;
   label: string;
+  /** Number value, or 0/1 for checkboxes. */
   value: number;
-  step: number;
+  step?: number;
   min?: number;
+  type?: "number" | "checkbox";
+}
+
+/** Result of a parametric operation: what to preview and how to commit it. */
+interface OpOutcome {
+  /** Shapes to preview, keyed by the body they replace (unknown/negative keys = new bodies). */
+  ghost: Map<number, Shape>;
+  /** Apply to the document. Returns the body ids to select afterwards. */
+  commit(): { select: number[]; solidMode?: boolean };
 }
 
 interface OpSpec {
   title: string;
   label: string;
   fields: OpField[];
-  compute(values: Record<string, number>): Map<number, Shape>;
+  compute(values: Record<string, number>): OpOutcome;
   remember?(values: Record<string, number>): void;
 }
 
@@ -67,11 +81,18 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
     ],
   },
   {
-    title: "Create",
+    title: "Solid",
     items: [
       { cmd: "tool.box", icon: "box", label: "Box", key: "B" },
       { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder", key: "C" },
       { cmd: "tool.sphere", icon: "sphere", label: "Sphere", key: "S" },
+    ],
+  },
+  {
+    title: "Face",
+    items: [
+      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "Q" },
+      { cmd: "tool.circle", icon: "circle", label: "Circle", key: "O" },
       { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "N" },
     ],
   },
@@ -127,6 +148,8 @@ const KEYMAP: Record<string, string> = {
   c: "tool.cylinder",
   s: "tool.sphere",
   n: "tool.polygon",
+  q: "tool.rectangle",
+  o: "tool.circle",
   p: "op.pushpull",
   f: "op.fillet",
   h: "op.chamfer",
@@ -158,12 +181,12 @@ class App implements ToolHost {
   private hover: SelItem | null = null;
   private hidden = new Set<number>();
   private tool: Tool | null = null;
-  private op: { spec: OpSpec; inputs: HTMLInputElement[]; timer: number; result: Map<number, Shape> | null; key: string } | null = null;
+  private op: { spec: OpSpec; inputs: HTMLInputElement[]; timer: number; result: OpOutcome | null; key: string } | null = null;
   private xf: { mode: "translate" | "rotate"; ids: number[] } | null = null;
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 2, chamfer: 1, pushpull: 10, shell: 1 };
+  private defaults = { fillet: 2, chamfer: 1, pushpull: 10, pushpullNew: false, shell: 1 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -216,13 +239,13 @@ class App implements ToolHost {
     this.hudEl.style.top = `${s.y - r.top}px`;
   }
 
-  finish(shape: Shape, baseName: string): void {
-    const body = this.doc.makeBody(shape, baseName);
+  finish(shape: Shape, baseName: string, kind: BodyKind): void {
+    const body = this.doc.makeBody(shape, baseName, kind);
     this.endTool();
     this.doc.commit([...this.doc.bodies, body], `Create ${baseName}`);
     this.setMode("body");
     this.setSelection([{ kind: "body", body: body.id, id: 0 }]);
-    this.toast(`${body.name} created`);
+    this.toast(kind === "face" ? `${body.name} created — press P to push/pull it into a solid` : `${body.name} created`);
   }
 
   fail(e: unknown): void {
@@ -248,7 +271,9 @@ class App implements ToolHost {
       case "tool.box": return this.startTool(new BoxTool(this).start());
       case "tool.cylinder": return this.startTool(new CylinderTool(this).start());
       case "tool.sphere": return this.startTool(new SphereTool(this).start());
-      case "tool.polygon": return this.startTool(new PolygonTool(this).start());
+      case "tool.rectangle": return this.startTool(new BoxTool(this, true).start());
+      case "tool.circle": return this.startTool(new CylinderTool(this, true).start());
+      case "tool.polygon": return this.startTool(new PolygonTool(this, true).start());
 
       case "op.pushpull": return this.opPushPull();
       case "op.fillet": return this.opEdges("fillet");
@@ -475,10 +500,16 @@ class App implements ToolHost {
       const label = document.createElement("label");
       label.textContent = f.label;
       const input = document.createElement("input");
-      input.type = "number";
-      input.step = String(f.step);
-      if (f.min !== undefined) input.min = String(f.min);
-      input.value = String(f.value);
+      if (f.type === "checkbox") {
+        input.type = "checkbox";
+        input.checked = f.value !== 0;
+        label.classList.add("check");
+      } else {
+        input.type = "number";
+        input.step = String(f.step ?? 1);
+        if (f.min !== undefined) input.min = String(f.min);
+        input.value = String(f.value);
+      }
       input.dataset.key = f.key;
       label.appendChild(input);
       panel.appendChild(label);
@@ -500,7 +531,7 @@ class App implements ToolHost {
       if (a === "cancel") this.cancelOp();
     });
     for (const input of inputs) {
-      input.addEventListener("input", () => this.scheduleOpPreview());
+      input.addEventListener(input.type === "checkbox" ? "change" : "input", () => this.scheduleOpPreview());
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -510,7 +541,7 @@ class App implements ToolHost {
           this.cancelOp();
         }
       });
-      input.addEventListener("wheel", (e) => {
+      if (input.type === "number") input.addEventListener("wheel", (e) => {
         e.preventDefault();
         const step = Number(input.step) * (e.shiftKey ? 10 : 1);
         input.value = fmt(Number(input.value) + (e.deltaY < 0 ? step : -step));
@@ -521,13 +552,14 @@ class App implements ToolHost {
     this.hint(`${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
     this.renderToolbarState();
     this.previewOp();
-    inputs[0]?.focus();
-    inputs[0]?.select();
+    const first = inputs.find((i) => i.type === "number") ?? inputs[0];
+    first?.focus();
+    if (first?.type === "number") first.select();
   }
 
   private opValues(): { values: Record<string, number>; key: string } {
     const values: Record<string, number> = {};
-    for (const i of this.op!.inputs) values[i.dataset.key!] = Number(i.value);
+    for (const i of this.op!.inputs) values[i.dataset.key!] = i.type === "checkbox" ? (i.checked ? 1 : 0) : Number(i.value);
     return { values, key: JSON.stringify(values) };
   }
 
@@ -537,7 +569,7 @@ class App implements ToolHost {
     this.op.timer = window.setTimeout(() => this.previewOp(), 120);
   }
 
-  private previewOp(): Map<number, Shape> | null {
+  private previewOp(): OpOutcome | null {
     const op = this.op;
     if (!op) return null;
     const { values, key } = this.opValues();
@@ -549,7 +581,7 @@ class App implements ToolHost {
       op.result = result;
       op.key = key;
       err.textContent = "";
-      this.viewport.showGhost(result);
+      this.viewport.showGhost(result.ghost);
       return result;
     } catch (e) {
       op.result = null;
@@ -568,8 +600,9 @@ class App implements ToolHost {
     if (!result) return;
     op.spec.remember?.(this.opValues().values);
     this.closeOpPanel();
-    this.doc.replaceShapes(result, op.spec.label);
-    this.setSelection(this.mode === "body" ? [...result.keys()].map((id) => ({ kind: "body", body: id, id: 0 })) : []);
+    const { select, solidMode } = result.commit();
+    if (solidMode) this.setMode("body");
+    this.setSelection(this.mode === "body" ? select.map((id) => ({ kind: "body", body: id, id: 0 })) : []);
     this.toast(`${op.spec.label} applied`);
   }
 
@@ -588,23 +621,99 @@ class App implements ToolHost {
     this.renderToolbarState();
   }
 
+  /** Outcome that replaces body shapes in place (fillet, shell, join push/pull...). */
+  private replaceOutcome(shapes: Map<number, Shape>, label: string): OpOutcome {
+    return {
+      ghost: shapes,
+      commit: () => {
+        this.doc.replaceShapes(shapes, label);
+        return { select: [...shapes.keys()] };
+      },
+    };
+  }
+
+  /** The body's shape as a solid, or a friendly error for flat faces. */
+  private solidOf(id: number, action: string): Solid {
+    const b = this.doc.get(id)!;
+    if (b.kind === "face") throw new Error(`${action} needs a solid — "${b.name}" is a flat face (Push/Pull it first)`);
+    return b.shape as Solid;
+  }
+
+  /** Bodies in the selection that are flat faces (for guarding solid-only commands). */
+  private faceBodiesIn(ids: number[]): Body[] {
+    return ids.map((id) => this.doc.get(id)!).filter((b) => b && b.kind === "face");
+  }
+
   private opPushPull(): void {
+    // Target: one selected face, or one selected flat-face body (it has a single face).
+    let target: { bodyId: number; faceId: number } | null = null;
     const faces = this.selection.filter((s) => s.kind === "face");
-    if (faces.length !== 1) {
-      this.toast("Push/Pull: select exactly one face (Face mode, key 2)", "error");
+    if (faces.length === 1 && this.selection.length === 1) target = { bodyId: faces[0].body, faceId: faces[0].id };
+    else if (this.selection.length === 1 && this.selection[0].kind === "body") {
+      const b = this.doc.get(this.selection[0].body);
+      if (b?.kind === "face") target = { bodyId: b.id, faceId: b.shape.faces[0].hashCode };
+    }
+    if (!target) {
+      this.toast("Push/Pull: select one face (Face mode, key 2) or one flat face object", "error");
       return;
     }
-    const { body: bodyId, id: faceId } = faces[0];
+    const { bodyId, faceId } = target;
+    const body = this.doc.get(bodyId)!;
+
+    if (body.kind === "face") {
+      // Flat face → extrude into a brand-new solid that replaces the face.
+      this.startOp({
+        title: "Push / Pull → new solid",
+        label: "Extrude face",
+        fields: [{ key: "d", label: "Distance (mm)", value: this.defaults.pushpull, step: 1 }],
+        compute: ({ d }) => {
+          const solid = extrudeFace(body.shape, faceId, d);
+          return {
+            ghost: new Map([[bodyId, solid]]),
+            commit: () => {
+              const nb = this.doc.makeBody(solid, "Solid");
+              this.doc.commit(this.doc.bodies.map((b) => (b.id === bodyId ? nb : b)), "Extrude face");
+              return { select: [nb.id], solidMode: true };
+            },
+          };
+        },
+        remember: ({ d }) => (this.defaults.pushpull = d),
+      });
+      return;
+    }
+
+    // Face of a solid → modify that solid, or (checkbox) create a separate new solid.
     this.startOp({
       title: "Push / Pull",
       label: "Push/Pull",
-      fields: [{ key: "d", label: "Distance (mm)", value: this.defaults.pushpull, step: 1 }],
-      compute: ({ d }) => new Map([[bodyId, pushPull(this.doc.get(bodyId)!.shape, faceId, d)]]),
-      remember: ({ d }) => (this.defaults.pushpull = d),
+      fields: [
+        { key: "d", label: "Distance (mm)", value: this.defaults.pushpull, step: 1 },
+        { key: "newBody", label: "New solid", value: this.defaults.pushpullNew ? 1 : 0, type: "checkbox" },
+      ],
+      compute: ({ d, newBody }) => {
+        if (newBody) {
+          const solid = extrudeFace(body.shape, faceId, d);
+          return {
+            ghost: new Map([[-1, solid]]),
+            commit: () => {
+              const nb = this.doc.makeBody(solid, "Solid");
+              this.doc.commit([...this.doc.bodies, nb], "Extrude face");
+              return { select: [nb.id], solidMode: true };
+            },
+          };
+        }
+        return this.replaceOutcome(new Map([[bodyId, pushPull(this.solidOf(bodyId, "Push/Pull"), faceId, d)]]), "Push/Pull");
+      },
+      remember: ({ d, newBody }) => {
+        this.defaults.pushpull = d;
+        this.defaults.pushpullNew = !!newBody;
+      },
     });
   }
 
   private opEdges(kind: "fillet" | "chamfer"): void {
+    const isFillet = kind === "fillet";
+    const title = isFillet ? "Fillet" : "Chamfer";
     const perBody = new Map<number, Set<number> | null>();
     for (const s of this.selection) {
       if (s.kind === "body") perBody.set(s.body, null);
@@ -615,22 +724,26 @@ class App implements ToolHost {
       }
     }
     if (!perBody.size) {
-      this.toast(`${kind === "fillet" ? "Fillet" : "Chamfer"}: select edges (Edge mode, key 3) or whole solids`, "error");
+      this.toast(`${title}: select edges (Edge mode, key 3) or whole solids`, "error");
       return;
     }
-    const isFillet = kind === "fillet";
+    const flat = this.faceBodiesIn([...perBody.keys()]);
+    if (flat.length) {
+      this.toast(`${title} works on solids — "${flat[0].name}" is a flat face. Push/Pull it first.`, "error");
+      return;
+    }
     this.startOp({
-      title: isFillet ? "Fillet" : "Chamfer",
-      label: isFillet ? "Fillet" : "Chamfer",
+      title,
+      label: title,
       fields: [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: isFillet ? this.defaults.fillet : this.defaults.chamfer, step: 0.5, min: 0 }],
       compute: ({ r }) => {
         if (r <= 0) throw new Error("value must be greater than 0");
         const out = new Map<number, Shape>();
         for (const [id, edges] of perBody) {
-          const shape = this.doc.get(id)!.shape;
+          const shape = this.solidOf(id, title);
           out.set(id, isFillet ? filletEdges(shape, edges, r) : chamferEdges(shape, edges, r));
         }
-        return out;
+        return this.replaceOutcome(out, title);
       },
       remember: ({ r }) => {
         if (isFillet) this.defaults.fillet = r;
@@ -647,6 +760,10 @@ class App implements ToolHost {
       return;
     }
     const bodyId = faces[0].body;
+    if (this.doc.get(bodyId)?.kind === "face") {
+      this.toast("Shell works on solids — Push/Pull the flat face first", "error");
+      return;
+    }
     const ids = new Set(faces.map((f) => f.id));
     this.startOp({
       title: "Shell",
@@ -654,7 +771,7 @@ class App implements ToolHost {
       fields: [{ key: "t", label: "Thickness (mm)", value: this.defaults.shell, step: 0.5, min: 0 }],
       compute: ({ t }) => {
         if (t <= 0) throw new Error("thickness must be greater than 0");
-        return new Map([[bodyId, shellSolid(this.doc.get(bodyId)!.shape, ids, t)]]);
+        return this.replaceOutcome(new Map([[bodyId, shellSolid(this.solidOf(bodyId, "Shell"), ids, t)]]), "Shell");
       },
       remember: ({ t }) => (this.defaults.shell = t),
     });
@@ -669,9 +786,14 @@ class App implements ToolHost {
       this.toast("Boolean: select 2+ solids. The first one selected is the target.", "error");
       return;
     }
+    const flat = this.faceBodiesIn(ids);
+    if (flat.length) {
+      this.toast(`Booleans work on solids — "${flat[0].name}" is a flat face. Push/Pull it first.`, "error");
+      return;
+    }
     const [targetId, ...toolIds] = ids;
     const target = this.doc.get(targetId)!;
-    const result = booleanOp(op, target.shape, toolIds.map((id) => this.doc.get(id)!.shape));
+    const result = booleanOp(op, target.shape as Solid, toolIds.map((id) => this.doc.get(id)!.shape as Solid));
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
     const removed = new Set(toolIds);
     const next = this.doc.bodies.filter((b) => !removed.has(b.id)).map((b) => (b.id === targetId ? { ...b, shape: result } : b));
@@ -732,10 +854,10 @@ class App implements ToolHost {
     this.endInteractions();
     const ids = new Set(this.selection.filter((s) => s.kind === "body").map((s) => s.body));
     if (!ids.size) {
-      this.toast("Delete: select solids (Solid mode, key 1)", "error");
+      this.toast("Delete: select objects (Solid mode, key 1)", "error");
       return;
     }
-    this.doc.commit(this.doc.bodies.filter((b) => !ids.has(b.id)), ids.size > 1 ? `Delete ${ids.size} solids` : "Delete");
+    this.doc.commit(this.doc.bodies.filter((b) => !ids.has(b.id)), ids.size > 1 ? `Delete ${ids.size} objects` : "Delete");
     this.setSelection([]);
   }
 
@@ -748,7 +870,7 @@ class App implements ToolHost {
     }
     const copies = ids.map((id) => {
       const b = this.doc.get(id)!;
-      return this.doc.makeBody(cloneShape(b.shape), b.name.replace(/\s+\d+$/, ""));
+      return this.doc.makeBody(cloneShape(b.shape), b.name.replace(/\s+\d+$/, ""), b.kind);
     });
     this.doc.commit([...this.doc.bodies, ...copies], "Duplicate");
     this.setMode("body");
@@ -833,7 +955,7 @@ class App implements ToolHost {
       row.className = "ol-row";
       row.classList.toggle("selected", selected.has(b.id));
       row.classList.toggle("hidden", this.hidden.has(b.id));
-      row.innerHTML = `<span class="ol-swatch"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${this.hidden.has(b.id) ? ICONS.eyeOff : ICONS.eye}</button>`;
+      row.innerHTML = `<span class="ol-swatch${b.kind === "face" ? " face" : ""}" title="${b.kind === "face" ? "Flat face" : "Solid"}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${this.hidden.has(b.id) ? ICONS.eyeOff : ICONS.eye}</button>`;
       row.addEventListener("click", (e) => {
         if ((e.target as HTMLElement).closest(".ol-eye, input")) return;
         this.setMode("body");
@@ -882,22 +1004,24 @@ class App implements ToolHost {
     const tip = (html: string) => `<div class="tip">${html}</div>`;
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
-        tip(`<kbd>B</kbd> box · <kbd>C</kbd> cylinder · <kbd>S</kbd> sphere · <kbd>N</kbd> polygon<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
+        tip(`Solids: <kbd>B</kbd> box · <kbd>C</kbd> cylinder · <kbd>S</kbd> sphere<br>Faces: <kbd>Q</kbd> rectangle · <kbd>O</kbd> circle · <kbd>N</kbd> polygon → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
       return;
     }
     const kind = sel[0].kind;
     const rows: [string, string][] = [];
     let hints = "";
     if (kind === "body") {
-      rows.push(["Solids", String(sel.length)]);
+      rows.push(["Objects", String(sel.length)]);
       if (sel.length === 1) {
         const b = this.doc.get(sel[0].body);
         if (b) {
           const [w, d, h] = boundingSize(b.shape);
-          rows.unshift(["Name", escapeHtml(b.name)]);
+          rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : "Solid"]);
           rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`], ["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length)]);
         }
-        hints = `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>F</kbd> fillet all edges · <kbd>Ctrl+D</kbd> duplicate`;
+        hints = b?.kind === "face"
+          ? `<kbd>P</kbd> push/pull into a new solid · <kbd>G</kbd> move · <kbd>R</kbd> rotate`
+          : `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>F</kbd> fillet all edges · <kbd>Ctrl+D</kbd> duplicate`;
       } else {
         hints = `<kbd>Shift+U</kbd> union · <kbd>Shift+S</kbd> subtract · <kbd>Shift+I</kbd> intersect<br>(first selected = target)`;
       }
@@ -906,10 +1030,10 @@ class App implements ToolHost {
       if (sel.length === 1) {
         const b = this.doc.get(sel[0].body);
         const f = b && findFace(b.shape, sel[0].id);
-        if (b) rows.push(["Solid", escapeHtml(b.name)]);
+        if (b) rows.push([b.kind === "face" ? "Flat face" : "Solid", escapeHtml(b.name)]);
         if (f) rows.push(["Surface", f.geomType]);
       }
-      hints = `<kbd>P</kbd> push/pull · <kbd>T</kbd> shell (opens selected faces)`;
+      hints = `<kbd>P</kbd> push/pull (flat face → new solid) · <kbd>T</kbd> shell (opens selected faces)`;
     } else {
       rows.push(["Edges", String(sel.length)]);
       hints = `<kbd>F</kbd> fillet · <kbd>H</kbd> chamfer`;
@@ -946,16 +1070,17 @@ class App implements ToolHost {
       ["Wheel", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
-      ["B · C · S · N", "Draw Box · Cylinder · Sphere · Polygon (type numbers + Enter for exact sizes)"],
+      ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
+      ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
       ["[ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Ctrl (while drawing)", "Temporarily disable grid snapping"],
-      ["P", "Push/Pull selected face"],
+      ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
       ["F · H", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
       ["Shift+U · Shift+S · Shift+I", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Ctrl+D", "Duplicate (then move)"],
-      ["Del / X", "Delete selected solids"],
+      ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
@@ -987,9 +1112,12 @@ class App implements ToolHost {
     const file = await window.y3d.openFile({ title: "Open model", filters: [{ name: "Y3D model", extensions: ["y3d"] }], binary: false });
     if (!file) return;
     try {
-      const json = JSON.parse(file.data as string) as { format: string; bodies: { name: string; brep: string }[] };
+      const json = JSON.parse(file.data as string) as { format: string; bodies: { name: string; kind?: BodyKind; brep: string }[] };
       if (json.format !== "y3d") throw new Error("not a Y3D file");
-      const bodies = json.bodies.map((b) => ({ name: b.name, shape: deserialize(b.brep) }));
+      const bodies = json.bodies.map((b) => {
+        const shape = deserialize(b.brep);
+        return { name: b.name, kind: b.kind ?? kindOf(shape), shape };
+      });
       this.endInteractions();
       this.selection = [];
       this.hidden.clear();
@@ -1006,7 +1134,7 @@ class App implements ToolHost {
       format: "y3d",
       version: 1,
       units: "mm",
-      bodies: this.doc.bodies.map((b) => ({ name: b.name, brep: serializeShape(b.shape) })),
+      bodies: this.doc.bodies.map((b) => ({ name: b.name, kind: b.kind, brep: serializeShape(b.shape) })),
     });
     let path = this.doc.filePath;
     if (saveAs || !path) {
@@ -1038,13 +1166,18 @@ class App implements ToolHost {
 
   private async fileExport(kind: "step" | "stl"): Promise<void> {
     const ids = this.selectedBodyIds();
-    const bodies = ids.length ? this.doc.bodies.filter((b) => ids.includes(b.id)) : this.doc.bodies.filter((b) => !this.hidden.has(b.id));
+    let bodies = ids.length ? this.doc.bodies.filter((b) => ids.includes(b.id)) : this.doc.bodies.filter((b) => !this.hidden.has(b.id));
+    if (kind === "stl") {
+      const solids = bodies.filter((b) => b.kind === "solid");
+      if (solids.length < bodies.length) this.toast("STL skips flat faces (no volume) — exporting solids only");
+      bodies = solids;
+    }
     if (!bodies.length) {
       this.toast("Nothing to export", "error");
       return;
     }
     try {
-      const buf = kind === "step" ? await exportStep(bodies.map((b) => ({ shape: b.shape, name: b.name }))) : await exportStl(bodies.map((b) => b.shape));
+      const buf = kind === "step" ? await exportStep(bodies.map((b) => ({ shape: b.shape, name: b.name }))) : await exportStl(bodies.map((b) => b.shape as Solid));
       const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.y3d$/, "") ?? "model";
       const path = await window.y3d.saveFile({
         title: `Export ${kind.toUpperCase()}`,
@@ -1052,7 +1185,7 @@ class App implements ToolHost {
         filters: kind === "step" ? [{ name: "STEP", extensions: ["step", "stp"] }] : [{ name: "STL", extensions: ["stl"] }],
         data: new Uint8Array(buf),
       });
-      if (path) this.toast(`Exported ${bodies.length} solid(s) to ${path.split(/[\\/]/).pop()}`);
+      if (path) this.toast(`Exported ${bodies.length} object(s) to ${path.split(/[\\/]/).pop()}`);
     } catch (e) {
       this.fail(e);
     }

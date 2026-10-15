@@ -12,7 +12,7 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body } from "./document";
-import { tessellate, type Shape, type V3 } from "./kernel";
+import { tessellate, kindOf, type Shape, type V3 } from "./kernel";
 
 export type SelMode = "body" | "face" | "edge";
 
@@ -87,6 +87,13 @@ export class Viewport {
       new THREE.MeshStandardMaterial({ color: 0x9aa5b1, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
       new THREE.MeshStandardMaterial({ color: 0xe9c46a, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
       new THREE.MeshStandardMaterial({ color: 0xf4a259, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+    ],
+    // Flat face bodies: bluish, pulled slightly toward the camera so they win over
+    // coplanar solid faces / the grid.
+    regionFaces: [
+      new THREE.MeshStandardMaterial({ color: 0x6f9bd1, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+      new THREE.MeshStandardMaterial({ color: 0xe9c46a, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+      new THREE.MeshStandardMaterial({ color: 0xf4a259, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
     ],
     edge: new LineMaterial({ color: 0x15171a, linewidth: 1.4 }),
     edgeHover: new LineMaterial({ color: 0xffe066, linewidth: 3.5 }),
@@ -259,7 +266,7 @@ export class Viewport {
       faceStarts.push(g.start);
       faceIndex.set(g.faceId, i);
     });
-    const mesh = new THREE.Mesh(geom, this.mats.faces);
+    const mesh = new THREE.Mesh(geom, body.kind === "face" ? this.mats.regionFaces : this.mats.faces);
 
     const edgePos = Float32Array.from(edges.lines);
     let lines: LineSegments2 | null = null;
@@ -498,12 +505,15 @@ export class Viewport {
     this.requestRender();
   }
 
-  /** Preview operation results in place of the given bodies. */
+  /**
+   * Preview operation results in place of the given bodies. Keys that are not
+   * existing body ids (e.g. negative numbers) add a preview without hiding anything.
+   */
   showGhost(shapes: Map<number, Shape>): void {
     this.clearGhost();
     let k = -1;
     for (const [id, shape] of shapes) {
-      const view = this.buildView({ id: k--, name: "", shape });
+      const view = this.buildView({ id: k--, name: "", kind: kindOf(shape), shape });
       this.ghostRoot.add(view.group);
       const orig = this.views.get(id);
       if (orig) orig.group.visible = false;

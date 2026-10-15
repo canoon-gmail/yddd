@@ -2,6 +2,10 @@
  * Geometry kernel facade. All B-rep modeling goes through this module so the
  * rest of the app never touches OpenCascade / replicad directly.
  *
+ * Body geometry is either a 3D solid (`Solid`) or a flat planar face
+ * (`Face`, made by the Rectangle / Circle / Polygon tools). `Shape` covers
+ * both; solid-only operations (booleans, fillet, shell...) take `Solid`.
+ *
  * Ownership rule: replicad's translate/rotate consume `this`, so every
  * transform here clones first. Shapes stored in the document are therefore
  * immutable and may be shared safely between undo snapshots.
@@ -21,14 +25,27 @@ import {
   exportSTEP,
   importSTEP,
   makeCompound,
+  Face,
   type AnyShape,
-  type Face,
+  type Sketch,
   type Shape3D,
   type ShapeEdgeMesh,
   type ShapeMesh,
 } from "replicad";
 
-export type Shape = Shape3D;
+/** A closed 3D solid. */
+export type Solid = Shape3D;
+/** Any body geometry: a solid or a flat face. */
+export type Shape = Shape3D | Face;
+export type BodyKind = "solid" | "face";
+
+export function isFaceShape(shape: Shape): shape is Face {
+  return shape instanceof Face;
+}
+
+export function kindOf(shape: Shape): BodyKind {
+  return isFaceShape(shape) ? "face" : "solid";
+}
 export type V3 = [number, number, number];
 /** Orthonormal frame describing a sketch plane. */
 export interface Frame {
@@ -70,17 +87,17 @@ export function tessellate(shape: Shape): Tessellation {
 const neg = (v: V3): V3 => [-v[0], -v[1], -v[2]];
 
 /** Rectangle of size w×d centered at `center` on the frame's plane, extruded by signed `h`. */
-export function makeBox(frame: Frame, center: V3, w: number, d: number, h: number): Shape {
+export function makeBox(frame: Frame, center: V3, w: number, d: number, h: number): Solid {
   const plane = new Plane(center, frame.x, h >= 0 ? frame.z : neg(frame.z));
-  return drawRoundedRectangle(w, d).sketchOnPlane(plane).extrude(Math.abs(h)) as Shape;
+  return drawRoundedRectangle(w, d).sketchOnPlane(plane).extrude(Math.abs(h)) as Solid;
 }
 
-export function makeCylinder(frame: Frame, center: V3, r: number, h: number): Shape {
+export function makeCylinder(frame: Frame, center: V3, r: number, h: number): Solid {
   const plane = new Plane(center, frame.x, h >= 0 ? frame.z : neg(frame.z));
-  return drawCircle(r).sketchOnPlane(plane).extrude(Math.abs(h)) as Shape;
+  return drawCircle(r).sketchOnPlane(plane).extrude(Math.abs(h)) as Solid;
 }
 
-export function makeSphereAt(center: V3, r: number): Shape {
+export function makeSphereAt(center: V3, r: number): Solid {
   return makeSphere(r).translate(center);
 }
 
@@ -89,12 +106,60 @@ export function makeSphereAt(center: V3, r: number): Shape {
  * centered at `center`, first corner at `angleDeg` measured in the frame's
  * plane from frame.x toward frame.y, extruded by signed `h`.
  */
-export function makePolygonPrism(frame: Frame, center: V3, r: number, sides: number, angleDeg: number, h: number): Shape {
+export function makePolygonPrism(frame: Frame, center: V3, r: number, sides: number, angleDeg: number, h: number): Solid {
   const flipped = h < 0;
   const plane = new Plane(center, frame.x, flipped ? neg(frame.z) : frame.z);
   // drawPolysides puts its first corner at +90°; a flipped plane mirrors local Y.
   const localAngle = flipped ? -angleDeg : angleDeg;
-  return drawPolysides(r, sides).rotate(localAngle - 90, [0, 0]).sketchOnPlane(plane).extrude(Math.abs(h)) as Shape;
+  return drawPolysides(r, sides).rotate(localAngle - 90, [0, 0]).sketchOnPlane(plane).extrude(Math.abs(h)) as Solid;
+}
+
+// ---------------------------------------------------------------- flat faces (regions)
+
+const facePlane = (frame: Frame, center: V3) => new Plane(center, frame.x, frame.z);
+
+/**
+ * Make the face normal point along the frame normal (the side it was drawn on).
+ * replicad is not consistent here (e.g. circles come out reversed), and Push/Pull
+ * uses the face normal as its positive direction.
+ */
+function orientFace(face: Face, frame: Frame): Face {
+  const n = face.normalAt(face.center).toTuple();
+  const dot = n[0] * frame.z[0] + n[1] * frame.z[1] + n[2] * frame.z[2];
+  return dot < 0 ? face.flipOrientation() : face;
+}
+
+/** Flat w×d rectangle face centered at `center` on the frame's plane. */
+export function makeRectFace(frame: Frame, center: V3, w: number, d: number): Face {
+  return orientFace((drawRoundedRectangle(w, d).sketchOnPlane(facePlane(frame, center)) as Sketch).face(), frame);
+}
+
+export function makeCircleFace(frame: Frame, center: V3, r: number): Face {
+  return orientFace((drawCircle(r).sketchOnPlane(facePlane(frame, center)) as Sketch).face(), frame);
+}
+
+/** Flat regular polygon face; first corner at `angleDeg` (from frame.x toward frame.y). */
+export function makePolygonFace(frame: Frame, center: V3, r: number, sides: number, angleDeg: number): Face {
+  // drawPolysides puts its first corner at +90°.
+  return orientFace((drawPolysides(r, sides).rotate(angleDeg - 90, [0, 0]).sketchOnPlane(facePlane(frame, center)) as Sketch).face(), frame);
+}
+
+/**
+ * Extrude one face (of a flat face body or of a solid) into a NEW solid,
+ * `distance` along the face normal (negative = opposite side).
+ * The source shape is not modified.
+ */
+export function extrudeFace(shape: Shape, faceId: number, distance: number): Solid {
+  const face = findFace(shape, faceId);
+  if (!face) throw new Error("face not found");
+  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+  const n = face.normalAt(face.center).normalized().toTuple();
+  const along = (d: number) => new Vector([n[0] * d, n[1] * d, n[2] * d]);
+  if (distance > 0) return basicFaceExtrusion(face, along(distance));
+  // Extrude the other way by moving a copy back first and prisming along the normal,
+  // which keeps the solid's orientation (positive volume).
+  const moved = face.clone().translate([n[0] * distance, n[1] * distance, n[2] * distance]);
+  return basicFaceExtrusion(moved, along(-distance));
 }
 
 // ---------------------------------------------------------------- topology lookup
@@ -125,16 +190,16 @@ export function planarFaceFrame(shape: Shape, faceId: number): Frame | null {
 
 // ---------------------------------------------------------------- modeling ops
 
-export function filletEdges(shape: Shape, edgeIds: Set<number> | null, radius: number): Shape {
+export function filletEdges(shape: Solid, edgeIds: Set<number> | null, radius: number): Solid {
   return edgeIds ? shape.fillet((e) => (edgeIds.has(e.hashCode) ? radius : null)) : shape.fillet(radius);
 }
 
-export function chamferEdges(shape: Shape, edgeIds: Set<number> | null, distance: number): Shape {
+export function chamferEdges(shape: Solid, edgeIds: Set<number> | null, distance: number): Solid {
   return edgeIds ? shape.chamfer((e) => (edgeIds.has(e.hashCode) ? distance : null)) : shape.chamfer(distance);
 }
 
-/** Push (negative) or pull (positive) a face along its normal. */
-export function pushPull(shape: Shape, faceId: number, distance: number): Shape {
+/** Push (negative) or pull (positive) a face of a solid along its normal, modifying that solid. */
+export function pushPull(shape: Solid, faceId: number, distance: number): Solid {
   const face = findFace(shape, faceId);
   if (!face) throw new Error("face not found");
   if (distance === 0) return shape;
@@ -145,13 +210,13 @@ export function pushPull(shape: Shape, faceId: number, distance: number): Shape 
 }
 
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */
-export function shellSolid(shape: Shape, faceIds: Set<number>, thickness: number): Shape {
+export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number): Solid {
   return shape.shell(thickness, (f) => f.when(({ element }) => faceIds.has(element.hashCode)));
 }
 
 export type BooleanOp = "union" | "subtract" | "intersect";
 
-export function booleanOp(op: BooleanOp, target: Shape, tools: Shape[]): Shape {
+export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   let result = target;
   for (const tool of tools) {
     if (op === "union") result = result.fuse(tool);
@@ -161,16 +226,16 @@ export function booleanOp(op: BooleanOp, target: Shape, tools: Shape[]): Shape {
   return result.simplify();
 }
 
-export function translateShape(shape: Shape, v: V3): Shape {
-  return shape.clone().translate(v);
+export function translateShape<T extends Shape>(shape: T, v: V3): T {
+  return shape.clone().translate(v) as T;
 }
 
-export function rotateShape(shape: Shape, angleDeg: number, center: V3, axis: V3): Shape {
-  return shape.clone().rotate(angleDeg, center, axis);
+export function rotateShape<T extends Shape>(shape: T, angleDeg: number, center: V3, axis: V3): T {
+  return shape.clone().rotate(angleDeg, center, axis) as T;
 }
 
-export function cloneShape(shape: Shape): Shape {
-  return shape.clone();
+export function cloneShape<T extends Shape>(shape: T): T {
+  return shape.clone() as T;
 }
 
 // ---------------------------------------------------------------- persistence / exchange
@@ -187,17 +252,17 @@ export function exportStep(items: { shape: Shape; name: string }[]): Promise<Arr
   return exportSTEP(items.map(({ shape, name }) => ({ shape, name }))).arrayBuffer();
 }
 
-export function exportStl(shapes: Shape[]): Promise<ArrayBuffer> {
-  const compound = makeCompound(shapes) as Shape;
+export function exportStl(shapes: Solid[]): Promise<ArrayBuffer> {
+  const compound = makeCompound(shapes) as Solid;
   return compound.blobSTL({ binary: true, tolerance: 0.01, angularTolerance: 0.1 }).arrayBuffer();
 }
 
 /** Import a STEP file, returning one shape per solid found. */
-export async function importStep(data: Uint8Array): Promise<Shape[]> {
+export async function importStep(data: Uint8Array): Promise<Solid[]> {
   const shape: AnyShape = await importSTEP(new Blob([data as BlobPart]));
   const solids = shape.solids;
-  if (solids.length > 0) return solids.map((s) => s as Shape);
-  return [shape as Shape];
+  if (solids.length > 0) return solids.map((s) => s as Solid);
+  return [shape as Solid];
 }
 
 export function boundingSize(shape: Shape): V3 {

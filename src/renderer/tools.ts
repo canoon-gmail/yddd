@@ -1,5 +1,8 @@
 /**
- * Interactive drawing tools (Box / Cylinder / Sphere / Polygon).
+ * Interactive drawing tools.
+ *   Solid tools: Box / Cylinder / Sphere create closed 3D solids.
+ *   Face tools:  Rectangle / Circle / Polygon create flat planar faces, which
+ *                Push/Pull then extrudes into a new solid.
  *
  * Every tool draws on the ground plane, or on the planar face under the
  * cursor at the first click, so you can build directly on existing solids.
@@ -8,7 +11,20 @@
  */
 import * as THREE from "three";
 import type { Viewport } from "./viewport";
-import { planarFaceFrame, makeBox, makeCylinder, makeSphereAt, makePolygonPrism, type Frame, type Shape, type V3 } from "./kernel";
+import {
+  planarFaceFrame,
+  makeBox,
+  makeCylinder,
+  makeSphereAt,
+  makePolygonPrism,
+  makeRectFace,
+  makeCircleFace,
+  makePolygonFace,
+  type BodyKind,
+  type Frame,
+  type Shape,
+  type V3,
+} from "./kernel";
 
 export interface ToolHost {
   viewport: Viewport;
@@ -16,7 +32,7 @@ export interface ToolHost {
   snapStep(e: { ctrlKey: boolean } | null): number;
   hint(text: string): void;
   hud(text: string | null, at?: THREE.Vector3): void;
-  finish(shape: Shape, baseName: string): void;
+  finish(shape: Shape, baseName: string, kind: BodyKind): void;
   fail(e: unknown): void;
 }
 
@@ -151,9 +167,9 @@ abstract class DrawTool implements Tool {
     return g;
   }
 
-  protected emit(shapeFn: () => Shape, baseName: string): void {
+  protected emit(shapeFn: () => Shape, baseName: string, kind: BodyKind = "solid"): void {
     try {
-      this.host.finish(shapeFn(), baseName);
+      this.host.finish(shapeFn(), baseName, kind);
     } catch (err) {
       this.host.fail(err);
     }
@@ -188,13 +204,24 @@ abstract class DrawTool implements Tool {
 
 // ------------------------------------------------------------------ Box
 
+/** Box solid, or (faceMode) a flat Rectangle face. */
 export class BoxTool extends DrawTool {
-  readonly name = "Box";
-  protected readonly hints = [
-    "Box: click the first corner (on the grid or on a planar face)",
-    "Box: click the opposite corner — or type width,depth + Enter",
-    "Box: move to set the height and click — or type height + Enter",
-  ];
+  constructor(host: ToolHost, private readonly faceMode = false) {
+    super(host);
+  }
+
+  get name(): string {
+    return this.faceMode ? "Rectangle" : "Box";
+  }
+
+  protected get hints(): string[] {
+    const n = this.name;
+    return [
+      `${n}: click the first corner (on the grid or on a planar face)`,
+      `${n}: click the opposite corner — or type width,depth + Enter`,
+      `${n}: move to set the height and click — or type height + Enter`,
+    ];
+  }
   private u1 = 0;
   private v1 = 0;
   private u2 = 0;
@@ -235,6 +262,10 @@ export class BoxTool extends DrawTool {
       this.stage = 1;
     } else if (this.stage === 1) {
       if (Math.abs(this.u2 - this.u1) < 1e-6 || Math.abs(this.v2 - this.v1) < 1e-6) return;
+      if (this.faceMode) {
+        this.buildFace();
+        return;
+      }
       this.stage = 2;
       this.h = 0;
     } else {
@@ -251,6 +282,10 @@ export class BoxTool extends DrawTool {
       if (!w || !d) return;
       this.u2 = this.u1 + Math.abs(w) * (this.u2 < this.u1 ? -1 : 1);
       this.v2 = this.v1 + Math.abs(d) * (this.v2 < this.v1 ? -1 : 1);
+      if (this.faceMode) {
+        this.buildFace();
+        return;
+      }
       this.stage = 2;
       this.h = 0;
       this.drawRect();
@@ -291,17 +326,35 @@ export class BoxTool extends DrawTool {
     const h = this.h;
     this.emit(() => makeBox(this.frame.toKernel(), [c.x, c.y, c.z], w, d, h), "Box");
   }
+
+  private buildFace(): void {
+    const c = this.rectCenter();
+    const w = Math.abs(this.u2 - this.u1);
+    const d = Math.abs(this.v2 - this.v1);
+    this.emit(() => makeRectFace(this.frame.toKernel(), [c.x, c.y, c.z], w, d), "Rectangle", "face");
+  }
 }
 
 // ------------------------------------------------------------------ Cylinder
 
+/** Cylinder solid, or (faceMode) a flat Circle face. */
 export class CylinderTool extends DrawTool {
-  readonly name = "Cylinder";
-  protected readonly hints = [
-    "Cylinder: click the center (on the grid or on a planar face)",
-    "Cylinder: click to set the radius — or type radius + Enter",
-    "Cylinder: move to set the height and click — or type height + Enter",
-  ];
+  constructor(host: ToolHost, private readonly faceMode = false) {
+    super(host);
+  }
+
+  get name(): string {
+    return this.faceMode ? "Circle" : "Cylinder";
+  }
+
+  protected get hints(): string[] {
+    const n = this.name;
+    return [
+      `${n}: click the center (on the grid or on a planar face)`,
+      `${n}: click to set the radius — or type radius + Enter`,
+      `${n}: move to set the height and click — or type height + Enter`,
+    ];
+  }
   private cu = 0;
   private cv = 0;
   private r = 0;
@@ -337,6 +390,10 @@ export class CylinderTool extends DrawTool {
       this.stage = 1;
     } else if (this.stage === 1) {
       if (this.r < 1e-6) return;
+      if (this.faceMode) {
+        this.buildFace();
+        return;
+      }
       this.stage = 2;
       this.h = 0;
     } else {
@@ -352,6 +409,10 @@ export class CylinderTool extends DrawTool {
     if (!v) return;
     if (this.stage === 1) {
       this.r = Math.abs(v);
+      if (this.faceMode) {
+        this.buildFace();
+        return;
+      }
       this.stage = 2;
       this.h = 0;
       this.drawCircle();
@@ -389,6 +450,12 @@ export class CylinderTool extends DrawTool {
     const r = this.r;
     const h = this.h;
     this.emit(() => makeCylinder(this.frame.toKernel(), [c.x, c.y, c.z], r, h), "Cylinder");
+  }
+
+  private buildFace(): void {
+    const c = this.center();
+    const r = this.r;
+    this.emit(() => makeCircleFace(this.frame.toKernel(), [c.x, c.y, c.z], r), "Circle", "face");
   }
 }
 
@@ -457,10 +524,15 @@ export class SphereTool extends DrawTool {
   }
 }
 
-// ------------------------------------------------------------------ Polygon (regular n-gon prism)
+// ------------------------------------------------------------------ Polygon (regular n-gon face, or prism)
 
+/** Flat regular Polygon face (default), or a polygon prism solid when faceMode is false. */
 export class PolygonTool extends DrawTool {
   readonly name = "Polygon";
+  constructor(host: ToolHost, private readonly faceMode = true) {
+    super(host);
+  }
+
   private static lastSides = 6;
   private sides = PolygonTool.lastSides;
   private cu = 0;
@@ -475,6 +547,7 @@ export class PolygonTool extends DrawTool {
     return [
       `Polygon (${n}): click the center (on the grid or on a planar face)`,
       `Polygon (${n}): click to set radius & rotation (15° snap) — or type radius[,sides] + Enter`,
+      // (stage 2 is only used for prisms)
       `Polygon (${n}): move to set the height and click — or type height + Enter`,
     ];
   }
@@ -514,6 +587,10 @@ export class PolygonTool extends DrawTool {
       this.stage = 1;
     } else if (this.stage === 1) {
       if (this.r < 1e-6) return;
+      if (this.faceMode) {
+        this.buildFace();
+        return;
+      }
       this.stage = 2;
       this.h = 0;
     } else {
@@ -542,6 +619,10 @@ export class PolygonTool extends DrawTool {
       if (!r) return;
       this.r = Math.abs(r);
       if (n && n >= 3) this.sides = PolygonTool.lastSides = Math.min(64, Math.round(n));
+      if (this.faceMode) {
+        this.buildFace();
+        return;
+      }
       this.stage = 2;
       this.h = 0;
       this.drawOutline();
@@ -596,5 +677,12 @@ export class PolygonTool extends DrawTool {
     const { r, sides, h } = this;
     const deg = THREE.MathUtils.radToDeg(this.a);
     this.emit(() => makePolygonPrism(this.frame.toKernel(), [c.x, c.y, c.z], r, sides, deg, h), "Polygon");
+  }
+
+  private buildFace(): void {
+    const c = this.center();
+    const { r, sides } = this;
+    const deg = THREE.MathUtils.radToDeg(this.a);
+    this.emit(() => makePolygonFace(this.frame.toKernel(), [c.x, c.y, c.z], r, sides, deg), "Polygon", "face");
   }
 }

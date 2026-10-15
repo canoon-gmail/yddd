@@ -28,17 +28,20 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
   border-bottom: 1px solid var(--border);
   overflow-x: auto;
 }
-.tb-group { display: flex; flex-direction: column; padding: 0 6px; border-right: 1px solid var(--border); }
+.tb-group { display: flex; flex-direction: column; padding: 0 4px; border-right: 1px solid var(--border); flex: none; }
 .tb-group:last-child { border-right: none; }
 .tb-buttons { display: flex; gap: 2px; }
 .tb-label { font-size: 10px; color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 1px; }
 .tb-btn {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
-  min-width: 50px; padding: 5px 4px 3px;
+  min-width: 42px; padding: 5px 3px 3px;
   background: transparent; color: var(--text);
   border: 1px solid transparent; border-radius: 6px;
-  font: inherit; font-size: 11px; cursor: pointer;
+  font: inherit; font-size: 10.5px; cursor: pointer; white-space: nowrap;
 }
+#toolbar::-webkit-scrollbar { height: 5px; }
+#toolbar::-webkit-scrollbar-track { background: transparent; }
+#toolbar::-webkit-scrollbar-thumb { background: #4a4e56; border-radius: 3px; }
 .tb-btn:hover { background: var(--panel-2); border-color: var(--border); }
 .tb-btn.active { background: #3d342a; border-color: var(--accent); color: var(--accent-2); }
 .tb-btn:disabled { opacity: 0.35; cursor: default; background: transparent; border-color: transparent; }
@@ -66,6 +69,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 .ol-row.selected { background: #3d342a; color: var(--accent-2); }
 .ol-row.hidden .ol-name { opacity: 0.45; }
 .ol-swatch { width: 10px; height: 10px; border-radius: 2px; background: #9aa5b1; flex: none; }
+.ol-swatch.face { background: transparent; border: 2px solid #6f9bd1; height: 6px; margin: 2px 0; }
 .ol-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ol-name input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 3px; }
 .ol-eye { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; }
@@ -109,6 +113,7 @@ kbd {
   background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
 }
 #op-panel input:focus { outline: none; border-color: var(--accent); }
+#op-panel label.check input { width: auto; accent-color: var(--accent); }
 #op-panel .op-error { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 4px; }
 #op-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 button.btn {
