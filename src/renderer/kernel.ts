@@ -17,9 +17,12 @@ import {
   Plane,
   Vector,
   drawRoundedRectangle,
-  drawCircle,
   drawPolysides,
   makeSphere,
+  makeCylinder as occCylinder,
+  makeCircle,
+  assembleWire,
+  makeFace,
   basicFaceExtrusion,
   deserializeShape,
   exportSTEP,
@@ -79,7 +82,41 @@ export function tessellate(shape: Shape): Tessellation {
   const diag = Math.hypot(x1 - x0, y1 - y0, z1 - z0) || 1;
   const tolerance = Math.min(0.1, Math.max(0.001, diag * 2e-4));
   const opts = { tolerance, angularTolerance: 0.15 };
-  return { faces: shape.mesh(opts), edges: shape.meshEdges(opts) };
+  return { faces: shape.mesh(opts), edges: withoutSeams(shape.meshEdges(opts), seamEdgeIds(shape)) };
+}
+
+/**
+ * Seam edges of a solid: edges used by only ONE face. On a closed solid every
+ * real edge separates two faces; an edge with a single face is either the seam
+ * where a periodic surface (sphere, cylinder, torus...) wraps onto itself, or a
+ * zero-length "degenerate" edge at a pole. Neither is a visible crease, so they
+ * are not drawn, not pickable and skipped by "fillet all edges".
+ * Flat face bodies have no seams (their single-face edges are the real outline).
+ */
+export function seamEdgeIds(shape: Shape): Set<number> {
+  if (isFaceShape(shape)) return new Set();
+  const faceCount = new Map<number, number>();
+  for (const face of shape.faces) {
+    // A seam appears twice in its face (once per orientation): count each face once.
+    for (const id of new Set(face.edges.map((e) => e.hashCode))) faceCount.set(id, (faceCount.get(id) ?? 0) + 1);
+  }
+  const seams = new Set<number>();
+  for (const [id, n] of faceCount) if (n === 1) seams.add(id);
+  return seams;
+}
+
+/** Drop the given edges from an edge mesh, re-packing the line buffer. */
+function withoutSeams(mesh: ShapeEdgeMesh, seams: Set<number>): ShapeEdgeMesh {
+  if (seams.size === 0) return mesh;
+  const lines: number[] = [];
+  const edgeGroups: ShapeEdgeMesh["edgeGroups"] = [];
+  for (const g of mesh.edgeGroups) {
+    if (seams.has(g.edgeId)) continue;
+    const start = lines.length / 3;
+    for (let k = g.start * 3; k < (g.start + g.count) * 3; k++) lines.push(mesh.lines[k]);
+    edgeGroups.push({ start, count: g.count, edgeId: g.edgeId });
+  }
+  return { lines, edgeGroups };
 }
 
 // ---------------------------------------------------------------- primitives
@@ -93,8 +130,9 @@ export function makeBox(frame: Frame, center: V3, w: number, d: number, h: numbe
 }
 
 export function makeCylinder(frame: Frame, center: V3, r: number, h: number): Solid {
-  const plane = new Plane(center, frame.x, h >= 0 ? frame.z : neg(frame.z));
-  return drawCircle(r).sketchOnPlane(plane).extrude(Math.abs(h)) as Solid;
+  // Built from one full circle (drawCircle uses two half-arcs, which would split the
+  // side into two half-cylinder faces with extra edges).
+  return occCylinder(r, Math.abs(h), center, h >= 0 ? frame.z : neg(frame.z));
 }
 
 export function makeSphereAt(center: V3, r: number): Solid {
@@ -135,7 +173,8 @@ export function makeRectFace(frame: Frame, center: V3, w: number, d: number): Fa
 }
 
 export function makeCircleFace(frame: Frame, center: V3, r: number): Face {
-  return orientFace((drawCircle(r).sketchOnPlane(facePlane(frame, center)) as Sketch).face(), frame);
+  // One full circle edge (not drawCircle's two half-arcs) → clean 1-edge face.
+  return orientFace(makeFace(assembleWire([makeCircle(r, center, frame.z)])), frame);
 }
 
 /** Flat regular polygon face; first corner at `angleDeg` (from frame.x toward frame.y). */
@@ -155,11 +194,11 @@ export function extrudeFace(shape: Shape, faceId: number, distance: number): Sol
   if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
   const n = face.normalAt(face.center).normalized().toTuple();
   const along = (d: number) => new Vector([n[0] * d, n[1] * d, n[2] * d]);
-  if (distance > 0) return basicFaceExtrusion(face, along(distance));
+  if (distance > 0) return basicFaceExtrusion(face, along(distance)).simplify();
   // Extrude the other way by moving a copy back first and prisming along the normal,
   // which keeps the solid's orientation (positive volume).
   const moved = face.clone().translate([n[0] * distance, n[1] * distance, n[2] * distance]);
-  return basicFaceExtrusion(moved, along(-distance));
+  return basicFaceExtrusion(moved, along(-distance)).simplify();
 }
 
 // ---------------------------------------------------------------- topology lookup
@@ -190,12 +229,16 @@ export function planarFaceFrame(shape: Shape, faceId: number): Frame | null {
 
 // ---------------------------------------------------------------- modeling ops
 
+/** Fillet the given edges, or (null) every real edge — seams are never filleted. */
 export function filletEdges(shape: Solid, edgeIds: Set<number> | null, radius: number): Solid {
-  return edgeIds ? shape.fillet((e) => (edgeIds.has(e.hashCode) ? radius : null)) : shape.fillet(radius);
+  const seams = seamEdgeIds(shape);
+  return shape.fillet((e) => (!seams.has(e.hashCode) && (!edgeIds || edgeIds.has(e.hashCode)) ? radius : null));
 }
 
+/** Chamfer the given edges, or (null) every real edge — seams are never chamfered. */
 export function chamferEdges(shape: Solid, edgeIds: Set<number> | null, distance: number): Solid {
-  return edgeIds ? shape.chamfer((e) => (edgeIds.has(e.hashCode) ? distance : null)) : shape.chamfer(distance);
+  const seams = seamEdgeIds(shape);
+  return shape.chamfer((e) => (!seams.has(e.hashCode) && (!edgeIds || edgeIds.has(e.hashCode)) ? distance : null));
 }
 
 /** Push (negative) or pull (positive) a face of a solid along its normal, modifying that solid. */

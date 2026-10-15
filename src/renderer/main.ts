@@ -23,6 +23,7 @@ import {
   boundingSize,
   findFace,
   extrudeFace,
+  seamEdgeIds,
   kindOf,
   type BodyKind,
   type BooleanOp,
@@ -1017,7 +1018,7 @@ class App implements ToolHost {
         if (b) {
           const [w, d, h] = boundingSize(b.shape);
           rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : "Solid"]);
-          rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`], ["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length)]);
+          rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`], ["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length - seamEdgeIds(b.shape).size)]);
         }
         hints = b?.kind === "face"
           ? `<kbd>P</kbd> push/pull into a new solid · <kbd>G</kbd> move · <kbd>R</kbd> rotate`
