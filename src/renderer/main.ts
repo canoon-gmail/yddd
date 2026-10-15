@@ -27,7 +27,7 @@ import {
 } from "./kernel";
 import { Doc, type Body } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, type Tool, type ToolHost } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, type Tool, type ToolHost } from "./tools";
 import { ICONS } from "./icons";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -72,6 +72,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
       { cmd: "tool.box", icon: "box", label: "Box", key: "B" },
       { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder", key: "C" },
       { cmd: "tool.sphere", icon: "sphere", label: "Sphere", key: "S" },
+      { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "N" },
     ],
   },
   {
@@ -125,6 +126,7 @@ const KEYMAP: Record<string, string> = {
   b: "tool.box",
   c: "tool.cylinder",
   s: "tool.sphere",
+  n: "tool.polygon",
   p: "op.pushpull",
   f: "op.fillet",
   h: "op.chamfer",
@@ -246,6 +248,7 @@ class App implements ToolHost {
       case "tool.box": return this.startTool(new BoxTool(this).start());
       case "tool.cylinder": return this.startTool(new CylinderTool(this).start());
       case "tool.sphere": return this.startTool(new SphereTool(this).start());
+      case "tool.polygon": return this.startTool(new PolygonTool(this).start());
 
       case "op.pushpull": return this.opPushPull();
       case "op.fillet": return this.opEdges("fillet");
@@ -879,7 +882,7 @@ class App implements ToolHost {
     const tip = (html: string) => `<div class="tip">${html}</div>`;
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
-        tip(`<kbd>B</kbd> box · <kbd>C</kbd> cylinder · <kbd>S</kbd> sphere<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
+        tip(`<kbd>B</kbd> box · <kbd>C</kbd> cylinder · <kbd>S</kbd> sphere · <kbd>N</kbd> polygon<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
       return;
     }
     const kind = sel[0].kind;
@@ -943,7 +946,8 @@ class App implements ToolHost {
       ["Wheel", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
-      ["B · C · S", "Draw Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
+      ["B · C · S · N", "Draw Box · Cylinder · Sphere · Polygon (type numbers + Enter for exact sizes)"],
+      ["[ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Ctrl (while drawing)", "Temporarily disable grid snapping"],
       ["P", "Push/Pull selected face"],
       ["F · H", "Fillet · Chamfer selected edges (or all edges of selected solids)"],

@@ -1,5 +1,5 @@
 /**
- * Interactive drawing tools (Box / Cylinder / Sphere).
+ * Interactive drawing tools (Box / Cylinder / Sphere / Polygon).
  *
  * Every tool draws on the ground plane, or on the planar face under the
  * cursor at the first click, so you can build directly on existing solids.
@@ -8,7 +8,7 @@
  */
 import * as THREE from "three";
 import type { Viewport } from "./viewport";
-import { planarFaceFrame, makeBox, makeCylinder, makeSphereAt, type Frame, type Shape, type V3 } from "./kernel";
+import { planarFaceFrame, makeBox, makeCylinder, makeSphereAt, makePolygonPrism, type Frame, type Shape, type V3 } from "./kernel";
 
 export interface ToolHost {
   viewport: Viewport;
@@ -454,5 +454,147 @@ export class SphereTool extends DrawTool {
     const c = this.c;
     const r = this.r;
     this.emit(() => makeSphereAt([c.x, c.y, c.z], r), "Sphere");
+  }
+}
+
+// ------------------------------------------------------------------ Polygon (regular n-gon prism)
+
+export class PolygonTool extends DrawTool {
+  readonly name = "Polygon";
+  private static lastSides = 6;
+  private sides = PolygonTool.lastSides;
+  private cu = 0;
+  private cv = 0;
+  private r = 0;
+  /** Angle of the first corner, radians, measured from frame.x toward frame.y. */
+  private a = 0;
+  private h = 0;
+
+  protected get hints(): string[] {
+    const n = `${this.sides} sides — [ / ] to change`;
+    return [
+      `Polygon (${n}): click the center (on the grid or on a planar face)`,
+      `Polygon (${n}): click to set radius & rotation (15° snap) — or type radius[,sides] + Enter`,
+      `Polygon (${n}): move to set the height and click — or type height + Enter`,
+    ];
+  }
+
+  move(e: PointerEvent): void {
+    this.last = e;
+    const step = this.host.snapStep(e);
+    if (this.stage === 0) {
+      this.frame = this.frameUnder(e);
+      const p = this.frame.hit(this.ray(e), step);
+      if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
+    } else if (this.stage === 1) {
+      const p = this.frame.hit(this.ray(e), 0);
+      if (!p) return;
+      const du = p.u - this.cu;
+      const dv = p.v - this.cv;
+      this.r = snapValue(Math.hypot(du, dv), step);
+      let a = Math.atan2(dv, du);
+      if (step > 0) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12); // 15° steps
+      this.a = a;
+      this.drawOutline();
+    } else {
+      const h = heightAlong(this.ray(e), this.center(), this.frame.z);
+      if (h === null) return;
+      this.h = snapValue(h, step);
+      this.drawPrism();
+    }
+  }
+
+  down(e: PointerEvent): void {
+    if (this.stage === 0) {
+      const p = this.frame.hit(this.ray(e), this.host.snapStep(e));
+      if (!p) return;
+      this.cu = p.u;
+      this.cv = p.v;
+      this.r = 0;
+      this.stage = 1;
+    } else if (this.stage === 1) {
+      if (this.r < 1e-6) return;
+      this.stage = 2;
+      this.h = 0;
+    } else {
+      if (Math.abs(this.h) < 1e-6) return;
+      this.build();
+      return;
+    }
+    this.updateHint();
+  }
+
+  key(e: KeyboardEvent): boolean {
+    if (e.key === "[" || e.key === "]") {
+      this.sides = Math.min(64, Math.max(3, this.sides + (e.key === "]" ? 1 : -1)));
+      PolygonTool.lastSides = this.sides;
+      this.updateHint();
+      if (this.stage === 1) this.drawOutline();
+      else if (this.stage === 2) this.drawPrism();
+      return true;
+    }
+    return super.key(e);
+  }
+
+  protected applyTyped(values: number[]): void {
+    if (this.stage === 1) {
+      const [r, n] = values;
+      if (!r) return;
+      this.r = Math.abs(r);
+      if (n && n >= 3) this.sides = PolygonTool.lastSides = Math.min(64, Math.round(n));
+      this.stage = 2;
+      this.h = 0;
+      this.drawOutline();
+    } else if (this.stage === 2 && values[0]) {
+      this.h = values[0];
+      this.build();
+    }
+  }
+
+  private center(): THREE.Vector3 {
+    return this.frame.point(this.cu, this.cv);
+  }
+
+  private corners(h = 0): THREE.Vector3[] {
+    const pts: THREE.Vector3[] = [];
+    for (let k = 0; k < this.sides; k++) {
+      const t = this.a + (k / this.sides) * Math.PI * 2;
+      pts.push(this.frame.point(this.cu + Math.cos(t) * this.r, this.cv + Math.sin(t) * this.r, h));
+    }
+    return pts;
+  }
+
+  private drawOutline(): void {
+    const pts = this.corners();
+    const objs: THREE.Object3D[] = [this.outline(pts), this.cursor(this.center()), this.cursor(pts[0])];
+    if (this.r > 0) {
+      // Fan-triangulated fill (convex polygon).
+      const fill = new THREE.BufferGeometry().setFromPoints([this.center(), ...pts]);
+      const idx: number[] = [];
+      for (let k = 1; k <= this.sides; k++) idx.push(0, k, (k % this.sides) + 1);
+      fill.setIndex(idx);
+      objs.push(new THREE.Mesh(fill, this.host.viewport.mats.previewFill));
+    }
+    this.host.viewport.setOverlay(objs);
+    const deg = Math.round((THREE.MathUtils.radToDeg(this.a) + 360) % 360);
+    this.host.hud(`${this.sides}-gon  R ${fmt(this.r)} mm  ∠ ${deg}°`, pts[0]);
+  }
+
+  private drawPrism(): void {
+    // CylinderGeometry corners sit at local (sinθ, ·, cosθ); with the "xz-cyl" basis
+    // that is world (u, v) = (sinθ, -cosθ), so θ = a + 90° puts a corner at angle a.
+    let geo: THREE.BufferGeometry = new THREE.CylinderGeometry(this.r, this.r, Math.max(Math.abs(this.h), 1e-3), this.sides, 1, false, this.a + Math.PI / 2);
+    geo = geo.toNonIndexed();
+    geo.computeVertexNormals(); // flat-shaded sides
+    const c = this.center().addScaledVector(this.frame.z, this.h / 2);
+    this.host.viewport.setOverlay([this.frame.place(this.solidPreview(geo), c, "xz-cyl")]);
+    this.host.hud(`${this.sides}-gon  R ${fmt(this.r)} × H ${fmt(this.h)} mm`, this.center().addScaledVector(this.frame.z, this.h));
+  }
+
+  private build(): void {
+    const c = this.center();
+    const { r, sides, h } = this;
+    const deg = THREE.MathUtils.radToDeg(this.a);
+    this.emit(() => makePolygonPrism(this.frame.toKernel(), [c.x, c.y, c.z], r, sides, deg, h), "Polygon");
   }
 }

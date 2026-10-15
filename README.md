@@ -18,7 +18,7 @@ npm run smoke    # automated end-to-end test, screenshots in /tmp/y3d-smoke
 
 | Area | What you can do |
 |---|---|
-| Create | Box, Cylinder, Sphere drawn interactively on the grid **or on any planar face**, grid snapping (Ctrl = free), typed exact dimensions |
+| Create | Box, Cylinder, Sphere, Polygon (regular 3–64 sided prism) drawn interactively on the grid **or on any planar face**, grid snapping (Ctrl = free), typed exact dimensions |
 | Select | Solid / Face / Edge modes with hover highlight, Shift+click multi-select |
 | Modify | Push/Pull face, Fillet & Chamfer (selected edges or whole solid), Shell (open selected faces) — all with live preview |
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |

@@ -14,6 +14,7 @@ import {
   Vector,
   drawRoundedRectangle,
   drawCircle,
+  drawPolysides,
   makeSphere,
   basicFaceExtrusion,
   deserializeShape,
@@ -81,6 +82,19 @@ export function makeCylinder(frame: Frame, center: V3, r: number, h: number): Sh
 
 export function makeSphereAt(center: V3, r: number): Shape {
   return makeSphere(r).translate(center);
+}
+
+/**
+ * Regular polygon prism: `sides` corners on a circle of radius `r` (circumradius)
+ * centered at `center`, first corner at `angleDeg` measured in the frame's
+ * plane from frame.x toward frame.y, extruded by signed `h`.
+ */
+export function makePolygonPrism(frame: Frame, center: V3, r: number, sides: number, angleDeg: number, h: number): Shape {
+  const flipped = h < 0;
+  const plane = new Plane(center, frame.x, flipped ? neg(frame.z) : frame.z);
+  // drawPolysides puts its first corner at +90°; a flipped plane mirrors local Y.
+  const localAngle = flipped ? -angleDeg : angleDeg;
+  return drawPolysides(r, sides).rotate(localAngle - 90, [0, 0]).sketchOnPlane(plane).extrude(Math.abs(h)) as Shape;
 }
 
 // ---------------------------------------------------------------- topology lookup
