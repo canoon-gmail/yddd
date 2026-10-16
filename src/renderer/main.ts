@@ -1269,7 +1269,7 @@ class App implements ToolHost {
           ? `<kbd>P</kbd> push/pull into a new solid · <kbd>G</kbd> move · <kbd>R</kbd> rotate`
           : `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>F</kbd> fillet all edges · <kbd>Ctrl+D</kbd> duplicate`;
       } else {
-        hints = `<kbd>Shift+U</kbd> union · <kbd>Shift+S</kbd> subtract · <kbd>Shift+I</kbd> intersect<br>(first selected = target)`;
+        hints = `<kbd>+</kbd> union · <kbd>−</kbd> subtract · <kbd>Shift+I</kbd> intersect<br>(first selected = target)`;
       }
     } else if (kind === "face") {
       rows.push(["Faces", String(sel.length)]);
@@ -1325,7 +1325,7 @@ class App implements ToolHost {
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
-      ["Shift+U · Shift+S · Shift+I", "Union · Subtract · Intersect (first selected = target)"],
+      ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Shift+G", "Move from point to point (snap)"],
       ["Ctrl+D", "Duplicate (then move)"],
