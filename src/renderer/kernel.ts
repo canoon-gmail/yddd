@@ -29,6 +29,11 @@ import {
   importSTEP,
   makeCompound,
   Face,
+  Compound,
+  cast,
+  getOC,
+  iterTopo,
+  makePolygon,
   type AnyShape,
   type Sketch,
   type Shape3D,
@@ -274,6 +279,87 @@ export function pushPullMany(shape: Solid, faceIds: number[], distance: number):
   });
   for (const t of tools) result = distance > 0 ? result.fuse(t) : result.cut(t);
   return result.simplify();
+}
+
+// ---------------------------------------------------------------- split face
+
+/** A straight edge of a planar face usable as a reference for Split Face. */
+export interface RefEdge {
+  id: number;
+  a: V3;
+  b: V3;
+  /** Unit direction inside the face plane, perpendicular to the edge, pointing into the face. */
+  inward: V3;
+  /** Extent of the face measured from this edge along `inward`. */
+  width: number;
+}
+
+const sub3 = (p: V3, q: V3): V3 => [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+const dot3 = (p: V3, q: V3) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+const cross3 = (p: V3, q: V3): V3 => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+const norm3 = (p: V3): V3 => {
+  const l = Math.hypot(...p) || 1;
+  return [p[0] / l, p[1] / l, p[2] / l];
+};
+
+/** Straight edges of a planar face (with the face normal), or null if the face is not planar. */
+export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges: RefEdge[] } | null {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") return null;
+  const n = face.normalAt(face.center).normalized().toTuple() as V3;
+  const c = face.center.toTuple() as V3;
+  const pts = face.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
+  const edges: RefEdge[] = [];
+  for (const e of face.edges) {
+    if (e.geomType !== "LINE") continue;
+    const a = e.startPoint.toTuple() as V3;
+    const b = e.endPoint.toTuple() as V3;
+    let p = norm3(cross3(n, norm3(sub3(b, a))));
+    if (dot3(sub3(c, a), p) < 0) p = [-p[0], -p[1], -p[2]];
+    const width = Math.max(...pts.map((q) => dot3(sub3(q, a), p)));
+    edges.push({ id: e.hashCode, a, b, inward: p, width });
+  }
+  return { normal: n, edges };
+}
+
+/**
+ * Split a planar face of a solid with lines parallel to one of its straight edges,
+ * at the given distances from that edge. Other faces are untouched (no simplify,
+ * which would merge the pieces back).
+ */
+export function splitFace(shape: Solid, faceId: number, edgeId: number, distances: number[]): Solid {
+  const info = faceRefEdges(shape, faceId);
+  const ref = info?.edges.find((e) => e.id === edgeId);
+  if (!info || !ref) throw new Error("Split face: needs a flat face and one of its straight edges");
+  const ds = distances.filter((d) => d > 1e-6 && d < ref.width - 1e-6);
+  if (!ds.length) throw new Error(`Split face: distance must be between 0 and ${+ref.width.toFixed(3)}`);
+  const [[x0, y0, z0], [x1, y1, z1]] = shape.boundingBox.bounds;
+  const big = Math.hypot(x1 - x0, y1 - y0, z1 - z0) + 1;
+  const t = norm3(sub3(ref.b, ref.a));
+  const n = info.normal;
+  const at = (o: V3, v: V3, k: number): V3 => [o[0] + v[0] * k, o[1] + v[1] * k, o[2] + v[2] * k];
+  const oc = getOC();
+  const args = new oc.NCollection_List_TopoDS_Shape();
+  args.Append(shape.wrapped);
+  const tools = new oc.NCollection_List_TopoDS_Shape();
+  for (const d of ds) {
+    // A wall standing on the face (outside the solid), meeting it exactly on the line.
+    const p = at(ref.a, ref.inward, d);
+    const s = at(p, t, -big);
+    const e = at(p, t, big);
+    tools.Append(makePolygon([s, e, at(e, n, big), at(s, n, big)]).wrapped);
+  }
+  const builder = new oc.BRepAlgoAPI_Splitter();
+  builder.SetArguments(args);
+  builder.SetTools(tools);
+  builder.Build(new oc.Message_ProgressRange());
+  if (builder.HasErrors()) throw new Error("Split face: the geometry kernel could not split this face");
+  let out = cast(builder.Shape());
+  if (out instanceof Compound) {
+    const solids = [...iterTopo(out.wrapped, "solid")].map((s) => cast(s));
+    if (solids.length === 1) out = solids[0];
+  }
+  return out as Solid;
 }
 
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */

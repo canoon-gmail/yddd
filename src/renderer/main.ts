@@ -27,6 +27,8 @@ import {
   seamEdgeIds,
   kindOf,
   faceAxis,
+  faceRefEdges,
+  splitFace,
   type V3,
   makeBox,
   makeCylinder,
@@ -38,7 +40,7 @@ import {
 } from "./kernel";
 import { Doc, type Body } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, SplitFaceTool, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -115,6 +117,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "T" },
+      { cmd: "op.split", icon: "rectangle", label: "Split face", key: "Shift+L" },
     ],
   },
   {
@@ -175,6 +178,7 @@ const KEYMAP: Record<string, string> = {
   t: "op.shell",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
+  "Shift+L": "op.split",
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
   x: "edit.delete",
@@ -204,7 +208,7 @@ const KEYMAP: Record<string, string> = {
 const MODE_HINTS: Record<SelMode, string> = {
   body: "Solid mode: click to select solids, Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
   face: "Face mode: click faces (P push/pull, T shell).  Shift+click to add",
-  edge: "Edge mode: click edges (F fillet, H chamfer).  Shift+click to add",
+  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D copy edge → split face).  Shift+click to add",
 };
 
 class App implements ToolHost {
@@ -377,6 +381,7 @@ class App implements ToolHost {
       case "op.fillet": return this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
+      case "op.split": return this.startSplitFace();
 
       case "bool.union": return this.boolean("union");
       case "bool.subtract": return this.boolean("subtract");
@@ -1188,6 +1193,54 @@ class App implements ToolHost {
     this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Enter/Esc: done`);
   }
 
+  /** Split the selected flat face with lines parallel to one of its edges. */
+  private startSplitFace(): void {
+    const faces = this.selection.filter((s) => s.kind === "face");
+    if (faces.length !== 1) return this.toast("Split face: select one flat face of a solid (Face mode, key 2)", "error");
+    const { body, id: faceId } = faces[0];
+    const b = this.doc.get(body);
+    if (!b || b.kind === "face") return this.toast("Split face: select a face of a solid (Push/Pull flat faces first)", "error");
+    const info = faceRefEdges(b.shape, faceId);
+    if (!info || !info.edges.length) return this.toast("Split face: the face must be flat with at least one straight edge", "error");
+    this.startTool(
+      new SplitFaceTool(this, info.edges, (edgeId, ds) => {
+        try {
+          const shape = splitFace(b.shape as Solid, faceId, edgeId, ds);
+          this.endTool();
+          this.doc.replaceShapes(new Map([[b.id, shape]]), "Split face");
+          this.setSelection([]);
+          this.toast(`Split face: ${ds.length} line(s) added`);
+        } catch (e) {
+          this.fail(e);
+        }
+      }).start(),
+    );
+  }
+
+  /** Edge + Shift+D: a copy of the edge slides across an adjacent flat face; Enter splits that face. */
+  private duplicateEdge(bodyId: number, edgeId: number): void {
+    const b = this.doc.get(bodyId);
+    if (!b || b.kind === "face") return this.toast("Edge copy: pick an edge of a solid", "error");
+    const faces = b.shape.faces.flatMap((f) => {
+      const ref = faceRefEdges(b.shape, f.hashCode)?.edges.find((e) => e.id === edgeId);
+      return ref ? [{ faceId: f.hashCode, ref }] : [];
+    });
+    if (!faces.length) return this.toast("Edge copy: the edge must be straight and next to a flat face", "error");
+    this.startTool(
+      new SplitFaceTool(this, faces.map((f) => f.ref), (eid, ds, faceId) => {
+        try {
+          const shape = splitFace(b.shape as Solid, faceId ?? faces[0].faceId, eid, ds);
+          this.endTool();
+          this.doc.replaceShapes(new Map([[b.id, shape]]), "Edge copy");
+          this.setSelection([]);
+          this.toast(`Edge copy: face split with ${ds.length} line(s)`);
+        } catch (e) {
+          this.fail(e);
+        }
+      }, { bodyId, faces }).startFromEdge(),
+    );
+  }
+
   /** Base-point move: pick a point on/near the selection, then a target point. */
   private startPointMove(): void {
     const ids = this.selectedBodyIds();
@@ -1383,6 +1436,8 @@ class App implements ToolHost {
 
   private duplicate(): void {
     this.endInteractions();
+    const edgeSel = this.selection.filter((x) => x.kind === "edge");
+    if (edgeSel.length === 1 && this.selection.length === 1) return this.duplicateEdge(edgeSel[0].body, edgeSel[0].id);
     const faceSel = this.selection.filter((x) => x.kind === "face");
     if (faceSel.length && faceSel.length === this.selection.length) {
       const faces = faceSel.flatMap((x) => {
@@ -1723,10 +1778,11 @@ class App implements ToolHost {
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
+      ["Shift+L", "Split face: pick a reference edge, place parallel line(s) at a distance (type / Tab: distance, %, count)"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
-      ["Shift+D / Ctrl+D", "Duplicate solids, or copy selected faces (then move)"],
+      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or copy an edge: slide it across a face, Enter splits the face"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+R", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
