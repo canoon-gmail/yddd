@@ -3,7 +3,13 @@
  * Every edit produces a new snapshot (array of Body); bodies and their shapes
  * are never mutated, so snapshots can share them.
  */
-import type { BodyKind, Shape } from "./kernel";
+import type { BodyKind, Shape, V3 } from "./kernel";
+
+/** A construction (guide) line: a snap target only, not geometry. */
+export interface Guide {
+  readonly a: V3;
+  readonly b: V3;
+}
 
 export interface Body {
   readonly id: number;
@@ -16,6 +22,7 @@ export interface Body {
 type Snapshot = readonly Body[];
 interface HistoryEntry {
   bodies: Snapshot;
+  guides: readonly Guide[];
   label: string;
 }
 
@@ -23,6 +30,7 @@ const MAX_HISTORY = 200;
 
 export class Doc {
   private snapshot: Snapshot = [];
+  private guideList: readonly Guide[] = [];
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
   private nextId = 1;
@@ -34,6 +42,15 @@ export class Doc {
 
   get bodies(): Snapshot {
     return this.snapshot;
+  }
+
+  get guides(): readonly Guide[] {
+    return this.guideList;
+  }
+
+  /** Replace the guide lines in one undoable step. */
+  setGuides(next: readonly Guide[], label: string): void {
+    this.commit(this.snapshot, label, next);
   }
 
   get(id: number): Body | undefined {
@@ -62,11 +79,12 @@ export class Doc {
     return { id: this.nextId++, name: `${baseName} ${n}`, kind, shape };
   }
 
-  commit(next: Snapshot, label: string): void {
-    this.undoStack.push({ bodies: this.snapshot, label });
+  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList): void {
+    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, label });
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
     this.redoStack = [];
     this.snapshot = next;
+    this.guideList = guides;
     this.dirty = true;
     this.emit();
   }
@@ -90,8 +108,9 @@ export class Doc {
   undo(): string | null {
     const entry = this.undoStack.pop();
     if (!entry) return null;
-    this.redoStack.push({ bodies: this.snapshot, label: entry.label });
+    this.redoStack.push({ bodies: this.snapshot, guides: this.guideList, label: entry.label });
     this.snapshot = entry.bodies;
+    this.guideList = entry.guides;
     this.dirty = true;
     this.emit();
     return entry.label;
@@ -100,15 +119,17 @@ export class Doc {
   redo(): string | null {
     const entry = this.redoStack.pop();
     if (!entry) return null;
-    this.undoStack.push({ bodies: this.snapshot, label: entry.label });
+    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, label: entry.label });
     this.snapshot = entry.bodies;
+    this.guideList = entry.guides;
     this.dirty = true;
     this.emit();
     return entry.label;
   }
 
   /** Start over with the given bodies (used by New / Open). Clears history. */
-  reset(bodies: { name: string; kind: BodyKind; shape: Shape }[] = [], filePath: string | null = null): void {
+  reset(bodies: { name: string; kind: BodyKind; shape: Shape }[] = [], filePath: string | null = null, guides: readonly Guide[] = []): void {
+    this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;
     this.snapshot = bodies.map((b) => ({ id: this.nextId++, name: b.name, kind: b.kind, shape: b.shape }));

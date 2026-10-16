@@ -29,11 +29,6 @@ import {
   importSTEP,
   makeCompound,
   Face,
-  Compound,
-  cast,
-  getOC,
-  iterTopo,
-  makePolygon,
   type AnyShape,
   type Sketch,
   type Shape3D,
@@ -283,7 +278,7 @@ export function pushPullMany(shape: Solid, faceIds: number[], distance: number):
 
 // ---------------------------------------------------------------- split face
 
-/** A straight edge of a planar face usable as a reference for Split Face. */
+/** A straight edge of a planar face usable as a reference for a guide line. */
 export interface RefEdge {
   id: number;
   a: V3;
@@ -320,46 +315,6 @@ export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges:
     edges.push({ id: e.hashCode, a, b, inward: p, width });
   }
   return { normal: n, edges };
-}
-
-/**
- * Split a planar face of a solid with lines parallel to one of its straight edges,
- * at the given distances from that edge. Other faces are untouched (no simplify,
- * which would merge the pieces back).
- */
-export function splitFace(shape: Solid, faceId: number, edgeId: number, distances: number[]): Solid {
-  const info = faceRefEdges(shape, faceId);
-  const ref = info?.edges.find((e) => e.id === edgeId);
-  if (!info || !ref) throw new Error("Split face: needs a flat face and one of its straight edges");
-  const ds = distances.filter((d) => d > 1e-6 && d < ref.width - 1e-6);
-  if (!ds.length) throw new Error(`Split face: distance must be between 0 and ${+ref.width.toFixed(3)}`);
-  const [[x0, y0, z0], [x1, y1, z1]] = shape.boundingBox.bounds;
-  const big = Math.hypot(x1 - x0, y1 - y0, z1 - z0) + 1;
-  const t = norm3(sub3(ref.b, ref.a));
-  const n = info.normal;
-  const at = (o: V3, v: V3, k: number): V3 => [o[0] + v[0] * k, o[1] + v[1] * k, o[2] + v[2] * k];
-  const oc = getOC();
-  const args = new oc.NCollection_List_TopoDS_Shape();
-  args.Append(shape.wrapped);
-  const tools = new oc.NCollection_List_TopoDS_Shape();
-  for (const d of ds) {
-    // A wall standing on the face (outside the solid), meeting it exactly on the line.
-    const p = at(ref.a, ref.inward, d);
-    const s = at(p, t, -big);
-    const e = at(p, t, big);
-    tools.Append(makePolygon([s, e, at(e, n, big), at(s, n, big)]).wrapped);
-  }
-  const builder = new oc.BRepAlgoAPI_Splitter();
-  builder.SetArguments(args);
-  builder.SetTools(tools);
-  builder.Build(new oc.Message_ProgressRange());
-  if (builder.HasErrors()) throw new Error("Split face: the geometry kernel could not split this face");
-  let out = cast(builder.Shape());
-  if (out instanceof Compound) {
-    const solids = [...iterTopo(out.wrapped, "solid")].map((s) => cast(s));
-    if (solids.length === 1) out = solids[0];
-  }
-  return out as Solid;
 }
 
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */

@@ -28,7 +28,6 @@ import {
   kindOf,
   faceAxis,
   faceRefEdges,
-  splitFace,
   type V3,
   makeBox,
   makeCylinder,
@@ -38,9 +37,9 @@ import {
   type Shape,
   type Solid,
 } from "./kernel";
-import { Doc, type Body } from "./document";
+import { Doc, type Body, type Guide } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, SplitFaceTool, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -117,6 +116,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "T" },
+      { cmd: "tool.guide", icon: "rectangle", label: "Guide line", key: "L" },
+      { cmd: "edit.clearGuides", icon: "delete", label: "Clear guides", key: "" },
     ],
   },
   {
@@ -177,6 +178,7 @@ const KEYMAP: Record<string, string> = {
   t: "op.shell",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
+  l: "tool.guide",
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
   x: "edit.delete",
@@ -206,7 +208,7 @@ const KEYMAP: Record<string, string> = {
 const MODE_HINTS: Record<SelMode, string> = {
   body: "Solid mode: click to select solids, Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
   face: "Face mode: click faces (P push/pull, T shell).  Shift+click to add",
-  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D copy edge → split face).  Shift+click to add",
+  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add",
 };
 
 class App implements ToolHost {
@@ -379,6 +381,11 @@ class App implements ToolHost {
       case "op.fillet": return this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
+      case "tool.guide": return this.startGuide();
+      case "edit.clearGuides":
+        if (!this.doc.guides.length) return this.toast("No guide lines");
+        this.selGuide = -1;
+        return this.doc.setGuides([], "Clear guides");
 
       case "bool.union": return this.boolean("union");
       case "bool.subtract": return this.boolean("subtract");
@@ -465,6 +472,16 @@ class App implements ToolHost {
   }
 
   private click(e: PointerEvent): void {
+    const g = this.viewport.guideAt(e.clientX, e.clientY);
+    if (g !== this.selGuide) {
+      this.selGuide = g;
+      this.showGuides();
+    }
+    if (g >= 0) {
+      this.setSelection([]);
+      this.hint("Guide line selected · Del removes it");
+      return;
+    }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
     const item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
     if (!item) {
@@ -1190,28 +1207,37 @@ class App implements ToolHost {
     this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Enter/Esc: done`);
   }
 
-  /** Edge + Shift+D: a copy of the edge slides across an adjacent flat face; Enter splits that face. */
-  private duplicateEdge(bodyId: number, edgeId: number): void {
+  /** Adjacent flat faces of an edge, each with the edge seen from that face. */
+  private edgeSides(bodyId: number, edgeId: number): EdgeSides | null {
     const b = this.doc.get(bodyId);
-    if (!b || b.kind === "face") return this.toast("Edge copy: pick an edge of a solid", "error");
+    if (!b) return null;
     const faces = b.shape.faces.flatMap((f) => {
       const ref = faceRefEdges(b.shape, f.hashCode)?.edges.find((e) => e.id === edgeId);
       return ref ? [{ faceId: f.hashCode, ref }] : [];
     });
-    if (!faces.length) return this.toast("Edge copy: the edge must be straight and next to a flat face", "error");
+    return faces.length ? { bodyId, faces } : null;
+  }
+
+  /** Guide line tool; with an edge given (edge + Shift+D) it starts from that edge. */
+  private startGuide(bodyId?: number, edgeId?: number): void {
+    if (bodyId !== undefined && edgeId !== undefined && !this.edgeSides(bodyId, edgeId)) {
+      return this.toast("Guide line: the edge must be straight and next to a flat face", "error");
+    }
+    this.endInteractions();
     this.startTool(
-      new SplitFaceTool(this, faces.map((f) => f.ref), (eid, ds, faceId) => {
-        try {
-          const shape = splitFace(b.shape as Solid, faceId ?? faces[0].faceId, eid, ds);
-          this.endTool();
-          this.doc.replaceShapes(new Map([[b.id, shape]]), "Edge copy");
-          this.setSelection([]);
-          this.toast(`Edge copy: face split with ${ds.length} line(s)`);
-        } catch (e) {
-          this.fail(e);
-        }
-      }, { bodyId, faces }).startFromEdge(),
+      new GuideTool(this, (bid, eid) => this.edgeSides(bid, eid), (lines) => {
+        this.endTool();
+        this.doc.setGuides([...this.doc.guides, ...lines], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
+        this.toast(`Added ${lines.length} guide line(s) — hold Ctrl to snap to them`);
+      }).start(bodyId, edgeId),
     );
+  }
+
+  private selGuide = -1;
+
+  private showGuides(): void {
+    if (this.selGuide >= this.doc.guides.length) this.selGuide = -1;
+    this.viewport.setGuides(this.doc.guides, this.selGuide);
   }
 
   /** Base-point move: pick a point on/near the selection, then a target point. */
@@ -1398,6 +1424,11 @@ class App implements ToolHost {
 
   private deleteSelected(): void {
     this.endInteractions();
+    if (this.selGuide >= 0) {
+      const i = this.selGuide;
+      this.selGuide = -1;
+      return this.doc.setGuides(this.doc.guides.filter((_, k) => k !== i), "Delete guide");
+    }
     const ids = new Set(this.selection.filter((s) => s.kind === "body").map((s) => s.body));
     if (!ids.size) {
       this.toast("Delete: select objects (Solid mode, key 1)", "error");
@@ -1410,7 +1441,7 @@ class App implements ToolHost {
   private duplicate(): void {
     this.endInteractions();
     const edgeSel = this.selection.filter((x) => x.kind === "edge");
-    if (edgeSel.length === 1 && this.selection.length === 1) return this.duplicateEdge(edgeSel[0].body, edgeSel[0].id);
+    if (edgeSel.length === 1 && this.selection.length === 1) return this.startGuide(edgeSel[0].body, edgeSel[0].id);
     const faceSel = this.selection.filter((x) => x.kind === "face");
     if (faceSel.length && faceSel.length === this.selection.length) {
       const faces = faceSel.flatMap((x) => {
@@ -1447,6 +1478,7 @@ class App implements ToolHost {
 
   private onDocChange(): void {
     this.viewport.sync(this.doc.bodies);
+    this.showGuides();
     const live = new Set(this.doc.bodies.map((b) => b.id));
     for (const id of [...this.hidden]) if (!live.has(id)) this.hidden.delete(id);
     this.selection = this.selection.filter((s) => this.viewport.isValid(s));
@@ -1751,10 +1783,11 @@ class App implements ToolHost {
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
+      ["L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
-      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or copy an edge: slide it across a face, Enter splits the face"],
+      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or on an edge: add a guide line (like L)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+R", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
@@ -1790,7 +1823,7 @@ class App implements ToolHost {
     const file = await window.y3d.openFile({ title: "Open model", filters: [{ name: "Y3D model", extensions: ["y3d"] }], binary: false });
     if (!file) return;
     try {
-      const json = JSON.parse(file.data as string) as { format: string; bodies: { name: string; kind?: BodyKind; brep: string }[] };
+      const json = JSON.parse(file.data as string) as { format: string; bodies: { name: string; kind?: BodyKind; brep: string }[]; guides?: Guide[] };
       if (json.format !== "y3d") throw new Error("not a Y3D file");
       const bodies = json.bodies.map((b) => {
         const shape = deserialize(b.brep);
@@ -1799,7 +1832,7 @@ class App implements ToolHost {
       this.endInteractions();
       this.selection = [];
       this.hidden.clear();
-      this.doc.reset(bodies, file.path);
+      this.doc.reset(bodies, file.path, json.guides ?? []);
       this.viewport.fit();
       this.toast(`Opened ${file.path.split(/[\\/]/).pop()}`);
     } catch (e) {
@@ -1813,6 +1846,7 @@ class App implements ToolHost {
       version: 1,
       units: "mm",
       bodies: this.doc.bodies.map((b) => ({ name: b.name, kind: b.kind, brep: serializeShape(b.shape) })),
+      guides: this.doc.guides,
     });
     let path = this.doc.filePath;
     if (saveAs || !path) {

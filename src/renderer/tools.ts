@@ -1028,106 +1028,92 @@ export class PointMoveTool implements Tool {
   }
 }
 
+/** Faces next to an edge, each with the edge as seen from that face. */
+export interface EdgeSides {
+  bodyId: number;
+  faces: { faceId: number; ref: RefEdge }[];
+}
+
 /**
- * Split Face: the selected flat face's straight edges are shown; click one as the
- * reference, then move the mouse to place a line parallel to it (distance shown,
- * Ctrl snaps to the grid step). Type a distance or press Tab for Distance / % / Count,
- * Enter applies.
+ * Guide line: pick a reference edge (or start from a selected edge), then move the mouse
+ * to slide a parallel copy across the adjacent flat face under the cursor (distance shown,
+ * Ctrl snaps to the grid step). Type a distance, or Tab for Distance / % / Count; Enter or
+ * click adds the guide line(s). Guides are snap targets (Ctrl) for drawing and moving.
  */
-export class SplitFaceTool implements Tool {
-  readonly name = "Split face";
+export class GuideTool implements Tool {
+  readonly name = "Guide line";
+  private sides: EdgeSides | null = null;
+  private hoverSides: EdgeSides | null = null;
   private ref: RefEdge | null = null;
-  private hoverEdge: RefEdge | null = null;
   private dist = 0;
   private count = 1;
   private typed = "";
 
   constructor(
     private host: ToolHost,
-    private edges: RefEdge[],
-    private onDone: (edgeId: number, distances: number[], faceId?: number) => void,
-    /** Edge + Shift+D: the faces next to the edge; the one under the cursor is split. */
-    private sides?: { bodyId: number; faces: { faceId: number; ref: RefEdge }[] },
+    /** Adjacent flat faces of an edge (null if the edge is not straight / has no flat face). */
+    private sidesOf: (bodyId: number, edgeId: number) => EdgeSides | null,
+    private onDone: (lines: { a: V3; b: V3 }[]) => void,
   ) {}
 
-  private faceId?: number;
-
-  /** Switch to the adjacent face under the cursor (edge-duplicate mode). */
-  private pickSide(e: PointerEvent): void {
-    if (!this.sides) return;
-    const hit = this.host.viewport.faceUnder(e.clientX, e.clientY);
-    const s = hit && hit.body.id === this.sides.bodyId ? this.sides.faces.find((f) => f.faceId === hit.faceId) : undefined;
-    if (s && s.faceId !== this.faceId) {
-      this.faceId = s.faceId;
-      this.ref = s.ref;
+  start(bodyId?: number, edgeId?: number): this {
+    if (bodyId !== undefined && edgeId !== undefined) {
+      const s = this.sidesOf(bodyId, edgeId);
+      if (s) this.choose(s);
     }
-  }
-
-  /** Start with the edge copy already picked (edge-duplicate mode). */
-  startFromEdge(): this {
-    const f = this.sides!.faces[0];
-    this.faceId = f.faceId;
-    this.pick(f.ref.id, 0);
-    this.ref = f.ref;
-    return this;
-  }
-
-  start(): this {
     this.draw();
     this.updateHint();
     return this;
   }
 
-  /** Distances of all lines: `count` lines evenly spaced by `dist` from the edge. */
-  distances(): number[] {
+  private choose(s: EdgeSides, dist = 0): void {
+    this.sides = s;
+    this.ref = s.faces[0].ref;
+    this.dist = dist;
+  }
+
+  /** Test hook: choose the reference edge and distance directly. */
+  pick(bodyId: number, edgeId: number, dist = 0): void {
+    const s = this.sidesOf(bodyId, edgeId);
+    if (s) this.choose(s, dist);
+    this.draw();
+    this.updateHint();
+  }
+
+  private distances(): number[] {
     return Array.from({ length: this.count }, (_, i) => this.dist * (i + 1));
   }
 
   private v = (t: V3) => new THREE.Vector3(...t);
 
   private draw(): void {
-    const vp = this.host.viewport;
-    const objs: THREE.Object3D[] = [];
     const line = (a: THREE.Vector3, b: THREE.Vector3, color: number) =>
       new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
+    const objs: THREE.Object3D[] = [];
     if (!this.ref) {
-      for (const e of this.edges) objs.push(line(this.v(e.a), this.v(e.b), e === this.hoverEdge ? 0xffd166 : 0x4fa3ff));
+      const r = this.hoverSides?.faces[0].ref;
+      if (r) objs.push(line(this.v(r.a), this.v(r.b), 0xffd166));
     } else {
       const r = this.ref;
       objs.push(line(this.v(r.a), this.v(r.b), 0xffd166));
       for (const d of this.distances()) {
         const off = this.v(r.inward).multiplyScalar(d);
-        objs.push(line(this.v(r.a).add(off), this.v(r.b).add(off), 0x8fd3ff));
+        objs.push(line(this.v(r.a).add(off), this.v(r.b).add(off), 0xff6fb5));
       }
     }
-    vp.setOverlay(objs);
+    this.host.viewport.setOverlay(objs);
   }
 
   private updateHint(): void {
     const t = this.ref
-      ? (this.sides ? "Edge copy: slide it across the face under the cursor" : "Split face: move to place the line") + " (Ctrl snaps) · type a distance or Tab for distance / % / count · Enter apply · Esc cancel"
-      : "Split face: click the edge to measure from";
+      ? "Guide line: move across the face under the cursor (Ctrl snaps) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel"
+      : "Guide line: click the reference edge";
     this.host.hint(this.typed ? `${t}   ⌨ ${this.typed}_` : t);
   }
 
-  private nearestEdge(cx: number, cy: number): RefEdge | null {
-    const vp = this.host.viewport;
-    let best: RefEdge | null = null;
-    let bd = 12;
-    for (const e of this.edges) {
-      const a = vp.toScreen(this.v(e.a));
-      const b = vp.toScreen(this.v(e.b));
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const k = Math.max(0, Math.min(1, ((cx - a.x) * dx + (cy - a.y) * dy) / (dx * dx + dy * dy || 1)));
-      const d = Math.hypot(cx - a.x - k * dx, cy - a.y - k * dy);
-      if (d < bd) { bd = d; best = e; }
-    }
-    return best;
-  }
-
-  private clampDist(d: number): number {
-    const w = this.ref!.width;
-    return Math.max(0, Math.min(w, d));
+  private edgeUnder(e: PointerEvent): EdgeSides | null {
+    const p = this.host.viewport.pick(e.clientX, e.clientY, "edge");
+    return p && p.kind === "edge" ? this.sidesOf(p.body, p.id) : null;
   }
 
   private showHud(): void {
@@ -1139,69 +1125,64 @@ export class SplitFaceTool implements Tool {
 
   move(e: PointerEvent): void {
     if (!this.ref) {
-      const h = this.nearestEdge(e.clientX, e.clientY);
-      if (h !== this.hoverEdge) { this.hoverEdge = h; this.draw(); }
+      const h = this.edgeUnder(e);
+      if (h?.faces[0].ref.id !== this.hoverSides?.faces[0].ref.id) { this.hoverSides = h; this.draw(); }
       return;
     }
     if (this.typed) return;
-    this.pickSide(e);
+    // The adjacent face under the cursor decides which way the copy slides.
+    const hit = this.host.viewport.faceUnder(e.clientX, e.clientY);
+    const side = hit && hit.body.id === this.sides!.bodyId ? this.sides!.faces.find((f) => f.faceId === hit.faceId) : undefined;
+    if (side) this.ref = side.ref;
     const r = this.ref;
-    // Project the cursor ray onto the face plane, then measure along `inward`.
     const n = this.v(r.inward).cross(this.v(r.b).sub(this.v(r.a))).normalize();
     const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, this.v(r.a));
     const p = this.host.viewport.ray(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3());
     if (!p) return;
-    this.dist = this.clampDist(snapValue(p.sub(this.v(r.a)).dot(this.v(r.inward)), this.host.snapStep(e)));
+    const d = snapValue(p.sub(this.v(r.a)).dot(this.v(r.inward)), this.host.snapStep(e));
+    this.dist = Math.max(0, Math.min(r.width, d));
     this.draw();
     this.showHud();
   }
 
   down(e: PointerEvent): void {
     if (!this.ref) {
-      const h = this.nearestEdge(e.clientX, e.clientY);
-      if (!h) return this.host.hint("Split face: click one of the highlighted edges");
-      this.pick(h.id);
+      const h = this.edgeUnder(e);
+      if (!h) return this.host.hint("Guide line: click a straight edge next to a flat face");
+      this.choose(h);
+      this.draw();
+      this.updateHint();
       return;
     }
     this.move(e);
     this.apply();
   }
 
-  /** Choose the reference edge (also used by tests). */
-  pick(edgeId: number, dist?: number): void {
-    const h = this.edges.find((x) => x.id === edgeId);
-    if (!h) return;
-    this.ref = h;
-    this.dist = dist ?? h.width / 2;
-    this.draw();
-    this.showHud();
-    this.updateHint();
-  }
-
   private apply(): void {
-    if (!this.ref) return;
-    const ds = this.distances().filter((d) => d > 1e-6 && d < this.ref!.width - 1e-6);
-    if (!ds.length) return this.host.hint(`Split face: distance must be between 0 and ${fmt(this.ref.width)}`);
-    this.onDone(this.ref.id, ds, this.faceId);
+    const r = this.ref;
+    if (!r) return;
+    const ds = this.distances().filter((d) => d > 1e-6);
+    if (!ds.length) return this.host.hint("Guide line: move away from the edge or type a distance first");
+    const off = (p: V3, d: number): V3 => [p[0] + r.inward[0] * d, p[1] + r.inward[1] * d, p[2] + r.inward[2] * d];
+    this.onDone(ds.map((d) => ({ a: off(r.a, d), b: off(r.b, d) })));
   }
 
   private dialog(): void {
     const r = this.ref!;
     this.host.propsDialog(
-      "Split face",
+      "Guide line",
       [
         { label: "Distance", value: +this.dist.toFixed(3), step: 1 },
-        { label: "% of width (0 = use distance)", value: 0, step: 5 },
+        { label: "% of face width (0 = use distance)", value: 0, step: 5 },
         { label: "Count", value: this.count, step: 1, min: 1 },
       ],
       ([d, pct, c]) => {
         this.count = Math.max(1, Math.round(c || 1));
-        // % with count: evenly divide, e.g. 3 lines at 25% → 25/50/75%.
         this.dist = pct > 0 ? (r.width * pct) / 100 : d;
         this.draw();
         this.apply();
       },
-      "Split",
+      "Add",
     );
   }
 
@@ -1214,11 +1195,8 @@ export class SplitFaceTool implements Tool {
     } else if (e.key === "Backspace" && this.typed) {
       this.typed = this.typed.slice(0, -1);
     } else if (e.key === "Enter") {
-      if (this.typed) {
-        const v = Number(this.typed);
-        this.typed = "";
-        if (Number.isFinite(v)) this.dist = v;
-      }
+      if (this.typed && Number.isFinite(Number(this.typed))) this.dist = Number(this.typed);
+      this.typed = "";
       this.apply();
       return true;
     } else {

@@ -106,6 +106,9 @@ export class Viewport {
   };
   private ghostRoot = new THREE.Group();
   private overlayRoot = new THREE.Group();
+  private guideRoot = new THREE.Group();
+  /** Guide lines (snap targets); see setGuides. */
+  private guides: { a: THREE.Vector3; b: THREE.Vector3 }[] = [];
   private hoverEdges: LineSegments2;
   private selOutline: LineSegments2;
   private hoverOutline: LineSegments2;
@@ -165,7 +168,7 @@ export class Viewport {
     fill.position.set(-2, -1, 0.5);
     this.camera.add(fill);
 
-    this.scene.add(this.makeGrid(), this.batchRoot, this.bodyRoot, this.ghostRoot, this.overlayRoot);
+    this.scene.add(this.makeGrid(), this.batchRoot, this.bodyRoot, this.ghostRoot, this.overlayRoot, this.guideRoot);
 
     this.hoverEdges = this.makeOverlayLines(this.mats.edgeHover);
     this.selEdges = this.makeOverlayLines(this.mats.edgeSelected);
@@ -791,6 +794,36 @@ export class Viewport {
     return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
   }
 
+  /** Show guide lines (dashed); `selected` is drawn highlighted. */
+  setGuides(list: readonly { a: V3; b: V3 }[], selected = -1): void {
+    for (const c of [...this.guideRoot.children]) {
+      c.removeFromParent();
+      (c as THREE.Line).geometry.dispose();
+    }
+    this.guides = list.map((g) => ({ a: new THREE.Vector3(...g.a), b: new THREE.Vector3(...g.b) }));
+    this.guides.forEach((g, i) => {
+      const mat = new THREE.LineDashedMaterial({ color: i === selected ? 0xffd166 : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
+      const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([g.a, g.b]), mat);
+      l.computeLineDistances();
+      l.renderOrder = 15;
+      this.guideRoot.add(l);
+    });
+    this.requestRender();
+  }
+
+  /** Index of the guide line within a few pixels of the cursor, or -1. */
+  guideAt(cx: number, cy: number): number {
+    let best = -1, bd = 6;
+    this.guides.forEach((g, i) => {
+      const a = this.toScreen(g.a), b = this.toScreen(g.b);
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const k = Math.max(0, Math.min(1, ((cx - a.x) * dx + (cy - a.y) * dy) / (dx * dx + dy * dy || 1)));
+      const d = Math.hypot(cx - a.x - k * dx, cy - a.y - k * dy);
+      if (d < bd) { bd = d; best = i; }
+    });
+    return best;
+  }
+
   /** Grid step used to round points snapped onto the world axis lines. */
   axisSnapStep = 1;
 
@@ -799,16 +832,24 @@ export class Viewport {
     const ray = this.ray(cx, cy);
     let best: { d: number; p: THREE.Vector3 } | null = null;
     const q = new THREE.Vector3();
-    for (const dir of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
-      // Closest point on the axis line to the cursor ray.
-      const w0 = ray.origin.clone();
+    const lines: { o: THREE.Vector3; dir: THREE.Vector3; len: number }[] = [
+      ...[new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)].map((dir) => ({ o: new THREE.Vector3(), dir, len: Infinity })),
+      ...this.guides.map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) })),
+    ];
+    for (const { o, dir, len } of lines) {
+      // Closest point on the axis / guide line to the cursor ray.
+      const w0 = ray.origin.clone().sub(o);
       const b = ray.direction.dot(dir), d = ray.direction.dot(w0), e = dir.dot(w0);
       const den = 1 - b * b;
       if (den < 1e-6) continue; // looking straight down this axis
       let t = (e - b * d) / den;
       const step = this.axisSnapStep;
       if (step > 0) t = Math.round(t / step) * step;
-      const p = dir.clone().multiplyScalar(t);
+      if (len !== Infinity) {
+        if (t < -1e-9 || t > len + 1e-9) continue;
+        if (len - t < step / 2) t = len; // land on the far end
+      }
+      const p = o.clone().addScaledVector(dir, t);
       if (hitDist !== undefined && this.camera.position.distanceTo(p) > hitDist * 1.01 + 0.05) continue;
       q.copy(p).project(this.camera);
       if (q.z < -1 || q.z > 1) continue;
