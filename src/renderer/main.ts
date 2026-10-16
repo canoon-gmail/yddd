@@ -318,6 +318,7 @@ class App implements ToolHost {
     document.getElementById("props-dlg")?.remove();
     const dlg = document.createElement("form");
     dlg.id = "props-dlg";
+    dlg.noValidate = true; // step is only for arrow keys; any value is allowed
     dlg.innerHTML =
       `<h4>${title}</h4>` +
       fields
@@ -1113,6 +1114,7 @@ class App implements ToolHost {
     if (!keep) {
       this.endTool();
       this.cancelOp();
+      this.lastXf = null;
     }
     const ids = this.selectedBodyIds();
     if (!ids.length) {
@@ -1145,8 +1147,12 @@ class App implements ToolHost {
     );
   }
 
+  /** Last gizmo drag, so Tab can prefill (and correct) it. */
+  private lastXf: { r: TransformResult; ids: string } | null = null;
+
   private applyTransform(r: TransformResult): void {
     if (!this.xf) return;
+    this.lastXf = { r, ids: this.xf.ids.join() };
     const shapes = new Map<number, Shape>();
     for (const id of this.xf.ids) {
       const b = this.doc.get(id);
@@ -1171,6 +1177,28 @@ class App implements ToolHost {
       this.doc.replaceShapes(shapes, label);
       this.startTransform(mode, true);
     };
+    // Just dragged the gizmo? Edit that drag: same axis, prefilled with the dragged amount.
+    const last = this.lastXf && this.lastXf.ids === ids.join() ? this.lastXf.r : null;
+    const r3 = (n: number) => +n.toFixed(3);
+    if (last?.type === "rotate" && mode === "rotate") {
+      const ax = last.axis.map((n) => Math.abs(n));
+      const name = ax[0] > 0.999 ? "X" : ax[1] > 0.999 ? "Y" : ax[2] > 0.999 ? "Z" : "gizmo axis";
+      this.propsDialog(`Rotate about ${name} (last drag)`, [{ label: "Angle °", value: r3(last.angleDeg), step: 15 }], ([a]) => {
+        const extra = a - last.angleDeg;
+        if (Math.abs(extra) > 1e-9) apply((s) => rotateShape(s, extra, last.center, last.axis), "Rotate");
+        this.lastXf = { r: { ...last, angleDeg: a }, ids: ids.join() };
+      }, "Rotate");
+      return;
+    }
+    if (last?.type === "translate" && mode === "translate") {
+      const v = last.vector;
+      this.propsDialog("Move (last drag)", [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }], (n) => {
+        const d: V3 = [n[0] - v[0], n[1] - v[1], n[2] - v[2]];
+        if (d.some((x) => Math.abs(x) > 1e-9)) apply((s) => translateShape(s, d), "Move");
+        this.lastXf = { r: { type: "translate", vector: [n[0], n[1], n[2]] }, ids: ids.join() };
+      }, "Move");
+      return;
+    }
     if (mode === "translate") {
       this.propsDialog("Move by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
         if (x || y || z) apply((s) => translateShape(s, [x, y, z]), "Move");

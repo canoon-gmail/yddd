@@ -190,6 +190,20 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
   log.push({ label: "tab move/rotate", mf, m1, rf, sizeAfterRotate: [0, 1].map((k) => +(rbb[1][k] - rbb[0][k]).toFixed(3)) });
 
+  // 10g) Drag-rotate a bit about Y, then Tab: dialog shows that axis + angle; typing 90 makes the total 90
+  app.run("xf.rotate");
+  const bb0 = app.doc.get(nb.id).shape.boundingBox.bounds;
+  const cen = [0, 1, 2].map((k) => (bb0[0][k] + bb0[1][k]) / 2);
+  app.applyTransform({ type: "rotate", angleDeg: 10, axis: [0, 1, 0], center: cen });
+  tab();
+  const dl = document.getElementById("props-dlg");
+  const title = dl ? dl.querySelector("h4").textContent : null;
+  const pre = dl ? dl.querySelector("input").value : null;
+  fill([90]);
+  const ab = app.doc.get(nb.id).shape.boundingBox.bounds;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  log.push({ label: "tab after drag", title, pre, zSize: +(ab[1][2] - ab[0][2]).toFixed(3) });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
