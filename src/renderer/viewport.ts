@@ -816,6 +816,12 @@ export class Viewport {
     const edgePoints = (items: SelItem[]) => {
       const out: number[] = [];
       for (const it of items) {
+        if (it.kind !== "edge" && it.kind !== "face") {
+          // Whole body: outline all of its edges.
+          const v = this.views.get(it.body);
+          if (v) for (let k = 0; k < v.edgePos.length; k++) out.push(v.edgePos[k]);
+          continue;
+        }
         if (it.kind !== "edge") continue;
         const v = this.views.get(it.body);
         const i = v?.edgeIndex.get(it.id);
