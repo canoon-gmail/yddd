@@ -98,13 +98,14 @@ const GROUND = new PlaneFrame(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0
 
 /**
  * Construction plane for empty space, chosen from the view: the ground (XY) unless the
- * camera looks mostly sideways — then XZ (front/back views) or YZ (side views), so shapes
+ * camera looks almost horizontally — then XZ (front/back views) or YZ (side views), so shapes
  * are drawn facing the viewer. Passes through `at` (default: origin).
  */
 function workPlane(camera: THREE.Camera, at = new THREE.Vector3()): PlaneFrame {
   const d = camera.getWorldDirection(new THREE.Vector3());
   const o = at.clone();
-  if (Math.abs(d.z) >= 0.5) return new PlaneFrame(new THREE.Vector3(0, 0, o.z), GROUND.x, GROUND.y, GROUND.z);
+  // Only near-horizontal views (within ~15°, e.g. front/right) switch to a vertical plane.
+  if (Math.abs(d.z) >= 0.26) return new PlaneFrame(new THREE.Vector3(0, 0, o.z), GROUND.x, GROUND.y, GROUND.z);
   const up = new THREE.Vector3(0, 0, 1);
   if (Math.abs(d.y) >= Math.abs(d.x)) {
     // XZ plane; normal points back toward the camera.

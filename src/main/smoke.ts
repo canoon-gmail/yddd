@@ -146,6 +146,14 @@ const SCENARIO_2 = String.raw`
   toolClicks([[95, -25, 35]]);
   log.push({ label: "pick boolean", removed: before - app.doc.bodies.length, kept: !!app.doc.get(b2), gone: !app.doc.get(b3) });
 
+  // 12a) Default startup camera: a rectangle in empty space lies on the floor (z = 0)
+  app.run("mode.body"); app.setSelection([]);
+  vp.camera.position.set(140, -190, 130); vp.controls.target.set(0, 0, 0); vp.controls.update(); await sleep(50);
+  app.run("tool.rectangle");
+  toolClicks([[-100, -100, 0], [-80, -80, 0]]);
+  const fb = app.doc.bodies[app.doc.bodies.length - 1].shape.boundingBox.bounds;
+  log.push({ label: "startup-view rectangle", min: fb[0].map((n) => +n.toFixed(2)), max: fb[1].map((n) => +n.toFixed(2)) });
+
   // 12) Front view: a rectangle in empty space is drawn on the XZ plane (y = 0)
   app.run("mode.body");
   app.setSelection([]);
