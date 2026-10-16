@@ -117,7 +117,6 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "T" },
-      { cmd: "op.split", icon: "rectangle", label: "Split face", key: "Shift+L" },
     ],
   },
   {
@@ -178,7 +177,6 @@ const KEYMAP: Record<string, string> = {
   t: "op.shell",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
-  "Shift+L": "op.split",
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
   x: "edit.delete",
@@ -381,7 +379,6 @@ class App implements ToolHost {
       case "op.fillet": return this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
-      case "op.split": return this.startSplitFace();
 
       case "bool.union": return this.boolean("union");
       case "bool.subtract": return this.boolean("subtract");
@@ -1193,30 +1190,6 @@ class App implements ToolHost {
     this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Enter/Esc: done`);
   }
 
-  /** Split the selected flat face with lines parallel to one of its edges. */
-  private startSplitFace(): void {
-    const faces = this.selection.filter((s) => s.kind === "face");
-    if (faces.length !== 1) return this.toast("Split face: select one flat face of a solid (Face mode, key 2)", "error");
-    const { body, id: faceId } = faces[0];
-    const b = this.doc.get(body);
-    if (!b || b.kind === "face") return this.toast("Split face: select a face of a solid (Push/Pull flat faces first)", "error");
-    const info = faceRefEdges(b.shape, faceId);
-    if (!info || !info.edges.length) return this.toast("Split face: the face must be flat with at least one straight edge", "error");
-    this.startTool(
-      new SplitFaceTool(this, info.edges, (edgeId, ds) => {
-        try {
-          const shape = splitFace(b.shape as Solid, faceId, edgeId, ds);
-          this.endTool();
-          this.doc.replaceShapes(new Map([[b.id, shape]]), "Split face");
-          this.setSelection([]);
-          this.toast(`Split face: ${ds.length} line(s) added`);
-        } catch (e) {
-          this.fail(e);
-        }
-      }).start(),
-    );
-  }
-
   /** Edge + Shift+D: a copy of the edge slides across an adjacent flat face; Enter splits that face. */
   private duplicateEdge(bodyId: number, edgeId: number): void {
     const b = this.doc.get(bodyId);
@@ -1778,7 +1751,6 @@ class App implements ToolHost {
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
-      ["Shift+L", "Split face: pick a reference edge, place parallel line(s) at a distance (type / Tab: distance, %, count)"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
