@@ -57,3 +57,10 @@ push/pull and so on.
 ## License notes
 
 OpenCascade (replicad-opencascadejs) is LGPL-2.1; replicad and Three.js are MIT.
+
+## TODO
+
+- [ ] **Pre-build snap points ahead of time.** Snap points are built lazily on the first
+  snap query (~100 ms hitch at 5000 solids, `npm run bench`). Build them in idle time
+  after `Viewport.sync()` (e.g. `requestIdleCallback`, in chunks) so complex models
+  respond instantly on the first hover.
