@@ -10,6 +10,7 @@ import {
   filletEdges,
   chamferEdges,
   pushPull,
+  pushPullMany,
   shellSolid,
   booleanOp,
   translateShape,
@@ -902,8 +903,9 @@ class App implements ToolHost {
       const b = this.doc.get(this.selection[0].body);
       if (b?.kind === "face") target = { bodyId: b.id, faceId: b.shape.faces[0].hashCode };
     }
+    if (!target && this.selection.length > 1) return this.opPushPullMany();
     if (!target) {
-      this.toast("Push/Pull: select one face (Face mode, key 2) or one flat face object", "error");
+      this.toast("Push/Pull: select one or more faces (Face mode, key 2) or flat face objects", "error");
       return;
     }
     const { bodyId, faceId } = target;
@@ -959,6 +961,52 @@ class App implements ToolHost {
       remember: ({ d, newBody }) => {
         this.defaults.pushpullNew = !!newBody;
       },
+      drag,
+    });
+  }
+
+  /** Several faces (on one or more solids) and/or flat face objects, one distance. */
+  private opPushPullMany(): void {
+    const perSolid = new Map<number, number[]>();
+    const flats: Body[] = [];
+    for (const s of this.selection) {
+      const b = this.doc.get(s.body);
+      if (!b) continue;
+      if (b.kind === "face") {
+        if (!flats.includes(b)) flats.push(b);
+      } else if (s.kind === "face") {
+        perSolid.set(b.id, [...(perSolid.get(b.id) ?? []), s.id]);
+      } else {
+        return this.toast("Push/Pull: select faces only (Face mode, key 2) — not whole solids or edges", "error");
+      }
+    }
+    const n = [...perSolid.values()].reduce((a, f) => a + f.length, 0) + flats.length;
+    if (!n) return this.toast("Push/Pull: select one or more faces", "error");
+    const first = this.selection[0];
+    const fb = this.doc.get(first.body)!;
+    const axis = faceAxis(fb.shape, fb.kind === "face" ? fb.shape.faces[0].hashCode : first.id);
+    const drag = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
+    this.startOp({
+      title: `Push / Pull (${n} faces)`,
+      label: "Push/Pull",
+      fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
+      compute: ({ d }) => {
+        const solids = new Map<number, Shape>();
+        for (const [id, faces] of perSolid) solids.set(id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d));
+        const extruded = new Map<number, Shape>(flats.map((b) => [b.id, extrudeFace(b.shape, b.shape.faces[0].hashCode, d)]));
+        return {
+          ghost: new Map([...solids, ...extruded]),
+          commit: () => {
+            const made = new Map(flats.map((b) => [b.id, this.doc.makeBody(extruded.get(b.id)!, "Solid")]));
+            this.doc.commit(
+              this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? { ...b, shape: solids.get(b.id)! } : b)),
+              "Push/Pull",
+            );
+            return { select: [...solids.keys(), ...[...made.values()].map((b) => b.id)], solidMode: made.size > 0 && !solids.size };
+          },
+        };
+      },
+      remember: () => {},
       drag,
     });
   }
@@ -1653,7 +1701,7 @@ class App implements ToolHost {
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
-      ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
+      ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],

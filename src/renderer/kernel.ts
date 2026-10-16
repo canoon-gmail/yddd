@@ -260,6 +260,22 @@ export function pushPull(shape: Solid, faceId: number, distance: number): Solid 
   return result.simplify();
 }
 
+/** Push/pull several faces of one solid by the same distance (each along its own normal). */
+export function pushPullMany(shape: Solid, faceIds: number[], distance: number): Solid {
+  if (faceIds.length === 1) return pushPull(shape, faceIds[0], distance);
+  if (distance === 0) return shape;
+  let result: Shape3D = shape;
+  // Tools are all built from the original faces so face ids stay valid.
+  const tools = faceIds.map((id) => {
+    const face = findFace(shape, id);
+    if (!face) throw new Error("face not found");
+    const n = face.normalAt(face.center).normalized().toTuple();
+    return basicFaceExtrusion(face, new Vector([n[0] * distance, n[1] * distance, n[2] * distance]));
+  });
+  for (const t of tools) result = distance > 0 ? result.fuse(t) : result.cut(t);
+  return result.simplify();
+}
+
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */
 export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number): Solid {
   return shape.shell(thickness, (f) => f.when(({ element }) => faceIds.has(element.hashCode)));

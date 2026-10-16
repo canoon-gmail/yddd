@@ -222,6 +222,23 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
   log.push({ label: "enter finishes move", xfOn, xfAfter: !!app.xf });
 
+  // 10j) Multi-face push/pull: both X-end faces of a box out by 4 -> X size +8
+  {
+    const b = app.doc.bodies.filter((x) => x.kind === "solid").slice(-1)[0];
+    const bb = b.shape.boundingBox.bounds;
+    const sx0 = bb[1][0] - bb[0][0];
+    const ends = b.shape.faces.filter((f) => { const nn = f.normalAt(f.center).toTuple(); return Math.abs(Math.abs(nn[0]) - 1) < 1e-6; });
+    app.run("mode.face");
+    app.setSelection(ends.map((f) => ({ kind: "face", body: b.id, id: f.hashCode })));
+    app.run("op.pushpull");
+    const inp = document.querySelector("#op-panel input[data-key=d]");
+    if (inp) { inp.value = "4"; inp.dispatchEvent(new Event("input", { bubbles: true })); }
+    app.applyOp();
+    const ab = app.doc.get(b.id).shape.boundingBox.bounds;
+    log.push({ label: "multi push/pull", faces: ends.length, dx: +((ab[1][0] - ab[0][0]) - sx0).toFixed(3) });
+    app.run("mode.body");
+  }
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
