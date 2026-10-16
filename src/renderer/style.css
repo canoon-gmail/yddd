@@ -127,6 +127,15 @@ kbd {
 #op-handle[hidden] { display: none; }
 #op-handle:hover { background: #4aa3ff; }
 #op-handle.dragging { cursor: grabbing; background: #ff9f1c; }
+#props-dlg {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 240px; padding: 10px 12px; z-index: 40;
+  background: rgba(38, 40, 44, 0.98); border: 1px solid var(--accent); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+#props-dlg h4 { margin: 0 0 8px; font-size: 13px; color: var(--accent-2); }
+#props-dlg label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+#props-dlg input { width: 110px; padding: 3px 6px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+#props-dlg input:focus { outline: none; border-color: var(--accent); }
+#props-dlg .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 #op-panel {
   position: absolute; top: 12px; left: 12px; width: 240px; padding: 10px 12px;
   background: rgba(38, 40, 44, 0.96); border: 1px solid var(--border); border-radius: 8px;

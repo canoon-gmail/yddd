@@ -34,6 +34,15 @@ export interface ToolHost {
   hud(text: string | null, at?: THREE.Vector3): void;
   finish(shape: Shape, baseName: string, kind: BodyKind): void;
   fail(e: unknown): void;
+  /** Show a property dialog; onOk receives the edited values in field order. */
+  propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void): void;
+}
+
+export interface PropField {
+  label: string;
+  value: number;
+  step?: number;
+  min?: number;
 }
 
 export interface Tool {
@@ -153,7 +162,7 @@ abstract class DrawTool implements Tool {
   }
 
   protected updateHint(): void {
-    const base = this.hints[this.stage] ?? "";
+    const base = `${this.hints[this.stage] ?? ""} · Tab: properties`;
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -244,7 +253,34 @@ abstract class DrawTool implements Tool {
     }
   }
 
+  /** Editable properties of the shape being drawn (Tab dialog). */
+  protected abstract props(): PropField[];
+  protected abstract applyProps(values: number[]): void;
+  private static lastProps = new Map<string, number[]>();
+
+  /** Tab: anchor at the cursor if nothing is placed yet, then open the property dialog. */
+  private openProps(): void {
+    if (this.stage === 0) {
+      if (!this.last) {
+        this.host.hint(`${this.name}: move the cursor over the viewport, then press Tab`);
+        return;
+      }
+      this.down(this.last);
+      if (this.stage === 0) return;
+    }
+    const remembered = DrawTool.lastProps.get(this.name);
+    const fields = this.props().map((f, i) => (f.value || !remembered ? f : { ...f, value: remembered[i] ?? f.value }));
+    this.host.propsDialog(this.name, fields, (vals) => {
+      DrawTool.lastProps.set(this.name, vals);
+      this.applyProps(vals);
+    });
+  }
+
   key(e: KeyboardEvent): boolean {
+    if (e.key === "Tab") {
+      this.openProps();
+      return true;
+    }
     if (this.stage === 0) return false;
     if (/^[0-9.,\-]$/.test(e.key)) {
       this.typed += e.key;
@@ -363,6 +399,25 @@ export class BoxTool extends DrawTool {
       this.h = values[0];
       this.build();
     }
+  }
+
+  protected props(): PropField[] {
+    const f: PropField[] = [
+      { label: "Width", value: +Math.abs(this.u2 - this.u1).toFixed(4), min: 0 },
+      { label: "Depth", value: +Math.abs(this.v2 - this.v1).toFixed(4), min: 0 },
+    ];
+    if (!this.faceMode) f.push({ label: "Height", value: +this.h.toFixed(4) });
+    return f;
+  }
+
+  protected applyProps([w, d, h]: number[]): void {
+    if (!(w > 0) || !(d > 0)) return this.host.fail("width and depth must be > 0");
+    this.u2 = this.u1 + w * (this.u2 < this.u1 ? -1 : 1);
+    this.v2 = this.v1 + d * (this.v2 < this.v1 ? -1 : 1);
+    if (this.faceMode) return this.buildFace();
+    if (!h) return this.host.fail("height must not be 0");
+    this.h = h;
+    this.build();
   }
 
   private rectCenter(): THREE.Vector3 {
@@ -492,6 +547,21 @@ export class CylinderTool extends DrawTool {
     }
   }
 
+  protected props(): PropField[] {
+    const f: PropField[] = [{ label: "Radius", value: +this.r.toFixed(4), min: 0 }];
+    if (!this.faceMode) f.push({ label: "Height", value: +this.h.toFixed(4) });
+    return f;
+  }
+
+  protected applyProps([r, h]: number[]): void {
+    if (!(r > 0)) return this.host.fail("radius must be > 0");
+    this.r = r;
+    if (this.faceMode) return this.buildFace();
+    if (!h) return this.host.fail("height must not be 0");
+    this.h = h;
+    this.build();
+  }
+
   private center(): THREE.Vector3 {
     return this.frame.point(this.cu, this.cv);
   }
@@ -577,6 +647,16 @@ export class SphereTool extends DrawTool {
       this.r = Math.abs(values[0]);
       this.build();
     }
+  }
+
+  protected props(): PropField[] {
+    return [{ label: "Radius", value: +this.r.toFixed(4), min: 0 }];
+  }
+
+  protected applyProps([r]: number[]): void {
+    if (!(r > 0)) return this.host.fail("radius must be > 0");
+    this.r = r;
+    this.build();
   }
 
   private draw(): void {
@@ -717,6 +797,27 @@ export class PolygonTool extends DrawTool {
 
   private center(): THREE.Vector3 {
     return this.frame.point(this.cu, this.cv);
+  }
+
+  protected props(): PropField[] {
+    const f: PropField[] = [
+      { label: "Radius", value: +this.r.toFixed(4), min: 0 },
+      { label: "Sides", value: this.sides, step: 1, min: 3 },
+      { label: "Rotation °", value: +THREE.MathUtils.radToDeg(this.a).toFixed(2), step: 15 },
+    ];
+    if (!this.faceMode) f.push({ label: "Height", value: +this.h.toFixed(4) });
+    return f;
+  }
+
+  protected applyProps([r, n, deg, h]: number[]): void {
+    if (!(r > 0)) return this.host.fail("radius must be > 0");
+    this.r = r;
+    this.sides = PolygonTool.lastSides = Math.min(64, Math.max(3, Math.round(n || this.sides)));
+    this.a = THREE.MathUtils.degToRad(deg || 0);
+    if (this.faceMode) return this.buildFace();
+    if (!h) return this.host.fail("height must not be 0");
+    this.h = h;
+    this.build();
   }
 
   private corners(h = 0): THREE.Vector3[] {

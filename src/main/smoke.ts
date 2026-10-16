@@ -167,6 +167,18 @@ const SCENARIO_2 = String.raw`
   app.endTool && app.endTool();
   log.push({ label: "polygon shift+wheel", s0, s1, zoomed });
 
+  // 10e) Tab opens the property dialog while drawing: box 20 x 10 x 5 at the cursor
+  app.run("tool.box");
+  ev("pointermove", [-60, 60, 0]);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true }));
+  const dlg = document.getElementById("props-dlg");
+  const ins = dlg ? [...dlg.querySelectorAll("input")] : [];
+  [20, 10, 5].forEach((v, k) => { if (ins[k]) ins[k].value = String(v); });
+  dlg && dlg.requestSubmit();
+  const nb = app.doc.bodies[app.doc.bodies.length - 1];
+  const bx = nb.shape.boundingBox.bounds;
+  log.push({ label: "tab props box", fields: ins.length, name: nb.name, size: [0, 1, 2].map((k) => +(bx[1][k] - bx[0][k]).toFixed(3)) });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;

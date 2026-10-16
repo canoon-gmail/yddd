@@ -37,7 +37,7 @@ import {
 } from "./kernel";
 import { Doc, type Body } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, type Tool, type ToolHost } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -312,6 +312,38 @@ class App implements ToolHost {
 
   fail(e: unknown): void {
     this.toast(`Failed: ${errorMessage(e)}`, "error");
+  }
+
+  propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void): void {
+    document.getElementById("props-dlg")?.remove();
+    const dlg = document.createElement("form");
+    dlg.id = "props-dlg";
+    dlg.innerHTML =
+      `<h4>${title} properties</h4>` +
+      fields
+        .map((f, i) => `<label><span>${f.label}</span><input type="number" data-i="${i}" value="${f.value}" step="${f.step ?? "any"}"${f.min !== undefined ? ` min="${f.min}"` : ""}></label>`)
+        .join("") +
+      `<div class="op-buttons"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn primary">Create</button></div>`;
+    const inputs = [...dlg.querySelectorAll<HTMLInputElement>("input")];
+    const close = (): void => {
+      dlg.remove();
+      $("viewport").focus?.();
+    };
+    dlg.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const vals = inputs.map((i) => parseFloat(i.value));
+      if (vals.some((v) => !Number.isFinite(v))) return this.toast("Enter a number in every field", "error");
+      close();
+      onOk(vals);
+    });
+    dlg.querySelector("[data-act=cancel]")!.addEventListener("click", close);
+    dlg.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Escape") close();
+    });
+    $("viewport").appendChild(dlg);
+    inputs[0]?.focus();
+    inputs[0]?.select();
   }
 
   // ================================================================ commands
@@ -1477,6 +1509,7 @@ class App implements ToolHost {
       ["Click / Shift+click", "Select / add to selection"],
       ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
+      ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
