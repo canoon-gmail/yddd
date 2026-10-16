@@ -116,8 +116,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   {
     title: "Boolean",
     items: [
-      { cmd: "bool.union", icon: "union", label: "Union", key: "Shift+U / Num +" },
-      { cmd: "bool.subtract", icon: "subtract", label: "Subtract", key: "Shift+S / Num −" },
+      { cmd: "bool.union", icon: "union", label: "Union", key: "+ / Shift+U" },
+      { cmd: "bool.subtract", icon: "subtract", label: "Subtract", key: "− / Shift+S" },
       { cmd: "bool.intersect", icon: "intersect", label: "Intersect", key: "Shift+I" },
     ],
   },
@@ -174,6 +174,9 @@ const KEYMAP: Record<string, string> = {
   "Shift+S": "bool.subtract",
   NumpadAdd: "bool.union",
   NumpadSubtract: "bool.subtract",
+  "+": "bool.union",
+  "=": "bool.union", // unshifted "+" key
+  "-": "bool.subtract",
   "Shift+I": "bool.intersect",
   "?": "help.shortcuts",
 };
