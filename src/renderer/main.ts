@@ -207,7 +207,7 @@ class App implements ToolHost {
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 2, chamfer: 1, pushpullNew: false, shell: 1 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -804,7 +804,7 @@ class App implements ToolHost {
     this.startOp({
       title,
       label: title,
-      fields: [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: isFillet ? this.defaults.fillet : this.defaults.chamfer, step: 0.5, min: 0 }],
+      fields: [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: isFillet ? this.defaults.fillet : this.defaults.chamfer, step: 0.1, min: 0 }],
       compute: ({ r }) => {
         if (r <= 0) throw new Error("value must be greater than 0");
         const out = new Map<number, Shape>();
