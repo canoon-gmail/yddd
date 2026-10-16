@@ -315,6 +315,12 @@ const SCENARIO_3 = String.raw`
   // 0) Empty scene: world origin is a snap point (cursor a few px away → exactly 0,0,0)
   { const o = S([0, 0, 0]); const sp = vp.snapPoint(o.x + 3, o.y + 2); expect("0 origin snap", sp && eq(sp.point.toArray(), [0, 0, 0]), sp && sp.point.toArray()); }
 
+  // 0b) Axis lines are snap lines: near (25,0,0) on X and (0,0,18) on Z → exact points on the axis
+  for (const [lbl, pt] of [["X", [25, 0, 0]], ["Z", [0, 0, 18]]]) {
+    const o = S(pt); const sp = vp.snapPoint(o.x + 0.4, o.y + 0.4);
+    expect("0b axis snap " + lbl, sp && sp.kind === "axis" && eq(sp.point.toArray().map(r), pt), sp && [sp.kind, sp.point.toArray().map(r)]);
+  }
+
   // 1) Base plate via Tab dialog: 60 x 40 x 10 with its corner at the origin
   app.run("tool.box");
   ev("pointermove", [0, 0, 0]);

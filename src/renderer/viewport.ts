@@ -64,7 +64,7 @@ interface BodyView {
 }
 
 /** Object snap kinds, in priority order. */
-export type SnapKind = "vertex" | "center" | "midpoint";
+export type SnapKind = "vertex" | "center" | "midpoint" | "axis";
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
 const SNAP_PX = 12;
 
@@ -786,9 +786,36 @@ export class Viewport {
       const hidden = faceHit && this.camera.position.length() > faceHit.distance * 1.01 + 0.05;
       if (d <= SNAP_PX && !hidden && (!best || d < best.score)) return { point: new THREE.Vector3(), kind: "vertex" };
     }
-    if (!best) return null;
+    if (!best) return this.axisSnap(px, py, cx, cy, faceHit?.distance);
     const s = best.view.snaps!;
     return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
+  }
+
+  /** Grid step used to round points snapped onto the world axis lines. */
+  axisSnapStep = 1;
+
+  /** Nearest point on the world X / Y / Z axis lines under the cursor (rounded to axisSnapStep). */
+  private axisSnap(px: number, py: number, cx: number, cy: number, hitDist?: number): { point: THREE.Vector3; kind: SnapKind } | null {
+    const ray = this.ray(cx, cy);
+    let best: { d: number; p: THREE.Vector3 } | null = null;
+    const q = new THREE.Vector3();
+    for (const dir of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
+      // Closest point on the axis line to the cursor ray.
+      const w0 = ray.origin.clone();
+      const b = ray.direction.dot(dir), d = ray.direction.dot(w0), e = dir.dot(w0);
+      const den = 1 - b * b;
+      if (den < 1e-6) continue; // looking straight down this axis
+      let t = (e - b * d) / den;
+      const step = this.axisSnapStep;
+      if (step > 0) t = Math.round(t / step) * step;
+      const p = dir.clone().multiplyScalar(t);
+      if (hitDist !== undefined && this.camera.position.distanceTo(p) > hitDist * 1.01 + 0.05) continue;
+      q.copy(p).project(this.camera);
+      if (q.z < -1 || q.z > 1) continue;
+      const dist = Math.hypot(((q.x + 1) / 2) * this.width - px, ((1 - q.y) / 2) * this.height - py);
+      if (dist <= SNAP_PX * 0.75 && (!best || dist < best.d)) best = { d: dist, p };
+    }
+    return best ? { point: best.p, kind: best.p.lengthSq() < 1e-12 ? "vertex" : "axis" } : null;
   }
 
   /** Pivot candidates of bodies: their snap points plus each body's bounding-box centre. */
@@ -870,7 +897,8 @@ export class Viewport {
         circ.push(Math.cos(a), Math.sin(a), 0, Math.cos(b), Math.sin(b), 0);
       }
       const geo = (arr: number[]) => new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
-      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)) };
+      const cross = [-1, -1, 0, 1, 1, 0, -1, 1, 0, 1, -1, 0];
+      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)), axis: mk(geo(cross)) };
       for (const m of Object.values(this.snapMarker)) {
         m.visible = false;
         this.scene.add(m);

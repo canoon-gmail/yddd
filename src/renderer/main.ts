@@ -1684,6 +1684,7 @@ class App implements ToolHost {
     const select = $<HTMLSelectElement>("snap-select");
     select.addEventListener("change", () => {
       this.snap = Number(select.value);
+      this.viewport.axisSnapStep = this.snap;
       select.blur();
       if (this.xf) this.startTransform(this.xf.mode, true);
     });
