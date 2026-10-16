@@ -1061,7 +1061,7 @@ class App implements ToolHost {
     this.xf = { mode, ids };
     this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r));
     this.renderToolbarState();
-    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (snaps to grid / 15°) · Esc to finish`);
+    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Esc to finish`);
   }
 
   /** Base-point move: pick a point on/near the selection, then a target point. */
@@ -1382,6 +1382,7 @@ class App implements ToolHost {
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
       ["[ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Ctrl (while drawing)", "Temporarily disable grid snapping"],
+      ["Ctrl + gizmo drag", "Snap move / rotate (grid, 15°, object points)"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],

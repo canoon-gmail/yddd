@@ -228,7 +228,16 @@ export class Viewport {
     // Capture phase on window so the pointer is current before TransformControls handles the move.
     window.addEventListener("pointermove", (e) => {
       this.xfPointer = { x: e.clientX, y: e.clientY, ctrl: e.ctrlKey };
+      this.updateXfSnap(e.ctrlKey);
     }, { capture: true });
+    window.addEventListener("pointerdown", (e) => this.updateXfSnap(e.ctrlKey), { capture: true });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Control") return;
+      if (this.xfPointer) this.xfPointer.ctrl = e.type === "keydown";
+      this.updateXfSnap(e.type === "keydown");
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    window.addEventListener("keyup", onKey, { capture: true });
 
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
     new ResizeObserver(() => this.resize(container)).observe(container);
@@ -1010,8 +1019,8 @@ export class Viewport {
     this.xfMode = mode;
     this.xfEnd = onEnd;
     this.tc.setMode(mode);
-    this.tc.setTranslationSnap(snapStep > 0 ? snapStep : null);
-    this.tc.setRotationSnap(snapStep > 0 ? THREE.MathUtils.degToRad(15) : null);
+    this.xfSnapStep = snapStep;
+    this.updateXfSnap(false);
     this.tc.attach(this.pivot);
     this.requestRender();
   }
@@ -1046,13 +1055,21 @@ export class Viewport {
   }
 
   private xfPointer: { x: number; y: number; ctrl: boolean } | null = null;
+  private xfSnapStep = 0;
+
+  /** Gizmo snapping (grid / 15° / object points) is active only while Ctrl is held. */
+  private updateXfSnap(ctrl: boolean): void {
+    const on = ctrl && this.xfSnapStep > 0;
+    this.tc.setTranslationSnap(on ? this.xfSnapStep : null);
+    this.tc.setRotationSnap(on ? THREE.MathUtils.degToRad(15) : null);
+  }
 
   /** During a move drag, pull the pivot onto a nearby object snap point (only along the dragged axes). */
   private snapPivot(): void {
     if (this.xfMode !== "translate" || !this.tc.dragging || !this.xfPointer) return;
     const ptr = this.xfPointer;
     const axis = this.tc.axis ?? "";
-    const sp = ptr.ctrl ? null : this.snapPoint(ptr.x, ptr.y, this.xfSet);
+    const sp = ptr.ctrl ? this.snapPoint(ptr.x, ptr.y, this.xfSet) : null;
     if (sp) {
       const p = this.pivot.position;
       if (axis.includes("X")) p.x = sp.point.x;
