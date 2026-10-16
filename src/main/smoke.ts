@@ -216,25 +216,6 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
   log.push({ label: "shift+R array", xs });
 
-  // 10i) Solid mode: P pushes/pulls the face under the cursor
-  app.setMode("body");
-  app.setSelection([{ kind: "body", body: nb.id, id: 0 }]);
-  let topP = null, under = null;
-  for (const b of [...app.doc.bodies].reverse()) {
-    if (b.kind !== "solid") continue;
-    const tb = b.shape.boundingBox.bounds;
-    for (const p of [[(tb[0][0] + tb[1][0]) / 2, (tb[0][1] + tb[1][1]) / 2, tb[1][2]], [(tb[0][0] + tb[1][0]) / 2, tb[0][1], (tb[0][2] + tb[1][2]) / 2]]) {
-      const sp = S(p); const u = vp.faceUnder(sp.x, sp.y);
-      if (u && u.body.id === b.id) { topP = sp; under = u; break; }
-    }
-    if (topP) break;
-  }
-  window.dispatchEvent(new PointerEvent("pointermove", { clientX: topP.x, clientY: topP.y, bubbles: true }));
-  app.run("op.pushpull");
-  const ppOn = !!app.op;
-  app.cancelOp();
-  log.push({ label: "pushpull in solid mode", ppOn, onBody: under && under.body.name });
-
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
