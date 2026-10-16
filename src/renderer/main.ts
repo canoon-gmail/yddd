@@ -591,7 +591,22 @@ class App implements ToolHost {
   private processHover(): void {
     const e = this.hoverQueued;
     this.hoverQueued = null;
-    if (!e || this.tool || this.op || this.viewport.gizmoHot) return;
+    if (!e || this.tool || this.op || this.viewport.gizmoHot) {
+      if (this.hoverGuide >= 0) { this.hoverGuide = -1; this.showGuides(); }
+      return;
+    }
+    const g = this.viewport.guideAt(e.clientX, e.clientY);
+    if (g !== this.hoverGuide) {
+      if (g < 0) this.viewport.canvas.style.cursor = "default";
+      this.hoverGuide = g;
+      this.showGuides();
+    }
+    if (g >= 0) {
+      // A guide under the cursor wins over bodies.
+      if (this.hover) { this.hover = null; this.viewport.setHighlight(this.selection, null); }
+      this.viewport.canvas.style.cursor = "pointer";
+      return;
+    }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
     const item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
     if (!sameItem(item, this.hover) && !(item === null && this.hover === null)) {
@@ -1234,10 +1249,12 @@ class App implements ToolHost {
   }
 
   private selGuide = -1;
+  private hoverGuide = -1;
 
   private showGuides(): void {
     if (this.selGuide >= this.doc.guides.length) this.selGuide = -1;
-    this.viewport.setGuides(this.doc.guides, this.selGuide);
+    if (this.hoverGuide >= this.doc.guides.length) this.hoverGuide = -1;
+    this.viewport.setGuides(this.doc.guides, this.selGuide, this.hoverGuide);
   }
 
   /** Base-point move: pick a point on/near the selection, then a target point. */

@@ -795,14 +795,14 @@ export class Viewport {
   }
 
   /** Show guide lines (dashed); `selected` is drawn highlighted. */
-  setGuides(list: readonly { a: V3; b: V3 }[], selected = -1): void {
+  setGuides(list: readonly { a: V3; b: V3 }[], selected = -1, hover = -1): void {
     for (const c of [...this.guideRoot.children]) {
       c.removeFromParent();
       (c as THREE.Line).geometry.dispose();
     }
     this.guides = list.map((g) => ({ a: new THREE.Vector3(...g.a), b: new THREE.Vector3(...g.b) }));
     this.guides.forEach((g, i) => {
-      const mat = new THREE.LineDashedMaterial({ color: i === selected ? 0xffd166 : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
+      const mat = new THREE.LineDashedMaterial({ color: i === selected ? 0xffd166 : i === hover ? 0xffffff : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
       const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([g.a, g.b]), mat);
       l.computeLineDistances();
       l.renderOrder = 15;
