@@ -212,6 +212,9 @@ async function createWindow(): Promise<void> {
   if (process.env.Y3D_SMOKE) {
     const { runSmoke } = await import("./smoke.js");
     await runSmoke(win, process.env.Y3D_SMOKE);
+  } else if (process.env.Y3D_BENCH) {
+    const { runBench } = await import("./bench.js");
+    await runBench(win);
   }
 }
 

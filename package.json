@@ -14,7 +14,8 @@
     "start": "npm run build && electron .",
     "start:stress": "npm run build && Y3D_STRESS=${N:-2000} electron .",
     "dev": "npm run build:main && node scripts/dev.mjs",
-    "smoke": "npm run build && Y3D_SMOKE=/tmp/y3d-smoke electron ."
+    "smoke": "npm run build && Y3D_SMOKE=/tmp/y3d-smoke electron .",
+    "bench": "npm run build && Y3D_STRESS=${N:-2000} Y3D_BENCH=1 electron ."
   },
   "dependencies": {
     "replicad": "^1.1.0",
