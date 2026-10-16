@@ -48,6 +48,13 @@ export class Doc {
     for (const fn of this.listeners) fn();
   }
 
+  /** Next auto-generated name for `baseName` ("Solid 3"). */
+  nextName(baseName: string): string {
+    const n = (this.counters.get(baseName) ?? 0) + 1;
+    this.counters.set(baseName, n);
+    return `${baseName} ${n}`;
+  }
+
   /** Create a new (not yet committed) body with an auto-generated name. */
   makeBody(shape: Shape, baseName: string, kind: BodyKind = "solid"): Body {
     const n = (this.counters.get(baseName) ?? 0) + 1;

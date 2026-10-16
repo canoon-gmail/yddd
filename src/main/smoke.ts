@@ -337,6 +337,7 @@ const SCENARIO_3 = String.raw`
   const part = app.doc.bodies.find((b) => b.kind === "solid").id;
   expect("3 union → one body", app.doc.bodies.length === 1, app.doc.bodies.length);
   expect("3 union size", eq(size(part), [60, 40, 25]), size(part));
+  expect("3 union renamed Solid", /^Solid \d+$/.test(app.doc.get(part).name), app.doc.get(part).name);
   vp.fit(); await sleep(50);
 
   // 4) Face mode: pick the tower top and push it up 5

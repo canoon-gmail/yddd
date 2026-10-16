@@ -1099,15 +1099,16 @@ class App implements ToolHost {
     this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
   }
 
-  /** Combine `toolIds` into `targetId` (target keeps its id/name); one undo step. Throws on failure. */
+  /** Combine `toolIds` into `targetId` (keeps its id; union/intersect results are renamed "Solid N"); one undo step. Throws on failure. */
   private applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string): void {
     const target = this.doc.get(targetId)!;
     const result = booleanOp(op, target.shape as Solid, toolIds.map((id) => this.doc.get(id)!.shape as Solid));
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
     const removed = new Set(toolIds);
-    const next = this.doc.bodies.filter((b) => !removed.has(b.id)).map((b) => (b.id === targetId ? { ...b, shape: result } : b));
+    const name = op !== "subtract" && !/^Solid \d+$/.test(target.name) ? this.doc.nextName("Solid") : target.name;
+    const next = this.doc.bodies.filter((b) => !removed.has(b.id)).map((b) => (b.id === targetId ? { ...b, shape: result, name } : b));
     this.doc.commit(next, label);
-    this.toast(`${label}: ${target.name}`);
+    this.toast(`${label}: ${name}`);
   }
 
   /** A + key + B (+ C ...): each click on another solid applies the operation to A right away. */
