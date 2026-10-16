@@ -732,3 +732,117 @@ export class PolygonTool extends DrawTool {
     this.emit(() => makePolygonFace(this.frame.toKernel(), [c.x, c.y, c.z], r, sides, deg), "Polygon", "face");
   }
 }
+
+// ------------------------------------------------------------------ Move by points
+
+/**
+ * Base-point move: click a point (snaps to vertices / centres / midpoints, any solid),
+ * then a target point (snaps to other solids). The selection moves by target − base.
+ * Off-snap points use a horizontal plane through the base (grid-snapped). Shift locks
+ * to the dominant axis; typing "dx,dy,dz" + Enter moves by an exact offset.
+ */
+export class PointMoveTool implements Tool {
+  readonly name = "Move from point";
+  private base: THREE.Vector3 | null = null;
+  private delta: THREE.Vector3 | null = null;
+  private typed = "";
+  private exclude: Set<number>;
+
+  constructor(
+    private host: ToolHost,
+    private ids: number[],
+    private onDone: (d: V3) => void,
+  ) {
+    this.exclude = new Set(ids);
+  }
+
+  start(): this {
+    this.updateHint();
+    return this;
+  }
+
+  private updateHint(): void {
+    const base = this.base
+      ? "Move: click the target point (Shift = axis lock, Ctrl = no snap) — or type dx,dy,dz + Enter · Esc cancel"
+      : "Move: click the base point to move from (snaps to corners / midpoints / centres)";
+    this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
+  }
+
+  private pointAt(e: PointerEvent, planeZ: number, exclude?: Set<number>): THREE.Vector3 | null {
+    const vp = this.host.viewport;
+    const sp = e.ctrlKey ? null : vp.snapPoint(e.clientX, e.clientY, exclude);
+    vp.showSnapMarker(sp);
+    if (sp) return sp.point;
+    const p = vp.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ), new THREE.Vector3());
+    if (!p) return null;
+    const step = this.host.snapStep(e);
+    if (step > 0) {
+      const o = this.base ?? new THREE.Vector3();
+      p.x = o.x + Math.round((p.x - o.x) / step) * step;
+      p.y = o.y + Math.round((p.y - o.y) / step) * step;
+    }
+    return p;
+  }
+
+  move(e: PointerEvent): void {
+    const vp = this.host.viewport;
+    if (!this.base) {
+      this.pointAt(e, 0);
+      return;
+    }
+    const t = this.pointAt(e, this.base.z, this.exclude);
+    if (!t) return;
+    const d = t.sub(this.base);
+    if (e.shiftKey) {
+      const a = Math.abs(d.x) >= Math.abs(d.y) && Math.abs(d.x) >= Math.abs(d.z) ? "x" : Math.abs(d.y) >= Math.abs(d.z) ? "y" : "z";
+      for (const k of ["x", "y", "z"] as const) if (k !== a) d[k] = 0;
+    }
+    this.delta = d;
+    vp.previewOffset(this.ids, d);
+    const end = this.base.clone().add(d);
+    vp.setOverlay([new THREE.Line(new THREE.BufferGeometry().setFromPoints([this.base, end]), vp.mats.previewLine)]);
+    const f = (n: number) => +n.toFixed(3);
+    this.host.hud(`Δ ${f(d.x)}, ${f(d.y)}, ${f(d.z)}  (${f(d.length())})`, end);
+  }
+
+  down(e: PointerEvent): void {
+    if (!this.base) {
+      const p = this.pointAt(e, 0);
+      if (!p) return;
+      this.base = p.clone();
+      this.updateHint();
+      return;
+    }
+    this.move(e);
+    if (this.delta) this.finish([this.delta.x, this.delta.y, this.delta.z]);
+  }
+
+  private finish(d: V3): void {
+    this.host.viewport.previewOffset(this.ids, null);
+    if (Math.hypot(...d) > 1e-9) this.onDone(d);
+  }
+
+  key(e: KeyboardEvent): boolean {
+    if (/^[0-9.,\-]$/.test(e.key)) {
+      this.typed += e.key;
+    } else if (e.key === "Backspace" && this.typed) {
+      this.typed = this.typed.slice(0, -1);
+    } else if (e.key === "Enter" && this.typed) {
+      const n = this.typed.split(",").map(Number);
+      this.typed = "";
+      if (n.length <= 3 && n.every(Number.isFinite)) this.finish([n[0] ?? 0, n[1] ?? 0, n[2] ?? 0]);
+    } else {
+      return false;
+    }
+    this.updateHint();
+    return true;
+  }
+
+  dispose(): void {
+    const vp = this.host.viewport;
+    vp.previewOffset(this.ids, null);
+    vp.showSnapMarker(null);
+    vp.setOverlay([]);
+    this.host.hud(null);
+  }
+}

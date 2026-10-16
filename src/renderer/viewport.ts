@@ -1040,6 +1040,25 @@ export class Viewport {
     this.showSnapMarker(sp);
   }
 
+  /** Show `ids` displaced by `d` (null clears). Used by the base-point Move tool. */
+  previewOffset(ids: number[], d: THREE.Vector3 | null): void {
+    if (!d) {
+      this.resetBodyMatrices();
+      if (this.xfSet.size) this.setXfSet([]);
+      this.requestRender();
+      return;
+    }
+    if (this.xfSet.size !== ids.length || ids.some((id) => !this.xfSet.has(id))) this.setXfSet(ids);
+    for (const id of ids) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      v.group.matrixAutoUpdate = false;
+      v.group.matrix.makeTranslation(d.x, d.y, d.z);
+      v.group.matrixWorldNeedsUpdate = true;
+    }
+    this.requestRender();
+  }
+
   private applyPivotToBodies(): void {
     this.pivot.updateMatrixWorld();
     const start = new THREE.Matrix4().makeTranslation(this.xfStart.x, this.xfStart.y, this.xfStart.z);

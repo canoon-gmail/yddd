@@ -125,6 +125,18 @@ const SCENARIO_2 = String.raw`
   log.push({ label: "snap corner", snap: snapNear([90, -30, 25]) });
   log.push({ label: "snap midpoint", snap: snapNear([70, -30, 25]) });
 
+  // 10) Move from point: box 3's corner (120,-60,0) → box 2's top corner (90,-30,25)
+  app.run("mode.body");
+  app.setSelection([]);
+  app.run("tool.box");
+  toolClicks([[120, -60, 0], [130, -50, 0], [125, -55, 10]]);
+  const b3 = app.doc.bodies[app.doc.bodies.length - 1].id;
+  app.setSelection([{ kind: "body", body: b3, id: 0 }]);
+  app.run("xf.moveFrom");
+  toolClicks([[120, -60, 0], [90, -30, 25]]);
+  const bb = app.doc.get(b3).shape.boundingBox.bounds;
+  log.push({ label: "move from point", min: bb[0].map((n) => +n.toFixed(3)) });
+
   app.run("mode.body");
   app.setSelection([]);
   vp.setView("iso"); vp.fit();

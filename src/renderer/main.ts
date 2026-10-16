@@ -37,7 +37,7 @@ import {
 } from "./kernel";
 import { Doc, type Body } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, type Tool, type ToolHost } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, type Tool, type ToolHost } from "./tools";
 import { ICONS } from "./icons";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -125,6 +125,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
     title: "Transform",
     items: [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
+      { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "Shift+G" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
       { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Ctrl+D" },
       { cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" },
@@ -163,6 +164,7 @@ const KEYMAP: Record<string, string> = {
   "Shift+F": "op.chamfer",
   t: "op.shell",
   g: "xf.move",
+  "Shift+G": "xf.moveFrom",
   r: "xf.rotate",
   x: "edit.delete",
   Delete: "edit.delete",
@@ -305,6 +307,7 @@ class App implements ToolHost {
 
       case "xf.move": return this.startTransform("translate");
       case "xf.rotate": return this.startTransform("rotate");
+      case "xf.moveFrom": return this.startPointMove();
 
       case "edit.undo": return this.undoRedo("undo");
       case "edit.redo": return this.undoRedo("redo");
@@ -888,6 +891,26 @@ class App implements ToolHost {
     this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (snaps to grid / 15°) · Esc to finish`);
   }
 
+  /** Base-point move: pick a point on/near the selection, then a target point. */
+  private startPointMove(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) {
+      this.toast("Move from point: select one or more solids first", "error");
+      return;
+    }
+    this.startTool(
+      new PointMoveTool(this, ids, (d) => {
+        this.endTool();
+        const shapes = new Map<number, Shape>();
+        for (const id of ids) {
+          const b = this.doc.get(id);
+          if (b) shapes.set(id, translateShape(b.shape, d));
+        }
+        this.doc.replaceShapes(shapes, "Move");
+      }).start(),
+    );
+  }
+
   private applyTransform(r: TransformResult): void {
     if (!this.xf) return;
     const shapes = new Map<number, Shape>();
@@ -1191,6 +1214,7 @@ class App implements ToolHost {
       ["T", "Shell (opens the selected faces)"],
       ["Shift+U · Shift+S · Shift+I", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
+      ["Shift+G", "Move from point to point (snap)"],
       ["Ctrl+D", "Duplicate (then move)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
