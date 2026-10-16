@@ -1030,7 +1030,7 @@ export class Viewport {
     this.xray = on;
     for (const m of [this.batchMats.solid, ...this.mats.faces]) {
       m.transparent = on;
-      m.opacity = on ? 0.55 : 1;
+      m.opacity = on ? 0.8 : 1;
       m.depthWrite = !on;
       m.needsUpdate = true;
     }
