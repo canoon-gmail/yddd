@@ -146,6 +146,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
       { cmd: "view.top", icon: "top", label: "Top", key: "7" },
       { cmd: "view.front", icon: "front", label: "Front", key: "Num 1" },
       { cmd: "view.right", icon: "right", label: "Right", key: "Num 3" },
+      { cmd: "view.xray", icon: "xray", label: "X-ray", key: "Shift+X" },
     ],
   },
 ];
@@ -186,6 +187,7 @@ const KEYMAP: Record<string, string> = {
   "-": "bool.subtract",
   "Shift+I": "bool.intersect",
   "Shift+V": "view.menu",
+  "Shift+X": "view.xray",
   "?": "help.shortcuts",
 };
 
@@ -356,6 +358,10 @@ class App implements ToolHost {
       case "view.right": return this.viewport.setView("right");
       case "view.iso": return this.viewport.setView("iso");
       case "view.flip": return this.viewport.flipView();
+      case "view.xray":
+        this.viewport.setXray(!this.viewport.xray);
+        this.toast(this.viewport.xray ? "X-ray on (semi-transparent solids)" : "X-ray off (opaque solids)");
+        return;
 
       case "file.new": void this.fileNew(); return;
       case "file.open": void this.fileOpen(); return;
@@ -1397,6 +1403,7 @@ class App implements ToolHost {
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
+      ["Shift+X", "Toggle x-ray (semi-transparent solids, on by default)"],
       ["Shift+V", "View menu (Top / Front / Right / Iso · V = opposite side, e.g. bottom)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
       ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],

@@ -30,6 +30,7 @@ export const ICONS: Record<string, string> = {
   fit: svg(`<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="9" y="9" width="6" height="6"/>`),
   iso: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" stroke-opacity="0.5"/>`),
   top: svg(`<rect x="5" y="5" width="14" height="14"/><path d="M5 5l14 14M19 5L5 19" stroke-opacity="0.3"/>`),
+  xray: svg(`<rect x="4" y="8" width="11" height="11"/><rect x="9" y="4" width="11" height="11" stroke-opacity="0.5" stroke-dasharray="2 2"/>`),
   right: svg(`<rect x="5" y="8" width="11" height="11"/><path d="M16 19l3-3V5l-3 3" stroke-opacity="0.4"/>`),
   front: svg(`<rect x="5" y="8" width="14" height="11"/><path d="M5 8l3-3h14l-3 3" stroke-opacity="0.4"/>`),
   eye: svg(`<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/>`),

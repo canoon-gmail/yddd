@@ -243,6 +243,7 @@ export class Viewport {
     new ResizeObserver(() => this.resize(container)).observe(container);
     this.resize(container);
     this.updateClipPlanes();
+    this.setXray(true); // default: semi-transparent solids
   }
 
   // ------------------------------------------------------------ scene setup
@@ -1021,6 +1022,19 @@ export class Viewport {
     this.controls.target.copy(sphere.center);
     this.camera.position.copy(sphere.center).addScaledVector(dir, dist);
     this.controls.update();
+  }
+
+  /** Semi-transparent (x-ray) solids: hidden faces and edges show through. */
+  xray = false;
+  setXray(on: boolean): void {
+    this.xray = on;
+    for (const m of [this.batchMats.solid, ...this.mats.faces]) {
+      m.transparent = on;
+      m.opacity = on ? 0.55 : 1;
+      m.depthWrite = !on;
+      m.needsUpdate = true;
+    }
+    this.requestRender();
   }
 
   setView(name: "top" | "front" | "right" | "iso"): void {
