@@ -44,6 +44,8 @@ interface BodyView {
   faceIds: number[];
   faceStarts: number[];
   faceIndex: Map<number, number>;
+  /** Surface area of each face group (same order as faceIds), used to prefer small faces when picking. */
+  faceAreas: number[];
   edgeIds: number[];
   edgeStarts: number[];
   edgeCounts: number[];
@@ -260,11 +262,22 @@ export class Viewport {
     const faceIds: number[] = [];
     const faceStarts: number[] = [];
     const faceIndex = new Map<number, number>();
+    const faceAreas: number[] = [];
+    const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+    const P = faces.vertices, T = faces.triangles;
     faces.faceGroups.forEach((g, i) => {
       geom.addGroup(g.start, g.count, 0);
       faceIds.push(g.faceId);
       faceStarts.push(g.start);
       faceIndex.set(g.faceId, i);
+      let area = 0;
+      for (let k = g.start; k + 2 < g.start + g.count; k += 3) {
+        va.fromArray(P, T[k] * 3);
+        vb.fromArray(P, T[k + 1] * 3).sub(va);
+        vc.fromArray(P, T[k + 2] * 3).sub(va);
+        area += vb.cross(vc).length() / 2;
+      }
+      faceAreas.push(area);
     });
     const mesh = new THREE.Mesh(geom, body.kind === "face" ? this.mats.regionFaces : this.mats.faces);
 
@@ -291,7 +304,7 @@ export class Viewport {
     group.add(mesh);
     if (lines) group.add(lines);
     group.visible = !this.hidden.has(body.id);
-    return { body, group, mesh, edges: lines, faceIds, faceStarts, faceIndex, edgeIds, edgeStarts, edgeCounts, edgeIndex, edgePos, proj: null, projStamp: -1 };
+    return { body, group, mesh, edges: lines, faceIds, faceStarts, faceIndex, faceAreas, edgeIds, edgeStarts, edgeCounts, edgeIndex, edgePos, proj: null, projStamp: -1 };
   }
 
   private disposeView(v: BodyView): void {
@@ -355,19 +368,35 @@ export class Viewport {
     this.setRay(cx, cy);
     const meshes: THREE.Object3D[] = [];
     for (const v of this.views.values()) if (v.group.visible) meshes.push(v.mesh);
-    const hit = this.raycaster.intersectObjects(meshes, false)[0];
-    if (!hit || hit.faceIndex == null) return null;
-    const view = [...this.views.values()].find((v) => v.mesh === hit.object)!;
-    // Binary search the face group containing this triangle.
-    const idx = hit.faceIndex * 3;
-    let lo = 0;
-    let hi = view.faceStarts.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (view.faceStarts[mid] <= idx) lo = mid;
-      else hi = mid - 1;
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    if (!hits.length || hits[0].faceIndex == null) return null;
+    const groupOf = (view: BodyView, faceIndex: number): number => {
+      // Binary search the face group containing this triangle.
+      const idx = faceIndex * 3;
+      let lo = 0;
+      let hi = view.faceStarts.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (view.faceStarts[mid] <= idx) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
+    const viewOf = (o: THREE.Object3D) => [...this.views.values()].find((v) => v.mesh === o)!;
+    // Hits at (nearly) the same depth as the nearest one are overlapping faces;
+    // prefer the smallest so small faces win over big ones underneath them.
+    const tol = Math.max(0.05, hits[0].distance * 2e-3);
+    let best: { view: BodyView; gi: number; hit: THREE.Intersection; area: number } | null = null;
+    for (const hit of hits) {
+      if (hit.distance - hits[0].distance > tol) break;
+      if (hit.faceIndex == null) continue;
+      const view = viewOf(hit.object);
+      const gi = groupOf(view, hit.faceIndex);
+      const area = view.faceAreas[gi];
+      if (!best || area < best.area) best = { view, gi, hit, area };
     }
-    return { view, faceId: view.faceIds[lo], point: hit.point.clone(), distance: hit.distance };
+    const { view, gi, hit } = best!;
+    return { view, faceId: view.faceIds[gi], point: hit.point.clone(), distance: hit.distance };
   }
 
   /** Screen-space projection of a body's edge polyline points, cached per camera state. */
