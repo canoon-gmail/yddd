@@ -895,8 +895,13 @@ class App implements ToolHost {
       const b = this.doc.get(this.selection[0].body);
       if (b?.kind === "face") target = { bodyId: b.id, faceId: b.shape.faces[0].hashCode };
     }
+    if (!target && this.pointer) {
+      // Solid mode: use the face under the cursor.
+      const f = this.viewport.faceUnder(this.pointer.x, this.pointer.y);
+      if (f) target = { bodyId: f.body.id, faceId: f.faceId };
+    }
     if (!target) {
-      this.toast("Push/Pull: select one face (Face mode, key 2) or one flat face object", "error");
+      this.toast("Push/Pull: point at a face and press P (or select one face / flat face object)", "error");
       return;
     }
     const { bodyId, faceId } = target;
@@ -1645,7 +1650,7 @@ class App implements ToolHost {
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
-      ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
+      ["P", "Push/Pull: selected face, or the face under the cursor (also in Solid mode)"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
