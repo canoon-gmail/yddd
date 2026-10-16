@@ -146,6 +146,15 @@ const SCENARIO_2 = String.raw`
   toolClicks([[95, -25, 35]]);
   log.push({ label: "pick boolean", removed: before - app.doc.bodies.length, kept: !!app.doc.get(b2), gone: !app.doc.get(b3) });
 
+  // 12) Front view: a rectangle in empty space is drawn on the XZ plane (y = 0)
+  app.run("mode.body");
+  app.setSelection([]);
+  vp.setView("front"); await sleep(50);
+  app.run("tool.rectangle");
+  toolClicks([[-100, 0, 10], [-80, 0, 30]]);
+  const rb = app.doc.bodies[app.doc.bodies.length - 1].shape.boundingBox.bounds;
+  log.push({ label: "front-view rectangle", min: rb[0].map((n) => +n.toFixed(2)), max: rb[1].map((n) => +n.toFixed(2)) });
+
   app.run("mode.body");
   app.setSelection([]);
   vp.setView("iso"); vp.fit();

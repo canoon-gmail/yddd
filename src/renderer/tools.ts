@@ -96,6 +96,25 @@ class PlaneFrame {
 
 const GROUND = new PlaneFrame(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1));
 
+/**
+ * Construction plane for empty space, chosen from the view: the ground (XY) unless the
+ * camera looks mostly sideways — then XZ (front/back views) or YZ (side views), so shapes
+ * are drawn facing the viewer. Passes through `at` (default: origin).
+ */
+function workPlane(camera: THREE.Camera, at = new THREE.Vector3()): PlaneFrame {
+  const d = camera.getWorldDirection(new THREE.Vector3());
+  const o = at.clone();
+  if (Math.abs(d.z) >= 0.5) return new PlaneFrame(new THREE.Vector3(0, 0, o.z), GROUND.x, GROUND.y, GROUND.z);
+  const up = new THREE.Vector3(0, 0, 1);
+  if (Math.abs(d.y) >= Math.abs(d.x)) {
+    // XZ plane; normal points back toward the camera.
+    const s = d.y > 0 ? 1 : -1;
+    return new PlaneFrame(new THREE.Vector3(0, o.y, 0), new THREE.Vector3(s, 0, 0), up, new THREE.Vector3(0, -s, 0));
+  }
+  const s = d.x > 0 ? 1 : -1;
+  return new PlaneFrame(new THREE.Vector3(o.x, 0, 0), new THREE.Vector3(0, -s, 0), up, new THREE.Vector3(-s, 0, 0));
+}
+
 /** Signed parameter along `axis` (through `base`) closest to the ray. */
 function heightAlong(ray: THREE.Ray, base: THREE.Vector3, axis: THREE.Vector3): number | null {
   const w0 = ray.origin.clone().sub(base);
@@ -138,22 +157,22 @@ abstract class DrawTool implements Tool {
     const frame = this.faceFrameUnder(e);
     const sp = e.ctrlKey ? null : this.host.viewport.snapPoint(e.clientX, e.clientY);
     // Vertices / edge midpoints sit on several faces at once, so the face under the cursor
-    // is ambiguous: draw on a horizontal plane through the point. Centres keep their face.
+    // is ambiguous: draw on the view's work plane through the point. Centres keep their face.
     if (sp && (sp.kind !== "center" || Math.abs(sp.point.clone().sub(frame.origin).dot(frame.z)) > 1e-4)) {
-      return new PlaneFrame(new THREE.Vector3(0, 0, sp.point.z), GROUND.x, GROUND.y, GROUND.z);
+      return workPlane(this.host.viewport.camera, sp.point);
     }
     return frame;
   }
 
   private faceFrameUnder(e: PointerEvent): PlaneFrame {
     const f = this.host.viewport.faceUnder(e.clientX, e.clientY);
-    if (!f) return GROUND;
+    if (!f) return workPlane(this.host.viewport.camera);
     const key = `${f.body.id}:${f.faceId}`;
     if (!this.faceCache.has(key)) {
       const k = planarFaceFrame(f.body.shape, f.faceId);
       this.faceCache.set(key, k ? PlaneFrame.from(k) : null);
     }
-    return this.faceCache.get(key) ?? GROUND;
+    return this.faceCache.get(key) ?? workPlane(this.host.viewport.camera);
   }
 
   protected ray(e: PointerEvent): THREE.Ray {
