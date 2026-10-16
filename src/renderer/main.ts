@@ -1136,6 +1136,21 @@ class App implements ToolHost {
 
   private duplicate(): void {
     this.endInteractions();
+    const faceSel = this.selection.filter((x) => x.kind === "face");
+    if (faceSel.length && faceSel.length === this.selection.length) {
+      const faces = faceSel.flatMap((x) => {
+        const b = this.doc.get(x.body);
+        const f = b && findFace(b.shape, x.id);
+        return f ? [this.doc.makeBody(cloneShape(f), "Face", "face")] : [];
+      });
+      if (!faces.length) return this.toast("Duplicate: could not copy face", "error");
+      this.doc.commit([...this.doc.bodies, ...faces], "Duplicate face");
+      this.setMode("body");
+      this.setSelection(faces.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      this.toast(`${faces.length} face${faces.length > 1 ? "s" : ""} copied — move it, then P to push/pull`);
+      this.startTransform("translate");
+      return;
+    }
     const ids = this.selectedBodyIds();
     if (!ids.length) {
       this.toast("Duplicate: select solids first", "error");
@@ -1399,7 +1414,7 @@ class App implements ToolHost {
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Shift+G", "Move from point to point (snap)"],
-      ["Shift+D / Ctrl+D", "Duplicate (then move)"],
+      ["Shift+D / Ctrl+D", "Duplicate solids, or copy selected faces (then move)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],

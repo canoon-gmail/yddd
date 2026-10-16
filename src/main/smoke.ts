@@ -146,6 +146,14 @@ const SCENARIO_2 = String.raw`
   const bd = app.doc.get(b3).shape.boundingBox.bounds;
   log.push({ label: "drag from pivot", dots, visible, min: bd[0].map((n) => +n.toFixed(3)) });
 
+  // 10c) Shift+D on a face copies just the face
+  const nBefore = app.doc.bodies.length;
+  app.setSelection([{ kind: "face", body: b3, id: app.doc.get(b3).shape.faces[0].hashCode }]);
+  app.run("edit.duplicate");
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  const last = app.doc.bodies[app.doc.bodies.length - 1];
+  log.push({ label: "duplicate face", added: app.doc.bodies.length - nBefore, kind: last.kind });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
