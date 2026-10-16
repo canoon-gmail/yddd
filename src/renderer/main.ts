@@ -79,7 +79,7 @@ interface ToolbarItem {
   key?: string;
 }
 
-const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
+const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
   {
     title: "Select",
     items: [
@@ -90,6 +90,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   },
   {
     title: "Solid",
+    drawer: true,
     items: [
       { cmd: "tool.box", icon: "box", label: "Box", key: "B" },
       { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder", key: "C" },
@@ -98,6 +99,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   },
   {
     title: "Face",
+    drawer: true,
     items: [
       { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "Q" },
       { cmd: "tool.circle", icon: "circle", label: "Circle", key: "O" },
@@ -106,6 +108,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   },
   {
     title: "Modify",
+    drawer: true,
     items: [
       { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull", key: "P" },
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
@@ -115,6 +118,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   },
   {
     title: "Boolean",
+    drawer: true,
     items: [
       { cmd: "bool.union", icon: "union", label: "Union", key: "+ / Shift+U" },
       { cmd: "bool.subtract", icon: "subtract", label: "Subtract", key: "− / Shift+S" },
@@ -123,6 +127,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   },
   {
     title: "Transform",
+    drawer: true,
     items: [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
       { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "Shift+G" },
@@ -140,6 +145,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   },
   {
     title: "View",
+    drawer: true,
     items: [
       { cmd: "view.fit", icon: "fit", label: "Fit", key: "Home" },
       { cmd: "view.iso", icon: "iso", label: "Iso", key: "5" },
@@ -1189,22 +1195,69 @@ class App implements ToolHost {
 
   private buildToolbar(): void {
     const bar = $("toolbar");
+    const mkBtn = (it: ToolbarItem, cls: string, html: string): HTMLButtonElement => {
+      const b = document.createElement("button");
+      b.className = cls;
+      b.dataset.cmd = it.cmd;
+      b.title = it.key ? `${it.label} (${it.key})` : it.label;
+      b.innerHTML = html;
+      return b;
+    };
     for (const group of TOOLBAR) {
       const g = document.createElement("div");
       g.className = "tb-group";
       const btns = document.createElement("div");
       btns.className = "tb-buttons";
-      for (const it of group.items) {
-        const b = document.createElement("button");
-        b.className = "tb-btn";
-        b.dataset.cmd = it.cmd;
-        b.title = it.key ? `${it.label} (${it.key})` : it.label;
-        b.innerHTML = `${ICONS[it.icon]}<span>${it.label}</span>`;
-        b.addEventListener("click", () => {
-          b.blur();
-          this.run(it.cmd);
+      if (!group.drawer) {
+        for (const it of group.items) {
+          const b = mkBtn(it, "tb-btn", `${ICONS[it.icon]}<span>${it.label}</span>`);
+          b.addEventListener("click", () => {
+            b.blur();
+            this.run(it.cmd);
+          });
+          btns.appendChild(b);
+        }
+      } else {
+        // Drawer: one button showing the last-used tool; hover opens the full list.
+        const drawer = document.createElement("div");
+        drawer.className = "tb-drawer";
+        const main = mkBtn(group.items[0], "tb-main", "");
+        const setMain = (it: ToolbarItem): void => {
+          main.dataset.cmd = it.cmd;
+          main.title = it.key ? `${it.label} (${it.key})` : it.label;
+          main.innerHTML = `${ICONS[it.icon]}<span>${it.label}</span><i class="tb-caret">▾</i>`;
+        };
+        setMain(group.items[0]);
+        main.addEventListener("click", () => {
+          main.blur();
+          this.run(main.dataset.cmd!);
         });
-        btns.appendChild(b);
+        const list = document.createElement("div");
+        list.className = "tb-flyout";
+        for (const it of group.items) {
+          const b = mkBtn(it, "tb-btn tb-item", `${ICONS[it.icon]}<span>${it.label}</span>${it.key ? `<kbd>${it.key}</kbd>` : ""}`);
+          b.addEventListener("click", () => {
+            b.blur();
+            setMain(it);
+            drawer.classList.remove("open");
+            this.run(it.cmd);
+          });
+          list.appendChild(b);
+        }
+        let closeT = 0;
+        drawer.addEventListener("mouseenter", () => {
+          clearTimeout(closeT);
+          for (const d of document.querySelectorAll(".tb-drawer.open")) if (d !== drawer) d.classList.remove("open");
+          const r = drawer.getBoundingClientRect();
+          list.style.left = `${r.left}px`;
+          list.style.top = `${r.bottom}px`;
+          drawer.classList.add("open");
+        });
+        drawer.addEventListener("mouseleave", () => {
+          closeT = window.setTimeout(() => drawer.classList.remove("open"), 150);
+        });
+        drawer.append(main, list);
+        btns.appendChild(drawer);
       }
       const label = document.createElement("div");
       label.className = "tb-label";
@@ -1227,6 +1280,17 @@ class App implements ToolHost {
       b.classList.toggle("active", active.has(cmd));
       if (cmd === "edit.undo") b.disabled = !this.doc.canUndo;
       if (cmd === "edit.redo") b.disabled = !this.doc.canRedo;
+    }
+    for (const d of document.querySelectorAll<HTMLElement>(".tb-drawer")) {
+      const items = [...d.querySelectorAll<HTMLButtonElement>(".tb-item")];
+      const on = items.find((b) => b.classList.contains("active"));
+      const main = d.querySelector<HTMLButtonElement>(".tb-main")!;
+      main.classList.toggle("active", !!on);
+      if (on && main.dataset.cmd !== on.dataset.cmd) {
+        main.dataset.cmd = on.dataset.cmd;
+        main.title = on.title;
+        main.innerHTML = on.innerHTML.replace(/<kbd>.*<\/kbd>/, "") + `<i class="tb-caret">▾</i>`;
+      }
     }
   }
 
