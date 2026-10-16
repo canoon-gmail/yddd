@@ -25,6 +25,8 @@ import {
   extrudeFace,
   seamEdgeIds,
   kindOf,
+  faceAxis,
+  type V3,
   makeBox,
   makeCylinder,
   type Frame,
@@ -66,6 +68,8 @@ interface OpSpec {
   fields: OpField[];
   compute(values: Record<string, number>): OpOutcome;
   remember?(values: Record<string, number>): void;
+  /** Mouse-drag control: moving the mouse along `dir` (through `origin`) changes field `key`. */
+  drag?: { origin: V3; dir: V3; key: string };
 }
 
 interface ToolbarItem {
@@ -187,7 +191,16 @@ class App implements ToolHost {
   private hover: SelItem | null = null;
   private hidden = new Set<number>();
   private tool: Tool | null = null;
-  private op: { spec: OpSpec; inputs: HTMLInputElement[]; timer: number; result: OpOutcome | null; key: string } | null = null;
+  private op: {
+    spec: OpSpec;
+    inputs: HTMLInputElement[];
+    timer: number;
+    result: OpOutcome | null;
+    key: string;
+    /** Drag reference: line parameter and field value when the mouse first moved. */
+    anchor?: { t: number; v: number };
+    dragQueued?: boolean;
+  } | null = null;
   private xf: { mode: "translate" | "rotate"; ids: number[] } | null = null;
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
@@ -396,7 +409,10 @@ class App implements ToolHost {
         return;
       }
       this.updateCoords(e);
-      if (this.op) return;
+      if (this.op) {
+        if (this.op.spec.drag) this.opDrag(e);
+        return;
+      }
       // Coalesce hover picking to one per frame.
       if (!this.hoverQueued) requestAnimationFrame(() => this.processHover());
       this.hoverQueued = e;
@@ -405,6 +421,10 @@ class App implements ToolHost {
       if (e.button !== 0) return;
       if (this.tool) {
         this.tool.down(e);
+        return;
+      }
+      if (this.op?.spec.drag && !e.shiftKey) {
+        this.applyOp(); // click in the viewport confirms the dragged value
         return;
       }
       if (this.viewport.gizmoHot || this.op) return;
@@ -555,12 +575,48 @@ class App implements ToolHost {
       });
     }
     this.hover = null;
-    this.hint(`${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
+    this.hint(spec.drag
+      ? `${spec.title}: move the mouse to set the distance (Ctrl = no snap) · click or Enter apply · Esc cancel`
+      : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
     this.renderToolbarState();
     this.previewOp();
     const first = inputs.find((i) => i.type === "number") ?? inputs[0];
     first?.focus();
     if (first?.type === "number") first.select();
+  }
+
+  /** Map mouse movement along the drag axis to the op's value (relative to where the drag started). */
+  private opDrag(e: PointerEvent): void {
+    const op = this.op!;
+    const drag = op.spec.drag!;
+    const input = op.inputs.find((i) => i.dataset.key === drag.key);
+    if (!input) return;
+    const ray = this.viewport.ray(e.clientX, e.clientY);
+    const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
+    // Closest point between the axis line O + tD and the mouse ray A + sB.
+    const B = ray.direction, w = O.clone().sub(ray.origin);
+    const b = D.dot(B), d = D.dot(w), ee = B.dot(w);
+    const denom = 1 - b * b;
+    if (Math.abs(denom) < 1e-4) return; // looking straight down the axis
+    const t = (b * ee - d) / denom;
+    if (!op.anchor) {
+      op.anchor = { t, v: Number(input.value) || 0 };
+      return;
+    }
+    let v = op.anchor.v + (t - op.anchor.t);
+    const step = this.snapStep(e);
+    if (step > 0) v = Math.round(v / step) * step;
+    if (fmt(v) === input.value) return;
+    input.value = fmt(v);
+    this.hud(`${fmt(v)} mm`, O.clone().addScaledVector(D, v));
+    if (!op.dragQueued) {
+      op.dragQueued = true;
+      requestAnimationFrame(() => {
+        if (this.op !== op) return;
+        op.dragQueued = false;
+        this.previewOp();
+      });
+    }
   }
 
   private opValues(): { values: Record<string, number>; key: string } {
@@ -621,6 +677,7 @@ class App implements ToolHost {
 
   private closeOpPanel(): void {
     this.op = null;
+    this.hud(null);
     this.opPanel.hidden = true;
     this.opPanel.innerHTML = "";
     this.viewport.clearGhost();
@@ -665,6 +722,8 @@ class App implements ToolHost {
     }
     const { bodyId, faceId } = target;
     const body = this.doc.get(bodyId)!;
+    const axis = faceAxis(body.shape, faceId);
+    const drag = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
 
     if (body.kind === "face") {
       // Flat face → extrude into a brand-new solid that replaces the face.
@@ -684,6 +743,7 @@ class App implements ToolHost {
           };
         },
         remember: () => {},
+        drag,
       });
       return;
     }
@@ -713,6 +773,7 @@ class App implements ToolHost {
       remember: ({ d, newBody }) => {
         this.defaults.pushpullNew = !!newBody;
       },
+      drag,
     });
   }
 

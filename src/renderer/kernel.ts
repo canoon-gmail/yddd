@@ -227,6 +227,14 @@ export function planarFaceFrame(shape: Shape, faceId: number): Frame | null {
   return { origin: [z[0] * dist, z[1] * dist, z[2] * dist], x, y, z };
 }
 
+/** Centre point and (outward) normal of a face, e.g. as a drag axis for push/pull. */
+export function faceAxis(shape: Shape, faceId: number): { center: V3; normal: V3 } | null {
+  const face = findFace(shape, faceId);
+  if (!face) return null;
+  const center = face.center.toTuple() as V3;
+  return { center, normal: face.normalAt(face.center).normalized().toTuple() as V3 };
+}
+
 // ---------------------------------------------------------------- modeling ops
 
 /** Fillet the given edges, or (null) every real edge — seams are never filleted. */
