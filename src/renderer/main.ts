@@ -601,6 +601,13 @@ class App implements ToolHost {
         e.preventDefault();
         return;
       }
+      if (e.key === "Enter" && this.xf && !this.tool) {
+        e.preventDefault();
+        const done = this.xf.mode === "translate" ? "Move done" : "Rotate done";
+        this.stopTransform(); // done moving / rotating
+        this.toast(done);
+        return;
+      }
       if (e.key === "Tab" && this.xf && !this.tool) {
         e.preventDefault();
         this.transformDialog();
@@ -1128,7 +1135,7 @@ class App implements ToolHost {
     this.xf = { mode, ids };
     this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r));
     this.renderToolbarState();
-    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Esc to finish`);
+    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Enter/Esc: done`);
   }
 
   /** Base-point move: pick a point on/near the selection, then a target point. */
@@ -1641,6 +1648,7 @@ class App implements ToolHost {
       ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
+      ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],

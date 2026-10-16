@@ -216,6 +216,12 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
   log.push({ label: "shift+R array", xs });
 
+  // 10i) Enter finishes the move gizmo
+  app.run("edit.duplicate");
+  const xfOn = !!app.xf;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
+  log.push({ label: "enter finishes move", xfOn, xfAfter: !!app.xf });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
