@@ -944,22 +944,30 @@ class App implements ToolHost {
     }
   }
 
+  private olRows = new Map<number, { row: HTMLElement; body: Body; hidden: boolean }>();
+  private olBound = false;
+
   private renderOutliner(): void {
     const el = $("outliner");
-    const selected = new Set(this.selection.map((s) => s.body));
-    if (!this.doc.bodies.length) {
-      el.innerHTML = `<div class="ol-empty">No bodies yet.<br>Press <kbd>B</kbd> to draw a box.</div>`;
-      return;
-    }
-    el.innerHTML = "";
-    for (const b of this.doc.bodies) {
-      const row = document.createElement("div");
-      row.className = "ol-row";
-      row.classList.toggle("selected", selected.has(b.id));
-      row.classList.toggle("hidden", this.hidden.has(b.id));
-      row.innerHTML = `<span class="ol-swatch${b.kind === "face" ? " face" : ""}" title="${b.kind === "face" ? "Flat face" : "Solid"}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${this.hidden.has(b.id) ? ICONS.eyeOff : ICONS.eye}</button>`;
-      row.addEventListener("click", (e) => {
-        if ((e.target as HTMLElement).closest(".ol-eye, input")) return;
+    if (!this.olBound) {
+      this.olBound = true;
+      // One delegated listener set instead of three listeners per row.
+      const bodyOf = (e: Event) => {
+        const row = (e.target as HTMLElement).closest<HTMLElement>(".ol-row");
+        return row ? this.doc.get(Number(row.dataset.id)) ?? null : null;
+      };
+      el.addEventListener("click", (e) => {
+        const b = bodyOf(e);
+        if (!b) return;
+        const t = e.target as HTMLElement;
+        if (t.closest(".ol-eye")) {
+          if (this.hidden.has(b.id)) this.hidden.delete(b.id);
+          else this.hidden.add(b.id);
+          this.viewport.setHidden(this.hidden);
+          this.renderOutliner();
+          return;
+        }
+        if (t.closest("input")) return;
         this.setMode("body");
         const item: SelItem = { kind: "body", body: b.id, id: 0 };
         if (e.shiftKey || e.ctrlKey) {
@@ -967,14 +975,46 @@ class App implements ToolHost {
           this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
         } else this.setSelection([item]);
       });
-      row.querySelector(".ol-eye")!.addEventListener("click", () => {
-        if (this.hidden.has(b.id)) this.hidden.delete(b.id);
-        else this.hidden.add(b.id);
-        this.viewport.setHidden(this.hidden);
-        this.renderOutliner();
+      el.addEventListener("dblclick", (e) => {
+        const b = bodyOf(e);
+        const cell = (e.target as HTMLElement).closest(".ol-name");
+        if (b && cell) this.rename(b, cell);
       });
-      row.querySelector(".ol-name")!.addEventListener("dblclick", () => this.rename(b, row.querySelector(".ol-name")!));
-      el.appendChild(row);
+    }
+    const selected = new Set(this.selection.map((s) => s.body));
+    if (!this.doc.bodies.length) {
+      this.olRows.clear();
+      el.innerHTML = `<div class="ol-empty">No bodies yet.<br>Press <kbd>B</kbd> to draw a box.</div>`;
+      return;
+    }
+    el.querySelector(".ol-empty")?.remove();
+    const live = new Set<number>();
+    let prev: Element | null = null;
+    for (const b of this.doc.bodies) {
+      live.add(b.id);
+      const hidden = this.hidden.has(b.id);
+      let entry = this.olRows.get(b.id);
+      if (!entry || entry.body !== b || entry.hidden !== hidden) {
+        const row = entry?.row ?? document.createElement("div");
+        row.className = "ol-row";
+        row.dataset.id = String(b.id);
+        row.innerHTML = `<span class="ol-swatch${b.kind === "face" ? " face" : ""}" title="${b.kind === "face" ? "Flat face" : "Solid"}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+        entry = { row, body: b, hidden };
+        this.olRows.set(b.id, entry);
+      }
+      const row = entry.row;
+      row.classList.toggle("selected", selected.has(b.id));
+      row.classList.toggle("hidden", hidden);
+      // Keep DOM order in sync with document order (no-op when already correct).
+      const want: Element | null = prev ? prev.nextElementSibling : el.firstElementChild;
+      if (want !== row) el.insertBefore(row, want);
+      prev = row;
+    }
+    for (const [id, entry] of this.olRows) {
+      if (!live.has(id)) {
+        entry.row.remove();
+        this.olRows.delete(id);
+      }
     }
   }
 
@@ -991,7 +1031,11 @@ class App implements ToolHost {
       const name = input.value.trim();
       if (save && name && name !== body.name) {
         this.doc.commit(this.doc.bodies.map((b) => (b.id === body.id ? { ...b, name } : b)), "Rename");
-      } else this.renderOutliner();
+      } else {
+        const cached = this.olRows.get(body.id);
+        if (cached) cached.hidden = !cached.hidden; // mark stale so the row is re-rendered in place
+        this.renderOutliner();
+      }
     };
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") commit(true);
@@ -1056,7 +1100,9 @@ class App implements ToolHost {
     const t = document.createElement("div");
     t.className = `toast ${kind}`;
     t.textContent = msg;
-    $("toasts").appendChild(t);
+    const box = $("toasts");
+    box.appendChild(t);
+    while (box.children.length > 4) box.firstElementChild!.remove();
     setTimeout(() => t.remove(), kind === "error" ? 4500 : 2200);
   }
 
