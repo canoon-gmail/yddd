@@ -179,6 +179,17 @@ const SCENARIO_2 = String.raw`
   const bx = nb.shape.boundingBox.bounds;
   log.push({ label: "tab props box", fields: ins.length, name: nb.name, size: [0, 1, 2].map((k) => +(bx[1][k] - bx[0][k]).toFixed(3)) });
 
+  // 10f) Tab during Move (G) / Rotate (R): exact values
+  const tab = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true }));
+  const fill = (vals) => { const d = document.getElementById("props-dlg"); const q = d ? [...d.querySelectorAll("input")] : []; vals.forEach((v, k) => { if (q[k]) q[k].value = String(v); }); d && d.requestSubmit(); return q.length; };
+  app.setSelection([{ kind: "body", body: nb.id, id: 0 }]);
+  app.run("xf.move"); tab(); const mf = fill([5, 0, 0]);
+  const m1 = app.doc.get(nb.id).shape.boundingBox.bounds[0].map((n) => +n.toFixed(3));
+  app.run("xf.rotate"); tab(); const rf = fill([0, 0, 90]);
+  const rbb = app.doc.get(nb.id).shape.boundingBox.bounds;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  log.push({ label: "tab move/rotate", mf, m1, rf, sizeAfterRotate: [0, 1].map((k) => +(rbb[1][k] - rbb[0][k]).toFixed(3)) });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;

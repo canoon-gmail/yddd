@@ -35,7 +35,7 @@ export interface ToolHost {
   finish(shape: Shape, baseName: string, kind: BodyKind): void;
   fail(e: unknown): void;
   /** Show a property dialog; onOk receives the edited values in field order. */
-  propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void): void;
+  propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void, okLabel?: string): void;
 }
 
 export interface PropField {

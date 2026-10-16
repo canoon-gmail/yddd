@@ -314,16 +314,16 @@ class App implements ToolHost {
     this.toast(`Failed: ${errorMessage(e)}`, "error");
   }
 
-  propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void): void {
+  propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void, okLabel = "Create"): void {
     document.getElementById("props-dlg")?.remove();
     const dlg = document.createElement("form");
     dlg.id = "props-dlg";
     dlg.innerHTML =
-      `<h4>${title} properties</h4>` +
+      `<h4>${title}</h4>` +
       fields
         .map((f, i) => `<label><span>${f.label}</span><input type="number" data-i="${i}" value="${f.value}" step="${f.step ?? "any"}"${f.min !== undefined ? ` min="${f.min}"` : ""}></label>`)
         .join("") +
-      `<div class="op-buttons"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn primary">Create</button></div>`;
+      `<div class="op-buttons"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn primary">${okLabel}</button></div>`;
     const inputs = [...dlg.querySelectorAll<HTMLInputElement>("input")];
     const close = (): void => {
       dlg.remove();
@@ -595,6 +595,11 @@ class App implements ToolHost {
       }
       if (this.tool && this.tool.key(e)) {
         e.preventDefault();
+        return;
+      }
+      if (e.key === "Tab" && this.xf && !this.tool) {
+        e.preventDefault();
+        this.transformDialog();
         return;
       }
       if (e.key === "Escape") {
@@ -1117,7 +1122,7 @@ class App implements ToolHost {
     this.xf = { mode, ids };
     this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r));
     this.renderToolbarState();
-    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Esc to finish`);
+    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Esc to finish`);
   }
 
   /** Base-point move: pick a point on/near the selection, then a target point. */
@@ -1151,6 +1156,49 @@ class App implements ToolHost {
     const mode = this.xf.mode;
     this.doc.replaceShapes(shapes, mode === "translate" ? "Move" : "Rotate");
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
+  }
+
+  /** Tab during Move/Rotate: exact offset or angles. */
+  private transformDialog(): void {
+    if (!this.xf) return;
+    const { mode, ids } = this.xf;
+    const apply = (fn: (s: Shape) => Shape, label: string): void => {
+      const shapes = new Map<number, Shape>();
+      for (const id of ids) {
+        const b = this.doc.get(id);
+        if (b) shapes.set(id, fn(b.shape));
+      }
+      this.doc.replaceShapes(shapes, label);
+      this.startTransform(mode, true);
+    };
+    if (mode === "translate") {
+      this.propsDialog("Move by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
+        if (x || y || z) apply((s) => translateShape(s, [x, y, z]), "Move");
+      }, "Move");
+      return;
+    }
+    // Rotate about the selection's bounding-box centre, X then Y then Z.
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const bb = this.doc.get(id)?.shape.boundingBox.bounds;
+      if (!bb) continue;
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], bb[0][k]);
+        hi[k] = Math.max(hi[k], bb[1][k]);
+      }
+    }
+    const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    const f = (label: string): PropField => ({ label, value: 0, step: 15 });
+    this.propsDialog("Rotate by (about selection centre)", [f("X °"), f("Y °"), f("Z °")], ([ax, ay, az]) => {
+      if (!ax && !ay && !az) return;
+      apply((s) => {
+        let r = s;
+        if (ax) r = rotateShape(r, ax, c, [1, 0, 0]);
+        if (ay) r = rotateShape(r, ay, c, [0, 1, 0]);
+        if (az) r = rotateShape(r, az, c, [0, 0, 1]);
+        return r;
+      }, "Rotate");
+    }, "Rotate");
   }
 
   private stopTransform(): void {
@@ -1510,6 +1558,7 @@ class App implements ToolHost {
       ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
+      ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
