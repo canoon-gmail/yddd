@@ -1106,7 +1106,7 @@ export class GuideTool implements Tool {
 
   private updateHint(): void {
     const t = this.ref
-      ? "Guide line: move across the face under the cursor (Ctrl snaps) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel"
+      ? "Guide line: move across the face under the cursor (Ctrl snaps to points / grid) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel"
       : "Guide line: click the reference edge";
     this.host.hint(this.typed ? `${t}   ⌨ ${this.typed}_` : t);
   }
@@ -1137,9 +1137,18 @@ export class GuideTool implements Tool {
     const r = this.ref;
     const n = this.v(r.inward).cross(this.v(r.b).sub(this.v(r.a))).normalize();
     const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, this.v(r.a));
-    const p = this.host.viewport.ray(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3());
-    if (!p) return;
-    const d = snapValue(p.sub(this.v(r.a)).dot(this.v(r.inward)), this.host.snapStep(e));
+    // Ctrl: snap to object points (corners, midpoints, centres, other guides / axes), else to the grid step.
+    const vp = this.host.viewport;
+    const sp = e.ctrlKey ? vp.snapPoint(e.clientX, e.clientY) : null;
+    vp.showSnapMarker(sp);
+    let d: number;
+    if (sp) {
+      d = sp.point.clone().sub(this.v(r.a)).dot(this.v(r.inward));
+    } else {
+      const p = vp.ray(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3());
+      if (!p) return;
+      d = snapValue(p.sub(this.v(r.a)).dot(this.v(r.inward)), this.host.snapStep(e));
+    }
     this.dist = Math.max(0, Math.min(r.width, d));
     this.draw();
     this.showHud();
@@ -1213,6 +1222,7 @@ export class GuideTool implements Tool {
 
   dispose(): void {
     this.host.viewport.setOverlay([]);
+    this.host.viewport.showSnapMarker(null);
     this.host.hud(null);
   }
 }
