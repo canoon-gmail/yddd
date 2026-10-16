@@ -200,7 +200,7 @@ class App implements ToolHost {
     result: OpOutcome | null;
     key: string;
     /** Drag reference: line parameter and field value when the mouse first moved. */
-    anchor?: { t: number; v: number };
+    anchor?: { x: number; y: number; v: number };
     dragQueued?: boolean;
   } | null = null;
   private xf: { mode: "translate" | "rotate"; ids: number[] } | null = null;
@@ -594,19 +594,19 @@ class App implements ToolHost {
     const drag = op.spec.drag!;
     const input = op.inputs.find((i) => i.dataset.key === drag.key);
     if (!input) return;
-    const ray = this.viewport.ray(e.clientX, e.clientY);
     const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
-    // Closest point between the axis line O + tD and the mouse ray A + sB.
-    const B = ray.direction, w = O.clone().sub(ray.origin);
-    const b = D.dot(B), d = D.dot(w), ee = B.dot(w);
-    const denom = 1 - b * b;
-    if (Math.abs(denom) < 1e-4) return; // looking straight down the axis
-    const t = (b * ee - d) / denom;
+    // Screen-space mapping: mouse movement projected onto the axis' on-screen direction,
+    // so the result doesn't depend on where the pointer is (e.g. started from a toolbar icon).
+    const s0 = this.viewport.toScreen(O), s1 = this.viewport.toScreen(O.clone().addScaledVector(D, 10));
+    const ax = s1.x - s0.x, ay = s1.y - s0.y;
+    const pxPer10 = Math.hypot(ax, ay);
+    if (pxPer10 < 5) return; // looking straight down the axis
     if (!op.anchor) {
-      op.anchor = { t, v: Number(input.value) || 0 };
+      op.anchor = { x: e.clientX, y: e.clientY, v: Number(input.value) || 0 };
       return;
     }
-    let v = op.anchor.v + (t - op.anchor.t);
+    const t = (((e.clientX - op.anchor.x) * ax + (e.clientY - op.anchor.y) * ay) / pxPer10) * (10 / pxPer10);
+    let v = op.anchor.v + t;
     const step = this.snapStep(e);
     if (step > 0) v = Math.round(v / step) * step;
     if (fmt(v) === input.value) return;
