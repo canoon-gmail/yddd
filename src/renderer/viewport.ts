@@ -53,7 +53,28 @@ interface BodyView {
   edgePos: Float32Array;
   proj: Float32Array | null;
   projStamp: number;
+  /** [firstVertex, endVertex) per face group, used to recolour faces inside a batch. */
+  faceV: number[];
+  vertexCount: number;
+  chunk: Chunk | null;
+  /** Where this body currently lives inside its chunk's merged mesh (null = not batched). */
+  slot: { mesh: THREE.Mesh; vOffset: number } | null;
 }
+
+/**
+ * Rendering batch: up to CHUNK_SIZE bodies merged into one solid mesh, one
+ * flat-face mesh and one edge line set (3 draw calls instead of 2 per body).
+ * Bodies stay separate for picking/selection; only drawing is merged.
+ * Only the chunk containing a changed body is rebuilt.
+ */
+interface Chunk {
+  ids: Set<number>;
+  root: THREE.Group;
+  dirty: boolean;
+}
+
+const CHUNK_SIZE = 256;
+const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xe9c46a, selected: 0xf4a259 };
 
 export class Viewport {
   readonly canvas: HTMLCanvasElement;
@@ -68,6 +89,14 @@ export class Viewport {
   private views = new Map<number, BodyView>();
   private hidden = new Set<number>();
   private bodyRoot = new THREE.Group();
+  private batchRoot = new THREE.Group();
+  private chunks: Chunk[] = [];
+  private xfSet = new Set<number>();
+  private hl = { sel: [] as SelItem[], hover: null as SelItem | null, painted: new Set<number>() };
+  private batchMats = {
+    solid: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+    region: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.87, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+  };
   private ghostRoot = new THREE.Group();
   private overlayRoot = new THREE.Group();
   private hoverEdges: LineSegments2;
@@ -125,7 +154,7 @@ export class Viewport {
     fill.position.set(-2, -1, 0.5);
     this.camera.add(fill);
 
-    this.scene.add(this.makeGrid(), this.bodyRoot, this.ghostRoot, this.overlayRoot);
+    this.scene.add(this.makeGrid(), this.batchRoot, this.bodyRoot, this.ghostRoot, this.overlayRoot);
 
     this.hoverEdges = this.makeOverlayLines(this.mats.edgeHover);
     this.selEdges = this.makeOverlayLines(this.mats.edgeSelected);
@@ -248,6 +277,7 @@ export class Viewport {
   }
 
   private render(): void {
+    this.flushBatches();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -263,6 +293,7 @@ export class Viewport {
     const faceStarts: number[] = [];
     const faceIndex = new Map<number, number>();
     const faceAreas: number[] = [];
+    const faceV: number[] = [];
     const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
     const P = faces.vertices, T = faces.triangles;
     faces.faceGroups.forEach((g, i) => {
@@ -271,6 +302,12 @@ export class Viewport {
       faceStarts.push(g.start);
       faceIndex.set(g.faceId, i);
       let area = 0;
+      let vMin = Infinity, vMax = -1;
+      for (let k = g.start; k < g.start + g.count; k++) {
+        if (T[k] < vMin) vMin = T[k];
+        if (T[k] > vMax) vMax = T[k];
+      }
+      faceV.push(vMax < 0 ? 0 : vMin, vMax + 1);
       for (let k = g.start; k + 2 < g.start + g.count; k += 3) {
         va.fromArray(P, T[k] * 3);
         vb.fromArray(P, T[k + 1] * 3).sub(va);
@@ -304,13 +341,20 @@ export class Viewport {
     group.add(mesh);
     if (lines) group.add(lines);
     group.visible = !this.hidden.has(body.id);
-    return { body, group, mesh, edges: lines, faceIds, faceStarts, faceIndex, faceAreas, edgeIds, edgeStarts, edgeCounts, edgeIndex, edgePos, proj: null, projStamp: -1 };
+    return {
+      body, group, mesh, edges: lines, faceIds, faceStarts, faceIndex, faceAreas, edgeIds, edgeStarts, edgeCounts, edgeIndex, edgePos,
+      proj: null, projStamp: -1, faceV, vertexCount: P.length / 3, chunk: null, slot: null,
+    };
   }
 
   private disposeView(v: BodyView): void {
     v.group.removeFromParent();
     v.mesh.geometry.dispose();
     v.edges?.geometry.dispose();
+    if (v.chunk) {
+      v.chunk.ids.delete(v.body.id);
+      v.chunk.dirty = true;
+    }
   }
 
   /** Bring the scene in line with the document snapshot (rebuilds only changed bodies). */
@@ -320,24 +364,141 @@ export class Viewport {
       live.add(body.id);
       const existing = this.views.get(body.id);
       if (existing && existing.body === body) continue;
+      const chunk = existing?.chunk ?? this.chunkWithRoom();
       if (existing) this.disposeView(existing);
       const view = this.buildView(body);
       this.views.set(body.id, view);
-      this.bodyRoot.add(view.group);
+      view.chunk = chunk;
+      chunk.ids.add(body.id);
+      chunk.dirty = true;
+      this.placeView(view);
     }
     for (const [id, v] of this.views) {
       if (!live.has(id)) {
         this.disposeView(v);
         this.views.delete(id);
+        this.hl.painted.delete(id);
       }
     }
     this.stamp++;
     this.requestRender();
   }
 
+  // ------------------------------------------------------------ batching
+
+  private chunkWithRoom(): Chunk {
+    let c = this.chunks.find((k) => k.ids.size < CHUNK_SIZE);
+    if (!c) {
+      c = { ids: new Set(), root: new THREE.Group(), dirty: true };
+      this.chunks.push(c);
+      this.batchRoot.add(c.root);
+    }
+    return c;
+  }
+
+  /** Bodies being dragged by the gizmo render on their own (so they can move); all others render batched. */
+  private placeView(v: BodyView): void {
+    if (this.xfSet.has(v.body.id)) this.bodyRoot.add(v.group);
+    else v.group.removeFromParent();
+  }
+
+  private markDirty(id: number): void {
+    const c = this.views.get(id)?.chunk;
+    if (c) c.dirty = true;
+  }
+
+  private flushBatches(): void {
+    let rebuilt = false;
+    for (const c of this.chunks) {
+      if (!c.dirty) continue;
+      this.buildChunk(c);
+      rebuilt = true;
+    }
+    if (rebuilt) {
+      this.chunks = this.chunks.filter((c) => {
+        if (c.ids.size) return true;
+        c.root.removeFromParent();
+        return false;
+      });
+      this.paintHighlight();
+    }
+  }
+
+  private buildChunk(c: Chunk): void {
+    c.dirty = false;
+    for (const o of [...c.root.children]) {
+      o.removeFromParent();
+      (o as THREE.Mesh).geometry.dispose();
+    }
+    const members: BodyView[] = [];
+    for (const id of c.ids) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      v.slot = null;
+      if (v.group.visible && !this.xfSet.has(id)) members.push(v);
+    }
+    const tmp = new THREE.Color();
+    for (const kind of ["solid", "face"] as const) {
+      const list = members.filter((v) => v.body.kind === kind);
+      if (!list.length) continue;
+      let nv = 0, ni = 0;
+      for (const v of list) {
+        nv += v.vertexCount;
+        ni += v.mesh.geometry.index!.count;
+      }
+      const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), col = new Float32Array(nv * 3);
+      const idx = new Uint32Array(ni);
+      tmp.setHex(kind === "face" ? COLORS.region : COLORS.solid);
+      const geom = new THREE.BufferGeometry();
+      const mesh = new THREE.Mesh(geom, kind === "face" ? this.batchMats.region : this.batchMats.solid);
+      mesh.raycast = () => {}; // picking uses the per-body meshes
+      let vo = 0, io = 0;
+      for (const v of list) {
+        const g = v.mesh.geometry;
+        pos.set(g.attributes.position.array as Float32Array, vo * 3);
+        nor.set(g.attributes.normal.array as Float32Array, vo * 3);
+        const src = g.index!.array;
+        for (let k = 0; k < src.length; k++) idx[io + k] = src[k] + vo;
+        for (let k = vo * 3; k < (vo + v.vertexCount) * 3; k += 3) {
+          col[k] = tmp.r;
+          col[k + 1] = tmp.g;
+          col[k + 2] = tmp.b;
+        }
+        v.slot = { mesh, vOffset: vo };
+        vo += v.vertexCount;
+        io += src.length;
+      }
+      geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geom.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+      geom.setAttribute("color", new THREE.BufferAttribute(col, 3));
+      geom.setIndex(new THREE.BufferAttribute(idx, 1));
+      geom.computeBoundingSphere();
+      c.root.add(mesh);
+    }
+    let ne = 0;
+    for (const v of members) ne += v.edgePos.length;
+    if (ne >= 6) {
+      const ep = new Float32Array(ne);
+      let o = 0;
+      for (const v of members) {
+        ep.set(v.edgePos, o);
+        o += v.edgePos.length;
+      }
+      const eg = new LineSegmentsGeometry();
+      eg.setPositions(ep);
+      const lines = new LineSegments2(eg, this.mats.edge);
+      lines.raycast = () => {};
+      c.root.add(lines);
+    }
+  }
+
   setHidden(ids: Set<number>): void {
     this.hidden = new Set(ids);
-    for (const [id, v] of this.views) v.group.visible = !this.hidden.has(id);
+    for (const [id, v] of this.views) {
+      const vis = !this.hidden.has(id);
+      if (v.group.visible !== vis) this.markDirty(id);
+      v.group.visible = vis;
+    }
     this.stamp++;
     this.requestRender();
   }
@@ -473,20 +634,12 @@ export class Viewport {
   // ------------------------------------------------------------ highlighting
 
   setHighlight(selection: SelItem[], hover: SelItem | null): void {
-    for (const v of this.views.values()) for (const g of v.mesh.geometry.groups) g.materialIndex = 0;
-
-    const paint = (it: SelItem, matIndex: number) => {
-      const v = this.views.get(it.body);
-      if (!v) return;
-      const groups = v.mesh.geometry.groups;
-      if (it.kind === "body") for (const g of groups) g.materialIndex = matIndex;
-      else if (it.kind === "face") {
-        const i = v.faceIndex.get(it.id);
-        if (i !== undefined) groups[i].materialIndex = matIndex;
-      }
-    };
-    if (hover) paint(hover, 1);
-    for (const it of selection) paint(it, 2);
+    // Reset only what was painted last time.
+    for (const id of this.hl.painted) this.paintBody(id, null, 0);
+    this.hl.painted.clear();
+    this.hl.sel = selection;
+    this.hl.hover = hover;
+    this.paintHighlight();
 
     const edgePoints = (items: SelItem[]) => {
       const out: number[] = [];
@@ -505,6 +658,37 @@ export class Viewport {
     this.setOverlayLines(this.selEdges, edgePoints(selection));
     this.setOverlayLines(this.hoverEdges, hover && !isSelected ? edgePoints([hover]) : []);
     this.requestRender();
+  }
+
+  private paintHighlight(): void {
+    const h = this.hl;
+    if (h.hover && h.hover.kind !== "edge") this.paintBody(h.hover.body, h.hover.kind === "face" ? h.hover.id : null, 1);
+    for (const it of h.sel) if (it.kind !== "edge") this.paintBody(it.body, it.kind === "face" ? it.id : null, 2);
+  }
+
+  /** Colour a whole body (faceId null) or one face: 0 = base, 1 = hover, 2 = selected. */
+  private paintBody(bodyId: number, faceId: number | null, level: 0 | 1 | 2): void {
+    const v = this.views.get(bodyId);
+    if (!v) return;
+    if (level) this.hl.painted.add(bodyId);
+    const fi = faceId === null ? -1 : v.faceIndex.get(faceId) ?? -2;
+    if (fi === -2) return;
+    // Standalone mesh (used while transforming): material groups.
+    const groups = v.mesh.geometry.groups;
+    if (fi < 0) for (const g of groups) g.materialIndex = level;
+    else groups[fi].materialIndex = level;
+    // Batched mesh: vertex colours.
+    if (!v.slot) return;
+    const attr = v.slot.mesh.geometry.getAttribute("color") as THREE.BufferAttribute;
+    const c = new THREE.Color(level === 1 ? COLORS.hover : level === 2 ? COLORS.selected : v.body.kind === "face" ? COLORS.region : COLORS.solid);
+    const [a, b] = fi < 0 ? [0, v.vertexCount] : [v.faceV[fi * 2], v.faceV[fi * 2 + 1]];
+    const arr = attr.array as Float32Array;
+    for (let k = (v.slot.vOffset + a) * 3; k < (v.slot.vOffset + b) * 3; k += 3) {
+      arr[k] = c.r;
+      arr[k + 1] = c.g;
+      arr[k + 2] = c.b;
+    }
+    attr.needsUpdate = true;
   }
 
   private setOverlayLines(lines: LineSegments2, pts: number[]): void {
@@ -545,7 +729,10 @@ export class Viewport {
       const view = this.buildView({ id: k--, name: "", kind: kindOf(shape), shape });
       this.ghostRoot.add(view.group);
       const orig = this.views.get(id);
-      if (orig) orig.group.visible = false;
+      if (orig) {
+        orig.group.visible = false;
+        this.markDirty(id);
+      }
     }
     this.requestRender();
   }
@@ -555,7 +742,11 @@ export class Viewport {
       child.removeFromParent();
       child.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
     }
-    for (const [id, v] of this.views) v.group.visible = !this.hidden.has(id);
+    for (const [id, v] of this.views) {
+      const vis = !this.hidden.has(id);
+      if (v.group.visible !== vis) this.markDirty(id);
+      v.group.visible = vis;
+    }
     this.requestRender();
   }
 
@@ -621,6 +812,7 @@ export class Viewport {
     this.pivot.updateMatrixWorld();
     this.xfStart.copy(c);
     this.xfIds = ids;
+    this.setXfSet(ids);
     this.xfMode = mode;
     this.xfEnd = onEnd;
     this.tc.setMode(mode);
@@ -634,8 +826,20 @@ export class Viewport {
     this.tc.detach();
     this.resetBodyMatrices();
     this.xfIds = [];
+    this.setXfSet([]);
     this.xfEnd = null;
     this.requestRender();
+  }
+
+  private setXfSet(ids: number[]): void {
+    const changed = new Set([...this.xfSet, ...ids]);
+    this.xfSet = new Set(ids);
+    for (const id of changed) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      this.placeView(v);
+      this.markDirty(id);
+    }
   }
 
   private resetBodyMatrices(): void {
