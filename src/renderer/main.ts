@@ -143,8 +143,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
     items: [
       { cmd: "view.fit", icon: "fit", label: "Fit", key: "Home" },
       { cmd: "view.iso", icon: "iso", label: "Iso" },
-      { cmd: "view.top", icon: "top", label: "Top" },
-      { cmd: "view.front", icon: "front", label: "Front" },
+      { cmd: "view.top", icon: "top", label: "Top", key: "7" },
+      { cmd: "view.front", icon: "front", label: "Front", key: "Num 1" },
     ],
   },
 ];
@@ -169,6 +169,9 @@ const KEYMAP: Record<string, string> = {
   x: "edit.delete",
   Delete: "edit.delete",
   Home: "view.fit",
+  "7": "view.top",
+  Numpad7: "view.top",
+  Numpad1: "view.front", // top-row "1" stays Solid mode
   ".": "view.fitSelection",
   "Shift+U": "bool.union",
   "Shift+S": "bool.subtract",
@@ -1332,6 +1335,7 @@ class App implements ToolHost {
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
+      ["7 · Num 1", "Top view · Front view"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
       ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],
     ];
