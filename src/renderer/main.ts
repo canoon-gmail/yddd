@@ -109,8 +109,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
   {
     title: "Boolean",
     items: [
-      { cmd: "bool.union", icon: "union", label: "Union", key: "Shift+U" },
-      { cmd: "bool.subtract", icon: "subtract", label: "Subtract", key: "Shift+S" },
+      { cmd: "bool.union", icon: "union", label: "Union", key: "Shift+U / Num +" },
+      { cmd: "bool.subtract", icon: "subtract", label: "Subtract", key: "Shift+S / Num −" },
       { cmd: "bool.intersect", icon: "intersect", label: "Intersect", key: "Shift+I" },
     ],
   },
@@ -163,6 +163,8 @@ const KEYMAP: Record<string, string> = {
   ".": "view.fitSelection",
   "Shift+U": "bool.union",
   "Shift+S": "bool.subtract",
+  NumpadAdd: "bool.union",
+  NumpadSubtract: "bool.subtract",
   "Shift+I": "bool.intersect",
   "?": "help.shortcuts",
 };
@@ -464,7 +466,7 @@ class App implements ToolHost {
       }
       if (e.ctrlKey || e.altKey || e.metaKey) return; // handled by native menu accelerators
       const combo = e.shiftKey && e.key.length === 1 && /[a-z]/i.test(e.key) ? `Shift+${e.key.toUpperCase()}` : e.key.length === 1 ? e.key.toLowerCase() : e.key;
-      const cmd = KEYMAP[combo] ?? KEYMAP[e.key];
+      const cmd = KEYMAP[e.code] ?? KEYMAP[combo] ?? KEYMAP[e.key];
       if (cmd) {
         e.preventDefault();
         this.run(cmd);
