@@ -204,6 +204,18 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
   log.push({ label: "tab after drag", title, pre, zSize: +(ab[1][2] - ab[0][2]).toFixed(3) });
 
+  // 10h) Shift+D, drag +30 X, then Shift+R twice -> array of copies at +30/+60/+90
+  app.setSelection([{ kind: "body", body: nb.id, id: 0 }]);
+  const x0 = app.doc.get(nb.id).shape.boundingBox.bounds[0][0];
+  const n0 = app.doc.bodies.length;
+  app.run("edit.duplicate");
+  app.applyTransform({ type: "translate", vector: [30, 0, 0] });
+  const shR = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "R", code: "KeyR", shiftKey: true, bubbles: true }));
+  shR(); shR();
+  const xs = app.doc.bodies.slice(n0).map((b) => +(b.shape.boundingBox.bounds[0][0] - x0).toFixed(3));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  log.push({ label: "shift+R array", xs });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;

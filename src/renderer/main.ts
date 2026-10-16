@@ -132,6 +132,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
       { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "Shift+G" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
+      { cmd: "xf.repeat", icon: "duplicate", label: "Repeat last", key: "Shift+R" },
       { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Shift+D / Ctrl+D" },
       { cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" },
     ],
@@ -173,6 +174,7 @@ const KEYMAP: Record<string, string> = {
   t: "op.shell",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
+  "Shift+R": "xf.repeat",
   r: "xf.rotate",
   x: "edit.delete",
   Delete: "edit.delete",
@@ -382,6 +384,7 @@ class App implements ToolHost {
       case "xf.move": return this.startTransform("translate");
       case "xf.rotate": return this.startTransform("rotate");
       case "xf.moveFrom": return this.startPointMove();
+      case "xf.repeat": return this.repeatLast();
 
       case "edit.undo": return this.undoRedo("undo");
       case "edit.redo": return this.undoRedo("redo");
@@ -1115,6 +1118,7 @@ class App implements ToolHost {
       this.endTool();
       this.cancelOp();
       this.lastXf = null;
+      this.repeatOps = [];
     }
     const ids = this.selectedBodyIds();
     if (!ids.length) {
@@ -1137,6 +1141,7 @@ class App implements ToolHost {
     this.startTool(
       new PointMoveTool(this, ids, (d) => {
         this.endTool();
+        this.repeatOps = [{ type: "translate", vector: d }];
         const shapes = new Map<number, Shape>();
         for (const id of ids) {
           const b = this.doc.get(id);
@@ -1153,6 +1158,7 @@ class App implements ToolHost {
   private applyTransform(r: TransformResult): void {
     if (!this.xf) return;
     this.lastXf = { r, ids: this.xf.ids.join() };
+    this.repeatOps.push(r);
     const shapes = new Map<number, Shape>();
     for (const id of this.xf.ids) {
       const b = this.doc.get(id);
@@ -1164,11 +1170,56 @@ class App implements ToolHost {
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
   }
 
+  /** Move/rotate steps of the current transform session (for Shift+R). */
+  private repeatOps: TransformResult[] = [];
+  /** Ids of the bodies made by the last duplicate: moving them makes Shift+R copy again. */
+  private repeatCopyIds = "";
+
+  /** Shift+R: repeat the last move/rotate on the selection; if it was a copy+move, copy again (array). */
+  private repeatLast(): void {
+    const ops = [...this.repeatOps];
+    if (!ops.length) return this.toast("Repeat: move or rotate something first (e.g. Shift+D then drag)", "error");
+    const ids = this.selectedBodyIds();
+    if (!ids.length) return this.toast("Repeat: select solids first", "error");
+    const xform = (s: Shape): Shape =>
+      ops.reduce<Shape>((acc, r) => (r.type === "translate" ? translateShape(acc, r.vector) : rotateShape(acc, r.angleDeg, r.center, r.axis)), s);
+    // Rotations pivot on their original centre; moving that centre along with the copy keeps polar arrays working.
+    const shiftOps = (): void => {
+      let off: V3 = [0, 0, 0];
+      for (const r of ops) {
+        if (r.type === "translate") off = [off[0] + r.vector[0], off[1] + r.vector[1], off[2] + r.vector[2]];
+      }
+      this.repeatOps = ops.map((r) => (r.type === "rotate" ? { ...r, center: [r.center[0] + off[0], r.center[1] + off[1], r.center[2] + off[2]] as V3 } : r));
+    };
+    const mode = this.xf?.mode;
+    if (this.repeatCopyIds === ids.join()) {
+      const copies = ids.map((id) => {
+        const b = this.doc.get(id)!;
+        return this.doc.makeBody(xform(cloneShape(b.shape)), b.name.replace(/\s+\d+$/, ""), b.kind);
+      });
+      this.doc.commit([...this.doc.bodies, ...copies], "Repeat copy");
+      this.setSelection(copies.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      this.repeatCopyIds = copies.map((b) => b.id).join();
+      this.toast(`Repeated copy (${copies.length})`);
+    } else {
+      const shapes = new Map<number, Shape>();
+      for (const id of ids) {
+        const b = this.doc.get(id);
+        if (b) shapes.set(id, xform(b.shape));
+      }
+      this.doc.replaceShapes(shapes, "Repeat");
+      this.toast("Repeated move/rotate");
+    }
+    shiftOps();
+    if (mode) this.startTransform(mode, true);
+  }
+
   /** Tab during Move/Rotate: exact offset or angles. */
   private transformDialog(): void {
     if (!this.xf) return;
     const { mode, ids } = this.xf;
-    const apply = (fn: (s: Shape) => Shape, label: string): void => {
+    const apply = (fn: (s: Shape) => Shape, label: string, ...rs: TransformResult[]): void => {
+      this.repeatOps.push(...rs);
       const shapes = new Map<number, Shape>();
       for (const id of ids) {
         const b = this.doc.get(id);
@@ -1185,7 +1236,7 @@ class App implements ToolHost {
       const name = ax[0] > 0.999 ? "X" : ax[1] > 0.999 ? "Y" : ax[2] > 0.999 ? "Z" : "gizmo axis";
       this.propsDialog(`Rotate about ${name} (last drag)`, [{ label: "Angle °", value: r3(last.angleDeg), step: 15 }], ([a]) => {
         const extra = a - last.angleDeg;
-        if (Math.abs(extra) > 1e-9) apply((s) => rotateShape(s, extra, last.center, last.axis), "Rotate");
+        if (Math.abs(extra) > 1e-9) apply((s) => rotateShape(s, extra, last.center, last.axis), "Rotate", { ...last, angleDeg: extra });
         this.lastXf = { r: { ...last, angleDeg: a }, ids: ids.join() };
       }, "Rotate");
       return;
@@ -1194,14 +1245,14 @@ class App implements ToolHost {
       const v = last.vector;
       this.propsDialog("Move (last drag)", [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }], (n) => {
         const d: V3 = [n[0] - v[0], n[1] - v[1], n[2] - v[2]];
-        if (d.some((x) => Math.abs(x) > 1e-9)) apply((s) => translateShape(s, d), "Move");
+        if (d.some((x) => Math.abs(x) > 1e-9)) apply((s) => translateShape(s, d), "Move", { type: "translate", vector: d });
         this.lastXf = { r: { type: "translate", vector: [n[0], n[1], n[2]] }, ids: ids.join() };
       }, "Move");
       return;
     }
     if (mode === "translate") {
       this.propsDialog("Move by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
-        if (x || y || z) apply((s) => translateShape(s, [x, y, z]), "Move");
+        if (x || y || z) apply((s) => translateShape(s, [x, y, z]), "Move", { type: "translate", vector: [x, y, z] });
       }, "Move");
       return;
     }
@@ -1225,7 +1276,9 @@ class App implements ToolHost {
         if (ay) r = rotateShape(r, ay, c, [0, 1, 0]);
         if (az) r = rotateShape(r, az, c, [0, 0, 1]);
         return r;
-      }, "Rotate");
+      }, "Rotate", ...([[ax, [1, 0, 0]], [ay, [0, 1, 0]], [az, [0, 0, 1]]] as [number, V3][])
+        .filter(([a]) => a)
+        .map(([a, axis]): TransformResult => ({ type: "rotate", angleDeg: a, axis, center: c })));
     }, "Rotate");
   }
 
@@ -1270,6 +1323,7 @@ class App implements ToolHost {
       this.setSelection(faces.map((b) => ({ kind: "body", body: b.id, id: 0 })));
       this.toast(`${faces.length} face${faces.length > 1 ? "s" : ""} copied — move it, then P to push/pull`);
       this.startTransform("translate");
+      this.repeatCopyIds = faces.map((b) => b.id).join();
       return;
     }
     const ids = this.selectedBodyIds();
@@ -1285,6 +1339,7 @@ class App implements ToolHost {
     this.setMode("body");
     this.setSelection(copies.map((b) => ({ kind: "body", body: b.id, id: 0 })));
     this.startTransform("translate");
+    this.repeatCopyIds = copies.map((b) => b.id).join();
   }
 
   // ================================================================ document changes
@@ -1586,6 +1641,7 @@ class App implements ToolHost {
       ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
+      ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
