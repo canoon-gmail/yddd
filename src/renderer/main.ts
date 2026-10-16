@@ -863,68 +863,69 @@ class App implements ToolHost {
       return;
     }
     const [targetId, ...toolIds] = ids;
+    this.applyBoolean(op, targetId, toolIds, label);
+    this.setMode("body");
+    this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
+  }
+
+  /** Combine `toolIds` into `targetId` (target keeps its id/name); one undo step. Throws on failure. */
+  private applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string): void {
     const target = this.doc.get(targetId)!;
     const result = booleanOp(op, target.shape as Solid, toolIds.map((id) => this.doc.get(id)!.shape as Solid));
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
     const removed = new Set(toolIds);
     const next = this.doc.bodies.filter((b) => !removed.has(b.id)).map((b) => (b.id === targetId ? { ...b, shape: result } : b));
     this.doc.commit(next, label);
-    this.setMode("body");
-    this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
     this.toast(`${label}: ${target.name}`);
   }
 
-  /** A + key + B: with one solid selected, wait for a click on the other solid, then apply. */
+  /** A + key + B (+ C ...): each click on another solid applies the operation to A right away. */
   private pickBooleanTool(op: BooleanOp, targetId: number, label: string): void {
     const target = this.doc.get(targetId);
     if (!target) return;
     const verb = op === "subtract" ? "subtract from" : op === "union" ? "join with" : "intersect with";
+    let count = 0;
     const msg = () =>
-      `${label}: click solids to ${verb} "${target.name}"` +
-      (picked.length ? ` (${picked.length} picked) · Enter / Space or click empty space to apply` : "") +
-      " · click again to unpick · Esc cancel";
-    const picked: number[] = [];
+      `${label}: click a solid to ${verb} "${target.name}"` + (count ? ` (${count} done) · keep clicking for more` : "") +
+      " · Esc / Enter / empty click to finish";
     const pickAt = (e: PointerEvent) => {
       const p = this.viewport.pick(e.clientX, e.clientY, "body");
       return p && p.body !== targetId ? p.body : null;
     };
     const show = (hover: number | null) =>
-      this.viewport.setHighlight(
-        [targetId, ...picked].map((id) => ({ kind: "body" as const, body: id, id: 0 })),
-        hover === null ? null : { kind: "body", body: hover, id: 0 },
-      );
-    const apply = () => {
+      this.viewport.setHighlight([{ kind: "body", body: targetId, id: 0 }], hover === null ? null : { kind: "body", body: hover, id: 0 });
+    const finish = () => {
       this.endTool();
-      this.selection = [targetId, ...picked].map((id) => ({ kind: "body" as const, body: id, id: 0 }));
-      try {
-        this.boolean(op);
-      } catch (err) {
-        this.fail(err);
-      }
+      this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
     };
     const tool: Tool = {
       name: label,
       move: (e) => show(pickAt(e)),
       down: (e) => {
         const id = pickAt(e);
-        if (id === null) {
-          if (picked.length) apply();
+        if (id === null) return finish();
+        const b = this.doc.get(id);
+        if (b?.kind === "face") {
+          this.toast(`Booleans work on solids — "${b.name}" is a flat face. Push/Pull it first.`, "error");
           return;
         }
-        const i = picked.indexOf(id);
-        if (i >= 0) picked.splice(i, 1);
-        else picked.push(id);
+        try {
+          this.applyBoolean(op, targetId, [id], label);
+          count++;
+        } catch (err) {
+          this.fail(err);
+        }
         show(null);
         this.hint(msg());
       },
       key: (e) => {
-        if ((e.key === "Enter" || e.key === " ") && picked.length) {
-          apply();
+        if (e.key === "Enter" || e.key === " ") {
+          finish();
           return true;
         }
         return false;
       },
-      dispose: () => this.hint(""),
+      dispose: () => {},
     };
     this.setMode("body");
     this.startTool(tool);
