@@ -142,7 +142,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     title: "History",
     items: [
       { cmd: "edit.undo", icon: "undo", label: "Undo", key: "Ctrl+Z" },
-      { cmd: "edit.redo", icon: "redo", label: "Redo", key: "Ctrl+Shift+Z" },
+      { cmd: "edit.redo", icon: "redo", label: "Redo", key: "Ctrl+R" },
     ],
   },
   {
@@ -1728,7 +1728,7 @@ class App implements ToolHost {
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
       ["Shift+D / Ctrl+D", "Duplicate solids, or copy selected faces (then move)"],
       ["Del / X", "Delete selected objects"],
-      ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
+      ["Ctrl+Z · Ctrl+R", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
       ["Shift+X", "Toggle x-ray (semi-transparent solids, on by default)"],

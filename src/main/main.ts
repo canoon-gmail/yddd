@@ -70,7 +70,7 @@ function buildMenu(): void {
       label: "&Edit",
       submenu: [
         item("Undo", "edit.undo", "CmdOrCtrl+Z"),
-        item("Redo", "edit.redo", "CmdOrCtrl+Shift+Z"),
+        item("Redo", "edit.redo", "CmdOrCtrl+R"),
         { type: "separator" },
         item("Duplicate", "edit.duplicate", "CmdOrCtrl+D"),
         item("Select All", "edit.selectAll", "CmdOrCtrl+A"),
@@ -85,7 +85,7 @@ function buildMenu(): void {
         item("Right", "view.right"),
         item("Isometric", "view.iso"),
         { type: "separator" },
-        { role: "reload" },
+        { label: "Reload", click: (_m, w) => (w as BrowserWindow | undefined)?.webContents.reload() }, // no shortcut: Ctrl+R is Redo
         { role: "toggleDevTools" },
         { role: "togglefullscreen" },
       ],
