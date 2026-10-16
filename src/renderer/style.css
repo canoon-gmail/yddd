@@ -159,3 +159,17 @@ button.btn:hover { filter: brightness(1.15); }
 #loading.error { color: var(--danger); }
 .spinner { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------------------------------------------------------------- view menu (Shift+V) */
+#view-menu {
+  position: fixed; z-index: 60; min-width: 140px; padding: 4px;
+  background: rgba(38, 40, 44, 0.98); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+#view-menu h5 { margin: 2px 8px 4px; font-size: 11px; color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.05em; }
+#view-menu button {
+  display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 5px 8px; border: 0; border-radius: 4px; background: none; color: var(--text); font: inherit; cursor: pointer; text-align: left;
+}
+#view-menu button:hover { background: var(--panel-2); }
+#view-menu kbd { opacity: 0.6; }

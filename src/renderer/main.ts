@@ -185,6 +185,7 @@ const KEYMAP: Record<string, string> = {
   "=": "bool.union", // unshifted "+" key
   "-": "bool.subtract",
   "Shift+I": "bool.intersect",
+  "Shift+V": "view.menu",
   "?": "help.shortcuts",
 };
 
@@ -369,6 +370,7 @@ class App implements ToolHost {
       case "file.exportStl": void this.fileExport("stl"); return;
 
       case "help.shortcuts": return this.toggleHelp();
+      case "view.menu": return this.showViewMenu();
     }
   }
 
@@ -436,6 +438,7 @@ class App implements ToolHost {
   // ================================================================ viewport input
 
   private bindViewportEvents(): void {
+    window.addEventListener("pointermove", (e) => (this.pointer = { x: e.clientX, y: e.clientY }), true);
     const c = this.viewport.canvas;
     c.addEventListener("pointermove", (e) => {
       if (this.tool) {
@@ -553,6 +556,54 @@ class App implements ToolHost {
         this.run(cmd);
       }
     });
+  }
+
+  // ================================================================ view menu
+
+  private pointer = { x: innerWidth / 2, y: innerHeight / 2 };
+
+  /** Pop-up at the cursor to pick a standard view (click, or press its number key). */
+  private showViewMenu(): void {
+    document.getElementById("view-menu")?.remove();
+    const items: [string, string, string][] = [
+      ["Top", "7", "view.top"],
+      ["Front", "1", "view.front"],
+      ["Right", "3", "view.right"],
+      ["Iso", "5", "view.iso"],
+    ];
+    const menu = document.createElement("div");
+    menu.id = "view-menu";
+    menu.innerHTML = `<h5>View</h5>` + items.map(([label, k, cmd]) => `<button data-cmd="${cmd}"><span>${label}</span><kbd>${k}</kbd></button>`).join("");
+    document.body.appendChild(menu);
+    const r = menu.getBoundingClientRect();
+    menu.style.left = `${Math.min(this.pointer.x, innerWidth - r.width - 4)}px`;
+    menu.style.top = `${Math.min(this.pointer.y, innerHeight - r.height - 4)}px`;
+    const close = () => {
+      menu.remove();
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+    const pick = (cmd: string) => {
+      close();
+      this.run(cmd);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const it = items.find(([, k]) => e.key === k || e.code === `Numpad${k}`);
+      if (it) pick(it[2]);
+      else if (e.key !== "Shift") close();
+    };
+    const onDown = (e: PointerEvent) => {
+      const b = (e.target as HTMLElement).closest?.("#view-menu button") as HTMLElement | null;
+      if (b) {
+        e.preventDefault();
+        e.stopPropagation();
+        pick(b.dataset.cmd!);
+      } else if (!menu.contains(e.target as Node)) close();
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onDown, true);
   }
 
   // ================================================================ tools
@@ -1340,6 +1391,7 @@ class App implements ToolHost {
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
+      ["Shift+V", "View menu (Top / Front / Right / Iso)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
       ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],
     ];

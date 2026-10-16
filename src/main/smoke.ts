@@ -155,6 +155,14 @@ const SCENARIO_2 = String.raw`
   const rb = app.doc.bodies[app.doc.bodies.length - 1].shape.boundingBox.bounds;
   log.push({ label: "front-view rectangle", min: rb[0].map((n) => +n.toFixed(2)), max: rb[1].map((n) => +n.toFixed(2)) });
 
+  // 13) Shift+V view menu → press 3 → right view (camera looks along -X)
+  app.run("mode.body");
+  app.run("view.menu");
+  const menuShown = !!document.getElementById("view-menu");
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", code: "Digit3", bubbles: true }));
+  const dir = vp.camera.getWorldDirection(new V()).toArray().map((n) => +n.toFixed(2));
+  log.push({ label: "view menu", menuShown, closed: !document.getElementById("view-menu"), dir });
+
   app.run("mode.body");
   app.setSelection([]);
   vp.setView("iso"); vp.fit();
