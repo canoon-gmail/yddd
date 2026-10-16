@@ -284,6 +284,128 @@ const SCENARIO_2 = String.raw`
 })()
 `;
 
+const SCENARIO_3 = String.raw`
+(async () => {
+  // Complex workflow on a fresh document: draw → select → push/pull → boolean → fillet → copy/array → undo/redo.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp;
+  const vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const canvas = vp.canvas;
+  const S = (p) => vp.toScreen(new V(p[0], p[1], p[2]));
+  const ev = (type, p) => { const s = S(p); canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ctrlKey: true })); };
+  const toolClicks = (pts) => { for (const p of pts) { ev("pointermove", p); ev("pointerdown", p); } };
+  const pickAt = (p, mode) => { const s = S(p); const k = vp.pick(s.x, s.y, mode); return k && { kind: k.kind, body: k.body, id: k.id }; };
+  const key = (k, code, extra = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true, ...extra }));
+  const dialog = (vals) => { const d = document.getElementById("props-dlg"); if (!d) return false; const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => { if (q[i]) q[i].value = String(v); }); d.requestSubmit(); return true; };
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel input[data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); } };
+  const r = (n) => +n.toFixed(3);
+  const size = (id) => { const b = app.doc.get(id).shape.boundingBox.bounds; return [0, 1, 2].map((k) => r(b[1][k] - b[0][k])); };
+  const lo = (id) => app.doc.get(id).shape.boundingBox.bounds[0].map(r);
+  const last = () => app.doc.bodies[app.doc.bodies.length - 1];
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  app.doc.reset([]);
+  app.run("mode.body");
+  vp.setView("iso"); vp.fit(); await sleep(100);
+
+  // 1) Base plate via Tab dialog: 60 x 40 x 10 with its corner at the origin
+  app.run("tool.box");
+  ev("pointermove", [0, 0, 0]);
+  key("Tab", "Tab");
+  expect("1 tab dialog opens", dialog([60, 40, 10]), null);
+  const base = last().id;
+  expect("1 base size", eq(size(base), [60, 40, 10]), size(base));
+  expect("1 base at origin", eq(lo(base), [0, 0, 0]), lo(base));
+  vp.fit(); await sleep(50);
+
+  // 2) Rectangle face drawn on the plate's top face, then Push/Pull it into a 15 mm tower
+  app.run("tool.rectangle");
+  toolClicks([[20, 10, 10], [40, 30, 10]]);
+  const rect = last();
+  expect("2 rectangle is a face on top", rect.kind === "face" && r(rect.shape.boundingBox.bounds[0][2]) === 10, rect.kind);
+  app.setSelection([{ kind: "body", body: rect.id, id: 0 }]);
+  app.run("op.pushpull"); opValue("d", 15); app.applyOp();
+  const tower = last().id;
+  expect("2 tower extruded", eq(size(tower), [20, 20, 15]) && app.doc.get(tower).kind === "solid", size(tower));
+
+  // 3) Union plate + tower (select both, +)
+  app.setSelection([{ kind: "body", body: base, id: 0 }, { kind: "body", body: tower, id: 0 }]);
+  app.run("bool.union");
+  const part = app.doc.bodies.find((b) => b.kind === "solid").id;
+  expect("3 union → one body", app.doc.bodies.length === 1, app.doc.bodies.length);
+  expect("3 union size", eq(size(part), [60, 40, 25]), size(part));
+  vp.fit(); await sleep(50);
+
+  // 4) Face mode: pick the tower top and push it up 5
+  app.run("mode.face");
+  const topFace = pickAt([30, 20, 25], "face");
+  expect("4 picked tower top", !!topFace, topFace);
+  if (topFace) app.setSelection([topFace]);
+  app.run("op.pushpull"); opValue("d", 5); app.applyOp();
+  expect("4 tower now 30 high", size(part)[2] === 30, size(part));
+
+  // 5) Multi-face push/pull: both X ends of the plate out by 5
+  const P = app.doc.get(part).shape;
+  const ends = P.faces.filter((f) => { const n = f.normalAt(f.center).toTuple(); return Math.abs(Math.abs(n[0]) - 1) < 1e-6 && f.center.x !== undefined && Math.abs(f.center.z - 5) < 1e-3; });
+  app.setSelection(ends.map((f) => ({ kind: "face", body: part, id: f.hashCode })));
+  app.run("op.pushpull"); opValue("d", 5); app.applyOp();
+  expect("5 two end faces selected", ends.length === 2, ends.length);
+  expect("5 plate now 70 long", size(part)[0] === 70 && lo(part)[0] === -5, [size(part), lo(part)]);
+
+  // 6) Cylinder via Tab on the plate top (r 4, down 40) and subtract → through hole
+  app.run("mode.body");
+  app.setSelection([]);
+  app.run("tool.cylinder");
+  ev("pointermove", [5, 20, 10]);
+  key("Tab", "Tab");
+  dialog([4, -40]);
+  const cyl = last().id;
+  expect("6 cylinder made", app.doc.get(cyl).kind === "solid" && size(cyl)[0] === 8, size(cyl));
+  const facesBefore = app.doc.get(part).shape.faces.length;
+  app.setSelection([{ kind: "body", body: part, id: 0 }, { kind: "body", body: cyl, id: 0 }]);
+  app.run("bool.subtract");
+  expect("6 subtract leaves one body", app.doc.bodies.length === 1, app.doc.bodies.length);
+  expect("6 hole adds a face", app.doc.get(part).shape.faces.length > facesBefore, [facesBefore, app.doc.get(part).shape.faces.length]);
+
+  // 7) Fillet a vertical outer edge of the plate (edge-mode pick), r = 2
+  app.run("mode.edge");
+  const edge = pickAt([65, 0, 5], "edge");
+  expect("7 picked edge", !!edge, edge);
+  const fBefore = app.doc.get(part).shape.faces.length;
+  if (edge) app.setSelection([edge]);
+  app.run("op.fillet"); opValue("r", 2); opValue("radius", 2); app.applyOp();
+  expect("7 fillet adds a face", app.doc.get(part).shape.faces.length === fBefore + 1, [fBefore, app.doc.get(part).shape.faces.length]);
+
+  // 8) Copy + move with Tab (ΔY 60) + Enter, then Shift+R → array of 3
+  app.run("mode.body");
+  app.setSelection([{ kind: "body", body: part, id: 0 }]);
+  key("D", "KeyD", { shiftKey: true });
+  key("Tab", "Tab");
+  dialog([0, 60, 0]);
+  key("Enter", "Enter");
+  expect("8 gizmo closed by Enter", !app.xf, !!app.xf);
+  key("R", "KeyR", { shiftKey: true });
+  const ys = app.doc.bodies.map((b) => lo(b.id)[1]);
+  expect("8 array y offsets", eq(ys, [0, 60, 120]), ys);
+
+  // 9) Undo / redo
+  app.run("edit.undo");
+  const afterUndo = app.doc.bodies.length;
+  app.run("edit.redo");
+  expect("9 undo removes the last copy, redo restores", afterUndo === 2 && app.doc.bodies.length === 3, [afterUndo, app.doc.bodies.length]);
+
+  app.setSelection([]);
+  vp.setView("iso"); vp.fit();
+  await sleep(400);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("complex scenario failed: " + JSON.stringify(failed));
+  return [{ label: "complex scenario", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void> {
   await mkdir(outDir, { recursive: true });
   const errors: string[] = [];
@@ -301,6 +423,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("1-fillet-preview.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_2, true));
     await shot("2-final.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_3, true));
+    await shot("3-complex.png");
   } catch (e) {
     errors.push(`scenario failed: ${String(e)}`);
     await shot("error.png").catch(() => {});
