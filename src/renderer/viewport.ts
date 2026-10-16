@@ -210,9 +210,19 @@ export class Viewport {
     this.tc.addEventListener("dragging-changed", (e) => {
       const dragging = (e as unknown as { value: boolean }).value;
       this.controls.enabled = !dragging;
-      if (!dragging) this.finishTransformDrag();
+      if (!dragging) {
+        this.showSnapMarker(null);
+        this.finishTransformDrag();
+      }
     });
-    this.tc.addEventListener("objectChange", () => this.applyPivotToBodies());
+    this.tc.addEventListener("objectChange", () => {
+      this.snapPivot();
+      this.applyPivotToBodies();
+    });
+    // Capture phase on window so the pointer is current before TransformControls handles the move.
+    window.addEventListener("pointermove", (e) => {
+      this.xfPointer = { x: e.clientX, y: e.clientY, ctrl: e.ctrlKey };
+    }, { capture: true });
 
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
     new ResizeObserver(() => this.resize(container)).observe(container);
@@ -719,14 +729,14 @@ export class Viewport {
   }
 
   /** Nearest visible object snap point within SNAP_PX of the cursor (vertex > centre > midpoint). */
-  snapPoint(cx: number, cy: number): { point: THREE.Vector3; kind: SnapKind } | null {
+  snapPoint(cx: number, cy: number, exclude?: Set<number>): { point: THREE.Vector3; kind: SnapKind } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left, py = cy - r.top;
-    const faceHit = this.raycastFaces(cx, cy);
+    const faceHit = exclude?.size ? null : this.raycastFaces(cx, cy);
     let best: { score: number; view: BodyView; i: number } | null = null;
     const p = new THREE.Vector3();
-    for (const v of this.views.values()) {
-      if (!v.group.visible) continue;
+    for (const [id, v] of this.views) {
+      if (!v.group.visible || exclude?.has(id)) continue;
       const s = this.snapsOf(v);
       if (s.projStamp !== this.stamp || !s.proj) {
         const n = s.kinds.length;
@@ -1011,6 +1021,23 @@ export class Viewport {
       v.group.quaternion.identity();
       v.group.updateMatrix();
     }
+  }
+
+  private xfPointer: { x: number; y: number; ctrl: boolean } | null = null;
+
+  /** During a move drag, pull the pivot onto a nearby object snap point (only along the dragged axes). */
+  private snapPivot(): void {
+    if (this.xfMode !== "translate" || !this.tc.dragging || !this.xfPointer) return;
+    const ptr = this.xfPointer;
+    const axis = this.tc.axis ?? "";
+    const sp = ptr.ctrl ? null : this.snapPoint(ptr.x, ptr.y, this.xfSet);
+    if (sp) {
+      const p = this.pivot.position;
+      if (axis.includes("X")) p.x = sp.point.x;
+      if (axis.includes("Y")) p.y = sp.point.y;
+      if (axis.includes("Z")) p.z = sp.point.z;
+    }
+    this.showSnapMarker(sp);
   }
 
   private applyPivotToBodies(): void {
