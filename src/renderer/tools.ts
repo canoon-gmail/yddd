@@ -772,6 +772,8 @@ export class PointMoveTool implements Tool {
   private exclude: Set<number>;
   private pivots: { point: THREE.Vector3; kind: SnapKind }[] = [];
   private press: { x: number; y: number } | null = null;
+  private all: { point: THREE.Vector3; kind: SnapKind }[] = [];
+  private camKey = "";
 
   constructor(
     private host: ToolHost,
@@ -782,10 +784,20 @@ export class PointMoveTool implements Tool {
   }
 
   start(): this {
-    this.pivots = this.host.viewport.pivotCandidates(this.ids);
-    this.host.viewport.showPivotDots(this.pivots.map((p) => p.point));
+    this.all = this.host.viewport.pivotCandidates(this.ids);
+    this.refreshPivots();
     this.updateHint();
     return this;
+  }
+
+  /** Recompute which marks are visible (not behind a body) when the camera moves. */
+  private refreshPivots(): void {
+    const c = this.host.viewport.camera;
+    const key = c.position.toArray().concat(c.quaternion.toArray() as number[]).map((n) => n.toFixed(4)).join();
+    if (key === this.camKey) return;
+    this.camKey = key;
+    this.pivots = this.host.viewport.visiblePoints(this.all);
+    this.host.viewport.showPivotDots(this.pivots.map((p) => p.point));
   }
 
   private updateHint(): void {
@@ -814,6 +826,7 @@ export class PointMoveTool implements Tool {
   move(e: PointerEvent): void {
     const vp = this.host.viewport;
     if (!this.base) {
+      this.refreshPivots();
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
       vp.showSnapMarker(pv ?? null);
       return;

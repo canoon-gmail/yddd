@@ -799,6 +799,22 @@ export class Viewport {
     return out;
   }
 
+  /** Keep only points not hidden behind any body (as seen from the camera). */
+  visiblePoints<T extends { point: THREE.Vector3 }>(pts: T[]): T[] {
+    const meshes = [...this.views.values()].map((v) => v.mesh);
+    const eye = this.camera.position;
+    const tol = Math.max(0.05, eye.distanceTo(this.controls.target) * 2e-3);
+    return pts.filter((p) => {
+      const dir = p.point.clone().sub(eye);
+      const dist = dir.length();
+      this.raycaster.set(eye, dir.normalize());
+      this.raycaster.far = dist - tol;
+      const hit = this.raycaster.intersectObjects(meshes, false).length > 0;
+      this.raycaster.far = Infinity;
+      return !hit;
+    });
+  }
+
   /** Nearest of `pts` to the cursor within `maxPx` screen pixels. */
   nearestOnScreen<T extends { point: THREE.Vector3 }>(cx: number, cy: number, pts: T[], maxPx = 12): T | null {
     let best: T | null = null, bd = maxPx;

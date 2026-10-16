@@ -140,11 +140,11 @@ const SCENARIO_2 = String.raw`
   // 10b) Drag from a pivot dot: press box 3's corner (90,-30,25), drag, release at (100,-30,25)
   app.setSelection([{ kind: "body", body: b3, id: 0 }]);
   app.run("xf.moveFrom");
-  const dots = vp.pivotCandidates([b3]).length;
+  const all = vp.pivotCandidates([b3]); const dots = all.length; const visible = vp.visiblePoints(all).length;
   ev("pointermove", [90, -30, 25]); ev("pointerdown", [90, -30, 25]);
   ev("pointermove", [100, -30, 25]); ev("pointerup", [100, -30, 25]);
   const bd = app.doc.get(b3).shape.boundingBox.bounds;
-  log.push({ label: "drag from pivot", dots, min: bd[0].map((n) => +n.toFixed(3)) });
+  log.push({ label: "drag from pivot", dots, visible, min: bd[0].map((n) => +n.toFixed(3)) });
 
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
