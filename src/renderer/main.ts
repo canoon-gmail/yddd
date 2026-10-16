@@ -932,6 +932,7 @@ class App implements ToolHost {
     this.viewport.canvas.style.cursor = "pointer";
     show(null);
     this.hint(msg());
+    this.toast(`${label} tool: click solids to ${verb} "${target.name}" · Esc to finish`);
   }
 
   // ================================================================ transforms
