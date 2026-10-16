@@ -127,7 +127,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[] }[] = [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
       { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "Shift+G" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
-      { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Ctrl+D" },
+      { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Shift+D / Ctrl+D" },
       { cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" },
     ],
   },
@@ -188,6 +188,7 @@ const KEYMAP: Record<string, string> = {
   "Shift+I": "bool.intersect",
   "Shift+V": "view.menu",
   "Shift+X": "view.xray",
+  "Shift+D": "edit.duplicate",
   "?": "help.shortcuts",
 };
 
