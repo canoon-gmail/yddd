@@ -784,6 +784,53 @@ export class Viewport {
     return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
   }
 
+  /** Pivot candidates of bodies: their snap points plus each body's bounding-box centre. */
+  pivotCandidates(ids: number[]): { point: THREE.Vector3; kind: SnapKind }[] {
+    const out: { point: THREE.Vector3; kind: SnapKind }[] = [];
+    for (const id of ids) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      const s = this.snapsOf(v);
+      for (let i = 0; i < s.kinds.length; i++) out.push({ point: new THREE.Vector3().fromArray(s.pts, i * 3), kind: SNAP_KINDS[s.kinds[i]] });
+      const box = new THREE.Box3().setFromBufferAttribute(v.mesh.geometry.attributes.position as THREE.BufferAttribute);
+      out.push({ point: box.getCenter(new THREE.Vector3()), kind: "center" });
+    }
+    return out;
+  }
+
+  /** Nearest of `pts` to the cursor within `maxPx` screen pixels. */
+  nearestOnScreen<T extends { point: THREE.Vector3 }>(cx: number, cy: number, pts: T[], maxPx = 12): T | null {
+    let best: T | null = null, bd = maxPx;
+    for (const p of pts) {
+      const s = this.toScreen(p.point);
+      const d = Math.hypot(s.x - cx, s.y - cy);
+      if (d <= bd) {
+        bd = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  /** Show fixed-size dots at `pts` (drawn on top), or hide them with null. */
+  showPivotDots(pts: THREE.Vector3[] | null): void {
+    if (this.pivotDots) {
+      this.scene.remove(this.pivotDots);
+      this.pivotDots.geometry.dispose();
+      (this.pivotDots.material as THREE.Material).dispose();
+      this.pivotDots = null;
+    }
+    if (pts?.length) {
+      const g = new THREE.BufferGeometry().setFromPoints(pts);
+      const m = new THREE.PointsMaterial({ color: 0x1e88ff, size: 9, sizeAttenuation: false, depthTest: false, transparent: true });
+      this.pivotDots = new THREE.Points(g, m);
+      this.pivotDots.renderOrder = 29;
+      this.scene.add(this.pivotDots);
+    }
+    this.requestRender();
+  }
+  private pivotDots: THREE.Points | null = null;
+
   /** Show (or hide with null) the object-snap marker. */
   showSnapMarker(snap: { point: THREE.Vector3; kind: SnapKind } | null): void {
     if (!this.snapMarker) {

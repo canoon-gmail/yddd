@@ -137,13 +137,22 @@ const SCENARIO_2 = String.raw`
   const bb = app.doc.get(b3).shape.boundingBox.bounds;
   log.push({ label: "move from point", min: bb[0].map((n) => +n.toFixed(3)) });
 
+  // 10b) Drag from a pivot dot: press box 3's corner (90,-30,25), drag, release at (100,-30,25)
+  app.setSelection([{ kind: "body", body: b3, id: 0 }]);
+  app.run("xf.moveFrom");
+  const dots = vp.pivotCandidates([b3]).length;
+  ev("pointermove", [90, -30, 25]); ev("pointerdown", [90, -30, 25]);
+  ev("pointermove", [100, -30, 25]); ev("pointerup", [100, -30, 25]);
+  const bd = app.doc.get(b3).shape.boundingBox.bounds;
+  log.push({ label: "drag from pivot", dots, min: bd[0].map((n) => +n.toFixed(3)) });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
   app.setSelection([{ kind: "body", body: b2, id: 0 }]);
   app.run("bool.union");
   vp.fit(); await sleep(50);
-  toolClicks([[95, -25, 35]]);
+  toolClicks([[105, -25, 35]]);
   log.push({ label: "pick boolean", removed: before - app.doc.bodies.length, kept: !!app.doc.get(b2), gone: !app.doc.get(b3) });
 
   // 12a) Default startup camera: a rectangle in empty space lies on the floor (z = 0)
@@ -187,7 +196,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
   const errors: string[] = [];
   win.webContents.on("console-message", (details) => {
     const d = details as unknown as { level: string | number; message: string };
-    if ((d.level === "error" || d.level === 3) && !d.message.includes("setPointerCapture")) errors.push(d.message); // synthetic events have no real pointer
+    if ((d.level === "error" || d.level === 3) && !d.message.includes("PointerCapture")) errors.push(d.message); // synthetic events have no real pointer
   });
   const shot = async (name: string) => {
     const img = await win.webContents.capturePage();

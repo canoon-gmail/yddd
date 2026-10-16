@@ -493,6 +493,10 @@ class App implements ToolHost {
     h.addEventListener("pointercancel", release);
     h.addEventListener("wheel", (e) => c.dispatchEvent(new WheelEvent("wheel", e)), { passive: true });
     c.addEventListener("pointerup", (e) => {
+      if (e.button === 0 && this.tool?.up) {
+        this.tool.up(e);
+        return;
+      }
       if (e.button !== 0 || !this.downAt) return;
       const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
       this.downAt = null;

@@ -10,7 +10,7 @@
  * can also type exact dimensions (e.g. "40,25" then Enter for a rectangle).
  */
 import * as THREE from "three";
-import type { Viewport } from "./viewport";
+import type { Viewport, SnapKind } from "./viewport";
 import {
   planarFaceFrame,
   makeBox,
@@ -40,6 +40,8 @@ export interface Tool {
   readonly name: string;
   move(e: PointerEvent): void;
   down(e: PointerEvent): void;
+  /** Optional: left button released in the viewport. */
+  up?(e: PointerEvent): void;
   /** Returns true if the key was consumed. */
   key(e: KeyboardEvent): boolean;
   dispose(): void;
@@ -756,8 +758,9 @@ export class PolygonTool extends DrawTool {
 // ------------------------------------------------------------------ Move by points
 
 /**
- * Base-point move: click a point (snaps to vertices / centres / midpoints, any solid),
- * then a target point (snaps to other solids). The selection moves by target − base.
+ * Base-point move: the selection's pivot candidates (corners, edge midpoints, centres)
+ * are shown as dots. Press on one and drag to the target (or click it, then click the
+ * target). A base can also be clicked anywhere else (Ctrl snaps to any solid). The selection moves by target − base.
  * Off-snap points use a horizontal plane through the base (grid-snapped). Shift locks
  * to the dominant axis; typing "dx,dy,dz" + Enter moves by an exact offset.
  */
@@ -767,6 +770,8 @@ export class PointMoveTool implements Tool {
   private delta: THREE.Vector3 | null = null;
   private typed = "";
   private exclude: Set<number>;
+  private pivots: { point: THREE.Vector3; kind: SnapKind }[] = [];
+  private press: { x: number; y: number } | null = null;
 
   constructor(
     private host: ToolHost,
@@ -777,14 +782,16 @@ export class PointMoveTool implements Tool {
   }
 
   start(): this {
+    this.pivots = this.host.viewport.pivotCandidates(this.ids);
+    this.host.viewport.showPivotDots(this.pivots.map((p) => p.point));
     this.updateHint();
     return this;
   }
 
   private updateHint(): void {
     const base = this.base
-      ? "Move: click the target point (Shift = axis lock, Ctrl = snap) — or type dx,dy,dz + Enter · Esc cancel"
-      : "Move: click the base point to move from (snaps to corners / midpoints / centres)";
+      ? "Move: drag/click to the target point (Shift = axis lock, Ctrl = snap) — or type dx,dy,dz + Enter · Esc cancel"
+      : "Move: press a blue dot (corner / midpoint / centre) and drag it to the target — or click any base point";
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -807,7 +814,9 @@ export class PointMoveTool implements Tool {
   move(e: PointerEvent): void {
     const vp = this.host.viewport;
     if (!this.base) {
-      this.pointAt(e, 0);
+      const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
+      if (pv) vp.showSnapMarker(pv);
+      else this.pointAt(e, 0);
       return;
     }
     const t = this.pointAt(e, this.base.z, this.exclude);
@@ -827,12 +836,24 @@ export class PointMoveTool implements Tool {
 
   down(e: PointerEvent): void {
     if (!this.base) {
-      const p = this.pointAt(e, 0);
+      const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
+      const p = pv ? pv.point : this.pointAt(e, 0);
       if (!p) return;
       this.base = p.clone();
+      this.press = { x: e.clientX, y: e.clientY };
+      this.host.viewport.showPivotDots(null);
       this.updateHint();
       return;
     }
+    this.move(e);
+    if (this.delta) this.finish([this.delta.x, this.delta.y, this.delta.z]);
+  }
+
+  /** Releasing after dragging from the base point drops the selection at the target. */
+  up(e: PointerEvent): void {
+    const p = this.press;
+    this.press = null;
+    if (!p || !this.base || Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5) return; // a click: wait for the target click
     this.move(e);
     if (this.delta) this.finish([this.delta.x, this.delta.y, this.delta.z]);
   }
@@ -862,6 +883,7 @@ export class PointMoveTool implements Tool {
     const vp = this.host.viewport;
     vp.previewOffset(this.ids, null);
     vp.showSnapMarker(null);
+    vp.showPivotDots(null);
     vp.setOverlay([]);
     this.host.hud(null);
   }
