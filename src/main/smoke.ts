@@ -222,6 +222,7 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true }));
   log.push({ label: "enter finishes move", xfOn, xfAfter: !!app.xf });
 
+
   // 10j) Multi-face push/pull: both X-end faces of a box out by 4 -> X size +8
   {
     const b = app.doc.bodies.filter((x) => x.kind === "solid").slice(-1)[0];
@@ -310,6 +311,9 @@ const SCENARIO_3 = String.raw`
   app.doc.reset([]);
   app.run("mode.body");
   vp.setView("iso"); vp.fit(); await sleep(100);
+
+  // 0) Empty scene: world origin is a snap point (cursor a few px away → exactly 0,0,0)
+  { const o = S([0, 0, 0]); const sp = vp.snapPoint(o.x + 3, o.y + 2); expect("0 origin snap", sp && eq(sp.point.toArray(), [0, 0, 0]), sp && sp.point.toArray()); }
 
   // 1) Base plate via Tab dialog: 60 x 40 x 10 with its corner at the origin
   app.run("tool.box");

@@ -779,6 +779,13 @@ export class Viewport {
         best = { score, view: v, i };
       }
     }
+    // World origin (0,0,0) is always a vertex-type snap point.
+    p.set(0, 0, 0).project(this.camera);
+    if (p.z >= -1 && p.z <= 1) {
+      const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
+      const hidden = faceHit && this.camera.position.length() > faceHit.distance * 1.01 + 0.05;
+      if (d <= SNAP_PX && !hidden && (!best || d < best.score)) return { point: new THREE.Vector3(), kind: "vertex" };
+    }
     if (!best) return null;
     const s = best.view.snaps!;
     return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
