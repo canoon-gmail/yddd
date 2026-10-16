@@ -895,6 +895,8 @@ export class PointMoveTool implements Tool {
     private host: ToolHost,
     private ids: number[],
     private onDone: (d: V3) => void,
+    /** Clicking a mark (no drag) hands it over, e.g. to show the move gizmo there. */
+    private onPick?: (p: V3) => void,
   ) {
     this.exclude = new Set(ids);
   }
@@ -919,7 +921,7 @@ export class PointMoveTool implements Tool {
   private updateHint(): void {
     const base = this.base
       ? "Move: drag/click to the target point (Shift = axis lock, Ctrl = snap) — or type dx,dy,dz + Enter · Esc cancel"
-      : "Move: press a blue dot (corner / midpoint / centre) and drag it to the target";
+      : "Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target";
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -981,7 +983,15 @@ export class PointMoveTool implements Tool {
   up(e: PointerEvent): void {
     const p = this.press;
     this.press = null;
-    if (!p || !this.base || Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5) return; // a click: wait for the target click
+    if (!p || !this.base) return;
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5) {
+      // A click on a mark: show the move gizmo there (or, without onPick, wait for the target click).
+      if (this.onPick) {
+        this.host.viewport.previewOffset(this.ids, null);
+        this.onPick([this.base.x, this.base.y, this.base.z]);
+      }
+      return;
+    }
     this.move(e);
     if (this.delta) this.finish([this.delta.x, this.delta.y, this.delta.z]);
   }

@@ -402,6 +402,24 @@ const SCENARIO_3 = String.raw`
   app.run("edit.redo");
   expect("9 undo removes the last copy, redo restores", afterUndo === 2 && app.doc.bodies.length === 3, [afterUndo, app.doc.bodies.length]);
 
+  // 10) Shift+G: click a mark → move gizmo appears at that mark; dragging keeps the pivot on the body
+  {
+    const id = app.doc.bodies[0].id;
+    app.setSelection([{ kind: "body", body: id, id: 0 }]);
+    vp.fit(); await sleep(50);
+    key("G", "KeyG", { shiftKey: true });
+    const vis = vp.visiblePoints(vp.pivotCandidates([id]));
+    const mark = vis.find((c) => c.kind === "vertex") || vis[0];
+    const mp = mark.point.toArray().map(r);
+    ev("pointermove", mp); ev("pointerdown", mp); ev("pointerup", mp);
+    const piv = vp.pivot.position.toArray().map(r);
+    expect("10 gizmo shown at clicked mark", !!app.xf && !app.tool && eq(piv, mp), { xf: !!app.xf, piv, mp });
+    app.applyTransform({ type: "translate", vector: [0, 0, 7] });
+    const piv2 = vp.pivot.position.toArray().map(r);
+    expect("10 pivot follows the move", eq(piv2, [mp[0], mp[1], r(mp[2] + 7)]), piv2);
+    key("Enter", "Enter");
+  }
+
   app.setSelection([]);
   vp.setView("iso"); vp.fit();
   await sleep(400);

@@ -1084,7 +1084,7 @@ export class Viewport {
     return this.tc.object !== undefined;
   }
 
-  startTransform(mode: "translate" | "rotate", ids: number[], snapStep: number, onEnd: (r: TransformResult) => void): void {
+  startTransform(mode: "translate" | "rotate", ids: number[], snapStep: number, onEnd: (r: TransformResult) => void, pivotAt?: V3): void {
     const box = new THREE.Box3();
     for (const id of ids) {
       const v = this.views.get(id);
@@ -1092,7 +1092,8 @@ export class Viewport {
     }
     if (box.isEmpty()) return;
     const c = box.getCenter(new THREE.Vector3());
-    if (snapStep > 0) c.set(Math.round(c.x / snapStep) * snapStep, Math.round(c.y / snapStep) * snapStep, Math.round(c.z / snapStep) * snapStep);
+    if (pivotAt) c.set(...pivotAt);
+    else if (snapStep > 0) c.set(Math.round(c.x / snapStep) * snapStep, Math.round(c.y / snapStep) * snapStep, Math.round(c.z / snapStep) * snapStep);
     this.pivot.position.copy(c);
     this.pivot.quaternion.identity();
     this.pivot.updateMatrixWorld();

@@ -226,7 +226,7 @@ class App implements ToolHost {
     anchor?: { x: number; y: number; v: number };
     dragQueued?: boolean;
   } | null = null;
-  private xf: { mode: "translate" | "rotate"; ids: number[] } | null = null;
+  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3 } | null = null;
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
@@ -1169,7 +1169,8 @@ class App implements ToolHost {
 
   // ================================================================ transforms
 
-  private startTransform(mode: "translate" | "rotate", keep = false): void {
+  private startTransform(mode: "translate" | "rotate", keep = false, pivot?: V3): void {
+    pivot ??= keep ? this.xf?.pivot : undefined;
     if (!keep) {
       this.endTool();
       this.cancelOp();
@@ -1181,8 +1182,8 @@ class App implements ToolHost {
       this.toast(`${mode === "translate" ? "Move" : "Rotate"}: select one or more solids first`, "error");
       return;
     }
-    this.xf = { mode, ids };
-    this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r));
+    this.xf = { mode, ids, pivot };
+    this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r), pivot);
     this.renderToolbarState();
     this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Enter/Esc: done`);
   }
@@ -1204,7 +1205,13 @@ class App implements ToolHost {
           if (b) shapes.set(id, translateShape(b.shape, d));
         }
         this.doc.replaceShapes(shapes, "Move");
-      }).start(),
+      },
+        (p) => {
+          this.endTool();
+          this.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
+          this.startTransform("translate", false, [...p] as V3);
+          this.hint("Move: drag the gizmo from the picked mark (Ctrl snaps) · Tab: exact values · Enter/Esc: done");
+        }).start(),
     );
   }
 
@@ -1215,6 +1222,7 @@ class App implements ToolHost {
     if (!this.xf) return;
     this.lastXf = { r, ids: this.xf.ids.join() };
     this.repeatOps.push(r);
+    this.shiftPivot([r]);
     const shapes = new Map<number, Shape>();
     for (const id of this.xf.ids) {
       const b = this.doc.get(id);
@@ -1224,6 +1232,13 @@ class App implements ToolHost {
     const mode = this.xf.mode;
     this.doc.replaceShapes(shapes, mode === "translate" ? "Move" : "Rotate");
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
+  }
+
+  /** Keep an explicit gizmo pivot (from Shift+G) on the moved bodies. */
+  private shiftPivot(rs: TransformResult[]): void {
+    const p = this.xf?.pivot;
+    if (!p) return;
+    for (const r of rs) if (r.type === "translate") for (let k = 0; k < 3; k++) p[k] += r.vector[k];
   }
 
   /** Move/rotate steps of the current transform session (for Shift+R). */
@@ -1266,6 +1281,7 @@ class App implements ToolHost {
       this.doc.replaceShapes(shapes, "Repeat");
       this.toast("Repeated move/rotate");
     }
+    this.shiftPivot(ops);
     shiftOps();
     if (mode) this.startTransform(mode, true);
   }
@@ -1276,6 +1292,7 @@ class App implements ToolHost {
     const { mode, ids } = this.xf;
     const apply = (fn: (s: Shape) => Shape, label: string, ...rs: TransformResult[]): void => {
       this.repeatOps.push(...rs);
+      this.shiftPivot(rs);
       const shapes = new Map<number, Shape>();
       for (const id of ids) {
         const b = this.doc.get(id);
@@ -1707,7 +1724,7 @@ class App implements ToolHost {
       ["T", "Shell (opens the selected faces)"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
-      ["Shift+G", "Move from point to point (snap)"],
+      ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
       ["Shift+D / Ctrl+D", "Duplicate solids, or copy selected faces (then move)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
