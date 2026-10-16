@@ -243,7 +243,6 @@ export class Viewport {
     new ResizeObserver(() => this.resize(container)).observe(container);
     this.resize(container);
     this.updateClipPlanes();
-    this.setXray(true); // default: semi-transparent solids
   }
 
   // ------------------------------------------------------------ scene setup
