@@ -107,6 +107,8 @@ export class Viewport {
   private ghostRoot = new THREE.Group();
   private overlayRoot = new THREE.Group();
   private hoverEdges: LineSegments2;
+  private selOutline: LineSegments2;
+  private hoverOutline: LineSegments2;
   private selEdges: LineSegments2;
 
   private stamp = 0;
@@ -136,6 +138,8 @@ export class Viewport {
     edge: new LineMaterial({ color: 0x15171a, linewidth: 1.4 }),
     edgeHover: new LineMaterial({ color: 0xffe066, linewidth: 3.5 }),
     edgeSelected: new LineMaterial({ color: 0xff9f1c, linewidth: 3.5 }),
+    outlineHover: new LineMaterial({ color: 0x7cc4ff, linewidth: 3 }),
+    outlineSelected: new LineMaterial({ color: 0x1e88ff, linewidth: 3.5 }),
     previewFill: new THREE.MeshStandardMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
     previewLine: new THREE.LineBasicMaterial({ color: 0x8fd3ff, depthTest: false, transparent: true }),
     cursor: new THREE.MeshBasicMaterial({ color: 0xffe066, depthTest: false, transparent: true }),
@@ -165,7 +169,9 @@ export class Viewport {
 
     this.hoverEdges = this.makeOverlayLines(this.mats.edgeHover);
     this.selEdges = this.makeOverlayLines(this.mats.edgeSelected);
-    this.scene.add(this.selEdges, this.hoverEdges);
+    this.selOutline = this.makeOverlayLines(this.mats.outlineSelected);
+    this.hoverOutline = this.makeOverlayLines(this.mats.outlineHover);
+    this.scene.add(this.selEdges, this.hoverEdges, this.selOutline, this.hoverOutline);
 
     this.controls = new OrbitControls(this.camera, this.canvas);
     // Requirements:
@@ -272,7 +278,7 @@ export class Viewport {
     this.renderer.setSize(this.width, this.height);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
-    for (const m of [this.mats.edge, this.mats.edgeHover, this.mats.edgeSelected]) m.resolution.set(this.width, this.height);
+    for (const m of [this.mats.edge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected]) m.resolution.set(this.width, this.height);
     this.stamp++;
     this.render();
   }
@@ -813,16 +819,17 @@ export class Viewport {
     this.hl.hover = hover;
     this.paintHighlight();
 
-    const edgePoints = (items: SelItem[]) => {
+    const edgePoints = (items: SelItem[], bodies = false) => {
       const out: number[] = [];
       for (const it of items) {
         if (it.kind !== "edge" && it.kind !== "face") {
+          if (!bodies) continue;
           // Whole body: outline all of its edges.
           const v = this.views.get(it.body);
           if (v) for (let k = 0; k < v.edgePos.length; k++) out.push(v.edgePos[k]);
           continue;
         }
-        if (it.kind !== "edge") continue;
+        if (it.kind !== "edge" || bodies) continue;
         const v = this.views.get(it.body);
         const i = v?.edgeIndex.get(it.id);
         if (!v || i === undefined) continue;
@@ -835,6 +842,8 @@ export class Viewport {
     const isSelected = hover && selection.some((s) => sameItem(s, hover));
     this.setOverlayLines(this.selEdges, edgePoints(selection));
     this.setOverlayLines(this.hoverEdges, hover && !isSelected ? edgePoints([hover]) : []);
+    this.setOverlayLines(this.selOutline, edgePoints(selection, true));
+    this.setOverlayLines(this.hoverOutline, hover && !isSelected ? edgePoints([hover], true) : []);
     this.requestRender();
   }
 
