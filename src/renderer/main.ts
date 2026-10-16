@@ -211,6 +211,7 @@ class App implements ToolHost {
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
+  private handleEl = $("op-handle");
   private opPanel = $("op-panel");
 
   constructor() {
@@ -252,7 +253,27 @@ class App implements ToolHost {
     this.positionHud();
   }
 
+  /** Place the op drag handle at origin + dir * value, rotated to the axis' screen direction. */
+  private positionHandle(): void {
+    const drag = this.op?.spec.drag;
+    const input = drag && this.op!.inputs.find((i) => i.dataset.key === drag.key);
+    if (!drag || !input) {
+      this.handleEl.hidden = true;
+      return;
+    }
+    const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
+    const P = O.clone().addScaledVector(D, Number(input.value) || 0);
+    const s = this.viewport.toScreen(P), s1 = this.viewport.toScreen(P.clone().add(D));
+    const r = $("viewport").getBoundingClientRect();
+    const ang = Math.atan2(s1.y - s.y, s1.x - s.x) * (180 / Math.PI) + 90;
+    this.handleEl.style.left = `${s.x - r.left}px`;
+    this.handleEl.style.top = `${s.y - r.top}px`;
+    this.handleEl.style.transform = `rotate(${ang}deg)`;
+    this.handleEl.hidden = false;
+  }
+
   private positionHud(): void {
+    this.positionHandle();
     if (!this.hudAnchor) return;
     const s = this.viewport.toScreen(this.hudAnchor);
     const r = $("viewport").getBoundingClientRect();
@@ -413,7 +434,6 @@ class App implements ToolHost {
       }
       this.updateCoords(e);
       if (this.op) {
-        if (this.op.spec.drag) this.opDrag(e);
         return;
       }
       // Coalesce hover picking to one per frame.
@@ -433,6 +453,31 @@ class App implements ToolHost {
       if (this.viewport.gizmoHot || this.op) return;
       this.downAt = { x: e.clientX, y: e.clientY };
     });
+    // Op drag handle: press on it and drag to change the value.
+    const h = this.handleEl;
+    h.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || !this.op?.spec.drag) return;
+      e.preventDefault();
+      e.stopPropagation();
+      h.setPointerCapture(e.pointerId);
+      h.classList.add("dragging");
+      this.op.anchor = undefined;
+      this.opDrag(e);
+    });
+    h.addEventListener("pointermove", (e) => {
+      if (h.hasPointerCapture(e.pointerId) && this.op?.spec.drag) {
+        this.opDrag(e);
+        this.positionHandle();
+      }
+    });
+    const release = (e: PointerEvent) => {
+      if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId);
+      h.classList.remove("dragging");
+      if (this.op) this.op.anchor = undefined;
+    };
+    h.addEventListener("pointerup", release);
+    h.addEventListener("pointercancel", release);
+    h.addEventListener("wheel", (e) => c.dispatchEvent(new WheelEvent("wheel", e)), { passive: true });
     c.addEventListener("pointerup", (e) => {
       if (e.button !== 0 || !this.downAt) return;
       const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
@@ -579,10 +624,11 @@ class App implements ToolHost {
     }
     this.hover = null;
     this.hint(spec.drag
-      ? `${spec.title}: move the mouse to set the distance (Ctrl = no snap) · click or Enter apply · Esc cancel`
+      ? `${spec.title}: drag the blue handle to set the distance (Ctrl = no snap) · click or Enter apply · Esc cancel`
       : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
     this.renderToolbarState();
     this.previewOp();
+    this.positionHandle();
     const first = inputs.find((i) => i.type === "number") ?? inputs[0];
     first?.focus();
     if (first?.type === "number") first.select();
@@ -629,6 +675,7 @@ class App implements ToolHost {
   }
 
   private scheduleOpPreview(): void {
+    this.positionHandle();
     if (!this.op) return;
     clearTimeout(this.op.timer);
     this.op.timer = window.setTimeout(() => this.previewOp(), 120);
@@ -681,6 +728,7 @@ class App implements ToolHost {
   private closeOpPanel(): void {
     this.op = null;
     this.hud(null);
+    this.handleEl.hidden = true;
     this.opPanel.hidden = true;
     this.opPanel.innerHTML = "";
     this.viewport.clearGhost();
