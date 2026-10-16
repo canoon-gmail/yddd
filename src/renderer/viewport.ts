@@ -59,7 +59,14 @@ interface BodyView {
   chunk: Chunk | null;
   /** Where this body currently lives inside its chunk's merged mesh (null = not batched). */
   slot: { mesh: THREE.Mesh; vOffset: number } | null;
+  /** Lazily built snap points (see snapsOf). */
+  snaps?: { pts: Float32Array; kinds: Uint8Array; proj: Float32Array | null; projStamp: number };
 }
+
+/** Object snap kinds, in priority order. */
+export type SnapKind = "vertex" | "center" | "midpoint";
+const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
+const SNAP_PX = 12;
 
 /**
  * Rendering batch: up to CHUNK_SIZE bodies merged into one solid mesh, one
@@ -630,6 +637,161 @@ export class Viewport {
     const hit = this.raycastFaces(cx, cy);
     return hit ? { body: hit.view.body, faceId: hit.faceId, point: hit.point } : null;
   }
+
+  // ------------------------------------------------------------ object snapping
+
+  /**
+   * Snap points of a body: edge end points (vertices), edge midpoints, centres
+   * of closed (circular) edges and centres of planar faces. Built on first use.
+   */
+  private snapsOf(v: BodyView): NonNullable<BodyView["snaps"]> {
+    if (v.snaps) return v.snaps;
+    const pts: number[] = [];
+    const kinds: number[] = [];
+    const seen = new Set<string>();
+    const add = (x: number, y: number, z: number, kind: number) => {
+      const key = `${kind}:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      pts.push(x, y, z);
+      kinds.push(kind);
+    };
+    const E = v.edgePos;
+    for (let e = 0; e < v.edgeIds.length; e++) {
+      const s = v.edgeStarts[e], n = v.edgeCounts[e];
+      if (n < 2) continue;
+      const a = s * 3, b = (s + n - 1) * 3;
+      const closed = Math.hypot(E[a] - E[b], E[a + 1] - E[b + 1], E[a + 2] - E[b + 2]) < 1e-6;
+      if (closed) {
+        // Circle / closed curve: centre = mean of its points.
+        let cx = 0, cy = 0, cz = 0;
+        for (let k = s; k < s + n; k++) {
+          cx += E[k * 3];
+          cy += E[k * 3 + 1];
+          cz += E[k * 3 + 2];
+        }
+        add(cx / n, cy / n, cz / n, 1);
+        continue;
+      }
+      add(E[a], E[a + 1], E[a + 2], 0);
+      add(E[b], E[b + 1], E[b + 2], 0);
+      // Midpoint by arc length along the segment pairs.
+      let total = 0;
+      for (let k = s; k + 1 < s + n; k += 2) total += Math.hypot(E[k * 3 + 3] - E[k * 3], E[k * 3 + 4] - E[k * 3 + 1], E[k * 3 + 5] - E[k * 3 + 2]);
+      let acc = 0;
+      for (let k = s; k + 1 < s + n; k += 2) {
+        const len = Math.hypot(E[k * 3 + 3] - E[k * 3], E[k * 3 + 4] - E[k * 3 + 1], E[k * 3 + 5] - E[k * 3 + 2]);
+        if (acc + len >= total / 2) {
+          const t = len > 0 ? (total / 2 - acc) / len : 0;
+          add(E[k * 3] + (E[k * 3 + 3] - E[k * 3]) * t, E[k * 3 + 1] + (E[k * 3 + 4] - E[k * 3 + 1]) * t, E[k * 3 + 2] + (E[k * 3 + 5] - E[k * 3 + 2]) * t, 2);
+          break;
+        }
+        acc += len;
+      }
+    }
+    // Planar face centres (area-weighted centroid; skipped for curved faces).
+    const g = v.mesh.geometry;
+    const P = g.attributes.position.array as Float32Array, N = g.attributes.normal.array as Float32Array, T = g.index!.array;
+    const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+    for (let f = 0; f < v.faceIds.length; f++) {
+      const [v0, v1] = [v.faceV[f * 2], v.faceV[f * 2 + 1]];
+      let planar = true;
+      for (let k = v0 + 1; k < v1 && planar; k++) {
+        if (N[k * 3] * N[v0 * 3] + N[k * 3 + 1] * N[v0 * 3 + 1] + N[k * 3 + 2] * N[v0 * 3 + 2] < 0.9999) planar = false;
+      }
+      if (!planar) continue;
+      const start = v.faceStarts[f], end = f + 1 < v.faceStarts.length ? v.faceStarts[f + 1] : T.length;
+      let A = 0, cx = 0, cy = 0, cz = 0;
+      for (let k = start; k + 2 < end + 0 && k + 2 < T.length; k += 3) {
+        va.fromArray(P, T[k] * 3);
+        vb.fromArray(P, T[k + 1] * 3);
+        vc.fromArray(P, T[k + 2] * 3);
+        const area = vb.clone().sub(va).cross(vc.clone().sub(va)).length() / 2;
+        A += area;
+        cx += ((va.x + vb.x + vc.x) / 3) * area;
+        cy += ((va.y + vb.y + vc.y) / 3) * area;
+        cz += ((va.z + vb.z + vc.z) / 3) * area;
+      }
+      if (A > 0) add(cx / A, cy / A, cz / A, 1);
+    }
+    v.snaps = { pts: Float32Array.from(pts), kinds: Uint8Array.from(kinds), proj: null, projStamp: -1 };
+    return v.snaps;
+  }
+
+  /** Nearest visible object snap point within SNAP_PX of the cursor (vertex > centre > midpoint). */
+  snapPoint(cx: number, cy: number): { point: THREE.Vector3; kind: SnapKind } | null {
+    const r = this.canvas.getBoundingClientRect();
+    const px = cx - r.left, py = cy - r.top;
+    const faceHit = this.raycastFaces(cx, cy);
+    let best: { score: number; view: BodyView; i: number } | null = null;
+    const p = new THREE.Vector3();
+    for (const v of this.views.values()) {
+      if (!v.group.visible) continue;
+      const s = this.snapsOf(v);
+      if (s.projStamp !== this.stamp || !s.proj) {
+        const n = s.kinds.length;
+        s.proj = s.proj && s.proj.length === n * 3 ? s.proj : new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+          p.fromArray(s.pts, i * 3).project(this.camera);
+          s.proj[i * 3] = ((p.x + 1) / 2) * this.width;
+          s.proj[i * 3 + 1] = ((1 - p.y) / 2) * this.height;
+          s.proj[i * 3 + 2] = p.z;
+        }
+        s.projStamp = this.stamp;
+      }
+      for (let i = 0; i < s.kinds.length; i++) {
+        const z = s.proj[i * 3 + 2];
+        if (z < -1 || z > 1) continue;
+        const d = Math.hypot(s.proj[i * 3] - px, s.proj[i * 3 + 1] - py);
+        if (d > SNAP_PX) continue;
+        const score = d + s.kinds[i] * 4; // prefer vertices, then centres, then midpoints
+        if (best && score >= best.score) continue;
+        if (faceHit) {
+          // Hidden behind a face? (allow points on the hit face itself)
+          p.fromArray(s.pts, i * 3);
+          if (this.camera.position.distanceTo(p) > faceHit.distance * 1.01 + 0.05) continue;
+        }
+        best = { score, view: v, i };
+      }
+    }
+    if (!best) return null;
+    const s = best.view.snaps!;
+    return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
+  }
+
+  /** Show (or hide with null) the object-snap marker. */
+  showSnapMarker(snap: { point: THREE.Vector3; kind: SnapKind } | null): void {
+    if (!this.snapMarker) {
+      const mk = (geo: THREE.BufferGeometry) => {
+        const l = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x4ade80, depthTest: false, transparent: true }));
+        l.renderOrder = 30;
+        return l;
+      };
+      const sq = [-1, -1, 0, 1, -1, 0, 1, -1, 0, 1, 1, 0, 1, 1, 0, -1, 1, 0, -1, 1, 0, -1, -1, 0];
+      const tri = [-1, -0.8, 0, 1, -0.8, 0, 1, -0.8, 0, 0, 1, 0, 0, 1, 0, -1, -0.8, 0];
+      const circ: number[] = [];
+      for (let i = 0; i < 16; i++) {
+        const a = (i / 16) * Math.PI * 2, b = ((i + 1) / 16) * Math.PI * 2;
+        circ.push(Math.cos(a), Math.sin(a), 0, Math.cos(b), Math.sin(b), 0);
+      }
+      const geo = (arr: number[]) => new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
+      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)) };
+      for (const m of Object.values(this.snapMarker)) {
+        m.visible = false;
+        this.scene.add(m);
+      }
+    }
+    for (const [k, m] of Object.entries(this.snapMarker)) {
+      m.visible = !!snap && snap.kind === k;
+      if (m.visible && snap) {
+        m.position.copy(snap.point);
+        m.quaternion.copy(this.camera.quaternion); // face the camera
+        m.scale.setScalar(this.worldPerPixel(snap.point) * 7);
+      }
+    }
+    this.requestRender();
+  }
+  private snapMarker: Record<SnapKind, THREE.LineSegments> | null = null;
 
   // ------------------------------------------------------------ highlighting
 

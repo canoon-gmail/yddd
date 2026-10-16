@@ -120,6 +120,11 @@ const SCENARIO_2 = String.raw`
   app.applyOp();
   state("shell");
 
+  // 9) Object snap: a cursor 4px off a corner / edge midpoint locks onto it exactly
+  const snapNear = (p) => { const s = S(p); const r = vp.snapPoint(s.x + 4, s.y - 3); return r && { kind: r.kind, p: r.point.toArray().map((n) => +n.toFixed(3)) }; };
+  log.push({ label: "snap corner", snap: snapNear([90, -30, 25]) });
+  log.push({ label: "snap midpoint", snap: snapNear([70, -30, 25]) });
+
   app.run("mode.body");
   app.setSelection([]);
   vp.setView("iso"); vp.fit();

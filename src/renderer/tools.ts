@@ -135,6 +135,17 @@ abstract class DrawTool implements Tool {
 
   /** The planar face frame under the cursor, or the ground plane. */
   protected frameUnder(e: PointerEvent): PlaneFrame {
+    const frame = this.faceFrameUnder(e);
+    const sp = e.ctrlKey ? null : this.host.viewport.snapPoint(e.clientX, e.clientY);
+    // Vertices / edge midpoints sit on several faces at once, so the face under the cursor
+    // is ambiguous: draw on a horizontal plane through the point. Centres keep their face.
+    if (sp && (sp.kind !== "center" || Math.abs(sp.point.clone().sub(frame.origin).dot(frame.z)) > 1e-4)) {
+      return new PlaneFrame(new THREE.Vector3(0, 0, sp.point.z), GROUND.x, GROUND.y, GROUND.z);
+    }
+    return frame;
+  }
+
+  private faceFrameUnder(e: PointerEvent): PlaneFrame {
     const f = this.host.viewport.faceUnder(e.clientX, e.clientY);
     if (!f) return GROUND;
     const key = `${f.body.id}:${f.faceId}`;
@@ -147,6 +158,40 @@ abstract class DrawTool implements Tool {
 
   protected ray(e: PointerEvent): THREE.Ray {
     return this.host.viewport.ray(e.clientX, e.clientY);
+  }
+
+  /** True when the last hit()/height() locked onto an object snap point. */
+  protected objSnapped = false;
+
+  /** Object snap under the cursor (off while Ctrl is held); updates the marker. */
+  private objectSnap(e: PointerEvent): THREE.Vector3 | null {
+    const snap = e.ctrlKey ? null : this.host.viewport.snapPoint(e.clientX, e.clientY);
+    this.host.viewport.showSnapMarker(snap);
+    return snap ? snap.point : null;
+  }
+
+  /** Cursor point on the drawing plane: object snap (projected onto the plane) or grid snap. */
+  protected hit(e: PointerEvent, step: number): { u: number; v: number } | null {
+    const sp = this.objectSnap(e);
+    this.objSnapped = !!sp;
+    if (sp) {
+      const d = sp.sub(this.frame.origin);
+      return { u: d.dot(this.frame.x), v: d.dot(this.frame.y) };
+    }
+    return this.frame.hit(this.ray(e), step);
+  }
+
+  /** Height along the frame normal from `base`: object snap point's height, or the cursor ray's. */
+  protected height(e: PointerEvent, base: THREE.Vector3): number | null {
+    const sp = this.objectSnap(e);
+    this.objSnapped = !!sp;
+    if (sp) return sp.sub(base).dot(this.frame.z);
+    return heightAlong(this.ray(e), base, this.frame.z);
+  }
+
+  /** Grid-round a value unless it came from an object snap. */
+  protected sv(n: number, step: number): number {
+    return this.objSnapped ? n : snapValue(n, step);
   }
 
   protected cursor(p: THREE.Vector3): THREE.Object3D {
@@ -197,6 +242,7 @@ abstract class DrawTool implements Tool {
   abstract down(e: PointerEvent): void;
 
   dispose(): void {
+    this.host.viewport.showSnapMarker(null);
     this.host.viewport.setOverlay([]);
     this.host.hud(null);
   }
@@ -233,21 +279,21 @@ export class BoxTool extends DrawTool {
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
       this.frame = this.frameUnder(e);
-      const p = this.frame.hit(this.ray(e), step);
+      const p = this.hit(e, step);
       if (!p) return;
       const w = this.frame.point(p.u, p.v);
       this.host.viewport.setOverlay([this.cursor(w)]);
       this.host.hud(null);
     } else if (this.stage === 1) {
-      const p = this.frame.hit(this.ray(e), step);
+      const p = this.hit(e, step);
       if (!p) return;
       this.u2 = p.u;
       this.v2 = p.v;
       this.drawRect();
     } else {
-      const h = heightAlong(this.ray(e), this.rectCenter(), this.frame.z);
+      const h = this.height(e, this.rectCenter());
       if (h === null) return;
-      this.h = snapValue(h, step);
+      this.h = this.sv(h, step);
       this.drawBox();
     }
   }
@@ -255,7 +301,7 @@ export class BoxTool extends DrawTool {
   down(e: PointerEvent): void {
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
-      const p = this.frame.hit(this.ray(e), step);
+      const p = this.hit(e, step);
       if (!p) return;
       this.u1 = this.u2 = p.u;
       this.v1 = this.v2 = p.v;
@@ -365,24 +411,24 @@ export class CylinderTool extends DrawTool {
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
       this.frame = this.frameUnder(e);
-      const p = this.frame.hit(this.ray(e), step);
+      const p = this.hit(e, step);
       if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
     } else if (this.stage === 1) {
-      const p = this.frame.hit(this.ray(e), 0);
+      const p = this.hit(e, 0);
       if (!p) return;
-      this.r = snapValue(Math.hypot(p.u - this.cu, p.v - this.cv), step);
+      this.r = this.sv(Math.hypot(p.u - this.cu, p.v - this.cv), step);
       this.drawCircle();
     } else {
-      const h = heightAlong(this.ray(e), this.center(), this.frame.z);
+      const h = this.height(e, this.center());
       if (h === null) return;
-      this.h = snapValue(h, step);
+      this.h = this.sv(h, step);
       this.drawCylinder();
     }
   }
 
   down(e: PointerEvent): void {
     if (this.stage === 0) {
-      const p = this.frame.hit(this.ray(e), this.host.snapStep(e));
+      const p = this.hit(e, this.host.snapStep(e));
       if (!p) return;
       this.cu = p.u;
       this.cv = p.v;
@@ -477,19 +523,19 @@ export class SphereTool extends DrawTool {
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
       this.frame = this.frameUnder(e);
-      const p = this.frame.hit(this.ray(e), step);
+      const p = this.hit(e, step);
       if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
     } else {
-      const p = this.frame.hit(this.ray(e), 0);
+      const p = this.hit(e, 0);
       if (!p) return;
-      this.r = snapValue(Math.hypot(p.u - this.cu, p.v - this.cv), step);
+      this.r = this.sv(Math.hypot(p.u - this.cu, p.v - this.cv), step);
       this.draw();
     }
   }
 
   down(e: PointerEvent): void {
     if (this.stage === 0) {
-      const p = this.frame.hit(this.ray(e), this.host.snapStep(e));
+      const p = this.hit(e, this.host.snapStep(e));
       if (!p) return;
       this.cu = p.u;
       this.cv = p.v;
@@ -557,29 +603,29 @@ export class PolygonTool extends DrawTool {
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
       this.frame = this.frameUnder(e);
-      const p = this.frame.hit(this.ray(e), step);
+      const p = this.hit(e, step);
       if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
     } else if (this.stage === 1) {
-      const p = this.frame.hit(this.ray(e), 0);
+      const p = this.hit(e, 0);
       if (!p) return;
       const du = p.u - this.cu;
       const dv = p.v - this.cv;
-      this.r = snapValue(Math.hypot(du, dv), step);
+      this.r = this.sv(Math.hypot(du, dv), step);
       let a = Math.atan2(dv, du);
       if (step > 0) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12); // 15° steps
       this.a = a;
       this.drawOutline();
     } else {
-      const h = heightAlong(this.ray(e), this.center(), this.frame.z);
+      const h = this.height(e, this.center());
       if (h === null) return;
-      this.h = snapValue(h, step);
+      this.h = this.sv(h, step);
       this.drawPrism();
     }
   }
 
   down(e: PointerEvent): void {
     if (this.stage === 0) {
-      const p = this.frame.hit(this.ray(e), this.host.snapStep(e));
+      const p = this.hit(e, this.host.snapStep(e));
       if (!p) return;
       this.cu = p.u;
       this.cv = p.v;
