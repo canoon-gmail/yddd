@@ -137,6 +137,15 @@ const SCENARIO_2 = String.raw`
   const bb = app.doc.get(b3).shape.boundingBox.bounds;
   log.push({ label: "move from point", min: bb[0].map((n) => +n.toFixed(3)) });
 
+  // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
+  const before = app.doc.bodies.length;
+  const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;
+  app.setSelection([{ kind: "body", body: b2, id: 0 }]);
+  app.run("bool.union");
+  vp.fit(); await sleep(50);
+  toolClicks([[95, -25, 35]]);
+  log.push({ label: "pick boolean", removed: before - app.doc.bodies.length, kept: !!app.doc.get(b2), gone: !app.doc.get(b3) });
+
   app.run("mode.body");
   app.setSelection([]);
   vp.setView("iso"); vp.fit();

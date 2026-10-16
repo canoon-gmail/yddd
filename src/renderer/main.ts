@@ -851,8 +851,10 @@ class App implements ToolHost {
   private boolean(op: BooleanOp): void {
     this.endInteractions();
     const ids = this.selectedBodyIds();
+    const label = { union: "Union", subtract: "Subtract", intersect: "Intersect" }[op];
+    if (ids.length === 1) return this.pickBooleanTool(op, ids[0], label);
     if (ids.length < 2) {
-      this.toast("Boolean: select 2+ solids. The first one selected is the target.", "error");
+      this.toast("Boolean: select a solid first (then press the key and click the other solid).", "error");
       return;
     }
     const flat = this.faceBodiesIn(ids);
@@ -866,11 +868,63 @@ class App implements ToolHost {
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
     const removed = new Set(toolIds);
     const next = this.doc.bodies.filter((b) => !removed.has(b.id)).map((b) => (b.id === targetId ? { ...b, shape: result } : b));
-    const label = { union: "Union", subtract: "Subtract", intersect: "Intersect" }[op];
     this.doc.commit(next, label);
     this.setMode("body");
     this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
     this.toast(`${label}: ${target.name}`);
+  }
+
+  /** A + key + B: with one solid selected, wait for a click on the other solid, then apply. */
+  private pickBooleanTool(op: BooleanOp, targetId: number, label: string): void {
+    const target = this.doc.get(targetId);
+    if (!target) return;
+    const msg = `${label}: click the solid to ${op === "subtract" ? "subtract from" : op === "union" ? "join with" : "intersect with"} "${target.name}" · Shift+click to add more, then click/Enter · Esc cancel`;
+    const picked: number[] = [];
+    const pickAt = (e: PointerEvent) => {
+      const p = this.viewport.pick(e.clientX, e.clientY, "body");
+      return p && p.body !== targetId ? p.body : null;
+    };
+    const show = (hover: number | null) =>
+      this.viewport.setHighlight(
+        [targetId, ...picked].map((id) => ({ kind: "body" as const, body: id, id: 0 })),
+        hover === null ? null : { kind: "body", body: hover, id: 0 },
+      );
+    const apply = () => {
+      this.endTool();
+      this.selection = [targetId, ...picked].map((id) => ({ kind: "body" as const, body: id, id: 0 }));
+      try {
+        this.boolean(op);
+      } catch (err) {
+        this.fail(err);
+      }
+    };
+    const tool: Tool = {
+      name: label,
+      move: (e) => show(pickAt(e)),
+      down: (e) => {
+        const id = pickAt(e);
+        if (id === null) {
+          if (picked.length) apply();
+          return;
+        }
+        if (!picked.includes(id)) picked.push(id);
+        if (e.shiftKey) show(null);
+        else apply();
+      },
+      key: (e) => {
+        if (e.key === "Enter" && picked.length) {
+          apply();
+          return true;
+        }
+        return false;
+      },
+      dispose: () => this.hint(""),
+    };
+    this.setMode("body");
+    this.startTool(tool);
+    this.viewport.canvas.style.cursor = "pointer";
+    show(null);
+    this.hint(msg);
   }
 
   // ================================================================ transforms
