@@ -206,7 +206,7 @@ const KEYMAP: Record<string, string> = {
 };
 
 const MODE_HINTS: Record<SelMode, string> = {
-  body: "Solid mode: click to select solids, Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
+  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
   face: "Face mode: click faces (P push/pull, T shell).  Shift+click to add",
   edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add",
 };
@@ -491,6 +491,13 @@ class App implements ToolHost {
     if (e.shiftKey || e.ctrlKey) {
       const exists = this.selection.some((s) => sameItem(s, item));
       this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
+    } else if (this.mode === "body" && this.selection.length === 1 && sameItem(this.selection[0], item)) {
+      // Second click on the selected solid: drill down to the edge (if close to one) or face under the cursor.
+      const sub = this.viewport.pick(e.clientX, e.clientY, "edge") ?? this.viewport.pick(e.clientX, e.clientY, "face");
+      if (sub && sub.body === item.body && sub.kind !== "body") {
+        this.setMode(sub.kind === "edge" ? "edge" : "face");
+        this.setSelection([{ kind: sub.kind, body: sub.body, id: sub.id }]);
+      }
     } else {
       this.setSelection([item]);
     }
@@ -1803,6 +1810,7 @@ class App implements ToolHost {
       ["L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
+      ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or on an edge: add a guide line (like L)"],
       ["Del / X", "Delete selected objects"],
