@@ -205,8 +205,10 @@ async function createWindow(): Promise<void> {
   });
   win.on("close", (e) => void onWindowClose(e));
   win.on("closed", () => (win = null));
-  if (DEV_URL) await win.loadURL(DEV_URL);
-  else await win.loadURL("app://y3d/index.html");
+  // Y3D_STRESS=N: renderer populates the scene with N test solids on startup.
+  const q = process.env.Y3D_STRESS ? `?stress=${encodeURIComponent(process.env.Y3D_STRESS)}` : "";
+  if (DEV_URL) await win.loadURL(DEV_URL + q);
+  else await win.loadURL("app://y3d/index.html" + q);
   if (process.env.Y3D_SMOKE) {
     const { runSmoke } = await import("./smoke.js");
     await runSmoke(win, process.env.Y3D_SMOKE);

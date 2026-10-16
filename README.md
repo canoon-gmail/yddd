@@ -12,6 +12,7 @@ npm install
 npm start        # type-check, build and launch
 npm run dev      # Vite dev server with hot reload + Electron
 npm run smoke    # automated end-to-end test, screenshots in /tmp/y3d-smoke
+npm run start:stress          # launch with 2000 test solids (N=5000 npm run start:stress for more)
 ```
 
 ## Features (v0.1)

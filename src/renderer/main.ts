@@ -25,6 +25,9 @@ import {
   extrudeFace,
   seamEdgeIds,
   kindOf,
+  makeBox,
+  makeCylinder,
+  type Frame,
   type BodyKind,
   type BooleanOp,
   type Shape,
@@ -1197,6 +1200,26 @@ class App implements ToolHost {
     this.toast(`Saved ${path.split(/[\\/]/).pop()}`);
   }
 
+  /** Stress-test scene: `n` separate solids (alternating boxes / cylinders) on a square grid. */
+  loadStressScene(n: number): void {
+    const t0 = performance.now();
+    const ground: Frame = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const cols = Math.ceil(Math.sqrt(n));
+    const pitch = 20;
+    const bodies: { name: string; kind: BodyKind; shape: Shape }[] = [];
+    for (let i = 0; i < n; i++) {
+      const x = (i % cols) * pitch, y = Math.floor(i / cols) * pitch;
+      const h = 5 + ((i * 7) % 11);
+      const cyl = i % 2 === 1;
+      const shape = cyl ? makeCylinder(ground, [x, y, 0], 5, h) : makeBox(ground, [x, y, 0], 10, 10, h);
+      bodies.push({ name: `${cyl ? "Cylinder" : "Box"} ${i + 1}`, kind: "solid", shape });
+    }
+    this.doc.reset(bodies);
+    this.viewport.setView("iso");
+    this.viewport.fit();
+    this.toast(`Stress scene: ${n} solids in ${Math.round(performance.now() - t0)} ms`);
+  }
+
   private async fileImportStep(): Promise<void> {
     const file = await window.y3d.openFile({ title: "Import STEP", filters: [{ name: "STEP", extensions: ["step", "stp"] }], binary: true });
     if (!file) return;
@@ -1249,6 +1272,8 @@ async function boot(): Promise<void> {
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
     loading.remove();
+    const stress = Number(new URLSearchParams(location.search).get("stress"));
+    if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
   } catch (e) {
     loading.classList.add("error");
     loading.innerHTML = `<div>Failed to start the geometry kernel:</div><div>${escapeHtml(errorMessage(e))}</div>`;
