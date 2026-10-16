@@ -187,7 +187,7 @@ class App implements ToolHost {
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 2, chamfer: 1, pushpull: 10, pushpullNew: false, shell: 1 };
+  private defaults = { fillet: 2, chamfer: 1, pushpullNew: false, shell: 1 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -666,7 +666,7 @@ class App implements ToolHost {
       this.startOp({
         title: "Push / Pull → new solid",
         label: "Extrude face",
-        fields: [{ key: "d", label: "Distance (mm)", value: this.defaults.pushpull, step: 1 }],
+        fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
         compute: ({ d }) => {
           const solid = extrudeFace(body.shape, faceId, d);
           return {
@@ -678,7 +678,7 @@ class App implements ToolHost {
             },
           };
         },
-        remember: ({ d }) => (this.defaults.pushpull = d),
+        remember: () => {},
       });
       return;
     }
@@ -688,7 +688,7 @@ class App implements ToolHost {
       title: "Push / Pull",
       label: "Push/Pull",
       fields: [
-        { key: "d", label: "Distance (mm)", value: this.defaults.pushpull, step: 1 },
+        { key: "d", label: "Distance (mm)", value: 1, step: 1 },
         { key: "newBody", label: "New solid", value: this.defaults.pushpullNew ? 1 : 0, type: "checkbox" },
       ],
       compute: ({ d, newBody }) => {
@@ -706,7 +706,6 @@ class App implements ToolHost {
         return this.replaceOutcome(new Map([[bodyId, pushPull(this.solidOf(bodyId, "Push/Pull"), faceId, d)]]), "Push/Pull");
       },
       remember: ({ d, newBody }) => {
-        this.defaults.pushpull = d;
         this.defaults.pushpullNew = !!newBody;
       },
     });
