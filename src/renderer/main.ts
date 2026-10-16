@@ -878,7 +878,11 @@ class App implements ToolHost {
   private pickBooleanTool(op: BooleanOp, targetId: number, label: string): void {
     const target = this.doc.get(targetId);
     if (!target) return;
-    const msg = `${label}: click the solid to ${op === "subtract" ? "subtract from" : op === "union" ? "join with" : "intersect with"} "${target.name}" · Shift+click to add more, then click/Enter · Esc cancel`;
+    const verb = op === "subtract" ? "subtract from" : op === "union" ? "join with" : "intersect with";
+    const msg = () =>
+      `${label}: click solids to ${verb} "${target.name}"` +
+      (picked.length ? ` (${picked.length} picked) · Enter / Space or click empty space to apply` : "") +
+      " · click again to unpick · Esc cancel";
     const picked: number[] = [];
     const pickAt = (e: PointerEvent) => {
       const p = this.viewport.pick(e.clientX, e.clientY, "body");
@@ -907,12 +911,14 @@ class App implements ToolHost {
           if (picked.length) apply();
           return;
         }
-        if (!picked.includes(id)) picked.push(id);
-        if (e.shiftKey) show(null);
-        else apply();
+        const i = picked.indexOf(id);
+        if (i >= 0) picked.splice(i, 1);
+        else picked.push(id);
+        show(null);
+        this.hint(msg());
       },
       key: (e) => {
-        if (e.key === "Enter" && picked.length) {
+        if ((e.key === "Enter" || e.key === " ") && picked.length) {
           apply();
           return true;
         }
@@ -924,7 +930,7 @@ class App implements ToolHost {
     this.startTool(tool);
     this.viewport.canvas.style.cursor = "pointer";
     show(null);
-    this.hint(msg);
+    this.hint(msg());
   }
 
   // ================================================================ transforms

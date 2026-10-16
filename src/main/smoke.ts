@@ -144,6 +144,7 @@ const SCENARIO_2 = String.raw`
   app.run("bool.union");
   vp.fit(); await sleep(50);
   toolClicks([[95, -25, 35]]);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
   log.push({ label: "pick boolean", removed: before - app.doc.bodies.length, kept: !!app.doc.get(b2), gone: !app.doc.get(b3) });
 
   app.run("mode.body");
