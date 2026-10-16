@@ -44,6 +44,8 @@ export interface Tool {
   up?(e: PointerEvent): void;
   /** Returns true if the key was consumed. */
   key(e: KeyboardEvent): boolean;
+  /** Optional: mouse wheel in the viewport. Return true to consume it (no zoom). */
+  wheel?(e: WheelEvent): boolean;
   dispose(): void;
 }
 
@@ -611,7 +613,7 @@ export class PolygonTool extends DrawTool {
   private h = 0;
 
   protected get hints(): string[] {
-    const n = `${this.sides} sides — [ / ] to change`;
+    const n = `${this.sides} sides — Shift+wheel or [ / ] to change`;
     return [
       `Polygon (${n}): click the center (on the grid or on a planar face)`,
       `Polygon (${n}): click to set radius & rotation (15° snap) — or type radius[,sides] + Enter`,
@@ -669,16 +671,29 @@ export class PolygonTool extends DrawTool {
     this.updateHint();
   }
 
+  private changeSides(d: number): void {
+    this.sides = Math.min(64, Math.max(3, this.sides + d));
+    PolygonTool.lastSides = this.sides;
+    this.updateHint();
+    if (this.stage === 1) this.drawOutline();
+    else if (this.stage === 2) this.drawPrism();
+  }
+
   key(e: KeyboardEvent): boolean {
     if (e.key === "[" || e.key === "]") {
-      this.sides = Math.min(64, Math.max(3, this.sides + (e.key === "]" ? 1 : -1)));
-      PolygonTool.lastSides = this.sides;
-      this.updateHint();
-      if (this.stage === 1) this.drawOutline();
-      else if (this.stage === 2) this.drawPrism();
+      this.changeSides(e.key === "]" ? 1 : -1);
       return true;
     }
     return super.key(e);
+  }
+
+  /** Shift+wheel: wheel up adds a side, wheel down removes one. */
+  wheel(e: WheelEvent): boolean {
+    if (!e.shiftKey) return false;
+    const d = e.deltaY || e.deltaX; // some platforms map Shift+wheel to horizontal
+    if (!d) return true;
+    this.changeSides(d < 0 ? 1 : -1);
+    return true;
   }
 
   protected applyTyped(values: number[]): void {

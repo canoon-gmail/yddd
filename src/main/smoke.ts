@@ -154,6 +154,19 @@ const SCENARIO_2 = String.raw`
   const last = app.doc.bodies[app.doc.bodies.length - 1];
   log.push({ label: "duplicate face", added: app.doc.bodies.length - nBefore, kind: last.kind });
 
+  // 10d) Shift+wheel changes polygon sides (and must not zoom)
+  app.run("tool.polygon");
+  const s0 = app.tool.sides;
+  const cv = document.querySelector("#viewport canvas");
+  const camD0 = vp.camera.position.length();
+  cv.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, shiftKey: true, bubbles: true, cancelable: true }));
+  cv.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, shiftKey: true, bubbles: true, cancelable: true }));
+  const s1 = app.tool.sides;
+  const zoomed = Math.abs(vp.camera.position.length() - camD0) > 1e-6;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  app.endTool && app.endTool();
+  log.push({ label: "polygon shift+wheel", s0, s1, zoomed });
+
   // 11) A + key + B: select box 2 only, press union, click box 3 → one body fewer, box 2 kept
   const before = app.doc.bodies.length;
   const b2 = app.doc.bodies[app.doc.bodies.length - 2].id;

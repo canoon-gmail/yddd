@@ -522,6 +522,13 @@ class App implements ToolHost {
       }
     });
     c.addEventListener("wheel", () => requestAnimationFrame(() => this.positionHud()), { passive: true });
+    // Tools may consume the wheel (e.g. Shift+wheel = polygon sides) before the camera zooms.
+    c.parentElement!.addEventListener("wheel", (e) => {
+      if (e.target === c && this.tool?.wheel?.(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, { capture: true, passive: false });
     c.addEventListener("pointermove", () => this.positionHud());
   }
 
@@ -1470,7 +1477,7 @@ class App implements ToolHost {
       ["Click / Shift+click", "Select / add to selection"],
       ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
-      ["[ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
+      ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
