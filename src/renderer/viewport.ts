@@ -975,6 +975,13 @@ export class Viewport {
     this.controls.update();
   }
 
+  /** Look from the opposite side (top ↔ bottom, front ↔ back, right ↔ left...). */
+  flipView(): void {
+    const off = this.camera.position.clone().sub(this.controls.target);
+    this.camera.position.copy(this.controls.target).sub(off);
+    this.controls.update();
+  }
+
   // ------------------------------------------------------------ transform gizmo
 
   get gizmoHot(): boolean {

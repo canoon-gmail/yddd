@@ -162,6 +162,9 @@ const SCENARIO_2 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "3", code: "Digit3", bubbles: true }));
   const dir = vp.camera.getWorldDirection(new V()).toArray().map((n) => +n.toFixed(2));
   log.push({ label: "view menu", menuShown, closed: !document.getElementById("view-menu"), dir });
+  app.run("view.menu");
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "v", code: "KeyV", bubbles: true }));
+  log.push({ label: "view flip", dir: vp.camera.getWorldDirection(new V()).toArray().map((n) => +n.toFixed(2)) });
 
   app.run("mode.body");
   app.setSelection([]);

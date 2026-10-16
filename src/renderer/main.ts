@@ -355,6 +355,7 @@ class App implements ToolHost {
       case "view.front": return this.viewport.setView("front");
       case "view.right": return this.viewport.setView("right");
       case "view.iso": return this.viewport.setView("iso");
+      case "view.flip": return this.viewport.flipView();
 
       case "file.new": void this.fileNew(); return;
       case "file.open": void this.fileOpen(); return;
@@ -570,6 +571,7 @@ class App implements ToolHost {
       ["Front", "1", "view.front"],
       ["Right", "3", "view.right"],
       ["Iso", "5", "view.iso"],
+      ["Opposite side", "V", "view.flip"],
     ];
     const menu = document.createElement("div");
     menu.id = "view-menu";
@@ -590,7 +592,7 @@ class App implements ToolHost {
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      const it = items.find(([, k]) => e.key === k || e.code === `Numpad${k}`);
+      const it = items.find(([, k]) => e.key.toUpperCase() === k || e.code === `Numpad${k}`);
       if (it) pick(it[2]);
       else if (e.key !== "Shift") close();
     };
@@ -1391,7 +1393,7 @@ class App implements ToolHost {
       ["Ctrl+Z · Ctrl+Shift+Z", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
-      ["Shift+V", "View menu (Top / Front / Right / Iso)"],
+      ["Shift+V", "View menu (Top / Front / Right / Iso · V = opposite side, e.g. bottom)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
       ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],
     ];
