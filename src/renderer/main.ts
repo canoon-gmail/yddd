@@ -245,7 +245,7 @@ class App implements ToolHost {
   // ================================================================ ToolHost
 
   snapStep(e: { ctrlKey: boolean } | null): number {
-    return e?.ctrlKey ? 0 : this.snap;
+    return e?.ctrlKey ? this.snap : 0; // snap only while Ctrl is held
   }
 
   hint(text: string): void {
@@ -687,7 +687,7 @@ class App implements ToolHost {
     }
     this.hover = null;
     this.hint(spec.drag
-      ? `${spec.title}: drag the blue handle to set the distance (Ctrl = no snap) · click or Enter apply · Esc cancel`
+      ? `${spec.title}: drag the blue handle to set the distance (hold Ctrl to snap) · click or Enter apply · Esc cancel`
       : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
     this.renderToolbarState();
     this.previewOp();
@@ -1381,8 +1381,7 @@ class App implements ToolHost {
       ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
       ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
       ["[ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
-      ["Ctrl (while drawing)", "Temporarily disable grid snapping"],
-      ["Ctrl + gizmo drag", "Snap move / rotate (grid, 15°, object points)"],
+      ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”)"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],

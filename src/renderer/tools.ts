@@ -6,7 +6,7 @@
  *
  * Every tool draws on the ground plane, or on the planar face under the
  * cursor at the first click, so you can build directly on existing solids.
- * Points snap to the grid (hold Ctrl to disable). While a tool is active you
+ * Points snap to the grid / object points only while Ctrl is held. While a tool is active you
  * can also type exact dimensions (e.g. "40,25" then Enter for a rectangle).
  */
 import * as THREE from "three";
@@ -28,7 +28,7 @@ import {
 
 export interface ToolHost {
   viewport: Viewport;
-  /** Grid step for snapping, 0 when snapping is off (or Ctrl is held). */
+  /** Grid step for snapping; 0 unless Ctrl is held (or when snapping is off). */
   snapStep(e: { ctrlKey: boolean } | null): number;
   hint(text: string): void;
   hud(text: string | null, at?: THREE.Vector3): void;
@@ -156,7 +156,7 @@ abstract class DrawTool implements Tool {
   /** The planar face frame under the cursor, or the ground plane. */
   protected frameUnder(e: PointerEvent): PlaneFrame {
     const frame = this.faceFrameUnder(e);
-    const sp = e.ctrlKey ? null : this.host.viewport.snapPoint(e.clientX, e.clientY);
+    const sp = e.ctrlKey ? this.host.viewport.snapPoint(e.clientX, e.clientY) : null;
     // Vertices / edge midpoints sit on several faces at once, so the face under the cursor
     // is ambiguous: draw on the view's work plane through the point. Centres keep their face.
     if (sp && (sp.kind !== "center" || Math.abs(sp.point.clone().sub(frame.origin).dot(frame.z)) > 1e-4)) {
@@ -183,9 +183,9 @@ abstract class DrawTool implements Tool {
   /** True when the last hit()/height() locked onto an object snap point. */
   protected objSnapped = false;
 
-  /** Object snap under the cursor (off while Ctrl is held); updates the marker. */
+  /** Object snap under the cursor (only while Ctrl is held); updates the marker. */
   private objectSnap(e: PointerEvent): THREE.Vector3 | null {
-    const snap = e.ctrlKey ? null : this.host.viewport.snapPoint(e.clientX, e.clientY);
+    const snap = e.ctrlKey ? this.host.viewport.snapPoint(e.clientX, e.clientY) : null;
     this.host.viewport.showSnapMarker(snap);
     return snap ? snap.point : null;
   }
@@ -783,14 +783,14 @@ export class PointMoveTool implements Tool {
 
   private updateHint(): void {
     const base = this.base
-      ? "Move: click the target point (Shift = axis lock, Ctrl = no snap) — or type dx,dy,dz + Enter · Esc cancel"
+      ? "Move: click the target point (Shift = axis lock, Ctrl = snap) — or type dx,dy,dz + Enter · Esc cancel"
       : "Move: click the base point to move from (snaps to corners / midpoints / centres)";
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
   private pointAt(e: PointerEvent, planeZ: number, exclude?: Set<number>): THREE.Vector3 | null {
     const vp = this.host.viewport;
-    const sp = e.ctrlKey ? null : vp.snapPoint(e.clientX, e.clientY, exclude);
+    const sp = e.ctrlKey ? vp.snapPoint(e.clientX, e.clientY, exclude) : null;
     vp.showSnapMarker(sp);
     if (sp) return sp.point;
     const p = vp.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ), new THREE.Vector3());
