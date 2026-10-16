@@ -791,7 +791,7 @@ export class PointMoveTool implements Tool {
   private updateHint(): void {
     const base = this.base
       ? "Move: drag/click to the target point (Shift = axis lock, Ctrl = snap) — or type dx,dy,dz + Enter · Esc cancel"
-      : "Move: press a blue dot (corner / midpoint / centre) and drag it to the target — or click any base point";
+      : "Move: press a blue dot (corner / midpoint / centre) and drag it to the target";
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -815,8 +815,7 @@ export class PointMoveTool implements Tool {
     const vp = this.host.viewport;
     if (!this.base) {
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
-      if (pv) vp.showSnapMarker(pv);
-      else this.pointAt(e, 0);
+      vp.showSnapMarker(pv ?? null);
       return;
     }
     const t = this.pointAt(e, this.base.z, this.exclude);
@@ -837,8 +836,8 @@ export class PointMoveTool implements Tool {
   down(e: PointerEvent): void {
     if (!this.base) {
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
-      const p = pv ? pv.point : this.pointAt(e, 0);
-      if (!p) return;
+      if (!pv) { this.host.hint("Move: start from a blue mark (corner / edge midpoint / centre) · Esc cancel"); return; }
+      const p = pv.point;
       this.base = p.clone();
       this.press = { x: e.clientX, y: e.clientY };
       this.host.viewport.showPivotDots(null);
