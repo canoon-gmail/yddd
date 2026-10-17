@@ -123,6 +123,7 @@ export class Viewport {
   private xfStart = new THREE.Vector3();
   private xfMode: "translate" | "rotate" = "translate";
   private xfEnd: ((r: TransformResult) => void) | null = null;
+  private xfChange: ((d: V3) => void) | null = null;
 
   /** Shared materials, also used by tools for previews. */
   readonly mats = {
@@ -141,8 +142,8 @@ export class Viewport {
     edge: new LineMaterial({ color: 0x15171a, linewidth: 1.4 }),
     edgeHover: new LineMaterial({ color: 0xffe066, linewidth: 3.5 }),
     edgeSelected: new LineMaterial({ color: 0xff9f1c, linewidth: 3.5 }),
-    outlineHover: new LineMaterial({ color: 0x7cc4ff, linewidth: 3 }),
-    outlineSelected: new LineMaterial({ color: 0x1e88ff, linewidth: 3.5 }),
+    outlineHover: new LineMaterial({ color: 0x7cc4ff, linewidth: 2 }),
+    outlineSelected: new LineMaterial({ color: 0x1e88ff, linewidth: 2 }),
     previewFill: new THREE.MeshStandardMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
     previewLine: new THREE.LineBasicMaterial({ color: 0x8fd3ff, depthTest: false, transparent: true }),
     cursor: new THREE.MeshBasicMaterial({ color: 0xffe066, depthTest: false, transparent: true }),
@@ -227,6 +228,10 @@ export class Viewport {
     this.tc.addEventListener("objectChange", () => {
       this.snapPivot();
       this.applyPivotToBodies();
+      if (this.xfChange && this.xfMode === "translate") {
+        const d = this.pivot.position.clone().sub(this.xfStart);
+        this.xfChange([d.x, d.y, d.z]);
+      }
     });
     // Capture phase on window so the pointer is current before TransformControls handles the move.
     window.addEventListener("pointermove", (e) => {
@@ -612,18 +617,26 @@ export class Viewport {
     return out;
   }
 
-  private pickEdge(cx: number, cy: number, faceDist: number | null): { view: BodyView; edgeId: number; point: THREE.Vector3 } | null {
+  private pickEdge(
+    cx: number,
+    cy: number,
+    faceDist: number | null,
+    tol = EDGE_PICK_PX,
+    only?: (body: number, edgeId: number) => boolean,
+  ): { view: BodyView; edgeId: number; point: THREE.Vector3 } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left;
     const py = cy - r.top;
     let best: { view: BodyView; edgeId: number; point: THREE.Vector3 } | null = null;
-    let bestD = EDGE_PICK_PX;
+    let bestD = tol;
+    const pickRay = this.ray(cx, cy);
     const a = new THREE.Vector3();
     const b = new THREE.Vector3();
     for (const v of this.views.values()) {
       if (!v.group.visible) continue;
       const proj = this.projected(v);
       for (let e = 0; e < v.edgeIds.length; e++) {
+        if (only && !only(v.body.id, v.edgeIds[e])) continue;
         const end = v.edgeStarts[e] + v.edgeCounts[e];
         for (let k = v.edgeStarts[e]; k + 1 < end; k += 2) {
           const ax = proj[k * 3], ay = proj[k * 3 + 1], az = proj[k * 3 + 2];
@@ -636,7 +649,9 @@ export class Viewport {
           if (d >= bestD) continue;
           a.fromArray(v.edgePos, k * 3);
           b.fromArray(v.edgePos, k * 3 + 3);
-          const world = a.clone().lerp(b, t);
+          // Closest point of the 3D segment to the pick ray (lerping by the screen-space t is off under perspective).
+          const world = new THREE.Vector3();
+          pickRay.distanceSqToSegment(a, b, undefined, world);
           if (faceDist !== null) {
             const depth = this.camera.position.distanceTo(world);
             if (depth > faceDist * 1.01 + 0.05) continue; // hidden behind a face
@@ -647,6 +662,13 @@ export class Viewport {
       }
     }
     return best;
+  }
+
+  /** Nearest visible edge accepted by `only`, within `tol` pixels. */
+  pickEdgeAmong(cx: number, cy: number, tol: number, only: (body: number, edgeId: number) => boolean): Pick | null {
+    const hit = this.raycastFaces(cx, cy);
+    const e = this.pickEdge(cx, cy, hit ? hit.distance : null, tol, only);
+    return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
   }
 
   pick(cx: number, cy: number, mode: SelMode): Pick | null {
@@ -1153,14 +1175,25 @@ export class Viewport {
     return this.tc.object !== undefined;
   }
 
-  startTransform(mode: "translate" | "rotate", ids: number[], snapStep: number, onEnd: (r: TransformResult) => void, pivotAt?: V3): void {
+  /**
+   * Attach the move/rotate gizmo to `ids` (or, with no ids, just to `pivotAt`).
+   * `onChange` reports the live offset while a move is dragged.
+   */
+  startTransform(
+    mode: "translate" | "rotate",
+    ids: number[],
+    snapStep: number,
+    onEnd: (r: TransformResult) => void,
+    pivotAt?: V3,
+    onChange?: (d: V3) => void,
+  ): void {
     const box = new THREE.Box3();
     for (const id of ids) {
       const v = this.views.get(id);
       if (v) box.expandByObject(v.mesh);
     }
-    if (box.isEmpty()) return;
-    const c = box.getCenter(new THREE.Vector3());
+    if (box.isEmpty() && !pivotAt) return;
+    const c = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
     if (pivotAt) c.set(...pivotAt);
     else if (snapStep > 0) c.set(Math.round(c.x / snapStep) * snapStep, Math.round(c.y / snapStep) * snapStep, Math.round(c.z / snapStep) * snapStep);
     this.pivot.position.copy(c);
@@ -1171,6 +1204,7 @@ export class Viewport {
     this.setXfSet(ids);
     this.xfMode = mode;
     this.xfEnd = onEnd;
+    this.xfChange = onChange ?? null;
     this.tc.setMode(mode);
     this.xfSnapStep = snapStep;
     this.updateXfSnap(false);
@@ -1184,6 +1218,7 @@ export class Viewport {
     this.xfIds = [];
     this.setXfSet([]);
     this.xfEnd = null;
+    this.xfChange = null;
     this.requestRender();
   }
 

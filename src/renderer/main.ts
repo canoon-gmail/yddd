@@ -7,6 +7,12 @@ import * as THREE from "three";
 import {
   initKernel,
   isValidShape,
+  faceEdgeIds,
+  moveEdges,
+  splitFaceByLine,
+  edgeEnds,
+  edgeBetween,
+  isPolyhedral,
   errorMessage,
   filletEdges,
   chamferEdges,
@@ -40,7 +46,7 @@ import {
 } from "./kernel";
 import { Doc, type Body, type Guide } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, PencilTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -117,7 +123,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "T" },
-      { cmd: "tool.guide", icon: "rectangle", label: "Guide line", key: "L" },
+      { cmd: "tool.line", icon: "pencil", label: "Line (split face)", key: "L" },
+      { cmd: "tool.guide", icon: "rectangle", label: "Guide line", key: "Shift+L" },
       { cmd: "edit.clearGuides", icon: "delete", label: "Clear guides", key: "" },
     ],
   },
@@ -139,8 +146,11 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
       { cmd: "xf.repeat", icon: "duplicate", label: "Repeat last", key: "Shift+R" },
       { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Shift+D / Ctrl+D" },
-      { cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" },
     ],
+  },
+  {
+    title: "Delete",
+    items: [{ cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" }],
   },
   {
     title: "History",
@@ -179,7 +189,8 @@ const KEYMAP: Record<string, string> = {
   t: "op.shell",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
-  l: "tool.guide",
+  l: "tool.line",
+  "Shift+L": "tool.guide",
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
   x: "edit.delete",
@@ -206,10 +217,26 @@ const KEYMAP: Record<string, string> = {
   "?": "help.shortcuts",
 };
 
+/** Toolbar commands that go into the recent strip (mode switches and undo/redo are always visible). */
+const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => g.title !== "Select" && g.title !== "History").flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
+const RECENT_MAX = 10;
+/** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
+const FACE_EDGE_PICK_PX = 14;
+const RECENT_KEY = "y3d.recentCmds";
+
+function loadRecent(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((c) => RECENT_ITEMS.has(c)).slice(-RECENT_MAX) : [];
+  } catch {
+    return [];
+  }
+}
+
 const MODE_HINTS: Record<SelMode, string> = {
   body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
-  face: "Face mode: click faces (P push/pull, T shell).  Shift+click to add",
-  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add",
+  face: "Face mode: click faces (P push/pull, T shell), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
+  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add · Right-click a solid → Solid mode",
 };
 
 class App implements ToolHost {
@@ -231,9 +258,15 @@ class App implements ToolHost {
     anchor?: { x: number; y: number; v: number };
     dragQueued?: boolean;
   } | null = null;
-  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3 } | null = null;
+  /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
+  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; edges?: SelItem[] } | null = null;
+  /** Latest edge-move drag offset waiting for its (once per frame) preview. */
+  private edgePreview: V3 | null = null;
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
+  private recent: string[] = loadRecent();
+  private selEdgeCache: { sel: SelItem[]; edges: Map<number, Set<number>> } | null = null;
+  private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1 };
 
@@ -246,6 +279,7 @@ class App implements ToolHost {
     const container = $("viewport");
     this.viewport = new Viewport(container);
     this.buildToolbar();
+    this.renderRecent();
     this.bindViewportEvents();
     this.bindKeys();
     this.bindStatusBar();
@@ -357,12 +391,40 @@ class App implements ToolHost {
 
   // ================================================================ commands
 
-  run(cmd: string): void {
+  run(cmd: string, recordRecent = true): void {
     try {
       this.dispatch(cmd);
+      if (recordRecent) this.pushRecent(cmd);
     } catch (e) {
       this.fail(e);
     }
+  }
+
+  /** Recent-commands strip (left border): newest at the bottom, oldest drops off the top. */
+  private pushRecent(cmd: string): void {
+    if (!RECENT_ITEMS.has(cmd)) return;
+    this.recent = [...this.recent.filter((c) => c !== cmd), cmd].slice(-RECENT_MAX);
+    localStorage.setItem(RECENT_KEY, JSON.stringify(this.recent));
+    this.renderRecent();
+  }
+
+  private renderRecent(): void {
+    const box = $("recent-list");
+    box.innerHTML = "";
+    for (const cmd of this.recent) {
+      const it = RECENT_ITEMS.get(cmd)!;
+      const b = document.createElement("button");
+      b.className = "tb-btn";
+      b.dataset.cmd = cmd;
+      b.title = it.key ? `${it.label} (${it.key})` : it.label;
+      b.innerHTML = `${ICONS[it.icon]}<span>${it.label}</span>`;
+      b.addEventListener("click", () => {
+        b.blur();
+        this.run(cmd, false); // picking from the strip keeps its order
+      });
+      box.appendChild(b);
+    }
+    this.renderToolbarState();
   }
 
   private dispatch(cmd: string): void {
@@ -383,6 +445,7 @@ class App implements ToolHost {
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
       case "tool.guide": return this.startGuide();
+      case "tool.line": return this.startTool(new PencilTool(this, (id, a, b) => this.pencilLine(id, a, b)).start());
       case "edit.clearGuides":
         if (!this.doc.guides.length) return this.toast("No guide lines");
         this.selGuide = -1;
@@ -392,7 +455,7 @@ class App implements ToolHost {
       case "bool.subtract": return this.boolean("subtract");
       case "bool.intersect": return this.boolean("intersect");
 
-      case "xf.move": return this.startTransform("translate");
+      case "xf.move": return this.mode === "edge" && this.selection.some((s) => s.kind === "edge") ? this.startEdgeMove() : this.startTransform("translate");
       case "xf.rotate": return this.startTransform("rotate");
       case "xf.moveFrom": return this.startPointMove();
       case "xf.repeat": return this.repeatLast();
@@ -446,6 +509,7 @@ class App implements ToolHost {
 
   private setMode(mode: SelMode): void {
     if (mode !== this.mode) {
+      if (this.xf?.edges) this.stopTransform();
       if (mode === "body") {
         const ids = [...new Set(this.selection.map((s) => s.body))];
         this.selection = ids.map((id) => ({ kind: "body", body: id, id: 0 }));
@@ -461,7 +525,10 @@ class App implements ToolHost {
   private setSelection(items: SelItem[]): void {
     this.selection = items;
     this.refreshSelection();
-    if (this.xf) {
+    if (this.xf?.edges) {
+      if (items.some((s) => s.kind === "edge")) this.startEdgeMove(true);
+      else this.stopTransform();
+    } else if (this.xf) {
       const ids = this.selectedBodyIds();
       if (ids.length) this.startTransform(this.xf.mode, true);
       else this.stopTransform();
@@ -494,14 +561,51 @@ class App implements ToolHost {
       this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
     } else if (this.mode === "body" && this.selection.length === 1 && sameItem(this.selection[0], item)) {
       // Second click on the selected solid: drill down to the edge (if close to one) or face under the cursor.
-      const sub = this.viewport.pick(e.clientX, e.clientY, "edge") ?? this.viewport.pick(e.clientX, e.clientY, "face");
+      let sub = this.viewport.pick(e.clientX, e.clientY, "edge");
+      if (!sub || sub.body !== item.body) sub = this.viewport.pick(e.clientX, e.clientY, "face");
       if (sub && sub.body === item.body && sub.kind !== "body") {
         this.setMode(sub.kind === "edge" ? "edge" : "face");
         this.setSelection([{ kind: sub.kind, body: sub.body, id: sub.id }]);
       }
     } else {
+      // Face mode: a click near an edge of a selected face switches to Edge mode with that edge.
+      const edge = this.mode === "face" ? this.selectedEdgeHit(e) : null;
+      if (edge) this.setMode("edge");
+      this.setSelection([edge ?? item]);
+    }
+  }
+
+  /** Smart object select: right-click on a solid switches to Solid mode and selects it (Shift/Ctrl toggles). */
+  private rightClick(e: PointerEvent): void {
+    const pick = this.viewport.pick(e.clientX, e.clientY, "body");
+    if (!pick) return;
+    const item: SelItem = { kind: "body", body: pick.body, id: 0 };
+    this.setMode("body");
+    if (e.shiftKey || e.ctrlKey) {
+      const exists = this.selection.some((s) => sameItem(s, item));
+      this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
+    } else {
       this.setSelection([item]);
     }
+  }
+
+  /** In Face mode: the edge near the cursor (generous tolerance) if it bounds one of the selected faces. */
+  private selectedEdgeHit(e: PointerEvent): SelItem | null {
+    if (this.mode !== "face" || !this.selection.length) return null;
+    if (this.selEdgeCache?.sel !== this.selection) {
+      const edges = new Map<number, Set<number>>();
+      for (const s of this.selection) {
+        const body = this.doc.get(s.body);
+        if (s.kind !== "face" || !body) continue;
+        const set = edges.get(s.body) ?? new Set<number>();
+        for (const id of faceEdgeIds(body.shape, s.id)) set.add(id);
+        edges.set(s.body, set);
+      }
+      this.selEdgeCache = { sel: this.selection, edges };
+    }
+    const edges = this.selEdgeCache.edges;
+    const hit = this.viewport.pickEdgeAmong(e.clientX, e.clientY, FACE_EDGE_PICK_PX, (b, id) => !!edges.get(b)?.has(id));
+    return hit ? { kind: "edge", body: hit.body, id: hit.id } : null;
   }
 
   private refreshSelection(): void {
@@ -532,6 +636,10 @@ class App implements ToolHost {
       this.hoverQueued = e;
     });
     c.addEventListener("pointerdown", (e) => {
+      if (e.button === 2) {
+        this.rightDownAt = this.tool || this.op || this.viewport.gizmoHot ? null : { x: e.clientX, y: e.clientY };
+        return;
+      }
       if (e.button !== 0) return;
       if (this.tool) {
         this.tool.down(e);
@@ -570,6 +678,12 @@ class App implements ToolHost {
     h.addEventListener("pointercancel", release);
     h.addEventListener("wheel", (e) => c.dispatchEvent(new WheelEvent("wheel", e)), { passive: true });
     c.addEventListener("pointerup", (e) => {
+      if (e.button === 2) {
+        const d = this.rightDownAt;
+        this.rightDownAt = null;
+        if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) this.rightClick(e);
+        return;
+      }
       if (e.button === 0 && this.tool?.up) {
         this.tool.up(e);
         return;
@@ -616,7 +730,8 @@ class App implements ToolHost {
       return;
     }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
-    const item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
+    // Face mode: preview the edge a click would switch to.
+    const item: SelItem | null = this.selectedEdgeHit(e) ?? (pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null);
     if (!sameItem(item, this.hover) && !(item === null && this.hover === null)) {
       this.hover = item;
       this.viewport.setHighlight(this.selection, this.hover);
@@ -1230,6 +1345,105 @@ class App implements ToolHost {
     this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (hold Ctrl to snap to grid / 15° / points) · Tab: type exact values · Enter/Esc: done`);
   }
 
+  /** G with edges selected: drag them with the gizmo, reshaping their (flat-faced) solids. */
+  private startEdgeMove(keep = false): void {
+    if (!keep) {
+      this.endTool();
+      this.cancelOp();
+      this.lastXf = null;
+      this.repeatOps = [];
+    }
+    const edges = this.selection.filter((s) => s.kind === "edge");
+    const ok = edges.length > 0 && edges.every((s) => {
+      const b = this.doc.get(s.body);
+      return b?.kind === "solid" && isPolyhedral(b.shape);
+    });
+    const ends = ok ? edgeEnds(this.doc.get(edges[0].body)!.shape, edges[0].id) : null;
+    if (!ends) {
+      this.stopTransform();
+      this.toast("Move edge works on solids with only flat faces and straight edges (no curves or fillets)", "error");
+      return;
+    }
+    const mid: V3 = [(ends[0][0] + ends[1][0]) / 2, (ends[0][1] + ends[1][1]) / 2, (ends[0][2] + ends[1][2]) / 2];
+    this.edgePreview = null;
+    this.viewport.clearGhost();
+    this.xf = { mode: "translate", ids: [], pivot: mid, edges };
+    this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyEdgeMove(r.vector), mid, (d) => this.previewEdgeMove(d));
+    this.renderToolbarState();
+    this.hint("Move edge: drag the gizmo (hold Ctrl to snap to grid / points) · Tab: exact offset · Enter/Esc: done");
+  }
+
+  /** The solids reshaped by moving `edges` by `d`, keyed by body id. Throws if a solid can't take it. */
+  private edgeMoveShapes(edges: SelItem[], d: V3): Map<number, Shape> {
+    const byBody = new Map<number, Set<number>>();
+    for (const e of edges) byBody.set(e.body, (byBody.get(e.body) ?? new Set<number>()).add(e.id));
+    const out = new Map<number, Shape>();
+    for (const [id, ids] of byBody) out.set(id, moveEdges(this.doc.get(id)!.shape as Solid, ids, d));
+    return out;
+  }
+
+  private previewEdgeMove(d: V3): void {
+    const queued = this.edgePreview !== null;
+    this.edgePreview = d;
+    if (queued) return;
+    requestAnimationFrame(() => {
+      const v = this.edgePreview;
+      this.edgePreview = null;
+      if (!v || !this.xf?.edges) return;
+      try {
+        this.viewport.showGhost(this.edgeMoveShapes(this.xf.edges, v));
+        this.hint(`Move edge: Δ ${v.map((n) => +n.toFixed(2)).join(", ")} · release to apply · Tab: exact offset · Enter/Esc: done`);
+      } catch (e) {
+        this.viewport.clearGhost();
+        this.hint(`Move edge: ${errorMessage(e)}`);
+      }
+    });
+  }
+
+  private applyEdgeMove(v: V3): void {
+    const edges = this.xf?.edges;
+    if (!edges) return;
+    this.edgePreview = null;
+    this.viewport.clearGhost();
+    let shapes: Map<number, Shape>;
+    try {
+      shapes = this.edgeMoveShapes(edges, v);
+    } catch (e) {
+      this.toast(errorMessage(e), "error");
+      this.startEdgeMove(true); // gizmo back on the unchanged edge
+      return;
+    }
+    const before = edges.map((e) => ({ body: e.body, ends: edgeEnds(this.doc.get(e.body)!.shape, e.id) }));
+    this.doc.replaceShapes(shapes, edges.length > 1 ? "Move edges" : "Move edge");
+    // Keep the moved edges selected (their ids change with the rebuilt solid); the gizmo follows them.
+    const add = (p: V3): V3 => [p[0] + v[0], p[1] + v[1], p[2] + v[2]];
+    const next = before.flatMap(({ body, ends }): SelItem[] => {
+      const shape = this.doc.get(body)?.shape;
+      const id = shape && ends ? edgeBetween(shape, add(ends[0]), add(ends[1])) : null;
+      return id !== null && id !== undefined ? [{ kind: "edge", body, id }] : [];
+    });
+    this.setSelection(next);
+    if (!next.length) this.toast("Edge moved (it merged into a neighbouring face)");
+  }
+
+  /** Line tool: split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
+  private pencilLine(bodyId: number, a: V3, b: V3): void {
+    const body = this.doc.get(bodyId);
+    if (!body || body.kind !== "solid") return this.hint("Line: draw on a solid's face");
+    let shape: Solid;
+    try {
+      shape = splitFaceByLine(body.shape as Solid, a, b);
+    } catch (e) {
+      return this.hint(errorMessage(e)); // keep the tool so the user can retry
+    }
+    this.endTool();
+    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Line");
+    const id = edgeBetween(shape, a, b, 1e-3);
+    this.setMode("edge");
+    this.setSelection(id === null ? [] : [{ kind: "edge", body: bodyId, id }]);
+    this.toast("Face split — G moves the new edge");
+  }
+
   /** Adjacent flat faces of an edge, each with the edge seen from that face. */
   private edgeSides(bodyId: number, edgeId: number): EdgeSides | null {
     const b = this.doc.get(bodyId);
@@ -1366,6 +1580,12 @@ class App implements ToolHost {
   /** Tab during Move/Rotate: exact offset or angles. */
   private transformDialog(): void {
     if (!this.xf) return;
+    if (this.xf.edges) {
+      this.propsDialog("Move edge by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
+        if (x || y || z) this.applyEdgeMove([x, y, z]);
+      }, "Move");
+      return;
+    }
     const { mode, ids } = this.xf;
     const apply = (fn: (s: Shape) => Shape, label: string, ...rs: TransformResult[]): void => {
       this.repeatOps.push(...rs);
@@ -1434,6 +1654,10 @@ class App implements ToolHost {
 
   private stopTransform(): void {
     if (!this.xf) return;
+    if (this.xf.edges) {
+      this.edgePreview = null;
+      this.viewport.clearGhost();
+    }
     this.xf = null;
     this.viewport.stopTransform();
     this.refreshSelection();
@@ -1771,7 +1995,8 @@ class App implements ToolHost {
       this.snap = Number(select.value);
       this.viewport.axisSnapStep = this.snap;
       select.blur();
-      if (this.xf) this.startTransform(this.xf.mode, true);
+      if (this.xf?.edges) this.startEdgeMove(true);
+      else if (this.xf) this.startTransform(this.xf.mode, true);
     });
   }
 
@@ -1803,17 +2028,21 @@ class App implements ToolHost {
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
+      ["L", "Line: click two points on the edges of a flat face to split it (corners / midpoints snap); the new edge is selected"],
+      ["G with edges selected", "Move edge: drag the edge, reshaping its flat-faced solid (bent faces split into triangles)"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
       ["T", "Shell (opens the selected faces)"],
-      ["L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds · click a guide + Del removes · Ctrl snaps to guides"],
+      ["Shift+L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
+      ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
+      ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
-      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or on an edge: add a guide line (like L)"],
+      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or on an edge: add a guide line (like Shift+L)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+R", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],

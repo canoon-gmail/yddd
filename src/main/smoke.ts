@@ -472,6 +472,103 @@ const SCENARIO_3 = String.raw`
     expect("11 push the other end in", valid(app.doc.get(bx).shape) && size(bx)[0] === 67, [valid(app.doc.get(bx).shape), size(bx)]);
   }
 
+  // 12) Smart selection on that box: Face mode click on an edge of the selected face → Edge mode;
+  //     Solid mode second click on the selected solid → Face mode
+  {
+    const bx = last().id;
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    const click = (p) => { const s = S(p); for (const t of ["pointerdown", "pointerup"]) canvas.dispatchEvent(new PointerEvent(t, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+    const sh = () => app.doc.get(bx).shape;
+    const top = sh().faces.find((f) => f.geomType === "PLANE" && near(f.center.z, 30));
+    const xMax = sh().boundingBox.bounds[1][0];
+    const topItem = { kind: "face", body: bx, id: top.hashCode };
+    app.setSelection([{ kind: "body", body: bx, id: 0 }]);
+    vp.fit(); await sleep(50);
+    app.run("mode.face");
+    app.setSelection([topItem]);
+    click([xMax - 20, 25, 30]);
+    expect("12 click inside the selected face keeps Face mode", app.mode === "face" && eq(app.selection, [topItem]), [app.mode, app.selection]);
+    click([xMax, 25, 30]);
+    const ids = new Set(top.edges.map((e) => e.hashCode));
+    expect("12 click on its edge → Edge mode", app.mode === "edge" && app.selection.length === 1 && app.selection[0].kind === "edge" && ids.has(app.selection[0].id), [app.mode, app.selection]);
+    app.run("mode.face");
+    app.setSelection([]);
+    click([xMax, 25, 30]);
+    expect("12 edge click with nothing selected selects a face", app.mode === "face" && app.selection.length === 1 && app.selection[0].kind === "face", [app.mode, app.selection]);
+    app.run("mode.body");
+    app.setSelection([{ kind: "body", body: bx, id: 0 }]);
+    click([xMax - 20, 25, 30]);
+    expect("12 second click on selected solid → Face mode", app.mode === "face" && eq(app.selection, [topItem]), [app.mode, app.selection]);
+  }
+
+  // 13) Move edge: G with an edge selected reshapes the solid (Tab → exact offset)
+  try {
+    app.run("mode.body");
+    app.setSelection([]);
+    app.run("tool.box");
+    ev("pointermove", [200, 0, 0]);
+    key("Tab", "Tab");
+    dialog([40, 30, 20]);
+    const bx = last().id;
+    const sh = () => app.doc.get(bx).shape;
+    const valid = window.y3dKernel.isValidShape;
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    // top edge along X at the back (y = max, z = 20)
+    const [blo, bhi] = sh().boundingBox.bounds;
+    const top = sh().edges.find((e) => near(e.startPoint.z, 20) && near(e.endPoint.z, 20) && near(e.startPoint.y, bhi[1]) && near(e.endPoint.y, bhi[1]));
+    expect("13 box drawn", eq(size(bx), [40, 30, 20]) && !!top, [size(bx), !!top]);
+    app.run("mode.edge");
+    app.setSelection([{ kind: "edge", body: bx, id: top.hashCode }]);
+    app.run("xf.move");
+    expect("13 G on an edge starts edge move", app.xf && app.xf.edges && app.xf.edges.length === 1, app.xf);
+    key("Tab", "Tab");
+    dialog([0, 0, 10]);
+    expect("13 raise edge: stays flat-faced, 6 faces, taller", valid(sh()) && eq(size(bx), [40, 30, 30]) && sh().faces.length === 6, [valid(sh()), size(bx), sh().faces.length]);
+    expect("13 moved edge stays selected, gizmo stays", app.selection.length === 1 && app.selection[0].kind === "edge" && app.xf && app.xf.edges, [app.selection, !!app.xf]);
+    key("Tab", "Tab");
+    dialog([10, 0, 0]);
+    expect("13 shift edge sideways: bent side faces split, valid", valid(sh()) && eq(size(bx), [50, 30, 30]) && sh().faces.length > 6, [valid(sh()), size(bx), sh().faces.length]);
+    key("Enter", "Enter");
+    expect("13 Enter ends edge move", !app.xf, app.xf);
+    app.run("edit.undo");
+    app.run("edit.undo");
+    expect("13 undo twice restores the box", eq(size(bx), [40, 30, 20]) && sh().faces.length === 6, [size(bx), sh().faces.length]);
+    app.run("mode.body");
+  } catch (e) {
+    expect("13 move edge threw", false, String(e && e.stack || e));
+  }
+
+  // 14) Line tool (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
+  try {
+    const valid = window.y3dKernel.isValidShape;
+    app.run("mode.body");
+    app.setSelection([]);
+    app.run("tool.box");
+    ev("pointermove", [400, 0, 0]);
+    key("Tab", "Tab");
+    dialog([40, 30, 20]);
+    const bx = last().id;
+    const sh = () => app.doc.get(bx).shape;
+    app.setSelection([{ kind: "body", body: bx, id: 0 }]);
+    vp.setView("iso"); app.run("view.fitSelection"); await sleep(50);
+    app.setSelection([]);
+    app.run("tool.line");
+    toolClicks([[420, 0, 20], [420, 30, 20]]);
+    const sel = app.selection[0];
+    expect("14 pencil splits the top face, new edge selected in Edge mode", sh().faces.length === 7 && valid(sh()) && app.mode === "edge" && app.selection.length === 1 && sel.kind === "edge", [sh().faces.length, valid(sh()), app.mode, app.selection]);
+    const e = sel && sh().edges.find((x) => x.hashCode === sel.id);
+    const r3 = (p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6));
+    expect("14 new edge runs exactly between the midpoints", e && eq([r3(e.startPoint), r3(e.endPoint)].sort(), [[420, 0, 20], [420, 30, 20]].sort()), e && [r3(e.startPoint), r3(e.endPoint)]);
+    app.run("xf.move");
+    key("Tab", "Tab");
+    dialog([0, 0, 10]);
+    key("Enter", "Enter");
+    expect("14 G lifts the ridge: gable house (7 faces, 30 tall)", valid(sh()) && eq(size(bx), [40, 30, 30]) && sh().faces.length === 7, [valid(sh()), size(bx), sh().faces.length]);
+    app.run("mode.body");
+  } catch (e) {
+    expect("14 pencil threw", false, String(e && e.stack || e));
+  }
+
   app.setSelection([]);
   vp.setView("iso"); vp.fit();
   await sleep(400);

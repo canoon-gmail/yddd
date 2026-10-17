@@ -1226,3 +1226,79 @@ export class GuideTool implements Tool {
     this.host.hud(null);
   }
 }
+
+// ------------------------------------------------------------------ pencil
+
+/**
+ * Line (pencil): click two points on the edges of a flat face to split it with a line
+ * (e.g. the two top midpoints of a box → a ridge edge that Move can lift into a gable).
+ * Corners and midpoints snap automatically; anywhere along an edge works too.
+ */
+export class PencilTool implements Tool {
+  readonly name = "Line";
+  private a: { point: THREE.Vector3; body: number } | null = null;
+  private cur: THREE.Vector3 | null = null;
+
+  constructor(
+    private host: ToolHost,
+    private onLine: (bodyId: number, a: V3, b: V3) => void,
+  ) {}
+
+  start(): this {
+    this.host.hint("Line: click a point on an edge of a face (corners / midpoints snap) · Esc cancel");
+    return this;
+  }
+
+  /** Point under the cursor: a corner / midpoint, else the nearest point on an edge. */
+  private pointAt(e: PointerEvent): { point: THREE.Vector3; body: number; kind: SnapKind } | null {
+    const vp = this.host.viewport;
+    const edge = vp.pick(e.clientX, e.clientY, "edge");
+    if (!edge) return null;
+    const sp = vp.snapPoint(e.clientX, e.clientY);
+    if (sp && (sp.kind === "vertex" || sp.kind === "midpoint")) return { point: sp.point, body: edge.body, kind: sp.kind };
+    return { point: edge.point.clone(), body: edge.body, kind: "axis" };
+  }
+
+  private draw(): void {
+    const objs: THREE.Object3D[] = [];
+    if (this.a && this.cur) {
+      objs.push(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([this.a.point, this.cur]),
+        new THREE.LineBasicMaterial({ color: 0xff6fb5, depthTest: false, transparent: true }),
+      ));
+    }
+    this.host.viewport.setOverlay(objs);
+  }
+
+  move(e: PointerEvent): void {
+    const p = this.pointAt(e);
+    this.host.viewport.showSnapMarker(p);
+    if (!this.a) return;
+    this.cur = p?.point ?? this.host.viewport.faceUnder(e.clientX, e.clientY)?.point ?? null;
+    this.draw();
+    if (this.cur) this.host.hud(fmt(this.cur.distanceTo(this.a.point)), this.cur);
+  }
+
+  down(e: PointerEvent): void {
+    const p = this.pointAt(e);
+    if (!p) return this.host.hint("Line: click on an edge (corners / midpoints snap)");
+    if (!this.a) {
+      this.a = { point: p.point, body: p.body };
+      this.host.hint("Line: click the end point on another edge of the same face · Esc cancel");
+      return;
+    }
+    if (p.body !== this.a.body) return this.host.hint("Line: the end point must be on the same solid");
+    const t = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
+    this.onLine(p.body, t(this.a.point), t(p.point));
+  }
+
+  key(): boolean {
+    return false;
+  }
+
+  dispose(): void {
+    this.host.viewport.setOverlay([]);
+    this.host.viewport.showSnapMarker(null);
+    this.host.hud(null);
+  }
+}

@@ -76,6 +76,13 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
   width: 270px; display: flex; flex-direction: column;
   background: var(--panel); border-left: 1px solid var(--border);
 }
+#recent {
+  width: 60px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px 4px;
+  background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto;
+}
+#recent-list { display: flex; flex-direction: column; gap: 2px; }
+#recent-list .tb-btn { width: 100%; min-width: 0; }
+#recent-list .tb-btn span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .panel { padding: 8px 10px; border-bottom: 1px solid var(--border); overflow: auto; }
 .panel:first-child { flex: 1; min-height: 120px; }
 .panel h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }

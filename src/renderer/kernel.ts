@@ -23,11 +23,15 @@ import {
   makeCircle,
   assembleWire,
   makeFace,
+  makeLine,
+  makeSolid,
   basicFaceExtrusion,
   deserializeShape,
   exportSTEP,
   importSTEP,
   makeCompound,
+  makePolygon,
+  iterTopo,
   cast,
   Face,
   type AnyShape,
@@ -247,6 +251,12 @@ export function findFace(shape: Shape, faceId: number): Face | undefined {
   return shape.faces.find((f) => f.hashCode === faceId);
 }
 
+/** Ids of the edges bounding a face (empty if the face is not found). */
+export function faceEdgeIds(shape: Shape, faceId: number): Set<number> {
+  const face = findFace(shape, faceId);
+  return new Set(face ? face.edges.map((e) => e.hashCode) : []);
+}
+
 /**
  * If the face is planar, return a sketch frame on it. The origin is the
  * projection of the world origin so grid snapping stays world-aligned.
@@ -417,6 +427,229 @@ export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges:
     edges.push({ id: e.hashCode, a, b, inward: p, width });
   }
   return { normal: n, edges };
+}
+
+// ---------------------------------------------------------------- move edges
+
+/** End points of an edge, or null if there is no such edge. */
+export function edgeEnds(shape: Shape, edgeId: number): [V3, V3] | null {
+  const e = shape.edges.find((x) => x.hashCode === edgeId);
+  return e ? [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] : null;
+}
+
+/** Id of the edge running between `a` and `b` (either direction), if any. */
+export function edgeBetween(shape: Shape, a: V3, b: V3, tol = 1e-5): number | null {
+  const near = (p: V3, q: V3) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < tol;
+  for (const e of shape.edges) {
+    const s = e.startPoint.toTuple() as V3, t = e.endPoint.toTuple() as V3;
+    if ((near(s, a) && near(t, b)) || (near(s, b) && near(t, a))) return e.hashCode;
+  }
+  return null;
+}
+
+/** True if every face is flat and every edge straight (the shapes `moveEdges` can reshape). */
+export function isPolyhedral(shape: Shape): boolean {
+  return shape.faces.every((f) => f.geomType === "PLANE") && shape.edges.every((e) => e.geomType === "LINE");
+}
+
+const add3 = (p: V3, q: V3): V3 => [p[0] + q[0], p[1] + q[1], p[2] + q[2]];
+const ptKey = (p: V3) => p.map((x) => Math.round(x * 1e5)).join();
+
+/** Wire edges chained into an ordered loop of corner points. */
+function loopPoints(edges: { startPoint: { toTuple(): number[] }; endPoint: { toTuple(): number[] } }[]): V3[] {
+  const segs = edges.map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
+  const pts: V3[] = [segs[0][0], segs[0][1]];
+  segs.splice(0, 1);
+  while (segs.length) {
+    const end = ptKey(pts[pts.length - 1]);
+    const i = segs.findIndex((sg) => ptKey(sg[0]) === end || ptKey(sg[1]) === end);
+    if (i < 0) throw new Error("Move edge: a face boundary is not a closed loop");
+    const [a, b] = segs.splice(i, 1)[0];
+    pts.push(ptKey(a) === end ? b : a);
+  }
+  if (ptKey(pts[0]) === ptKey(pts[pts.length - 1])) pts.pop();
+  return pts;
+}
+
+/** Newell normal of a polygon (not normalised; zero for degenerate loops). */
+function newell(pts: V3[]): V3 {
+  const n: V3 = [0, 0, 0];
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i], q = pts[(i + 1) % pts.length];
+    n[0] += (p[1] - q[1]) * (p[2] + q[2]);
+    n[1] += (p[2] - q[2]) * (p[0] + q[0]);
+    n[2] += (p[0] - q[0]) * (p[1] + q[1]);
+  }
+  return n;
+}
+
+/** Ear-clipping triangulation of a simple polygon; returns index triples. */
+function triangulate(pts: V3[], normal: V3): [number, number, number][] {
+  // Project onto the polygon plane.
+  const n = norm3(normal);
+  const u = norm3(Math.abs(n[0]) < 0.9 ? cross3(n, [1, 0, 0]) : cross3(n, [0, 1, 0]));
+  const w = cross3(n, u);
+  const p2 = pts.map((p) => [dot3(p, u), dot3(p, w)]);
+  const area = (a: number[], b: number[], c: number[]) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const idx = pts.map((_, i) => i);
+  const tris: [number, number, number][] = [];
+  let guard = 0;
+  while (idx.length > 3 && guard++ < 10000) {
+    let clipped = false;
+    for (let k = 0; k < idx.length; k++) {
+      const i0 = idx[(k + idx.length - 1) % idx.length], i1 = idx[k], i2 = idx[(k + 1) % idx.length];
+      const a = p2[i0], b = p2[i1], c = p2[i2];
+      if (area(a, b, c) <= 1e-12) continue; // reflex or flat corner
+      const inside = idx.some((j) => j !== i0 && j !== i1 && j !== i2 &&
+        area(a, b, p2[j]) >= 0 && area(b, c, p2[j]) >= 0 && area(c, a, p2[j]) >= 0);
+      if (inside) continue;
+      tris.push([i0, i1, i2]);
+      idx.splice(k, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) throw new Error("Move edge: could not split a bent face into triangles");
+  }
+  if (idx.length === 3) tris.push([idx[0], idx[1], idx[2]]);
+  return tris;
+}
+
+function polyWire(pts: V3[]) {
+  return assembleWire(pts.map((p, i) => makeLine(p, pts[(i + 1) % pts.length])));
+}
+
+/**
+ * Move the given straight edges of a flat-faced solid by `v`, reshaping the
+ * faces around them. Faces that stay flat stay single faces; faces that bend
+ * are split into triangles. Coplanar neighbours are merged again afterwards.
+ */
+export function moveEdges(shape: Solid, edgeIds: Set<number>, v: V3): Solid {
+  if (!isPolyhedral(shape)) throw new Error("Move edge works on solids with only flat faces and straight edges (no curves or fillets)");
+  const moved = new Set<string>();
+  for (const e of shape.edges) {
+    if (!edgeIds.has(e.hashCode)) continue;
+    moved.add(ptKey(e.startPoint.toTuple() as V3));
+    moved.add(ptKey(e.endPoint.toTuple() as V3));
+  }
+  if (!moved.size) throw new Error("Move edge: edge not found on this solid");
+  const mv = (p: V3): V3 => (moved.has(ptKey(p)) ? add3(p, v) : p);
+  // Drop corners that collapse onto their neighbour.
+  const clean = (pts: V3[]) => pts.filter((p, i) => ptKey(p) !== ptKey(pts[(i + 1) % pts.length]));
+
+  const [lo, hi] = shape.boundingBox.bounds;
+  const tol = 1e-6 * Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + Math.hypot(...v));
+  const faces: Face[] = [];
+  for (const f of shape.faces) {
+    // outerWire / innerWires delete the face they are called on.
+    const loops = [f.clone().outerWire(), ...f.clone().innerWires()].map((w) => loopPoints(w.edges));
+    if (!loops.some((l) => l.some((p) => moved.has(ptKey(p))))) {
+      faces.push(f);
+      continue;
+    }
+    const outer0 = loops[0];
+    const outer = clean(outer0.map(mv));
+    const holes = loops.slice(1).map((l) => clean(l.map(mv)));
+    if (outer.length < 3) continue; // face collapsed to a line
+    const n = norm3(newell(outer));
+    const flat = Math.hypot(...newell(outer)) > 1e-12 &&
+      [outer, ...holes].every((l) => l.every((p) => Math.abs(dot3(sub3(p, outer[0]), n)) < tol));
+    if (flat) {
+      faces.push(makeFace(polyWire(outer), holes.filter((h) => h.length >= 3).map(polyWire)));
+      continue;
+    }
+    if (holes.length) throw new Error("Move edge: this would bend a face that has a hole");
+    // Split along the original (flat) layout so the triangles never overlap.
+    for (const [a, b, c] of triangulate(outer0, newell(outer0))) {
+      const t = [mv(outer0[a]), mv(outer0[b]), mv(outer0[c])];
+      if (Math.hypot(...cross3(sub3(t[1], t[0]), sub3(t[2], t[0]))) < 1e-12) continue;
+      faces.push(makeFace(polyWire(t)));
+    }
+  }
+  const solid = makeSolid(faces).simplify();
+  if (!isValidShape(solid)) throw new Error("Move edge: the result is not a valid solid (faces would cross)");
+  return solid;
+}
+
+// ---------------------------------------------------------------- line tool (split face by a line)
+
+/** Distance from `p` to the segment a–b. */
+function segDist(p: V3, a: V3, b: V3): number {
+  const ab = sub3(b, a);
+  const len2 = dot3(ab, ab);
+  const t = len2 > 0 ? Math.min(1, Math.max(0, dot3(sub3(p, a), ab) / len2)) : 0;
+  return Math.hypot(...sub3(p, [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t]));
+}
+
+/**
+ * Split a flat face of a solid along the straight line a–b. Both points must lie
+ * on the face's (straight) boundary edges; the face is found from them. The
+ * neighbouring faces gain the new corner points, so the new edge can be moved.
+ */
+export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
+  const [lo, hi] = shape.boundingBox.bounds;
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const tol = Math.max(1e-5, diag * 1e-7);
+  const len = Math.hypot(...sub3(b, a));
+  if (len < tol * 10) throw new Error("Line: the two points are the same");
+  const onBoundary = (f: Face, p: V3) =>
+    f.edges.some((e) => e.geomType === "LINE" && segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10);
+  const face = shape.faces.find((f) => {
+    if (f.geomType !== "PLANE") return false;
+    const n = f.normalAt(f.center).normalized().toTuple() as V3;
+    const c = f.center.toTuple() as V3;
+    if (Math.abs(dot3(sub3(a, c), n)) > tol * 10 || Math.abs(dot3(sub3(b, c), n)) > tol * 10) return false;
+    if (!onBoundary(f, a) || !onBoundary(f, b)) return false;
+    // A line along an existing edge splits nothing.
+    const m: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+    return !onBoundary(f, m);
+  });
+  if (!face) throw new Error("Line: start and end on the edges of the same flat face (corners, midpoints or anywhere along an edge)");
+  // Clicked points carry float32 snap error: make them exact corners / midpoints / points on the edge.
+  const exact = (p: V3): V3 => {
+    let best: V3 = p, bestD = Infinity;
+    for (const e of face.edges) {
+      if (e.geomType !== "LINE") continue;
+      const s = e.startPoint.toTuple() as V3, f = e.endPoint.toTuple() as V3;
+      if (segDist(p, s, f) >= tol * 10) continue;
+      const m: V3 = [(s[0] + f[0]) / 2, (s[1] + f[1]) / 2, (s[2] + f[2]) / 2];
+      for (const q of [s, f, m]) {
+        const d = Math.hypot(...sub3(p, q));
+        if (d < tol * 100 && d < bestD) { best = q; bestD = d; }
+      }
+      if (bestD === Infinity) {
+        const ab = sub3(f, s);
+        const k = dot3(sub3(p, s), ab) / dot3(ab, ab);
+        best = [s[0] + ab[0] * k, s[1] + ab[1] * k, s[2] + ab[2] * k];
+      }
+    }
+    return best;
+  };
+  a = exact(a);
+  b = exact(b);
+  const n = face.normalAt(face.center).normalized().toTuple() as V3;
+  const t = norm3(sub3(b, a));
+  const at = (o: V3, v: V3, k: number): V3 => [o[0] + v[0] * k, o[1] + v[1] * k, o[2] + v[2] * k];
+  // A thin wall standing on the face (outside the solid), meeting it exactly on the line;
+  // a little longer than a–b so it cleanly crosses the boundary edges.
+  const ext = Math.max(tol * 100, len * 1e-3);
+  const h = Math.max(1e-3, diag * 1e-3);
+  const s0 = at(a, t, -ext), s1 = at(b, t, ext);
+  const args = new oc.NCollection_List_TopoDS_Shape();
+  args.Append(shape.wrapped);
+  const tools = new oc.NCollection_List_TopoDS_Shape();
+  tools.Append(makePolygon([s0, s1, at(s1, n, h), at(s0, n, h)]).wrapped);
+  const builder = new oc.BRepAlgoAPI_Splitter();
+  builder.SetArguments(args);
+  builder.SetTools(tools);
+  builder.Build(new oc.Message_ProgressRange());
+  if (builder.HasErrors()) {
+    builder.delete();
+    throw new Error("Line: the geometry kernel could not split this face");
+  }
+  const solids = [...iterTopo(builder.Shape(), "solid")].map((x) => cast(x) as Solid);
+  builder.delete();
+  if (solids.length !== 1 || !isValidShape(solids[0])) throw new Error("Line: splitting this face did not give a valid solid");
+  return solids[0];
 }
 
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */
