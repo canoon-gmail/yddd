@@ -28,6 +28,7 @@ import {
   exportSTEP,
   importSTEP,
   makeCompound,
+  cast,
   Face,
   type AnyShape,
   type Sketch,
@@ -58,9 +59,48 @@ export interface Frame {
   z: V3;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let oc: any;
+
 export async function initKernel(): Promise<void> {
-  const oc = await opencascade({ locateFile: () => wasmUrl });
+  oc = await opencascade({ locateFile: () => wasmUrl });
   setOC(oc);
+}
+
+/**
+ * Boolean fuse / cut / common. Unlike replicad's fuse/cut/intersect this runs in
+ * non-destructive mode: by default OpenCascade's boolean edits its arguments in
+ * place (e.g. the document solid during a live push/pull preview), which leaves
+ * them invalid so the next operation on them fails.
+ */
+function boolean(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D): Shape3D {
+  const builder =
+    kind === "fuse" ? new oc.BRepAlgoAPI_Fuse() : kind === "cut" ? new oc.BRepAlgoAPI_Cut() : new oc.BRepAlgoAPI_Common();
+  const args = new oc.NCollection_List_TopoDS_Shape();
+  const tools = new oc.NCollection_List_TopoDS_Shape();
+  try {
+    args.Append(a.wrapped);
+    tools.Append(b.wrapped);
+    builder.SetArguments(args);
+    builder.SetTools(tools);
+    builder.SetNonDestructive(true);
+    builder.Build();
+    if (builder.HasErrors()) throw new Error(`boolean ${kind} failed`);
+    builder.SimplifyResult(true, true, 1e-3);
+    return cast(builder.Shape()) as Shape3D;
+  } finally {
+    args.delete();
+    tools.delete();
+    builder.delete();
+  }
+}
+
+/** OpenCascade's BRepCheck: false if the shape is broken (bad topology / geometry). */
+export function isValidShape(shape: Shape): boolean {
+  const check = new oc.BRepCheck_Analyzer(shape.wrapped, true, false);
+  const ok = check.IsValid();
+  check.delete();
+  return ok;
 }
 
 /** Human-readable message for errors thrown by JS or by the wasm kernel. */
@@ -249,31 +289,93 @@ export function chamferEdges(shape: Solid, edgeIds: Set<number> | null, distance
   return shape.chamfer((e) => (!seams.has(e.hashCode) && (!edgeIds || edgeIds.has(e.hashCode)) ? distance : null));
 }
 
-/** Push (negative) or pull (positive) a face of a solid along its normal, modifying that solid. */
-export function pushPull(shape: Solid, faceId: number, distance: number): Solid {
+/**
+ * Curved faces that blend smoothly into `face` (fillets around its rim), found
+ * across tangent edges. Push/Pull moves them with the face so a filleted corner
+ * stays rounded instead of leaving a step. Faces whose normal runs across `n`
+ * (side walls, fillets along the push direction) or away from it are not taken.
+ */
+function tangentChain(shape: Solid, face: Face, n: V3): Face[] {
+  const faces = shape.faces;
+  const seen = new Set([face.hashCode]);
+  const chain: Face[] = [];
+  const queue = [face];
+  while (queue.length) {
+    const f = queue.shift()!;
+    for (const e of f.edges) {
+      for (const g of faces) {
+        if (seen.has(g.hashCode) || g.geomType === "PLANE") continue;
+        if (!g.edges.some((x) => x.isSame(e))) continue;
+        try {
+          // UV-centre normal: `center` of a revolved face lies on its axis, off the surface.
+          if (dot3(g.normalAt().normalized().toTuple() as V3, n) < 0.01) continue;
+          const p = e.pointAt(0.5);
+          if (dot3(f.normalAt(p).normalized().toTuple() as V3, g.normalAt(p).normalized().toTuple() as V3) < 0.999) continue;
+        } catch {
+          continue;
+        }
+        seen.add(g.hashCode);
+        chain.push(g);
+        queue.push(g);
+      }
+    }
+  }
+  return chain;
+}
+
+/** Fuse (pull) or cut (push) prisms of `faces` swept by `distance` along `n`. */
+function sweepFaces(shape: Solid, faces: { face: Face; n: V3 }[], distance: number): Solid {
+  let result: Shape3D = shape;
+  for (const { face, n } of faces) {
+    const tool = basicFaceExtrusion(face, new Vector([n[0] * distance, n[1] * distance, n[2] * distance]));
+    result = boolean(distance > 0 ? "fuse" : "cut", result, tool);
+  }
+  return result.simplify();
+}
+
+/**
+ * Push/pull faces with their tangent fillet chains; if that fails or gives an
+ * invalid solid, fall back to moving just the faces themselves.
+ */
+function pushPullFaces(shape: Solid, faces: { face: Face; n: V3 }[], distance: number): Solid {
+  // A fillet between two selected faces would be swept twice in different directions: leave it.
+  const owner = new Map<number, number>();
+  const chains = faces.map(({ face, n }, i) => {
+    const chain = tangentChain(shape, face, n);
+    for (const g of chain) owner.set(g.hashCode, owner.has(g.hashCode) && owner.get(g.hashCode) !== i ? -1 : i);
+    return chain;
+  });
+  const withChains = faces.flatMap((f, i) => [f, ...chains[i].filter((g) => owner.get(g.hashCode) === i).map((g) => ({ face: g, n: f.n }))]);
+  if (withChains.length > faces.length) {
+    try {
+      const r = sweepFaces(shape, withChains, distance);
+      if (isValidShape(r)) return r;
+    } catch {
+      // fall through to the plain push/pull
+    }
+  }
+  return sweepFaces(shape, faces, distance);
+}
+
+function faceWithNormal(shape: Solid, faceId: number): { face: Face; n: V3 } {
   const face = findFace(shape, faceId);
   if (!face) throw new Error("face not found");
+  return { face, n: face.normalAt(face.center).normalized().toTuple() as V3 };
+}
+
+/** Push (negative) or pull (positive) a face of a solid along its normal, modifying that solid. */
+export function pushPull(shape: Solid, faceId: number, distance: number): Solid {
+  const f = faceWithNormal(shape, faceId);
   if (distance === 0) return shape;
-  const n = face.normalAt(face.center).normalized().toTuple();
-  const tool = basicFaceExtrusion(face, new Vector([n[0] * distance, n[1] * distance, n[2] * distance]));
-  const result = distance > 0 ? shape.fuse(tool) : shape.cut(tool);
-  return result.simplify();
+  return pushPullFaces(shape, [f], distance);
 }
 
 /** Push/pull several faces of one solid by the same distance (each along its own normal). */
 export function pushPullMany(shape: Solid, faceIds: number[], distance: number): Solid {
-  if (faceIds.length === 1) return pushPull(shape, faceIds[0], distance);
+  // Faces are all looked up on the original shape so face ids stay valid.
+  const faces = faceIds.map((id) => faceWithNormal(shape, id));
   if (distance === 0) return shape;
-  let result: Shape3D = shape;
-  // Tools are all built from the original faces so face ids stay valid.
-  const tools = faceIds.map((id) => {
-    const face = findFace(shape, id);
-    if (!face) throw new Error("face not found");
-    const n = face.normalAt(face.center).normalized().toTuple();
-    return basicFaceExtrusion(face, new Vector([n[0] * distance, n[1] * distance, n[2] * distance]));
-  });
-  for (const t of tools) result = distance > 0 ? result.fuse(t) : result.cut(t);
-  return result.simplify();
+  return pushPullFaces(shape, faces, distance);
 }
 
 // ---------------------------------------------------------------- split face
@@ -327,9 +429,7 @@ export type BooleanOp = "union" | "subtract" | "intersect";
 export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   let result = target;
   for (const tool of tools) {
-    if (op === "union") result = result.fuse(tool);
-    else if (op === "subtract") result = result.cut(tool);
-    else result = result.intersect(tool);
+    result = boolean(op === "union" ? "fuse" : op === "subtract" ? "cut" : "common", result, tool);
   }
   return result.simplify();
 }

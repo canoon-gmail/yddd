@@ -6,6 +6,7 @@ import "./style.css";
 import * as THREE from "three";
 import {
   initKernel,
+  isValidShape,
   errorMessage,
   filletEdges,
   chamferEdges,
@@ -1957,6 +1958,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape }; // used by the smoke test
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

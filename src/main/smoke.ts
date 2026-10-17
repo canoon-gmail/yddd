@@ -390,6 +390,21 @@ const SCENARIO_3 = String.raw`
   app.run("op.fillet"); opValue("r", 2); opValue("radius", 2); app.applyOp();
   expect("7 fillet adds a face", app.doc.get(part).shape.faces.length === fBefore + 1, [fBefore, app.doc.get(part).shape.faces.length]);
 
+  // 7b) Pull the flat face beside the fillet out 5: the fillet moves with it (no step left behind), then undo
+  {
+    app.run("mode.face");
+    const side = pickAt([65, 20, 5], "face");
+    expect("7b picked face beside fillet", !!side, side);
+    const fc = app.doc.get(part).shape.faces.length;
+    if (side) app.setSelection([side]);
+    app.run("op.pushpull"); opValue("d", 5); app.applyOp();
+    const sh = app.doc.get(part).shape;
+    const curved = sh.faces.filter((f) => f.geomType === "CYLINDRE" && f.center.x > 65).length;
+    expect("7b fillet moved with the face", size(part)[0] === 75 && sh.faces.length === fc && curved === 1, [size(part), fc, sh.faces.length, curved]);
+    app.run("edit.undo");
+    expect("7b undo", size(part)[0] === 70, size(part));
+  }
+
   // 8) Copy + move with Tab (ΔY 60) + Enter, then Shift+R → array of 3
   app.run("mode.body");
   app.setSelection([{ kind: "body", body: part, id: 0 }]);
@@ -424,6 +439,37 @@ const SCENARIO_3 = String.raw`
     const piv2 = vp.pivot.position.toArray().map(r);
     expect("10 pivot follows the move", eq(piv2, [mp[0], mp[1], r(mp[2] + 7)]), piv2);
     key("Enter", "Enter");
+  }
+
+  // 11) Box with a filleted top edge along X; Push/Pull its X end face (outline includes the fillet arc)
+  //     with several live previews first: booleans must not damage the document solid.
+  {
+    const valid = window.y3dKernel.isValidShape;
+    app.run("mode.body");
+    app.setSelection([]);
+    app.run("tool.box");
+    ev("pointermove", [200, 0, 0]);
+    key("Tab", "Tab");
+    dialog([60, 40, 30]);
+    const bx = last().id;
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    const e = app.doc.get(bx).shape.edges.find((x) => near(x.startPoint.z, 30) && near(x.endPoint.z, 30) && near(x.startPoint.y, 0) && near(x.endPoint.y, 0));
+    app.run("mode.edge");
+    app.setSelection([{ kind: "edge", body: bx, id: e.hashCode }]);
+    app.run("op.fillet"); opValue("r", 6); opValue("radius", 6); app.applyOp();
+    const before = app.doc.get(bx).shape;
+    const xEnd = (sh) => sh.faces.find((f) => f.geomType === "PLANE" && near(f.center.x, 260));
+    app.run("mode.face");
+    app.setSelection([{ kind: "face", body: bx, id: xEnd(before).hashCode }]);
+    app.run("op.pushpull");
+    for (const v of [5, -5, 12, -12, 3]) { opValue("d", v); app.previewOp(); }
+    opValue("d", 15); app.applyOp();
+    const after = app.doc.get(bx).shape;
+    expect("11 fillet + X push/pull valid", valid(after) && valid(before) && size(bx)[0] === 75, [valid(after), valid(before), size(bx)]);
+    const x0 = after.faces.find((f) => f.geomType === "PLANE" && near(f.center.x, 200));
+    app.setSelection([{ kind: "face", body: bx, id: x0.hashCode }]);
+    app.run("op.pushpull"); opValue("d", -8); app.applyOp();
+    expect("11 push the other end in", valid(app.doc.get(bx).shape) && size(bx)[0] === 67, [valid(app.doc.get(bx).shape), size(bx)]);
   }
 
   app.setSelection([]);
