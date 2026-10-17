@@ -18,6 +18,7 @@ export const ICONS: Record<string, string> = {
   pushpull: svg(`<path d="M4 14l8-3 8 3-8 3z" ${FILL}/><path d="M4 14v4l8 3 8-3v-4"/><path d="M12 9V2M9 5l3-3 3 3"/>`),
   fillet: svg(`<path d="M4 20V12a8 8 0 0 1 8-8h8"/><path d="M4 8V4h4" stroke-opacity="0.4" stroke-dasharray="2 2"/>`),
   chamfer: svg(`<path d="M4 20V10l6-6h10"/><path d="M4 10V4h6" stroke-opacity="0.4" stroke-dasharray="2 2"/>`),
+  offset: svg(`<rect x="7.5" y="9" width="9" height="6" ${FILL}/><rect x="3.5" y="5" width="17" height="14" stroke-dasharray="2.5 2"/>`),
   shell: svg(`<path d="M3 6v15h18V6"/><path d="M7 6v11h10V6"/><path d="M3 6h4M17 6h4"/>`),
   union: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 1 0 12 6.8z" ${FILL}/><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>`),
   subtract: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 0 1 12 6.8z" ${FILL}/><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6" stroke-dasharray="2 2"/>`),

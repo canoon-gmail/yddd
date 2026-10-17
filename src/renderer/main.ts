@@ -35,6 +35,11 @@ import {
   kindOf,
   faceAxis,
   faceRefEdges,
+  offsetFace,
+  offsetDragAxis,
+  offsetEdges,
+  offsetEdgesAxis,
+  edgeOffsetFaces,
   type V3,
   makeBox,
   makeCylinder,
@@ -101,18 +106,18 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     title: "Solid",
     drawer: true,
     items: [
-      { cmd: "tool.box", icon: "box", label: "Box", key: "B" },
-      { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder", key: "C" },
-      { cmd: "tool.sphere", icon: "sphere", label: "Sphere", key: "S" },
+      { cmd: "tool.box", icon: "box", label: "Box", key: "B B" },
+      { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder", key: "B C" },
+      { cmd: "tool.sphere", icon: "sphere", label: "Sphere", key: "B S" },
     ],
   },
   {
     title: "Face",
     drawer: true,
     items: [
-      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "Q" },
-      { cmd: "tool.circle", icon: "circle", label: "Circle", key: "O" },
-      { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "N" },
+      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "E R" },
+      { cmd: "tool.circle", icon: "circle", label: "Circle", key: "E C" },
+      { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "E E" },
     ],
   },
   {
@@ -122,7 +127,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull", key: "P" },
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
-      { cmd: "op.shell", icon: "shell", label: "Shell", key: "T" },
+      { cmd: "op.shell", icon: "shell", label: "Shell", key: "H" },
+      { cmd: "op.offset", icon: "offset", label: "Offset", key: "O" },
       { cmd: "tool.line", icon: "pencil", label: "Line (split face)", key: "L" },
       { cmd: "tool.guide", icon: "rectangle", label: "Guide line", key: "Shift+L" },
       { cmd: "edit.clearGuides", icon: "delete", label: "Clear guides", key: "" },
@@ -178,15 +184,12 @@ const KEYMAP: Record<string, string> = {
   "2": "mode.face",
   "3": "mode.edge",
   b: "tool.box",
-  c: "tool.cylinder",
-  s: "tool.sphere",
-  n: "tool.polygon",
-  q: "tool.rectangle",
-  o: "tool.circle",
+  e: "tool.polygon",
   p: "op.pushpull",
   f: "op.fillet",
   "Shift+F": "op.chamfer",
-  t: "op.shell",
+  h: "op.shell",
+  o: "op.offset",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
   l: "tool.line",
@@ -217,6 +220,16 @@ const KEYMAP: Record<string, string> = {
   "?": "help.shortcuts",
 };
 
+/**
+ * Two-key chords: the first key starts its tool at once; a second key within CHORD_MS switches tool.
+ * B B box · B C cylinder · B S sphere — E E polygon · E R rectangle · E C circle.
+ */
+const CHORDS: Record<string, Record<string, string>> = {
+  b: { b: "tool.box", c: "tool.cylinder", s: "tool.sphere" },
+  e: { e: "tool.polygon", r: "tool.rectangle", c: "tool.circle" },
+};
+const CHORD_MS = 1500;
+
 /** Toolbar commands that go into the recent strip (mode switches and undo/redo are always visible). */
 const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => g.title !== "Select" && g.title !== "History").flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 const RECENT_MAX = 10;
@@ -235,7 +248,7 @@ function loadRecent(): string[] {
 
 const MODE_HINTS: Record<SelMode, string> = {
   body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
-  face: "Face mode: click faces (P push/pull, T shell), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
+  face: "Face mode: click faces (P push/pull, H shell), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
   edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add · Right-click a solid → Solid mode",
 };
 
@@ -248,6 +261,8 @@ class App implements ToolHost {
   private hover: SelItem | null = null;
   private hidden = new Set<number>();
   private tool: Tool | null = null;
+  /** Pending two-key chord (see CHORDS): its second-key map and when the first key was pressed. */
+  private chord: { keys: Record<string, string>; at: number } | null = null;
   private op: {
     spec: OpSpec;
     inputs: HTMLInputElement[];
@@ -268,7 +283,7 @@ class App implements ToolHost {
   private selEdgeCache: { sel: SelItem[]; edges: Map<number, Set<number>> } | null = null;
   private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -444,6 +459,7 @@ class App implements ToolHost {
       case "op.fillet": return this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
+      case "op.offset": return this.opOffset();
       case "tool.guide": return this.startGuide();
       case "tool.line": return this.startTool(new PencilTool(this, (id, a, b) => this.pencilLine(id, a, b)).start());
       case "edit.clearGuides":
@@ -755,6 +771,13 @@ class App implements ToolHost {
         if (e.key === "Escape" || e.key === "?" || e.key === "F1") this.toggleHelp();
         return;
       }
+      const chordCmd = this.chord && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && performance.now() - this.chord.at < CHORD_MS ? this.chord.keys[e.key.toLowerCase()] : undefined;
+      if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) this.chord = null;
+      if (chordCmd) {
+        e.preventDefault();
+        this.run(chordCmd);
+        return;
+      }
       if (this.tool && this.tool.key(e)) {
         e.preventDefault();
         return;
@@ -785,6 +808,7 @@ class App implements ToolHost {
       if (cmd) {
         e.preventDefault();
         this.run(cmd);
+        if (CHORDS[combo]) this.chord = { keys: CHORDS[combo], at: performance.now() };
       }
     });
   }
@@ -1232,6 +1256,100 @@ class App implements ToolHost {
       },
       remember: ({ t }) => (this.defaults.shell = t),
     });
+  }
+
+  /** Offset: a new flat face on the selected face's plane, its outline grown (or shrunk) by a distance. */
+  private opOffset(): void {
+    if (this.selection.length && this.selection.every((s) => s.kind === "edge")) return this.opOffsetEdges();
+    let target: { bodyId: number; faceId: number } | null = null;
+    if (this.selection.length === 1) {
+      const s = this.selection[0];
+      if (s.kind === "face") target = { bodyId: s.body, faceId: s.id };
+      else if (s.kind === "body") {
+        const b = this.doc.get(s.body);
+        if (b?.kind === "face") target = { bodyId: b.id, faceId: b.shape.faces[0].hashCode };
+      }
+    }
+    if (!target) {
+      this.toast("Offset: select one flat face (Face mode, key 2) or one flat face object", "error");
+      return;
+    }
+    const { bodyId, faceId } = target;
+    const body = this.doc.get(bodyId)!;
+    if (findFace(body.shape, faceId)?.geomType !== "PLANE") {
+      this.toast("Offset works on flat faces only", "error");
+      return;
+    }
+    const axis = offsetDragAxis(body.shape, faceId);
+    this.startOp({
+      title: "Offset face",
+      label: "Offset",
+      fields: [{ key: "d", label: "Distance (mm)", value: this.defaults.offset, step: 1 }],
+      compute: ({ d }) => {
+        const face = offsetFace(body.shape, faceId, d);
+        return {
+          ghost: new Map([[-1, face]]),
+          commit: () => {
+            const nb = this.doc.makeBody(face, "Face", "face");
+            this.doc.commit([...this.doc.bodies, nb], "Offset face");
+            return { select: [nb.id], solidMode: true };
+          },
+        };
+      },
+      remember: ({ d }) => (this.defaults.offset = d),
+      drag: axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined,
+    });
+  }
+
+  /** Offset edges: new flat strip(s) centred on the selected straight edges, in the plane of an adjacent flat face. */
+  private opOffsetEdges(): void {
+    const bodyId = this.selection[0].body;
+    if (this.selection.some((s) => s.body !== bodyId)) {
+      this.toast("Offset: select edges of one object", "error");
+      return;
+    }
+    const body = this.doc.get(bodyId)!;
+    const edgeIds = this.selection.map((s) => s.id);
+    // Most horizontal face first, so a top edge extends the top by default (like an eave).
+    const tilt = (id: number) => Math.abs(faceAxis(body.shape, id)?.normal[2] ?? 0);
+    const faceIds = edgeOffsetFaces(body.shape, edgeIds).sort((a, b) => tilt(b) - tilt(a));
+    if (!faceIds.length) {
+      this.toast("Offset: the selected edges must all lie on one flat face", "error");
+      return;
+    }
+    try {
+      offsetEdges(body.shape, edgeIds, faceIds[0], 1); // reject loops / curves / branches before opening the panel
+    } catch (e) {
+      this.toast(errorMessage(e), "error");
+      return;
+    }
+    const faceOf = (other: number) => faceIds[other && faceIds.length > 1 ? 1 : 0];
+    const fields: OpField[] = [{ key: "d", label: "Each side (mm)", value: Math.abs(this.defaults.offset) || 5, step: 1, min: 0 }];
+    if (faceIds.length > 1) fields.push({ key: "other", label: "Other face", value: 0, type: "checkbox" });
+    const dragFor = (faceId: number) => {
+      const axis = offsetEdgesAxis(body.shape, edgeIds, faceId);
+      return axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined;
+    };
+    const spec: OpSpec = {
+      title: "Offset edges",
+      label: "Offset",
+      fields,
+      compute: ({ d, other }) => {
+        spec.drag = dragFor(faceOf(other)); // "Other face" flips the drag direction too
+        const faces = offsetEdges(body.shape, edgeIds, faceOf(other), d);
+        return {
+          ghost: new Map(faces.map((f, i) => [-1 - i, f] as [number, Shape])),
+          commit: () => {
+            const made = faces.map((f) => this.doc.makeBody(f, "Face", "face"));
+            this.doc.commit([...this.doc.bodies, ...made], "Offset edges");
+            return { select: made.map((b) => b.id), solidMode: true };
+          },
+        };
+      },
+      remember: ({ d }) => (this.defaults.offset = d),
+      drag: dragFor(faceIds[0]),
+    };
+    this.startOp(spec);
   }
 
   // ================================================================ booleans
@@ -1952,7 +2070,7 @@ class App implements ToolHost {
     const tip = (html: string) => `<div class="tip">${html}</div>`;
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
-        tip(`Solids: <kbd>B</kbd> box · <kbd>C</kbd> cylinder · <kbd>S</kbd> sphere<br>Faces: <kbd>Q</kbd> rectangle · <kbd>O</kbd> circle · <kbd>N</kbd> polygon → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
+        tip(`Solids: <kbd>B</kbd> <kbd>B</kbd> box · <kbd>B</kbd> <kbd>C</kbd> cylinder · <kbd>B</kbd> <kbd>S</kbd> sphere<br>Faces: <kbd>E</kbd> <kbd>R</kbd> rectangle · <kbd>E</kbd> <kbd>C</kbd> circle · <kbd>E</kbd> <kbd>E</kbd> polygon → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
       return;
     }
     const kind = sel[0].kind;
@@ -1981,10 +2099,10 @@ class App implements ToolHost {
         if (b) rows.push([b.kind === "face" ? "Flat face" : "Solid", escapeHtml(b.name)]);
         if (f) rows.push(["Surface", f.geomType]);
       }
-      hints = `<kbd>P</kbd> push/pull (flat face → new solid) · <kbd>T</kbd> shell (opens selected faces)`;
+      hints = `<kbd>P</kbd> push/pull (flat face → new solid) · <kbd>H</kbd> shell (opens selected faces) · <kbd>O</kbd> offset`;
     } else {
       rows.push(["Edges", String(sel.length)]);
-      hints = `<kbd>F</kbd> fillet · <kbd>H</kbd> chamfer`;
+      hints = `<kbd>F</kbd> fillet · <kbd>Shift+F</kbd> chamfer · <kbd>O</kbd> offset (strip)`;
     }
     el.innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` + tip(hints);
   }
@@ -2022,8 +2140,8 @@ class App implements ToolHost {
       ["Wheel", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
-      ["B · C · S", "Draw solid Box · Cylinder · Sphere (type numbers + Enter for exact sizes)"],
-      ["Q · O · N", "Draw flat Rectangle · Circle · Polygon face (then P to push/pull into a solid)"],
+      ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
+      ["E R · E C · E E", "Draw flat Rectangle · Circle · Polygon face (E alone starts a polygon; then P to push/pull into a solid)"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
@@ -2034,7 +2152,9 @@ class App implements ToolHost {
       ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
       ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
-      ["T", "Shell (opens the selected faces)"],
+      ["H", "Shell / hollow (opens the selected faces)"],
+      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller); then P to push/pull"],
+      ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Shift+L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],

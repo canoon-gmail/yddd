@@ -25,6 +25,8 @@ import {
   makeFace,
   makeLine,
   makeSolid,
+  makeVertex,
+  measureDistanceBetween,
   basicFaceExtrusion,
   deserializeShape,
   exportSTEP,
@@ -34,6 +36,7 @@ import {
   iterTopo,
   cast,
   Face,
+  Wire,
   type AnyShape,
   type Sketch,
   type Shape3D,
@@ -655,6 +658,165 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */
 export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number): Solid {
   return shape.shell(thickness, (f) => f.when(({ element }) => faceIds.has(element.hashCode)));
+}
+
+/**
+ * New flat face on the same plane as a planar face, its outline offset by `distance`
+ * (positive = larger, holes shrink; negative = smaller). Corners stay sharp.
+ * The source shape is not modified.
+ */
+export function offsetFace(shape: Shape, faceId: number, distance: number): Face {
+  const face = findFace(shape, faceId);
+  if (!face) throw new Error("face not found");
+  if (face.geomType !== "PLANE") throw new Error("Offset works on flat faces only");
+  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+  const mk = new oc.BRepOffsetAPI_MakeOffset(face.wrapped, oc.GeomAbs_JoinType.GeomAbs_Intersection, false);
+  mk.Perform(distance, 0);
+  const done = mk.IsDone();
+  const result = done ? mk.Shape() : null;
+  mk.delete();
+  const wires = result ? [...iterTopo(result, "wire")].map((w) => cast(w) as Wire) : [];
+  if (!wires.length) throw new Error("Offset: the face vanishes at this distance");
+  // Outer boundary = the wire with the largest bounding box; the rest are holes.
+  const size = (w: Wire) => {
+    const b = w.boundingBox;
+    return b.width * b.height + b.height * b.depth + b.depth * b.width;
+  };
+  wires.sort((a, b) => size(b) - size(a));
+  let out = makeFace(wires[0], wires.slice(1));
+  const n0 = face.normalAt(face.center).toTuple();
+  const n1 = out.normalAt(out.center).toTuple();
+  if (n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2] < 0) out = out.flipOrientation();
+  if (!isValidShape(out)) throw new Error("Offset: the result is not a valid face");
+  return out;
+}
+
+/** Flat faces that contain every one of the given edges (candidate planes for an edge offset). */
+export function edgeOffsetFaces(shape: Shape, edgeIds: number[]): number[] {
+  return shape.faces
+    .filter((f) => f.geomType === "PLANE" && edgeIds.every((id) => f.edges.some((e) => e.hashCode === id)))
+    .map((f) => f.hashCode);
+}
+
+/**
+ * One chain of straight edges on a face: its points and per-segment outward (away from the face)
+ * directions. A closed chain has as many segments as points (the last one wraps to the first).
+ */
+interface EdgeChain {
+  pts: V3[];
+  outs: V3[];
+  closed: boolean;
+}
+
+function edgeChains(shape: Shape, edgeIds: number[], faceId: number): EdgeChain[] {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") throw new Error("Offset: the edges must lie on a flat face");
+  const n = norm3(face.normalAt(face.center).toTuple() as V3);
+  const edges = face.edges.filter((e) => edgeIds.includes(e.hashCode));
+  if (edges.length !== edgeIds.length) throw new Error("Offset: the edges must lie on one flat face");
+  if (edges.some((e) => e.geomType !== "LINE")) throw new Error("Offset: select straight edges (lines) only");
+  const bb = face.boundingBox;
+  const eps = 1e-3 * Math.max(bb.width, bb.height, bb.depth, 1);
+  // Outward = in the face plane, perpendicular to the segment, on the side where the face is not.
+  const outward = (a: V3, b: V3): V3 => {
+    const o = norm3(cross3(sub3(b, a), n));
+    const mid: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+    const probe = makeVertex(add3(mid, [o[0] * eps, o[1] * eps, o[2] * eps]));
+    return measureDistanceBetween(face, probe) < eps / 10 ? [-o[0], -o[1], -o[2]] : o;
+  };
+  // Chain the segments end to end.
+  const segs = edges.map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
+  const count = new Map<string, number>();
+  for (const [a, b] of segs) for (const p of [a, b]) count.set(ptKey(p), (count.get(ptKey(p)) ?? 0) + 1);
+  if ([...count.values()].some((c) => c > 2)) throw new Error("Offset: the edges branch — select a simple chain");
+  const chains: EdgeChain[] = [];
+  while (segs.length) {
+    // Start from a free end so an open chain is walked in one direction; no free end = closed loop.
+    let i = segs.findIndex(([a, b]) => count.get(ptKey(a)) === 1 || count.get(ptKey(b)) === 1);
+    if (i < 0) i = 0;
+    const [s0, s1] = segs.splice(i, 1)[0];
+    const pts: V3[] = count.get(ptKey(s0)) === 1 ? [s0, s1] : [s1, s0];
+    for (;;) {
+      const end = ptKey(pts[pts.length - 1]);
+      i = segs.findIndex(([a, b]) => ptKey(a) === end || ptKey(b) === end);
+      if (i < 0) break;
+      const [a, b] = segs.splice(i, 1)[0];
+      pts.push(ptKey(a) === end ? b : a);
+    }
+    const closed = pts.length > 3 && ptKey(pts[0]) === ptKey(pts[pts.length - 1]);
+    if (closed) pts.pop();
+    const segCount = closed ? pts.length : pts.length - 1;
+    chains.push({ pts, closed, outs: Array.from({ length: segCount }, (_, k) => outward(pts[k], pts[(k + 1) % pts.length])) });
+  }
+  return chains;
+}
+
+/**
+ * New flat strips in the plane of `faceId`, centred on the selected straight edges and
+ * reaching `distance` to each side. Connected edges give one strip with mitred corners;
+ * a closed loop gives a ring (a face with a hole).
+ */
+export function offsetEdges(shape: Shape, edgeIds: number[], faceId: number, distance: number): Face[] {
+  if (distance <= 1e-9) throw new Error("distance must be greater than 0");
+  const n = norm3(findFace(shape, faceId)!.normalAt().toTuple() as V3);
+  return edgeChains(shape, edgeIds, faceId).map(({ pts, outs, closed }) => {
+    const shift = (d: number) => pts.map((p, k) => {
+      let m: V3;
+      if (!closed && k === 0) m = outs[0];
+      else if (!closed && k === pts.length - 1) m = outs[outs.length - 1];
+      else {
+        const a = outs[(k - 1 + outs.length) % outs.length], b = outs[k];
+        const c = 1 + dot3(a, b);
+        if (c < 1e-6) throw new Error("Offset: the edges fold back on themselves");
+        m = [(a[0] + b[0]) / c, (a[1] + b[1]) / c, (a[2] + b[2]) / c]; // mitre: m·a = m·b = 1
+      }
+      return add3(p, [m[0] * d, m[1] * d, m[2] * d]);
+    });
+    let f: Face;
+    if (closed) {
+      // Ring: the larger offset loop is the outline, the smaller one the hole.
+      let [outer, inner] = [shift(distance), shift(-distance)];
+      // Too large a distance turns segments of the hole around (or squashes them to nothing).
+      const keepsDirection = (q: V3[]) => q.every((p, k) => dot3(sub3(q[(k + 1) % q.length], p), sub3(pts[(k + 1) % pts.length], pts[k])) > 1e-9);
+      if (!keepsDirection(outer) || !keepsDirection(inner)) throw new Error("Offset: the distance is too large — the ring's hole vanishes");
+      if (Math.hypot(...newell(inner)) > Math.hypot(...newell(outer))) [outer, inner] = [inner, outer];
+      if (dot3(newell(inner), newell(outer)) > 0) inner.reverse(); // hole wire runs opposite to the outline
+      f = makeFace(polyWire(outer), [polyWire(inner)]);
+    } else {
+      f = makeFace(polyWire([...shift(distance), ...shift(-distance).reverse()]));
+    }
+    if (dot3(f.normalAt().toTuple() as V3, n) < 0) f = f.flipOrientation();
+    if (!isValidShape(f)) throw new Error("Offset: the result is not a valid face (distance too large?)");
+    return f;
+  });
+}
+
+/** Drag axis for an edge offset: from the middle of the first selected edge, outward. */
+export function offsetEdgesAxis(shape: Shape, edgeIds: number[], faceId: number): { origin: V3; dir: V3 } | null {
+  try {
+    const { pts, outs } = edgeChains(shape, edgeIds, faceId)[0];
+    const [a, b] = pts;
+    return { origin: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2], dir: outs[0] };
+  } catch {
+    return null;
+  }
+}
+
+/** Drag axis for Offset: from the face's outline (on the +x side of its frame) outward along x. */
+export function offsetDragAxis(shape: Shape, faceId: number): { origin: V3; dir: V3 } | null {
+  const face = findFace(shape, faceId);
+  const frame = planarFaceFrame(shape, faceId);
+  if (!face || !frame) return null;
+  const c = face.center.toTuple() as V3;
+  let reach = 0;
+  for (const e of face.edges) {
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const p = e.pointAt(t).toTuple();
+      reach = Math.max(reach, (p[0] - c[0]) * frame.x[0] + (p[1] - c[1]) * frame.x[1] + (p[2] - c[2]) * frame.x[2]);
+    }
+  }
+  const x = frame.x;
+  return { origin: [c[0] + x[0] * reach, c[1] + x[1] * reach, c[2] + x[2] * reach], dir: x };
 }
 
 export type BooleanOp = "union" | "subtract" | "intersect";
