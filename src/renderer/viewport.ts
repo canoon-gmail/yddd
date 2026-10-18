@@ -12,7 +12,7 @@ import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body } from "./document";
-import { tessellate, kindOf, type Shape, type V3 } from "./kernel";
+import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, type Shape, type TriMesh, type V3 } from "./kernel";
 
 export type SelMode = "body" | "face" | "edge";
 
@@ -60,11 +60,12 @@ interface BodyView {
   /** Where this body currently lives inside its chunk's merged mesh (null = not batched). */
   slot: { mesh: THREE.Mesh; vOffset: number } | null;
   /** Lazily built snap points (see snapsOf). */
-  snaps?: { pts: Float32Array; kinds: Uint8Array; proj: Float32Array | null; projStamp: number };
+  /** `inner`: points inside the body (sphere centres) — snappable through the body's own surface. */
+  snaps?: { pts: Float64Array; kinds: Uint8Array; inner: Uint8Array; proj: Float32Array | null; projStamp: number };
 }
 
 /** Object snap kinds, in priority order. */
-export type SnapKind = "vertex" | "center" | "midpoint" | "axis";
+export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge";
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
 const SNAP_PX = 12;
 
@@ -81,7 +82,7 @@ interface Chunk {
 }
 
 const CHUNK_SIZE = 256;
-const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xe9c46a, selected: 0xf4a259 };
+const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xc0c4c8, selected: 0xf0d78c };
 
 export class Viewport {
   readonly canvas: HTMLCanvasElement;
@@ -100,6 +101,12 @@ export class Viewport {
   private chunks: Chunk[] = [];
   private xfSet = new Set<number>();
   private hl = { sel: [] as SelItem[], hover: null as SelItem | null, painted: new Set<number>() };
+  /** Object mode: glow round the outline of the hovered body (silver) and selected bodies (blue). */
+  private glowBody: number | null = null;
+  private glowSel: number[] = [];
+  /** While moving / rotating: the preview's matrix, so the selected bodies' glow follows it. */
+  private glowXf: { ids: Set<number>; matrix: THREE.Matrix4 } | null = null;
+  private glow: SilhouetteGlow | null = null;
   private batchMats = {
     solid: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
     region: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.87, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
@@ -129,24 +136,26 @@ export class Viewport {
   readonly mats = {
     faces: [
       new THREE.MeshStandardMaterial({ color: 0x9aa5b1, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
-      new THREE.MeshStandardMaterial({ color: 0xe9c46a, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
-      new THREE.MeshStandardMaterial({ color: 0xf4a259, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+      new THREE.MeshStandardMaterial({ color: 0xc0c4c8, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
+      new THREE.MeshStandardMaterial({ color: 0xf0d78c, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
     ],
     // Flat face bodies: bluish, pulled slightly toward the camera so they win over
     // coplanar solid faces / the grid.
     regionFaces: [
       new THREE.MeshStandardMaterial({ color: 0x6f9bd1, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
-      new THREE.MeshStandardMaterial({ color: 0xe9c46a, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
-      new THREE.MeshStandardMaterial({ color: 0xf4a259, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+      new THREE.MeshStandardMaterial({ color: 0xc0c4c8, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+      new THREE.MeshStandardMaterial({ color: 0xf0d78c, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
     ],
     edge: new LineMaterial({ color: 0x15171a, linewidth: 1.4 }),
-    edgeHover: new LineMaterial({ color: 0xffe066, linewidth: 3.5 }),
-    edgeSelected: new LineMaterial({ color: 0xff9f1c, linewidth: 3.5 }),
+    edgeHover: new LineMaterial({ color: 0xe2e5e8, linewidth: 3.5 }),
+    edgeSelected: new LineMaterial({ color: 0xffe08a, linewidth: 3.5 }),
     outlineHover: new LineMaterial({ color: 0x7cc4ff, linewidth: 2 }),
     outlineSelected: new LineMaterial({ color: 0x1e88ff, linewidth: 2 }),
     previewFill: new THREE.MeshStandardMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
     previewLine: new THREE.LineBasicMaterial({ color: 0x8fd3ff, depthTest: false, transparent: true }),
     cursor: new THREE.MeshBasicMaterial({ color: 0xffe066, depthTest: false, transparent: true }),
+    // Snap markers (square = corner, circle = centre, ...): fat lines, a plain line is always 1px.
+    snapMarker: new LineMaterial({ color: 0x4ade80, linewidth: 2.5, depthTest: false, transparent: true }),
   };
 
   constructor(container: HTMLElement) {
@@ -295,7 +304,7 @@ export class Viewport {
     this.renderer.setSize(this.width, this.height);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
-    for (const m of [this.mats.edge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected]) m.resolution.set(this.width, this.height);
+    for (const m of [this.mats.edge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker]) m.resolution.set(this.width, this.height);
     this.stamp++;
     this.render();
   }
@@ -319,12 +328,31 @@ export class Viewport {
   private render(): void {
     this.flushBatches();
     this.renderer.render(this.scene, this.camera);
+    this.renderGlow();
+  }
+
+  /** Soft glow just outside the silhouettes of the selected (blue) and hovered (silver) bodies. */
+  private renderGlow(): void {
+    const at = (id: number): { mesh: THREE.Mesh; matrix: THREE.Matrix4 } | null => {
+      const v = this.views.get(id);
+      if (!v) return null;
+      v.mesh.updateWorldMatrix(true, false);
+      if (this.glowXf?.ids.has(id)) return { mesh: v.mesh, matrix: this.glowXf.matrix.clone().multiply(v.mesh.matrixWorld) };
+      return v.group.visible ? { mesh: v.mesh, matrix: v.mesh.matrixWorld } : null;
+    };
+    const sel = this.glowSel.map(at).filter((x): x is NonNullable<typeof x> => !!x);
+    const hov = this.glowBody === null ? null : at(this.glowBody);
+    if (!sel.length && !hov) return;
+    this.glow ??= new SilhouetteGlow();
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    if (sel.length) this.glow.draw(this.renderer, this.camera, sel, size, SilhouetteGlow.SELECTED);
+    if (hov) this.glow.draw(this.renderer, this.camera, [hov], size, SilhouetteGlow.HOVER);
   }
 
   // ------------------------------------------------------------ bodies
 
-  private buildView(body: Body): BodyView {
-    const { faces, edges } = tessellate(body.shape);
+  private buildView(body: Body, preview = false): BodyView {
+    const { faces, edges } = body.kind === "mesh" ? meshTessellation(body.shape) : tessellate(body.shape, preview);
     const geom = new THREE.BufferGeometry();
     geom.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(faces.vertices), 3));
     geom.setAttribute("normal", new THREE.BufferAttribute(Float32Array.from(faces.normals), 3));
@@ -479,7 +507,7 @@ export class Viewport {
     }
     const tmp = new THREE.Color();
     for (const kind of ["solid", "face"] as const) {
-      const list = members.filter((v) => v.body.kind === kind);
+      const list = members.filter((v) => (v.body.kind === "mesh" ? "solid" : v.body.kind) === kind);
       if (!list.length) continue;
       let nv = 0, ni = 0;
       for (const v of list) {
@@ -565,10 +593,10 @@ export class Viewport {
     return this.raycaster.ray.clone();
   }
 
-  private raycastFaces(cx: number, cy: number): { view: BodyView; faceId: number; point: THREE.Vector3; distance: number } | null {
+  private raycastFaces(cx: number, cy: number, only?: number): { view: BodyView; faceId: number; point: THREE.Vector3; distance: number } | null {
     this.setRay(cx, cy);
     const meshes: THREE.Object3D[] = [];
-    for (const v of this.views.values()) if (v.group.visible) meshes.push(v.mesh);
+    for (const v of this.views.values()) if (v.group.visible && (only === undefined || v.body.id === only)) meshes.push(v.mesh);
     const hits = this.raycaster.intersectObjects(meshes, false);
     if (!hits.length || hits[0].faceIndex == null) return null;
     const groupOf = (view: BodyView, faceIndex: number): number => {
@@ -623,11 +651,11 @@ export class Viewport {
     faceDist: number | null,
     tol = EDGE_PICK_PX,
     only?: (body: number, edgeId: number) => boolean,
-  ): { view: BodyView; edgeId: number; point: THREE.Vector3 } | null {
+  ): { view: BodyView; edgeId: number; point: THREE.Vector3; d: number } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left;
     const py = cy - r.top;
-    let best: { view: BodyView; edgeId: number; point: THREE.Vector3 } | null = null;
+    let best: { view: BodyView; edgeId: number; point: THREE.Vector3; d: number } | null = null;
     let bestD = tol;
     const pickRay = this.ray(cx, cy);
     const a = new THREE.Vector3();
@@ -657,7 +685,7 @@ export class Viewport {
             if (depth > faceDist * 1.01 + 0.05) continue; // hidden behind a face
           }
           bestD = d;
-          best = { view: v, edgeId: v.edgeIds[e], point: world };
+          best = { view: v, edgeId: v.edgeIds[e], point: world, d };
         }
       }
     }
@@ -671,14 +699,16 @@ export class Viewport {
     return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
   }
 
-  pick(cx: number, cy: number, mode: SelMode): Pick | null {
-    const hit = this.raycastFaces(cx, cy);
+  /** What is under the cursor in `mode`; with `only`, on that body alone (others are ignored, not in the way). */
+  pick(cx: number, cy: number, mode: SelMode, only?: number): Pick | null {
+    const hit = this.raycastFaces(cx, cy, only);
     if (mode === "edge") {
-      const e = this.pickEdge(cx, cy, hit ? hit.distance : null);
+      const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, only === undefined ? undefined : (b) => b === only);
       return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
     }
     if (!hit) return null;
-    if (mode === "body") return { kind: "body", body: hit.view.body.id, id: 0, point: hit.point };
+    // A mesh has no faces to pick: it is always picked whole.
+    if (mode === "body" || hit.view.body.kind === "mesh") return { kind: "body", body: hit.view.body.id, id: 0, point: hit.point };
     return { kind: "face", body: hit.view.body.id, id: hit.faceId, point: hit.point };
   }
 
@@ -698,18 +728,50 @@ export class Viewport {
     if (v.snaps) return v.snaps;
     const pts: number[] = [];
     const kinds: number[] = [];
+    const inner: number[] = [];
     const seen = new Set<string>();
-    const add = (x: number, y: number, z: number, kind: number) => {
+    const add = (x: number, y: number, z: number, kind: number, isInner = 0) => {
       const key = `${kind}:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
       if (seen.has(key)) return;
       seen.add(key);
       pts.push(x, y, z);
       kinds.push(kind);
+      inner.push(isInner);
     };
     const E = v.edgePos;
+    // Exact (double precision) B-rep geometry, so snapped values match the model exactly;
+    // the float32 display mesh is only the fallback.
+    if (v.body.kind === "mesh") return (v.snaps = { pts: new Float64Array(), kinds: new Uint8Array(), inner: new Uint8Array(), proj: null, projStamp: -1 }); // no edges / faces to snap to
+    const exactEdges = new Map(v.body.shape.edges.map((ed) => [ed.hashCode, ed]));
+    const exactFaces = new Map(v.body.shape.faces.map((fc) => [fc.hashCode, fc]));
     for (let e = 0; e < v.edgeIds.length; e++) {
       const s = v.edgeStarts[e], n = v.edgeCounts[e];
       if (n < 2) continue;
+      const ed = exactEdges.get(v.edgeIds[e]);
+      if (ed) {
+        try {
+          const p0 = ed.startPoint.toTuple(), p1 = ed.endPoint.toTuple();
+          if (Math.hypot(p0[0] - p1[0], p0[1] - p1[1], p0[2] - p1[2]) < 1e-9) {
+            // Circle / closed curve: centre = mean of evenly spaced points (exact for circles).
+            let cx = 0, cy = 0, cz = 0;
+            for (let k = 0; k < 16; k++) {
+              const q = ed.pointAt(k / 16).toTuple();
+              cx += q[0];
+              cy += q[1];
+              cz += q[2];
+            }
+            add(cx / 16, cy / 16, cz / 16, 1);
+          } else {
+            add(p0[0], p0[1], p0[2], 0);
+            add(p1[0], p1[1], p1[2], 0);
+            const m = ed.pointAt(0.5).toTuple();
+            add(m[0], m[1], m[2], 2);
+          }
+          continue;
+        } catch {
+          // fall back to the display mesh below
+        }
+      }
       const a = s * 3, b = (s + n - 1) * 3;
       const closed = Math.hypot(E[a] - E[b], E[a + 1] - E[b + 1], E[a + 2] - E[b + 2]) < 1e-6;
       if (closed) {
@@ -749,7 +811,13 @@ export class Viewport {
       for (let k = v0 + 1; k < v1 && planar; k++) {
         if (N[k * 3] * N[v0 * 3] + N[k * 3 + 1] * N[v0 * 3 + 1] + N[k * 3 + 2] * N[v0 * 3 + 2] < 0.9999) planar = false;
       }
-      if (!planar) continue;
+      if (!planar) {
+        // Sphere / torus: its centre (inside the body).
+        const fc = exactFaces.get(v.faceIds[f]);
+        const c = fc && curvedFaceCenter(fc);
+        if (c) add(c[0], c[1], c[2], 1, 1);
+        continue;
+      }
       const start = v.faceStarts[f], end = f + 1 < v.faceStarts.length ? v.faceStarts[f + 1] : T.length;
       let A = 0, cx = 0, cy = 0, cz = 0;
       for (let k = start; k + 2 < end + 0 && k + 2 < T.length; k += 3) {
@@ -762,9 +830,19 @@ export class Viewport {
         cy += ((va.y + vb.y + vc.y) / 3) * area;
         cz += ((va.z + vb.z + vc.z) / 3) * area;
       }
+      const fc = exactFaces.get(v.faceIds[f]);
+      if (fc) {
+        try {
+          const c = fc.center.toTuple();
+          add(c[0], c[1], c[2], 1);
+          continue;
+        } catch {
+          // fall back to the mesh centroid
+        }
+      }
       if (A > 0) add(cx / A, cy / A, cz / A, 1);
     }
-    v.snaps = { pts: Float32Array.from(pts), kinds: Uint8Array.from(kinds), proj: null, projStamp: -1 };
+    v.snaps = { pts: Float64Array.from(pts), kinds: Uint8Array.from(kinds), inner: Uint8Array.from(inner), proj: null, projStamp: -1 };
     return v.snaps;
   }
 
@@ -796,8 +874,8 @@ export class Viewport {
         if (d > SNAP_PX) continue;
         const score = d + s.kinds[i] * 4; // prefer vertices, then centres, then midpoints
         if (best && score >= best.score) continue;
-        if (faceHit) {
-          // Hidden behind a face? (allow points on the hit face itself)
+        if (faceHit && !(s.inner[i] && faceHit.view === v)) {
+          // Hidden behind a face? (allow points on the hit face itself, and the hovered body's inner centres)
           p.fromArray(s.pts, i * 3);
           if (this.camera.position.distanceTo(p) > faceHit.distance * 1.01 + 0.05) continue;
         }
@@ -811,10 +889,32 @@ export class Viewport {
       const hidden = faceHit && this.camera.position.length() > faceHit.distance * 1.01 + 0.05;
       if (d <= SNAP_PX && !hidden && (!best || d < best.score)) return { point: new THREE.Vector3(), kind: "vertex" };
     }
-    if (!best) return this.axisSnap(px, py, cx, cy, faceHit?.distance);
+    if (!best) {
+      // No point nearby: the closer of an axis / guide line and anywhere along a visible edge.
+      const ax = this.axisSnap(px, py, cx, cy, faceHit?.distance);
+      const ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_PX * 0.75, exclude?.size ? (b) => !exclude.has(b) : undefined);
+      if (ed && (!ax || ed.d < ax.d)) {
+        // Redo the point on the exact B-rep edge (the display mesh is float32: a push/pull snapped to
+        // a circle's mesh would end ~1e-6 mm off — e.g. not level with another cylinder's top).
+        const body = ed.view.body;
+        const exact = body.kind === "mesh" ? undefined : body.shape.edges.find((x) => x.hashCode === ed.edgeId);
+        if (exact?.geomType === "LINE") {
+          const a = new THREE.Vector3(...exact.startPoint.toTuple()), b = new THREE.Vector3(...exact.endPoint.toTuple());
+          this.ray(cx, cy).distanceSqToSegment(a, b, undefined, ed.point);
+        } else if (exact) {
+          const q = body.kind === "mesh" ? null : nearestOnEdge(body.shape, ed.edgeId, ed.point.toArray() as V3);
+          if (q) ed.point.set(...q);
+        }
+        return { point: ed.point, kind: "edge" };
+      }
+      return ax && { point: ax.point, kind: ax.kind };
+    }
     const s = best.view.snaps!;
     return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
   }
+
+  /** Guide not offered as a snap target (the one being moved), -1 = none. */
+  snapSkipGuide = -1;
 
   /** Show guide lines (dashed); `selected` is drawn highlighted. */
   setGuides(list: readonly { a: V3; b: V3 }[], selected = -1, hover = -1): void {
@@ -837,7 +937,9 @@ export class Viewport {
   guideAt(cx: number, cy: number): number {
     let best = -1, bd = 6;
     this.guides.forEach((g, i) => {
-      const a = this.toScreen(g.a), b = this.toScreen(g.b);
+      const seg = this.segmentToScreen(g.a, g.b);
+      if (!seg) return;
+      const [a, b] = seg;
       const dx = b.x - a.x, dy = b.y - a.y;
       const k = Math.max(0, Math.min(1, ((cx - a.x) * dx + (cy - a.y) * dy) / (dx * dx + dy * dy || 1)));
       const d = Math.hypot(cx - a.x - k * dx, cy - a.y - k * dy);
@@ -850,13 +952,13 @@ export class Viewport {
   axisSnapStep = 1;
 
   /** Nearest point on the world X / Y / Z axis lines under the cursor (rounded to axisSnapStep). */
-  private axisSnap(px: number, py: number, cx: number, cy: number, hitDist?: number): { point: THREE.Vector3; kind: SnapKind } | null {
+  private axisSnap(px: number, py: number, cx: number, cy: number, hitDist?: number): { point: THREE.Vector3; kind: SnapKind; d: number } | null {
     const ray = this.ray(cx, cy);
     let best: { d: number; p: THREE.Vector3 } | null = null;
     const q = new THREE.Vector3();
     const lines: { o: THREE.Vector3; dir: THREE.Vector3; len: number }[] = [
       ...[new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)].map((dir) => ({ o: new THREE.Vector3(), dir, len: Infinity })),
-      ...this.guides.map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) })),
+      ...this.guides.filter((_, i) => i !== this.snapSkipGuide).map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) })),
     ];
     for (const { o, dir, len } of lines) {
       // Closest point on the axis / guide line to the cursor ray.
@@ -878,7 +980,27 @@ export class Viewport {
       const dist = Math.hypot(((q.x + 1) / 2) * this.width - px, ((1 - q.y) / 2) * this.height - py);
       if (dist <= SNAP_PX * 0.75 && (!best || dist < best.d)) best = { d: dist, p };
     }
-    return best ? { point: best.p, kind: best.p.lengthSq() < 1e-12 ? "vertex" : "axis" } : null;
+    return best ? { point: best.p, kind: best.p.lengthSq() < 1e-12 ? "vertex" : "axis", d: best.d } : null;
+  }
+
+  /** The world axis line (0 = X, 1 = Y, 2 = Z) under the cursor, or -1 (e.g. to draw a guide parallel to it). */
+  axisUnder(cx: number, cy: number): number {
+    const r = this.canvas.getBoundingClientRect();
+    const px = cx - r.left, py = cy - r.top;
+    const ray = this.ray(cx, cy);
+    const q = new THREE.Vector3();
+    let best = { k: -1, d: SNAP_PX };
+    for (let k = 0; k < 3; k++) {
+      const dir = new THREE.Vector3().setComponent(k, 1);
+      const b = ray.direction.dot(dir), d = ray.direction.dot(ray.origin), e = dir.dot(ray.origin);
+      const den = 1 - b * b;
+      if (den < 1e-6) continue; // looking straight down this axis
+      q.copy(dir).multiplyScalar((e - b * d) / den).project(this.camera);
+      if (q.z < -1 || q.z > 1) continue;
+      const dist = Math.hypot(((q.x + 1) / 2) * this.width - px, ((1 - q.y) / 2) * this.height - py);
+      if (dist < best.d) best = { k, d: dist };
+    }
+    return best.k;
   }
 
   /** Pivot candidates of bodies: their snap points plus each body's bounding-box centre. */
@@ -947,8 +1069,8 @@ export class Viewport {
   /** Show (or hide with null) the object-snap marker. */
   showSnapMarker(snap: { point: THREE.Vector3; kind: SnapKind } | null): void {
     if (!this.snapMarker) {
-      const mk = (geo: THREE.BufferGeometry) => {
-        const l = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x4ade80, depthTest: false, transparent: true }));
+      const mk = (geo: LineSegmentsGeometry) => {
+        const l = new LineSegments2(geo, this.mats.snapMarker);
         l.renderOrder = 30;
         return l;
       };
@@ -959,9 +1081,10 @@ export class Viewport {
         const a = (i / 16) * Math.PI * 2, b = ((i + 1) / 16) * Math.PI * 2;
         circ.push(Math.cos(a), Math.sin(a), 0, Math.cos(b), Math.sin(b), 0);
       }
-      const geo = (arr: number[]) => new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(arr, 3));
+      const geo = (arr: number[]) => new LineSegmentsGeometry().setPositions(arr);
       const cross = [-1, -1, 0, 1, 1, 0, -1, 1, 0, 1, -1, 0];
-      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)), axis: mk(geo(cross)) };
+      const diamond = [0, -1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0];
+      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)), axis: mk(geo(cross)), edge: mk(geo(diamond)) };
       for (const m of Object.values(this.snapMarker)) {
         m.visible = false;
         this.scene.add(m);
@@ -977,7 +1100,7 @@ export class Viewport {
     }
     this.requestRender();
   }
-  private snapMarker: Record<SnapKind, THREE.LineSegments> | null = null;
+  private snapMarker: Record<SnapKind, LineSegments2> | null = null;
 
   // ------------------------------------------------------------ highlighting
 
@@ -986,7 +1109,11 @@ export class Viewport {
     for (const id of this.hl.painted) this.paintBody(id, null, 0);
     this.hl.painted.clear();
     this.hl.sel = selection;
-    this.hl.hover = hover;
+    // Object mode: a hovered (unselected) body gets a glow round its outline, nothing on the body.
+    const bodyHover = hover?.kind === "body" && !selection.some((s) => sameItem(s, hover)) ? hover.body : null;
+    this.glowBody = bodyHover;
+    this.glowSel = selection.filter((s) => s.kind === "body").map((s) => s.body);
+    this.hl.hover = bodyHover === null ? hover : null;
     this.paintHighlight();
 
     const edgePoints = (items: SelItem[], bodies = false) => {
@@ -1012,8 +1139,9 @@ export class Viewport {
     const isSelected = hover && selection.some((s) => sameItem(s, hover));
     this.setOverlayLines(this.selEdges, edgePoints(selection));
     this.setOverlayLines(this.hoverEdges, hover && !isSelected ? edgePoints([hover]) : []);
-    this.setOverlayLines(this.selOutline, edgePoints(selection, true));
-    this.setOverlayLines(this.hoverOutline, hover && !isSelected ? edgePoints([hover], true) : []);
+    // Selected bodies: gold fill + a blue glow round the outline (renderGlow), no edge lines.
+    this.setOverlayLines(this.selOutline, []);
+    this.setOverlayLines(this.hoverOutline, hover && !isSelected && bodyHover === null ? edgePoints([hover], true) : []);
     this.requestRender();
   }
 
@@ -1083,7 +1211,7 @@ export class Viewport {
     this.clearGhost();
     let k = -1;
     for (const [id, shape] of shapes) {
-      const view = this.buildView({ id: k--, name: "", kind: kindOf(shape), shape });
+      const view = this.buildView({ id: k--, name: "", kind: kindOf(shape), shape }, true);
       this.ghostRoot.add(view.group);
       const orig = this.views.get(id);
       if (orig) {
@@ -1094,10 +1222,99 @@ export class Viewport {
     this.requestRender();
   }
 
+  /**
+   * Preview bodies moved / stretched by `matrix` without re-tessellating: their display meshes
+   * drawn through the matrix (instant even for heavy curved bodies; exact for affine maps).
+   */
+  showGhostTransformed(ids: number[], matrix: THREE.Matrix4): void {
+    this.clearGhost();
+    for (const id of ids) {
+      const orig = this.views.get(id);
+      if (!orig) continue;
+      const g = orig.group.clone(); // shares geometry and materials with the body's view
+      g.userData.sharedGeometry = true;
+      g.matrixAutoUpdate = false;
+      g.matrix.copy(matrix);
+      g.visible = true;
+      this.ghostRoot.add(g);
+      orig.group.visible = false;
+      this.markDirty(id);
+    }
+    // The selection outline / glow follows the preview (it outlines these bodies).
+    this.glowXf = { ids: new Set(ids), matrix: matrix.clone() };
+    for (const l of [this.selEdges, this.selOutline]) {
+      l.matrixAutoUpdate = false;
+      l.matrix.copy(matrix);
+      l.matrixWorldNeedsUpdate = true;
+    }
+    this.requestRender();
+  }
+
+  /**
+   * Instant push/pull drag preview: each body's display mesh with the given faces shifted (by
+   * face id → offset) and the matching vertices of their neighbours shifted along, so side faces
+   * stretch to follow. Approximate (no boolean): the exact preview follows once the drag pauses.
+   */
+  showGhostDeformed(moves: Map<number, Map<number, V3>>): void {
+    this.clearGhost();
+    const key = (a: ArrayLike<number>, i: number) => `${Math.round(a[i] * 1e3)},${Math.round(a[i + 1] * 1e3)},${Math.round(a[i + 2] * 1e3)}`;
+    for (const [id, faces] of moves) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      const g0 = v.mesh.geometry;
+      const P = g0.attributes.position.array as Float32Array;
+      // Offset per vertex position (first moved face wins where two meet).
+      const shift = new Map<string, V3>();
+      for (const [faceId, d] of faces) {
+        const gi = v.faceIndex.get(faceId);
+        if (gi === undefined) continue;
+        for (let k = v.faceV[gi * 2]; k < v.faceV[gi * 2 + 1]; k++) {
+          const kk = key(P, k * 3);
+          if (!shift.has(kk)) shift.set(kk, d);
+        }
+      }
+      const moved = (src: ArrayLike<number>) => {
+        const out = Float32Array.from(src);
+        for (let i = 0; i < out.length; i += 3) {
+          const d = shift.get(key(src, i));
+          if (d) {
+            out[i] += d[0];
+            out[i + 1] += d[1];
+            out[i + 2] += d[2];
+          }
+        }
+        return out;
+      };
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(moved(P), 3));
+      geom.setAttribute("normal", new THREE.BufferAttribute(Float32Array.from(g0.attributes.normal.array as Float32Array), 3));
+      geom.setIndex(new THREE.BufferAttribute(Uint32Array.from(g0.index!.array as Uint32Array), 1));
+      for (const g of g0.groups) geom.addGroup(g.start, g.count, g.materialIndex); // per-face materials
+      const group = new THREE.Group();
+      group.add(new THREE.Mesh(geom, v.mesh.material));
+      if (v.edges) {
+        const eg = new LineSegmentsGeometry();
+        eg.setPositions(moved(v.edgePos));
+        const lines = new LineSegments2(eg, this.mats.edge);
+        lines.raycast = () => {};
+        group.add(lines);
+      }
+      this.ghostRoot.add(group);
+      v.group.visible = false;
+      this.markDirty(id);
+    }
+    this.requestRender();
+  }
+
   clearGhost(): void {
+    this.glowXf = null;
+    for (const l of [this.selEdges, this.selOutline]) {
+      l.matrix.identity();
+      l.matrixWorldNeedsUpdate = true;
+    }
     for (const child of [...this.ghostRoot.children]) {
       child.removeFromParent();
-      child.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      if (!child.userData.sharedGeometry) child.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
     }
     for (const [id, v] of this.views) {
       const vis = !this.hidden.has(id);
@@ -1113,6 +1330,23 @@ export class Viewport {
     return (2 * d * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))) / this.height;
   }
 
+  /**
+   * A 3D segment on screen, cut at the camera's near plane first: a point behind the camera
+   * projects to the wrong side of the screen, so a long guide running past the camera (e.g. one
+   * from an axis) would be picked along a line that isn't where it's drawn. Null if all behind.
+   */
+  segmentToScreen(a: THREE.Vector3, b: THREE.Vector3): [{ x: number; y: number }, { x: number; y: number }] | null {
+    this.camera.updateMatrixWorld();
+    const va = a.clone().applyMatrix4(this.camera.matrixWorldInverse), vb = b.clone().applyMatrix4(this.camera.matrixWorldInverse);
+    // View space looks down -z; keep the part in front of the near plane (orthographic: all of it).
+    const near = (this.camera as THREE.PerspectiveCamera).isPerspectiveCamera ? -(this.camera as THREE.PerspectiveCamera).near * 1.01 : Infinity;
+    if (va.z > near && vb.z > near) return null;
+    if (va.z > near) va.lerp(vb, (va.z - near) / (va.z - vb.z));
+    else if (vb.z > near) vb.lerp(va, (vb.z - near) / (vb.z - va.z));
+    const toWorld = (v: THREE.Vector3) => v.applyMatrix4(this.camera.matrixWorld);
+    return [this.toScreen(toWorld(va)), this.toScreen(toWorld(vb))];
+  }
+
   toScreen(point: THREE.Vector3): { x: number; y: number } {
     const p = point.clone().project(this.camera);
     const r = this.canvas.getBoundingClientRect();
@@ -1121,7 +1355,8 @@ export class Viewport {
 
   // ------------------------------------------------------------ camera
 
-  fit(ids?: number[]): void {
+  /** Frame the bodies (or `ids`); `rightInset` px on the right are covered (e.g. by a panel), so centre in the rest. */
+  fit(ids?: number[], rightInset = 0): void {
     const box = new THREE.Box3();
     for (const [id, v] of this.views) {
       if (!v.group.visible) continue;
@@ -1131,9 +1366,18 @@ export class Viewport {
     if (box.isEmpty()) box.set(new THREE.Vector3(-60, -60, 0), new THREE.Vector3(60, 60, 40));
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
-    const dist = (Math.max(sphere.radius, 1) / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.15;
+    const free = Math.max(1, this.width - rightInset);
+    const dist = (Math.max(sphere.radius, 1) / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.15 * Math.max(1, this.height / free);
     this.controls.target.copy(sphere.center);
     this.camera.position.copy(sphere.center).addScaledVector(dir, dist);
+    if (rightInset > 0) {
+      // Pan so the centre lands in the middle of the uncovered part.
+      this.camera.updateMatrixWorld();
+      const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+      const shift = right.multiplyScalar((rightInset / 2) * this.worldPerPixel(sphere.center));
+      this.controls.target.add(shift);
+      this.camera.position.add(shift);
+    }
     this.controls.update();
   }
 
@@ -1324,4 +1568,109 @@ export class Viewport {
     if (result) end(result);
     else this.requestRender();
   }
+}
+
+/**
+ * Glow round bodies' silhouettes: the bodies drawn as a white mask into an offscreen buffer, then
+ * a full-screen pass colours pixels just outside the mask, fading over RADIUS px. Pixels on the
+ * bodies themselves are left alone, so only the outside boundary glows.
+ */
+class SilhouetteGlow {
+  static readonly HOVER = 0xe2e5e8;
+  static readonly SELECTED = 0x1e88ff;
+  static readonly RADIUS = 6; // CSS px
+  private target = new THREE.WebGLRenderTarget(1, 1, { samples: 4 });
+  private maskScene = new THREE.Scene();
+  private maskMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+  private masks: THREE.Mesh[] = [];
+  private quadScene = new THREE.Scene();
+  private quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private mat = new THREE.ShaderMaterial({
+    uniforms: { mask: { value: null }, texel: { value: new THREE.Vector2() }, radius: { value: 1 }, color: { value: new THREE.Color() } },
+    vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }",
+    fragmentShader: `
+      uniform sampler2D mask; uniform vec2 texel; uniform float radius; uniform vec3 color;
+      varying vec2 vUv;
+      void main() {
+        if (texture2D(mask, vUv).r > 0.5) discard; // on the body: no glow
+        float g = 0.0;
+        for (int i = 0; i < 16; i++) {
+          float a = float(i) * 0.39269908; // 2π / 16
+          vec2 d = vec2(cos(a), sin(a)) * texel;
+          for (int j = 1; j <= 4; j++) {
+            float r = radius * float(j) / 4.0;
+            if (texture2D(mask, vUv + d * r).r > 0.5) g = max(g, 1.0 - (r - radius / 4.0) / radius);
+          }
+        }
+        if (g <= 0.0) discard;
+        gl_FragColor = vec4(color, g * g * 0.9);
+        #include <colorspace_fragment>
+      }`,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+  constructor() {
+    this.quadScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.mat));
+  }
+
+  /** Glow of `color` round the given bodies (their display meshes, placed by `matrix`). */
+  draw(renderer: THREE.WebGLRenderer, camera: THREE.Camera, bodies: { mesh: THREE.Mesh; matrix: THREE.Matrix4 }[], size: THREE.Vector2, color: number): void {
+    if (this.target.width !== size.x || this.target.height !== size.y) this.target.setSize(size.x, size.y);
+    while (this.masks.length < bodies.length) {
+      const m = new THREE.Mesh(undefined, this.maskMat);
+      m.matrixAutoUpdate = false;
+      this.masks.push(m);
+      this.maskScene.add(m);
+    }
+    this.masks.forEach((m, i) => {
+      m.visible = i < bodies.length;
+      if (!m.visible) return;
+      m.geometry = bodies[i].mesh.geometry;
+      m.matrix.copy(bodies[i].matrix);
+      m.matrixWorld.copy(bodies[i].matrix); // no auto-update: place it here (the mask scene has no transform)
+    });
+    this.mat.uniforms.color.value.set(color);
+    const clear = renderer.getClearColor(new THREE.Color()), alpha = renderer.getClearAlpha();
+    renderer.setRenderTarget(this.target);
+    renderer.setClearColor(0x000000, 1);
+    renderer.clear();
+    renderer.render(this.maskScene, camera);
+    renderer.setRenderTarget(null);
+    renderer.setClearColor(clear, alpha);
+    this.mat.uniforms.mask.value = this.target.texture;
+    this.mat.uniforms.texel.value.set(1 / size.x, 1 / size.y);
+    this.mat.uniforms.radius.value = SilhouetteGlow.RADIUS * renderer.getPixelRatio();
+    const auto = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.render(this.quadScene, this.quadCam);
+    renderer.autoClear = auto;
+  }
+}
+
+/**
+ * A mesh body in the same form as a B-rep tessellation: one face group (id 0) with flat-shaded
+ * triangles, and no edges (drawing every triangle edge would turn a fine mesh black).
+ */
+function meshTessellation(m: TriMesh): ReturnType<typeof tessellate> {
+  const P = m.positions, N = new Float32Array(P.length), n = P.length / 3;
+  for (let i = 0; i < P.length; i += 9) {
+    const ux = P[i + 3] - P[i], uy = P[i + 4] - P[i + 1], uz = P[i + 5] - P[i + 2];
+    const vx = P[i + 6] - P[i], vy = P[i + 7] - P[i + 1], vz = P[i + 8] - P[i + 2];
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1;
+    nx /= l; ny /= l; nz /= l;
+    for (let k = 0; k < 9; k += 3) {
+      N[i + k] = nx;
+      N[i + k + 1] = ny;
+      N[i + k + 2] = nz;
+    }
+  }
+  const T = new Uint32Array(n);
+  for (let i = 0; i < n; i++) T[i] = i;
+  return {
+    faces: { vertices: P, normals: N, triangles: T, faceGroups: [{ start: 0, count: n, faceId: 0 }] },
+    edges: { lines: [], edgeGroups: [] },
+  } as unknown as ReturnType<typeof tessellate>;
 }

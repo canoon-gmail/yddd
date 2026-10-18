@@ -10,11 +10,14 @@ import {
   faceEdgeIds,
   moveEdges,
   splitFaceByLine,
+  splitFacesByPlane,
+  cutFaceByPlane,
   edgeEnds,
   edgeBetween,
   isPolyhedral,
   errorMessage,
   filletEdges,
+  filletDragAxis,
   chamferEdges,
   pushPull,
   pushPullMany,
@@ -27,7 +30,10 @@ import {
   deserialize,
   exportStep,
   exportStl,
+  stlTriangleCount,
+  type StlQuality,
   importStep,
+  importStl,
   boundingSize,
   findFace,
   extrudeFace,
@@ -36,6 +42,12 @@ import {
   faceAxis,
   faceRefEdges,
   offsetFace,
+  scaleShape,
+  guidePlaneNormal,
+  pushPullMoves,
+  edgesAlong,
+  asPreview,
+  splitByPlane,
   offsetDragAxis,
   offsetEdges,
   offsetEdgesAxis,
@@ -43,16 +55,31 @@ import {
   type V3,
   makeBox,
   makeCylinder,
+  solidPieces,
+  solidVolume,
+  shapesTouch,
   type Frame,
   type BodyKind,
   type BooleanOp,
+  type Geom,
   type Shape,
   type Solid,
+  TriMesh,
+  isMesh,
+  parseStl,
 } from "./kernel";
-import { Doc, type Body, type Guide } from "./document";
+import { Doc, withShape, type Body, type BodyGeom, type Guide, type ShapeBody } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, PencilTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
+import { BIRD_HOUSE } from "./birdhouse";
+import { CABLE_STORAGE_BOX } from "./cablebox";
+import type { TutCtx, Tutorial } from "./tutorials";
+
+/** Why an editing command can't run on a mesh body (an imported STL). */
+const meshOnly = (action: string, name: string) => `${action}: "${name}" is a mesh (imported STL) — it can be moved, rotated, scaled, copied and exported, not edited`;
+
+const notMesh = (g: Geom): g is Shape => !isMesh(g);
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (n: number) => String(Math.round(n * 100) / 100);
@@ -65,15 +92,44 @@ interface OpField {
   value: number;
   step?: number;
   min?: number;
-  type?: "number" | "checkbox";
+  /** "select": `value` is the index into `options`. */
+  type?: "number" | "checkbox" | "select";
+  options?: string[];
 }
+
+type OpInput = HTMLInputElement | HTMLSelectElement;
 
 /** Result of a parametric operation: what to preview and how to commit it. */
 interface OpOutcome {
   /** Shapes to preview, keyed by the body they replace (unknown/negative keys = new bodies). */
   ghost: Map<number, Shape>;
+  /**
+   * Instead of `ghost`: preview these bodies' current meshes through a transform (instant);
+   * the exact result is then only built by `commit`, which may throw.
+   */
+  xform?: { ids: number[]; matrix: THREE.Matrix4 };
   /** Apply to the document. Returns the body ids to select afterwards. */
   commit(): { select: number[]; solidMode?: boolean };
+}
+
+/**
+ * Mouse-drag control: moving the mouse along `dir` (through `origin`) changes field `key`.
+ * `unit` = world mm per unit of the field (default 1), e.g. for a percentage; `mul` names a
+ * percentage field that also stretches the handle's distance (e.g. overall scale for an axis handle).
+ * `look`/`color` style the handle; `line` draws a line from `origin` to it.
+ */
+interface OpDrag {
+  origin: V3;
+  dir: V3;
+  key: string;
+  /** Smallest value the drag gives (e.g. a fillet radius can't reach 0). */
+  min?: number;
+  unit?: number;
+  mul?: string;
+  look?: "arrow" | "box" | "ring";
+  color?: string;
+  line?: boolean;
+  title?: string;
 }
 
 interface OpSpec {
@@ -82,9 +138,19 @@ interface OpSpec {
   fields: OpField[];
   compute(values: Record<string, number>): OpOutcome;
   remember?(values: Record<string, number>): void;
-  /** Mouse-drag control: moving the mouse along `dir` (through `origin`) changes field `key`. */
-  drag?: { origin: V3; dir: V3; key: string };
+  /** One or more drag handles (see OpDrag). */
+  drag?: OpDrag | OpDrag[];
+  /**
+   * Instant approximate preview used while dragging when `compute` is slow (returns false if it
+   * can't help for these values); the real preview follows once the drag pauses.
+   */
+  fastDrag?(values: Record<string, number>): boolean;
 }
+
+/** Op previews slower than this (ms) are not redone on every drag frame. */
+const SLOW_PREVIEW_MS = 60;
+
+const dragsOf = (spec: OpSpec): OpDrag[] => (!spec.drag ? [] : Array.isArray(spec.drag) ? spec.drag : [spec.drag]);
 
 interface ToolbarItem {
   cmd: string;
@@ -115,22 +181,24 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     title: "Face",
     drawer: true,
     items: [
-      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "E R" },
-      { cmd: "tool.circle", icon: "circle", label: "Circle", key: "E C" },
-      { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "E E" },
+      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "A" },
+      { cmd: "tool.circle", icon: "circle", label: "Circle", key: "A C" },
+      { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "A P" },
     ],
   },
   {
     title: "Modify",
     drawer: true,
     items: [
-      { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull", key: "P" },
+      { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull", key: "P / Space" },
       { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "H" },
       { cmd: "op.offset", icon: "offset", label: "Offset", key: "O" },
-      { cmd: "tool.line", icon: "pencil", label: "Line (split face)", key: "L" },
-      { cmd: "tool.guide", icon: "rectangle", label: "Guide line", key: "Shift+L" },
+      { cmd: "op.cut", icon: "cut", label: "Cut by guide", key: "C" },
+      { cmd: "op.splitFace", icon: "cut", label: "Split face by guide", key: "Shift+C" },
+      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face", key: "L" },
+      { cmd: "tool.guide", icon: "guide", label: "Guide line", key: "Shift+L" },
       { cmd: "edit.clearGuides", icon: "delete", label: "Clear guides", key: "" },
     ],
   },
@@ -150,6 +218,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
       { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "Shift+G" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
+      { cmd: "xf.scale", icon: "scale", label: "Scale", key: "S" },
       { cmd: "xf.repeat", icon: "duplicate", label: "Repeat last", key: "Shift+R" },
       { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Shift+D / Ctrl+D" },
     ],
@@ -184,18 +253,22 @@ const KEYMAP: Record<string, string> = {
   "2": "mode.face",
   "3": "mode.edge",
   b: "tool.box",
-  e: "tool.polygon",
+  a: "tool.rectangle",
   p: "op.pushpull",
+  Space: "op.pushpull",
   f: "op.fillet",
   "Shift+F": "op.chamfer",
   h: "op.shell",
   o: "op.offset",
+  c: "op.cut",
   g: "xf.move",
   "Shift+G": "xf.moveFrom",
-  l: "tool.line",
+  l: "tool.divideFace",
   "Shift+L": "tool.guide",
+  "Shift+C": "op.splitFace",
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
+  s: "xf.scale",
   x: "edit.delete",
   Delete: "edit.delete",
   Home: "view.fit",
@@ -214,7 +287,7 @@ const KEYMAP: Record<string, string> = {
   "=": "bool.union", // unshifted "+" key
   "-": "bool.subtract",
   "Shift+I": "bool.intersect",
-  "Shift+V": "view.menu",
+  v: "view.menu",
   "Shift+X": "view.xray",
   "Shift+D": "edit.duplicate",
   "?": "help.shortcuts",
@@ -222,11 +295,11 @@ const KEYMAP: Record<string, string> = {
 
 /**
  * Two-key chords: the first key starts its tool at once; a second key within CHORD_MS switches tool.
- * B B box · B C cylinder · B S sphere — E E polygon · E R rectangle · E C circle.
+ * B B box · B C cylinder · B S sphere — A rectangle · A C circle · A P polygon.
  */
 const CHORDS: Record<string, Record<string, string>> = {
   b: { b: "tool.box", c: "tool.cylinder", s: "tool.sphere" },
-  e: { e: "tool.polygon", r: "tool.rectangle", c: "tool.circle" },
+  a: { a: "tool.rectangle", r: "tool.rectangle", c: "tool.circle", p: "tool.polygon" },
 };
 const CHORD_MS = 1500;
 
@@ -235,9 +308,17 @@ const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => g.title !== "Select" && g.tit
 const RECENT_MAX = 10;
 /** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
 const FACE_EDGE_PICK_PX = 14;
-const RECENT_KEY = "y3d.recentCmds";
+/** v2: the strip saved before "tool.line" became "tool.divideFace" is dropped (see loadRecent). */
+const RECENT_KEY = "y3d.recentCmds.v2";
+const RECENT_KEY_OLD = "y3d.recentCmds";
+/** Largest STL (triangles) imported as editable solids; bigger ones stay meshes. */
+const STL_SOLID_MAX = 20000;
+
+/** Last STL export quality (localStorage). */
+const STL_QUALITY_KEY = "y3d.stlQuality";
 
 function loadRecent(): string[] {
+  localStorage.removeItem(RECENT_KEY_OLD);
   try {
     const v = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
     return Array.isArray(v) ? v.filter((c) => RECENT_ITEMS.has(c)).slice(-RECENT_MAX) : [];
@@ -265,16 +346,23 @@ class App implements ToolHost {
   private chord: { keys: Record<string, string>; at: number } | null = null;
   private op: {
     spec: OpSpec;
-    inputs: HTMLInputElement[];
+    inputs: OpInput[];
     timer: number;
     result: OpOutcome | null;
     key: string;
     /** Drag reference: line parameter and field value when the mouse first moved. */
     anchor?: { x: number; y: number; v: number };
+    /** Full-precision value of a snapped drag; used while the field still shows its rounded text. */
+    exact?: { key: string; shown: string; value: number };
     dragQueued?: boolean;
+    /** Index (into dragsOf(spec)) of the handle being dragged. */
+    active?: number;
+    /** How long the last preview took (ms); slow previews are only redone once the drag pauses. */
+    previewMs?: number;
+    dragTimer?: number;
   } | null = null;
   /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
-  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; edges?: SelItem[] } | null = null;
+  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; edges?: SelItem[]; guide?: number } | null = null;
   /** Latest edge-move drag offset waiting for its (once per frame) preview. */
   private edgePreview: V3 | null = null;
   private snap = 1;
@@ -283,11 +371,12 @@ class App implements ToolHost {
   private selEdgeCache: { sel: SelItem[]; edges: Map<number, Set<number>> } | null = null;
   private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, edgesWhich: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
-  private handleEl = $("op-handle");
+  private handlesEl = $("op-handles");
+  private linesEl = $("op-lines") as unknown as SVGSVGElement;
   private opPanel = $("op-panel");
 
   constructor() {
@@ -300,6 +389,7 @@ class App implements ToolHost {
     this.bindStatusBar();
 
     this.doc.onChange(() => this.onDocChange());
+    this.doc.onChange(() => this.scheduleAutosave());
     window.y3d?.onMenu((cmd) => this.run(cmd));
     // Unsaved-changes prompt on close is handled by the main process (see setDirty);
     // a beforeunload handler would silently block closing in Electron.
@@ -330,23 +420,81 @@ class App implements ToolHost {
     this.positionHud();
   }
 
-  /** Place the op drag handle at origin + dir * value, rotated to the axis' screen direction. */
-  private positionHandle(): void {
-    const drag = this.op?.spec.drag;
-    const input = drag && this.op!.inputs.find((i) => i.dataset.key === drag.key);
-    if (!drag || !input) {
-      this.handleEl.hidden = true;
-      return;
+  /** World mm per field unit of `drag`, including its `mul` field. */
+  private dragUnit(drag: OpDrag): number {
+    const m = drag.mul && this.op?.inputs.find((i) => i.dataset.key === drag.mul);
+    return (drag.unit ?? 1) * (m ? (Number(m.value) || 0) / 100 : 1);
+  }
+
+  /** (Re)create one handle element per op drag, wired to start a drag on that handle. */
+  private buildHandles(n: number): void {
+    const c = this.viewport.canvas;
+    this.handlesEl.innerHTML = "";
+    for (let i = 0; i < n; i++) {
+      const h = document.createElement("div");
+      h.className = "op-handle";
+      h.hidden = true;
+      h.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !this.op?.spec.drag) return;
+        e.preventDefault();
+        e.stopPropagation();
+        h.setPointerCapture(e.pointerId);
+        h.classList.add("dragging");
+        this.op.anchor = undefined;
+        this.op.active = i;
+        this.opDrag(e);
+      });
+      h.addEventListener("pointermove", (e) => {
+        if (h.hasPointerCapture(e.pointerId) && this.op?.spec.drag) {
+          this.opDrag(e);
+          this.positionHandle();
+        }
+      });
+      const release = (e: PointerEvent) => {
+        if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId);
+        this.viewport.showSnapMarker(null);
+        h.classList.remove("dragging");
+        if (this.op) this.op.anchor = undefined;
+      };
+      h.addEventListener("pointerup", release);
+      h.addEventListener("pointercancel", release);
+      h.addEventListener("wheel", (e) => c.dispatchEvent(new WheelEvent("wheel", e)), { passive: true });
+      this.handlesEl.appendChild(h);
     }
-    const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
-    const P = O.clone().addScaledVector(D, Number(input.value) || 0);
-    const s = this.viewport.toScreen(P), s1 = this.viewport.toScreen(P.clone().add(D));
+  }
+
+  /** Place each op drag handle at origin + dir * value, rotated to the axis' screen direction. */
+  private positionHandle(): void {
+    const drags = this.op ? dragsOf(this.op.spec) : [];
+    if (this.handlesEl.childElementCount !== drags.length) this.buildHandles(drags.length);
     const r = $("viewport").getBoundingClientRect();
-    const ang = Math.atan2(s1.y - s.y, s1.x - s.x) * (180 / Math.PI) + 90;
-    this.handleEl.style.left = `${s.x - r.left}px`;
-    this.handleEl.style.top = `${s.y - r.top}px`;
-    this.handleEl.style.transform = `rotate(${ang}deg)`;
-    this.handleEl.hidden = false;
+    let lines = "";
+    drags.forEach((drag, i) => {
+      const el = this.handlesEl.children[i] as HTMLElement;
+      const input = this.op!.inputs.find((inp) => inp.dataset.key === drag.key);
+      if (!input) {
+        el.hidden = true;
+        return;
+      }
+      const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
+      const P = O.clone().addScaledVector(D, (Number(input.value) || 0) * this.dragUnit(drag));
+      const s = this.viewport.toScreen(P), s1 = this.viewport.toScreen(P.clone().add(D));
+      const look = drag.look ?? "arrow";
+      const ang = Math.atan2(s1.y - s.y, s1.x - s.x) * (180 / Math.PI) + 90;
+      el.className = `op-handle ${look}${el.classList.contains("dragging") ? " dragging" : ""}`;
+      el.textContent = look === "arrow" ? "\u21D5" : "";
+      el.title = drag.title ?? "Drag to change the value";
+      el.style.setProperty("--c", drag.color ?? "#1e88ff");
+      el.style.left = `${s.x - r.left}px`;
+      el.style.top = `${s.y - r.top}px`;
+      el.style.transform = look === "arrow" ? `rotate(${ang}deg)` : "";
+      el.hidden = false;
+      if (drag.line) {
+        const o = this.viewport.toScreen(O);
+        lines += `<line x1="${o.x - r.left}" y1="${o.y - r.top}" x2="${s.x - r.left}" y2="${s.y - r.top}" stroke="${drag.color ?? "#1e88ff"}" stroke-width="2" stroke-opacity="0.85"/>`;
+      }
+    });
+    this.linesEl.innerHTML = lines;
   }
 
   private positionHud(): void {
@@ -369,6 +517,11 @@ class App implements ToolHost {
 
   fail(e: unknown): void {
     this.toast(`Failed: ${errorMessage(e)}`, "error");
+  }
+
+  /** The open value dialog (Tab properties, STL quality), if any. */
+  private valueDialog(): HTMLElement | null {
+    return document.getElementById("props-dlg");
   }
 
   propsDialog(title: string, fields: PropField[], onOk: (values: number[]) => void, okLabel = "Create"): void {
@@ -460,8 +613,10 @@ class App implements ToolHost {
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
       case "op.offset": return this.opOffset();
+      case "op.cut": return this.startCut();
+      case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
-      case "tool.line": return this.startTool(new PencilTool(this, (id, a, b) => this.pencilLine(id, a, b)).start());
+      case "tool.divideFace": return this.startTool(new DivideFaceTool(this, (id, a, b) => this.divideFace(id, a, b), (id) => this.divideRefusal(id)).start());
       case "edit.clearGuides":
         if (!this.doc.guides.length) return this.toast("No guide lines");
         this.selGuide = -1;
@@ -471,8 +626,11 @@ class App implements ToolHost {
       case "bool.subtract": return this.boolean("subtract");
       case "bool.intersect": return this.boolean("intersect");
 
-      case "xf.move": return this.mode === "edge" && this.selection.some((s) => s.kind === "edge") ? this.startEdgeMove() : this.startTransform("translate");
+      case "xf.move":
+        if (this.selGuide >= 0 && !this.selection.length) return this.startGuideMove();
+        return this.mode === "edge" && this.selection.some((s) => s.kind === "edge") ? this.startEdgeMove() : this.startTransform("translate");
       case "xf.rotate": return this.startTransform("rotate");
+      case "xf.scale": return this.opScale();
       case "xf.moveFrom": return this.startPointMove();
       case "xf.repeat": return this.repeatLast();
 
@@ -506,10 +664,13 @@ class App implements ToolHost {
         });
         return;
       case "file.importStep": void this.fileImportStep(); return;
+      case "file.importStl": void this.fileImportStl(); return;
       case "file.exportStep": void this.fileExport("step"); return;
       case "file.exportStl": void this.fileExport("stl"); return;
 
       case "help.shortcuts": return this.toggleHelp();
+      case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
+      case "help.cablebox": return this.toggleTutorial(CABLE_STORAGE_BOX);
       case "view.menu": return this.showViewMenu();
     }
   }
@@ -541,7 +702,11 @@ class App implements ToolHost {
   private setSelection(items: SelItem[]): void {
     this.selection = items;
     this.refreshSelection();
-    if (this.xf?.edges) {
+    if (this.xf?.guide !== undefined) {
+      // Clicking another guide moves the gizmo to it; anything else ends the guide move.
+      if (this.selGuide >= 0 && !items.length) this.startGuideMove(true);
+      else this.stopTransform();
+    } else if (this.xf?.edges) {
       if (items.some((s) => s.kind === "edge")) this.startEdgeMove(true);
       else this.stopTransform();
     } else if (this.xf) {
@@ -563,11 +728,18 @@ class App implements ToolHost {
     }
     if (g >= 0) {
       this.setSelection([]);
-      this.hint("Guide line selected · Del removes it");
+      this.hint("Guide line selected · G moves it · Del removes it");
       return;
     }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
-    const item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
+    let item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
+    // Two solids in the same place (e.g. a copy not moved yet): stay on the selected one instead of flipping to its twin.
+    const sel = this.selection.length === 1 && this.selection[0].kind === "body" ? this.selection[0].body : null;
+    if (pick && item && this.mode === "body" && sel !== null && item.body !== sel && !e.shiftKey && !e.ctrlKey) {
+      const own = this.viewport.pick(e.clientX, e.clientY, "body", sel);
+      const tol = 1e-4 * Math.max(1, this.viewport.camera.position.distanceTo(pick.point));
+      if (own && own.point.distanceTo(pick.point) < tol) item = { kind: "body", body: sel, id: 0 };
+    }
     if (!item) {
       if (!e.shiftKey) this.setSelection([]);
       return;
@@ -577,8 +749,9 @@ class App implements ToolHost {
       this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
     } else if (this.mode === "body" && this.selection.length === 1 && sameItem(this.selection[0], item)) {
       // Second click on the selected solid: drill down to the edge (if close to one) or face under the cursor.
-      let sub = this.viewport.pick(e.clientX, e.clientY, "edge");
-      if (!sub || sub.body !== item.body) sub = this.viewport.pick(e.clientX, e.clientY, "face");
+      // (Only on that body: another solid in the same place — e.g. a copy — must not get in the way.)
+      let sub = this.viewport.pick(e.clientX, e.clientY, "edge", item.body);
+      if (!sub) sub = this.viewport.pick(e.clientX, e.clientY, "face", item.body);
       if (sub && sub.body === item.body && sub.kind !== "body") {
         this.setMode(sub.kind === "edge" ? "edge" : "face");
         this.setSelection([{ kind: sub.kind, body: sub.body, id: sub.id }]);
@@ -612,7 +785,7 @@ class App implements ToolHost {
       const edges = new Map<number, Set<number>>();
       for (const s of this.selection) {
         const body = this.doc.get(s.body);
-        if (s.kind !== "face" || !body) continue;
+        if (s.kind !== "face" || !body || body.kind === "mesh") continue;
         const set = edges.get(s.body) ?? new Set<number>();
         for (const id of faceEdgeIds(body.shape, s.id)) set.add(id);
         edges.set(s.body, set);
@@ -638,7 +811,18 @@ class App implements ToolHost {
   private bindViewportEvents(): void {
     window.addEventListener("pointermove", (e) => (this.pointer = { x: e.clientX, y: e.clientY }), true);
     const c = this.viewport.canvas;
+    // While a value dialog (Tab) is open the model waits for it: left clicks in the viewport don't
+    // reach the tool, the gizmo or picking, and only put the focus back in the dialog. Orbit, pan
+    // and zoom still work.
+    c.parentElement!.addEventListener("pointerdown", (e) => {
+      const dlg = this.valueDialog();
+      if (!dlg || e.target !== c || e.button !== 0 || e.shiftKey) return;
+      e.preventDefault(); // no mousedown: the dialog keeps the focus
+      e.stopPropagation();
+      if (!dlg.contains(document.activeElement)) dlg.querySelector<HTMLInputElement>("input")?.focus();
+    }, { capture: true });
     c.addEventListener("pointermove", (e) => {
+      if (this.valueDialog()) return;
       if (this.tool) {
         this.tool.move(e);
         return;
@@ -668,31 +852,6 @@ class App implements ToolHost {
       if (this.viewport.gizmoHot || this.op) return;
       this.downAt = { x: e.clientX, y: e.clientY };
     });
-    // Op drag handle: press on it and drag to change the value.
-    const h = this.handleEl;
-    h.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0 || !this.op?.spec.drag) return;
-      e.preventDefault();
-      e.stopPropagation();
-      h.setPointerCapture(e.pointerId);
-      h.classList.add("dragging");
-      this.op.anchor = undefined;
-      this.opDrag(e);
-    });
-    h.addEventListener("pointermove", (e) => {
-      if (h.hasPointerCapture(e.pointerId) && this.op?.spec.drag) {
-        this.opDrag(e);
-        this.positionHandle();
-      }
-    });
-    const release = (e: PointerEvent) => {
-      if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId);
-      h.classList.remove("dragging");
-      if (this.op) this.op.anchor = undefined;
-    };
-    h.addEventListener("pointerup", release);
-    h.addEventListener("pointercancel", release);
-    h.addEventListener("wheel", (e) => c.dispatchEvent(new WheelEvent("wheel", e)), { passive: true });
     c.addEventListener("pointerup", (e) => {
       if (e.button === 2) {
         const d = this.rightDownAt;
@@ -700,6 +859,7 @@ class App implements ToolHost {
         if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) this.rightClick(e);
         return;
       }
+      if (e.button === 0 && this.valueDialog()) return;
       if (e.button === 0 && this.tool?.up) {
         this.tool.up(e);
         return;
@@ -718,7 +878,7 @@ class App implements ToolHost {
     c.addEventListener("wheel", () => requestAnimationFrame(() => this.positionHud()), { passive: true });
     // Tools may consume the wheel (e.g. Shift+wheel = polygon sides) before the camera zooms.
     c.parentElement!.addEventListener("wheel", (e) => {
-      if (e.target === c && this.tool?.wheel?.(e)) {
+      if (e.target === c && this.tool && !this.valueDialog() && this.tool.wheel?.(e)) {
         e.preventDefault();
         e.stopPropagation();
       }
@@ -780,6 +940,11 @@ class App implements ToolHost {
       }
       if (this.tool && this.tool.key(e)) {
         e.preventDefault();
+        return;
+      }
+      if (e.key === "Enter" && this.op && !this.tool) {
+        e.preventDefault();
+        this.applyOp(); // focus may have left the panel (e.g. the op was opened by a viewport click)
         return;
       }
       if (e.key === "Enter" && this.xf && !this.tool) {
@@ -887,9 +1052,18 @@ class App implements ToolHost {
     this.endInteractions();
     const panel = this.opPanel;
     panel.innerHTML = `<h4>${spec.title}</h4>`;
-    const inputs = spec.fields.map((f) => {
+    const inputs = spec.fields.map((f): OpInput => {
       const label = document.createElement("label");
       label.textContent = f.label;
+      if (f.type === "select") {
+        const select = document.createElement("select");
+        (f.options ?? []).forEach((o, i) => select.add(new Option(o, String(i))));
+        select.value = String(f.value);
+        select.dataset.key = f.key;
+        label.appendChild(select);
+        panel.appendChild(label);
+        return select;
+      }
       const input = document.createElement("input");
       if (f.type === "checkbox") {
         input.type = "checkbox";
@@ -922,8 +1096,9 @@ class App implements ToolHost {
       if (a === "cancel") this.cancelOp();
     });
     for (const input of inputs) {
-      input.addEventListener(input.type === "checkbox" ? "change" : "input", () => this.scheduleOpPreview());
-      input.addEventListener("keydown", (e) => {
+      input.addEventListener(input.type === "checkbox" || input instanceof HTMLSelectElement ? "change" : "input", () => this.scheduleOpPreview());
+      input.addEventListener("keydown", (ev) => {
+        const e = ev as KeyboardEvent;
         if (e.key === "Enter") {
           e.preventDefault();
           this.applyOp();
@@ -932,7 +1107,7 @@ class App implements ToolHost {
           this.cancelOp();
         }
       });
-      if (input.type === "number") input.addEventListener("wheel", (e) => {
+      if (input instanceof HTMLInputElement && input.type === "number") input.addEventListener("wheel", (e) => {
         e.preventDefault();
         const step = Number(input.step) * (e.shiftKey ? 10 : 1);
         input.value = fmt(Number(input.value) + (e.deltaY < 0 ? step : -step));
@@ -940,21 +1115,23 @@ class App implements ToolHost {
       });
     }
     this.hover = null;
-    this.hint(spec.drag
-      ? `${spec.title}: drag the blue handle to set the distance (hold Ctrl to snap) · click or Enter apply · Esc cancel`
+    const drags = dragsOf(spec);
+    this.hint(drags.length
+      ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (hold Ctrl to snap) · click or Enter apply · Esc cancel`
       : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
     this.renderToolbarState();
     this.previewOp();
     this.positionHandle();
     const first = inputs.find((i) => i.type === "number") ?? inputs[0];
     first?.focus();
-    if (first?.type === "number") first.select();
+    if (first instanceof HTMLInputElement && first.type === "number") first.select();
   }
 
   /** Map mouse movement along the drag axis to the op's value (relative to where the drag started). */
   private opDrag(e: PointerEvent): void {
     const op = this.op!;
-    const drag = op.spec.drag!;
+    const drag = dragsOf(op.spec)[op.active ?? 0];
+    if (!drag) return;
     const input = op.inputs.find((i) => i.dataset.key === drag.key);
     if (!input) return;
     const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
@@ -968,14 +1145,30 @@ class App implements ToolHost {
       op.anchor = { x: e.clientX, y: e.clientY, v: Number(input.value) || 0 };
       return;
     }
+    const unit = this.dragUnit(drag);
     const t = (((e.clientX - op.anchor.x) * ax + (e.clientY - op.anchor.y) * ay) / pxPer10) * (10 / pxPer10);
-    let v = op.anchor.v + t;
-    const step = this.snapStep(e);
-    if (step > 0) v = Math.round(v / step) * step;
+    let v = op.anchor.v + t / unit;
+    // Ctrl: level with the object point under the cursor (corner, midpoint, centre, edge, guide, axis), else grid.
+    const sp = e.ctrlKey ? this.viewport.snapPoint(e.clientX, e.clientY) : null;
+    this.viewport.showSnapMarker(sp);
+    if (sp) v = sp.point.clone().sub(O).dot(D) / unit;
+    else {
+      const step = this.snapStep(e);
+      if (step > 0) v = Math.round(v / step) * step;
+    }
+    if (drag.min !== undefined) v = Math.max(drag.min, v);
+    op.exact = sp ? { key: drag.key, shown: fmt(v), value: v } : undefined;
     if (fmt(v) === input.value) return;
     input.value = fmt(v);
-    this.hud(`${fmt(v)} mm`, O.clone().addScaledVector(D, v));
-    if (!op.dragQueued) {
+    const units = drag.unit ? "%" : "mm";
+    this.hud(sp ? `${fmt(v)} ${units} · ${sp.kind}` : `${fmt(v)} ${units}`, O.clone().addScaledVector(D, v * unit));
+    if ((op.previewMs ?? 0) > SLOW_PREVIEW_MS) {
+      // Heavy geometry: recomputing every frame would keep the CPU pegged. Show the instant
+      // approximate preview if the op has one, and the real one once the drag pauses.
+      if (op.spec.fastDrag?.(this.opValues().values)) op.key = ""; // the real preview must redraw
+      clearTimeout(op.dragTimer);
+      op.dragTimer = window.setTimeout(() => this.op === op && this.previewOp(), 150);
+    } else if (!op.dragQueued) {
       op.dragQueued = true;
       requestAnimationFrame(() => {
         if (this.op !== op) return;
@@ -987,7 +1180,11 @@ class App implements ToolHost {
 
   private opValues(): { values: Record<string, number>; key: string } {
     const values: Record<string, number> = {};
-    for (const i of this.op!.inputs) values[i.dataset.key!] = i.type === "checkbox" ? (i.checked ? 1 : 0) : Number(i.value);
+    const exact = this.op!.exact;
+    for (const i of this.op!.inputs) {
+      const k = i.dataset.key!;
+      values[k] = i instanceof HTMLInputElement && i.type === "checkbox" ? (i.checked ? 1 : 0) : exact?.key === k && i.value === exact.shown ? exact.value : Number(i.value);
+    }
     return { values, key: JSON.stringify(values) };
   }
 
@@ -1006,11 +1203,14 @@ class App implements ToolHost {
     const err = op.inputs[0].closest("#op-panel")!.querySelector(".op-error")!;
     try {
       if (Object.values(values).some((v) => !Number.isFinite(v))) throw new Error("enter a number");
+      const t0 = performance.now();
       const result = op.spec.compute(values);
       op.result = result;
       op.key = key;
       err.textContent = "";
-      this.viewport.showGhost(result.ghost);
+      if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
+      else this.viewport.showGhost(result.ghost);
+      op.previewMs = performance.now() - t0;
       return result;
     } catch (e) {
       op.result = null;
@@ -1028,8 +1228,17 @@ class App implements ToolHost {
     const result = this.previewOp();
     if (!result) return;
     op.spec.remember?.(this.opValues().values);
+    let done: { select: number[]; solidMode?: boolean };
+    try {
+      done = result.commit(); // a transform preview builds the exact result only now
+    } catch (e) {
+      const err = this.opPanel.querySelector(".op-error");
+      if (err) err.textContent = errorMessage(e);
+      this.toast(errorMessage(e), "error");
+      return;
+    }
     this.closeOpPanel();
-    const { select, solidMode } = result.commit();
+    const { select, solidMode } = done;
     if (solidMode) this.setMode("body");
     this.setSelection(this.mode === "body" ? select.map((id) => ({ kind: "body", body: id, id: 0 })) : []);
     this.toast(`${op.spec.label} applied`);
@@ -1043,9 +1252,11 @@ class App implements ToolHost {
   }
 
   private closeOpPanel(): void {
+    clearTimeout(this.op?.dragTimer);
     this.op = null;
     this.hud(null);
-    this.handleEl.hidden = true;
+    this.viewport.showSnapMarker(null);
+    this.positionHandle();
     this.opPanel.hidden = true;
     this.opPanel.innerHTML = "";
     this.viewport.clearGhost();
@@ -1053,9 +1264,9 @@ class App implements ToolHost {
   }
 
   /** Outcome that replaces body shapes in place (fillet, shell, join push/pull...). */
-  private replaceOutcome(shapes: Map<number, Shape>, label: string): OpOutcome {
+  private replaceOutcome(shapes: Map<number, Geom>, label: string): OpOutcome {
     return {
-      ghost: shapes,
+      ghost: new Map([...shapes].filter((e): e is [number, Shape] => !isMesh(e[1]))),
       commit: () => {
         this.doc.replaceShapes(shapes, label);
         return { select: [...shapes.keys()] };
@@ -1063,11 +1274,27 @@ class App implements ToolHost {
     };
   }
 
-  /** The body's shape as a solid, or a friendly error for flat faces. */
+  /** The body's shape as a solid, or a friendly error for flat faces and meshes. */
   private solidOf(id: number, action: string): Solid {
     const b = this.doc.get(id)!;
     if (b.kind === "face") throw new Error(`${action} needs a solid — "${b.name}" is a flat face (Push/Pull it first)`);
+    if (b.kind === "mesh") throw new Error(meshOnly(action, b.name));
     return b.shape as Solid;
+  }
+
+  /** The B-rep of a body picked by face or edge (a mesh never is: it is always picked whole). */
+  private brep(id: number): Shape {
+    const b = this.doc.get(id)!;
+    if (b.kind === "mesh") throw new Error(meshOnly("Edit", b.name));
+    return b.shape;
+  }
+
+  /** The body if it is a solid or flat face; for a mesh, says what it can do and returns null. */
+  private shapeBody(id: number, action: string): ShapeBody | null {
+    const b = this.doc.get(id);
+    if (b?.kind !== "mesh") return b ?? null;
+    this.toast(meshOnly(action, b.name), "error");
+    return null;
   }
 
   /** Bodies in the selection that are flat faces (for guarding solid-only commands). */
@@ -1090,7 +1317,8 @@ class App implements ToolHost {
       return;
     }
     const { bodyId, faceId } = target;
-    const body = this.doc.get(bodyId)!;
+    const body = this.shapeBody(bodyId, "Push/Pull");
+    if (!body) return;
     const axis = faceAxis(body.shape, faceId);
     const drag = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
 
@@ -1137,11 +1365,17 @@ class App implements ToolHost {
             },
           };
         }
-        return this.replaceOutcome(new Map([[bodyId, pushPull(this.solidOf(bodyId, "Push/Pull"), faceId, d)]]), "Push/Pull");
+        // Fast preview; the exact result is computed on Apply (see asPreview).
+        const solid = this.solidOf(bodyId, "Push/Pull");
+        return {
+          ghost: new Map([[bodyId, asPreview(() => pushPull(solid, faceId, d))]]),
+          commit: () => this.replaceOutcome(new Map([[bodyId, pushPull(solid, faceId, d)]]), "Push/Pull").commit(),
+        };
       },
       remember: ({ d, newBody }) => {
         this.defaults.pushpullNew = !!newBody;
       },
+      fastDrag: ({ d, newBody }) => !newBody && this.dragPushPull(new Map([[bodyId, [faceId]]]), d),
       drag,
     });
   }
@@ -1149,7 +1383,7 @@ class App implements ToolHost {
   /** Several faces (on one or more solids) and/or flat face objects, one distance. */
   private opPushPullMany(): void {
     const perSolid = new Map<number, number[]>();
-    const flats: Body[] = [];
+    const flats: ShapeBody[] = [];
     for (const s of this.selection) {
       const b = this.doc.get(s.body);
       if (!b) continue;
@@ -1164,7 +1398,8 @@ class App implements ToolHost {
     const n = [...perSolid.values()].reduce((a, f) => a + f.length, 0) + flats.length;
     if (!n) return this.toast("Push/Pull: select one or more faces", "error");
     const first = this.selection[0];
-    const fb = this.doc.get(first.body)!;
+    const fb = this.shapeBody(first.body, "Push/Pull");
+    if (!fb) return;
     const axis = faceAxis(fb.shape, fb.kind === "face" ? fb.shape.faces[0].hashCode : first.id);
     const drag = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
     this.startOp({
@@ -1172,15 +1407,17 @@ class App implements ToolHost {
       label: "Push/Pull",
       fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
       compute: ({ d }) => {
-        const solids = new Map<number, Shape>();
-        for (const [id, faces] of perSolid) solids.set(id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d));
+        // Fast preview; the exact solids are computed on Apply (see asPreview).
+        const pushed = () => new Map<number, Shape>([...perSolid].map(([id, faces]) => [id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d)]));
+        const preview = asPreview(pushed);
         const extruded = new Map<number, Shape>(flats.map((b) => [b.id, extrudeFace(b.shape, b.shape.faces[0].hashCode, d)]));
         return {
-          ghost: new Map([...solids, ...extruded]),
+          ghost: new Map([...preview, ...extruded]),
           commit: () => {
+            const solids = pushed();
             const made = new Map(flats.map((b) => [b.id, this.doc.makeBody(extruded.get(b.id)!, "Solid")]));
             this.doc.commit(
-              this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? { ...b, shape: solids.get(b.id)! } : b)),
+              this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? withShape(b, solids.get(b.id)!) : b)),
               "Push/Pull",
             );
             return { select: [...solids.keys(), ...[...made.values()].map((b) => b.id)], solidMode: made.size > 0 && !solids.size };
@@ -1188,8 +1425,33 @@ class App implements ToolHost {
         };
       },
       remember: () => {},
+      fastDrag: ({ d }) => !flats.length && this.dragPushPull(perSolid, d),
       drag,
     });
+  }
+
+  /** Faces moved by a push/pull, per body (cached per op: the document doesn't change while it is open). */
+  private ppMoves = new Map<string, Map<number, V3>>();
+
+  /** Instant push/pull drag preview: shift the faces (and the fillets they carry) in the display meshes. */
+  private dragPushPull(perBody: Map<number, number[]>, d: number): boolean {
+    const moves = new Map<number, Map<number, V3>>();
+    try {
+      for (const [id, faces] of perBody) {
+        const k = `${this.doc.version}:${id}:${faces.join()}`;
+        let m = this.ppMoves.get(k);
+        if (!m) {
+          if (this.ppMoves.size > 20) this.ppMoves.clear();
+          m = pushPullMoves(this.solidOf(id, "Push/Pull"), faces);
+          this.ppMoves.set(k, m);
+        }
+        moves.set(id, new Map([...m].map(([f, n]) => [f, [n[0] * d, n[1] * d, n[2] * d] as V3])));
+      }
+    } catch {
+      return false;
+    }
+    this.viewport.showGhostDeformed(moves);
+    return true;
   }
 
   private opEdges(kind: "fillet" | "chamfer"): void {
@@ -1213,24 +1475,51 @@ class App implements ToolHost {
       this.toast(`${title} works on solids — "${flat[0].name}" is a flat face. Push/Pull it first.`, "error");
       return;
     }
-    this.startOp({
+    const fields: OpField[] = [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: isFillet ? this.defaults.fillet : this.defaults.chamfer, step: 0.1, min: 0 }];
+    // Whole solids selected: which of their edges (e.g. just the vertical corners of a box).
+    const WHICH = ["all", "vertical", "horizontal"] as const;
+    const wholeSolids = [...perBody.values()].some((v) => v === null);
+    if (wholeSolids) fields.push({ key: "which", label: "Edges", type: "select", options: ["All", "Vertical", "Horizontal"], value: this.defaults.edgesWhich });
+    const edgesOf = (id: number, picked: Set<number> | null, which: number | undefined) => {
+      const shape = this.solidOf(id, title);
+      const w = WHICH[which ?? 0] ?? "all";
+      return { shape, w, edges: picked ?? (w === "all" ? null : edgesAlong(shape, w)) };
+    };
+    // Drag handle on the first selected edge (or the top edge of the first solid), across its face.
+    const dragFor = (which: number | undefined): OpDrag | undefined => {
+      const [id, picked] = [...perBody][0];
+      let axis: { origin: V3; dir: V3 } | null = null;
+      try {
+        const { shape, edges } = edgesOf(id, picked, which);
+        axis = filletDragAxis(shape, edges);
+      } catch {
+        // not a solid (e.g. a mesh): compute reports it
+      }
+      return axis ? { origin: axis.origin, dir: axis.dir, key: "r", min: 0.1, title: `Drag to change the ${isFillet ? "radius" : "distance"}` } : undefined;
+    };
+    const spec: OpSpec = {
       title,
       label: title,
-      fields: [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: isFillet ? this.defaults.fillet : this.defaults.chamfer, step: 0.1, min: 0 }],
-      compute: ({ r }) => {
+      fields,
+      compute: ({ r, which }) => {
+        if (wholeSolids) spec.drag = dragFor(which); // "Edges" can move the handle to another edge
         if (r <= 0) throw new Error("value must be greater than 0");
         const out = new Map<number, Shape>();
-        for (const [id, edges] of perBody) {
-          const shape = this.solidOf(id, title);
+        for (const [id, picked] of perBody) {
+          const { shape, w, edges } = edgesOf(id, picked, which);
+          if (edges && !edges.size) throw new Error(`"${this.doc.get(id)!.name}" has no ${w} edges`);
           out.set(id, isFillet ? filletEdges(shape, edges, r) : chamferEdges(shape, edges, r));
         }
         return this.replaceOutcome(out, title);
       },
-      remember: ({ r }) => {
+      remember: ({ r, which }) => {
         if (isFillet) this.defaults.fillet = r;
         else this.defaults.chamfer = r;
+        if (which !== undefined) this.defaults.edgesWhich = which;
       },
-    });
+      drag: dragFor(wholeSolids ? this.defaults.edgesWhich : undefined),
+    };
+    this.startOp(spec);
   }
 
   private opShell(): void {
@@ -1275,7 +1564,8 @@ class App implements ToolHost {
       return;
     }
     const { bodyId, faceId } = target;
-    const body = this.doc.get(bodyId)!;
+    const body = this.shapeBody(bodyId, "Offset");
+    if (!body) return;
     if (findFace(body.shape, faceId)?.geomType !== "PLANE") {
       this.toast("Offset works on flat faces only", "error");
       return;
@@ -1284,9 +1574,12 @@ class App implements ToolHost {
     this.startOp({
       title: "Offset face",
       label: "Offset",
-      fields: [{ key: "d", label: "Distance (mm)", value: this.defaults.offset, step: 1 }],
-      compute: ({ d }) => {
-        const face = offsetFace(body.shape, faceId, d);
+      fields: [
+        { key: "d", label: "Distance (mm)", value: this.defaults.offset, step: 1 },
+        { key: "round", label: "Round corners", value: this.defaults.offsetRound ? 1 : 0, type: "checkbox" },
+      ],
+      compute: ({ d, round }) => {
+        const face = offsetFace(body.shape, faceId, d, !!round);
         return {
           ghost: new Map([[-1, face]]),
           commit: () => {
@@ -1296,7 +1589,10 @@ class App implements ToolHost {
           },
         };
       },
-      remember: ({ d }) => (this.defaults.offset = d),
+      remember: ({ d, round }) => {
+        this.defaults.offset = d;
+        this.defaults.offsetRound = !!round;
+      },
       drag: axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined,
     });
   }
@@ -1308,7 +1604,8 @@ class App implements ToolHost {
       this.toast("Offset: select edges of one object", "error");
       return;
     }
-    const body = this.doc.get(bodyId)!;
+    const body = this.shapeBody(bodyId, "Offset");
+    if (!body) return;
     const edgeIds = this.selection.map((s) => s.id);
     // Most horizontal face first, so a top edge extends the top by default (like an eave).
     const tilt = (id: number) => Math.abs(faceAxis(body.shape, id)?.normal[2] ?? 0);
@@ -1352,6 +1649,245 @@ class App implements ToolHost {
     this.startOp(spec);
   }
 
+  /** Scale the selected objects about the bottom centre of their bounding box (they stay on the ground). */
+  private opScale(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) {
+      this.toast("Scale: select one or more objects first", "error");
+      return;
+    }
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const [a, b] = this.doc.get(id)!.shape.boundingBox.bounds;
+      for (let i = 0; i < 3; i++) {
+        lo[i] = Math.min(lo[i], a[i]);
+        hi[i] = Math.max(hi[i], b[i]);
+      }
+    }
+    const pivot: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
+    // Gizmo: X / Y / Z boxes on axis lines from the pivot set the per-axis %; the ring on the
+    // top corner (dragged along the diagonal) sets the overall Scale %.
+    const corner: V3 = [hi[0], hi[1], hi[2]];
+    const diag: V3 = [corner[0] - pivot[0], corner[1] - pivot[1], corner[2] - pivot[2]];
+    const len = Math.hypot(...diag);
+    const drags: OpDrag[] = [];
+    const axes = [["x", "#e5484d"], ["y", "#30a46c"], ["z", "#3e8bff"]] as const;
+    axes.forEach(([key, color], i) => {
+      const ext = hi[i] - pivot[i];
+      if (ext < 1e-9) return; // flat along this axis
+      const dir: V3 = [0, 0, 0];
+      dir[i] = 1;
+      drags.push({ origin: pivot, dir, key, unit: ext / 100, mul: "s", look: "box", color, line: true, title: `Drag to scale along ${key.toUpperCase()}` });
+    });
+    if (len > 1e-9) drags.push({ origin: pivot, dir: diag, key: "s", unit: len / 100, look: "ring", color: "#ffd84a", line: true, title: "Drag to scale in all directions" });
+    const pct = (k: number) => k / 100;
+    this.startOp({
+      title: "Scale",
+      label: "Scale",
+      fields: [
+        { key: "s", label: "Scale (%)", value: 100, step: 5, min: 0 },
+        { key: "x", label: "X (%)", value: 100, step: 5, min: 0 },
+        { key: "y", label: "Y (%)", value: 100, step: 5, min: 0 },
+        { key: "z", label: "Z (%)", value: 100, step: 5, min: 0 },
+      ],
+      compute: ({ s, x, y, z }) => {
+        const f: V3 = [pct(s) * pct(x), pct(s) * pct(y), pct(s) * pct(z)];
+        if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
+        // Preview: the current meshes stretched on the GPU (instant); the exact solids are built on Apply.
+        const matrix = new THREE.Matrix4()
+          .makeTranslation(...pivot)
+          .multiply(new THREE.Matrix4().makeScale(...f))
+          .multiply(new THREE.Matrix4().makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
+        return {
+          ghost: new Map(),
+          xform: { ids, matrix },
+          commit: () => this.replaceOutcome(new Map(ids.map((id) => [id, scaleShape(this.doc.get(id)!.shape, f, pivot)])), "Scale").commit(),
+        };
+      },
+      drag: drags.length ? drags : undefined,
+    });
+  }
+
+  /** Cut: with solids selected, click a guide line; the solids are cut by the plane through it. */
+  private startCut(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) {
+      this.toast("Cut: select the solid(s) or flat face(s) to cut first, then press C and click a guide line", "error");
+      return;
+    }
+    if (!this.doc.guides.length) {
+      this.toast("Cut: draw a guide line on the solid first (Shift+L — two points or parallel to an edge)", "error");
+      return;
+    }
+    const hover = (g: number) => {
+      if (g === this.hoverGuide) return;
+      this.hoverGuide = g;
+      this.showGuides();
+      this.viewport.canvas.style.cursor = g >= 0 ? "pointer" : "crosshair";
+      this.showCutPlane(g >= 0 ? this.cutPlane(g, ids) : null, ids);
+    };
+    this.startTool({
+      name: "Cut",
+      move: (e) => hover(this.viewport.guideAt(e.clientX, e.clientY)),
+      down: (e) => {
+        const g = this.viewport.guideAt(e.clientX, e.clientY);
+        if (g < 0) return this.hint("Cut: click a guide line (pink dashed)");
+        this.endTool();
+        this.opCut(ids, g);
+      },
+      key: () => false,
+      dispose: () => {
+        hover(-1);
+        this.viewport.setOverlay([]);
+      },
+    });
+    this.hint("Cut: hover a guide line to see its cut plane, click to cut — the plane runs straight across the face the guide was drawn on (off a flat face, e.g. on a sphere: along the line as seen when it was drawn) · Esc cancel");
+    this.toast("Cut: select a guide line (click the pink dashed line) · Esc cancel");
+  }
+
+  /** Split face: with faces selected, click a guide line; each face is split where the guide's plane crosses it. */
+  private startSplitFace(): void {
+    const perBody = new Map<number, number[]>();
+    for (const s of this.selection) if (s.kind === "face" && this.doc.get(s.body)?.kind === "solid") perBody.set(s.body, [...(perBody.get(s.body) ?? []), s.id]);
+    if (!perBody.size) {
+      this.toast("Split face: select the face(s) to split first (Face mode, key 2), then press Shift+C and click a guide line", "error");
+      return;
+    }
+    if (!this.doc.guides.length) {
+      this.toast("Split face: draw a guide line first (Shift+L — two points or parallel to an edge)", "error");
+      return;
+    }
+    const ids = [...perBody.keys()];
+    const hover = (g: number) => {
+      if (g === this.hoverGuide) return;
+      this.hoverGuide = g;
+      this.showGuides();
+      this.viewport.canvas.style.cursor = g >= 0 ? "pointer" : "crosshair";
+      this.showCutPlane(g >= 0 ? this.cutPlane(g, ids) : null, ids);
+    };
+    this.startTool({
+      name: "Split face",
+      move: (e) => hover(this.viewport.guideAt(e.clientX, e.clientY)),
+      down: (e) => {
+        const g = this.viewport.guideAt(e.clientX, e.clientY);
+        if (g < 0) return this.hint("Split face: click a guide line (pink dashed)");
+        this.endTool();
+        this.opSplitFace(perBody, g);
+      },
+      key: () => false,
+      dispose: () => {
+        hover(-1);
+        this.viewport.setOverlay([]);
+      },
+    });
+    this.hint("Split face: hover a guide line to see its plane, click to split the selected face(s) along it — the solid stays one piece · Esc cancel");
+    this.toast("Split face: select a guide line (click the pink dashed line) · Esc cancel");
+  }
+
+  /** Split the faces where the guide's plane crosses them (one undo step); the pieces are selected. */
+  private opSplitFace(perBody: Map<number, number[]>, guideIndex: number): void {
+    const shapes = new Map<number, Shape>();
+    const pieces: SelItem[] = [];
+    try {
+      const { point, normal } = this.cutPlane(guideIndex, [...perBody.keys()]);
+      for (const [id, faces] of perBody) {
+        const r = splitFacesByPlane(this.solidOf(id, "Split face"), faces, point, normal);
+        shapes.set(id, r.shape);
+        for (const f of r.faces) pieces.push({ kind: "face", body: id, id: f });
+      }
+    } catch (e) {
+      this.toast(errorMessage(e), "error");
+      return;
+    }
+    this.doc.commit(this.doc.bodies.map((b) => (shapes.has(b.id) ? withShape(b, shapes.get(b.id)!) : b)), "Split face");
+    this.setMode("face");
+    this.setSelection(pieces);
+    this.toast(`Split into ${pieces.length} faces — they are selected (Push/Pull moves just one part)`);
+  }
+
+  /** Current viewing direction (camera forward). */
+  private viewDir(): V3 {
+    return this.viewport.camera.getWorldDirection(new THREE.Vector3()).toArray() as V3;
+  }
+
+  /**
+   * The cut plane of a guide: straight across the face of the solids being cut that it lies on
+   * (unless its stored direction already is), else its stored direction, else (older files) the view;
+   * off a face, guides along X / Y / Z snap to the nearest world plane.
+   */
+  private cutPlane(guideIndex: number, ids: number[]): { point: V3; normal: V3 } {
+    const { a, b, n } = this.doc.guides[guideIndex];
+    return { point: a, normal: guidePlaneNormal(ids.map((id) => this.doc.get(id)!.shape).filter(notMesh), a, b, this.viewDir(), n) };
+  }
+
+  /** Translucent square of the cut plane across the solids being cut (null hides it). */
+  private showCutPlane(plane: { point: V3; normal: V3 } | null, ids: number[]): void {
+    if (!plane) return this.viewport.setOverlay([]);
+    const box = new THREE.Box3();
+    for (const id of ids) {
+      const [lo, hi] = this.doc.get(id)!.shape.boundingBox.bounds;
+      box.expandByPoint(new THREE.Vector3(...lo)).expandByPoint(new THREE.Vector3(...hi));
+    }
+    const N = new THREE.Vector3(...plane.normal).normalize(), P = new THREE.Vector3(...plane.point);
+    const c = box.getCenter(new THREE.Vector3());
+    c.addScaledVector(N, -c.clone().sub(P).dot(N)); // box centre dropped onto the plane
+    const size = Math.max(box.getSize(new THREE.Vector3()).length() * 1.15, 1);
+    // Square edges along the guide and across it.
+    const g = this.doc.guides[this.hoverGuide];
+    const u = g ? new THREE.Vector3(...g.b).sub(new THREE.Vector3(...g.a)).normalize() : new THREE.Vector3(1, 0, 0);
+    const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(u, N.clone().cross(u), N));
+    const geo = new THREE.PlaneGeometry(size, size);
+    const sheet = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xff6fb5, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
+    const rim = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xff6fb5, depthTest: false, transparent: true }));
+    for (const o of [sheet, rim]) {
+      o.quaternion.copy(q);
+      o.position.copy(c);
+    }
+    this.viewport.setOverlay([sheet, rim]);
+  }
+
+  /**
+   * Cut the solids by the plane through a guide line; each one becomes two objects (one undo step).
+   * Flat faces (a drawn rectangle, circle...) are cut into separate faces the same way.
+   */
+  private opCut(ids: number[], guideIndex: number): void {
+    const kept = new Map<number, Shape>();
+    const cutOff: Body[] = [];
+    const facePieces: number[] = [];
+    try {
+      const { point, normal } = this.cutPlane(guideIndex, ids);
+      for (const id of ids) {
+        const body = this.doc.get(id)!;
+        if (body.kind === "face") {
+          const [first, ...rest] = cutFaceByPlane(body.shape as Parameters<typeof cutFaceByPlane>[0], point, normal);
+          kept.set(id, first);
+          const made = rest.map((f) => this.doc.makeBody(f, "Face", "face"));
+          cutOff.push(...made);
+          facePieces.push(id, ...made.map((b) => b.id));
+          continue;
+        }
+        const { above, below } = splitByPlane(this.solidOf(id, "Cut"), point, normal);
+        if (!above || !below) throw new Error(`Cut: the guide's cut plane does not pass through "${body.name}"`);
+        kept.set(id, below);
+        cutOff.push(this.doc.makeBody(above, "Solid"));
+      }
+    } catch (e) {
+      this.toast(errorMessage(e), "error");
+      return;
+    }
+    this.doc.commit([...this.doc.bodies.map((bd) => (kept.has(bd.id) ? withShape(bd, kept.get(bd.id)!) : bd)), ...cutOff], "Cut");
+    const solidPieces = cutOff.filter((b) => b.kind !== "face");
+    if (!solidPieces.length) {
+      // Only faces: select all the pieces (each can be moved / pushed on its own).
+      this.setSelection(facePieces.map((id) => ({ kind: "body", body: id, id: 0 })));
+      this.toast(`Cut into ${facePieces.length} separate faces — they are selected`);
+      return;
+    }
+    // Select the upper pieces, so Del removes them straight away.
+    this.setSelection(solidPieces.map((bd) => ({ kind: "body", body: bd.id, id: 0 })));
+    this.toast(`Cut into ${ids.length * 2} objects — the upper part is selected (Del removes it)`);
+  }
+
   // ================================================================ booleans
 
   private boolean(op: BooleanOp): void {
@@ -1369,21 +1905,44 @@ class App implements ToolHost {
       return;
     }
     const [targetId, ...toolIds] = ids;
-    this.applyBoolean(op, targetId, toolIds, label);
+    const made = this.applyBoolean(op, targetId, toolIds, label);
+    if (!made) return;
     this.setMode("body");
-    this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
+    this.setSelection(made.map((id) => ({ kind: "body", body: id, id: 0 })));
   }
 
-  /** Combine `toolIds` into `targetId` (keeps its id; union/intersect results are renamed "Solid N"); one undo step. Throws on failure. */
-  private applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string): void {
+  /**
+   * Combine `toolIds` into `targetId` (keeps its id; union/intersect results are renamed "Solid N"); one undo step.
+   * A result in separate pieces (e.g. a bar cut through) becomes one body per piece: the largest
+   * keeps the target's id. Returns the resulting body ids, or null (with a message, nothing changed)
+   * if a union would leave solids that don't touch in one body. Throws on failure.
+   */
+  private applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string): number[] | null {
     const target = this.doc.get(targetId)!;
-    const result = booleanOp(op, target.shape as Solid, toolIds.map((id) => this.doc.get(id)!.shape as Solid));
+    const tools = toolIds.map((id) => this.doc.get(id)!);
+    const result = booleanOp(op, this.solidOf(targetId, label), toolIds.map((id) => this.solidOf(id, label)));
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
+    const pieces = solidPieces(result);
+    if (op === "union" && pieces.length > 1) {
+      // One body must be one solid: solids that don't touch stay separate objects.
+      const main = pieces.find((p) => shapesTouch(p, this.solidOf(targetId, label))) ?? pieces[0];
+      const apart = tools.filter((b) => !shapesTouch(main, this.solidOf(b.id, label)));
+      const names = (apart.length ? apart : tools).map((b) => `"${b.name}"`);
+      const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+      this.toast(`"${target.name}" and ${list} don't touch — nothing to join`, "error");
+      return null;
+    }
     const removed = new Set(toolIds);
     const name = op !== "subtract" && !/^Solid \d+$/.test(target.name) ? this.doc.nextName("Solid") : target.name;
-    const next = this.doc.bodies.filter((b) => !removed.has(b.id)).map((b) => (b.id === targetId ? { ...b, shape: result, name } : b));
+    // One body per piece, largest first (it keeps the target's id and name).
+    const parts = pieces.length > 1 ? pieces.map((p) => ({ p, v: solidVolume(p) })).sort((a, b) => b.v - a.v).map(({ p }) => p) : [result];
+    const extra = parts.slice(1).map((p) => this.doc.makeBody(p, name));
+    const next = this.doc.bodies
+      .filter((b) => !removed.has(b.id))
+      .flatMap((b) => (b.id === targetId ? [{ ...withShape(b, parts[0]), name }, ...extra] : [b]));
     this.doc.commit(next, label);
-    this.toast(`${label}: ${name}`);
+    this.toast(extra.length ? `${label}: "${name}" split into ${parts.length} solids` : `${label}: ${name}`);
+    return [targetId, ...extra.map((b) => b.id)];
   }
 
   /** A + key + B (+ C ...): each click on another solid applies the operation to A right away. */
@@ -1417,8 +1976,7 @@ class App implements ToolHost {
           return;
         }
         try {
-          this.applyBoolean(op, targetId, [id], label);
-          count++;
+          if (this.applyBoolean(op, targetId, [id], label)) count++;
         } catch (err) {
           this.fail(err);
         }
@@ -1451,6 +2009,7 @@ class App implements ToolHost {
       this.cancelOp();
       this.lastXf = null;
       this.repeatOps = [];
+      this.placing = null; // a new move session is its own undo step (Duplicate sets it again after this)
     }
     const ids = this.selectedBodyIds();
     if (!ids.length) {
@@ -1476,7 +2035,7 @@ class App implements ToolHost {
       const b = this.doc.get(s.body);
       return b?.kind === "solid" && isPolyhedral(b.shape);
     });
-    const ends = ok ? edgeEnds(this.doc.get(edges[0].body)!.shape, edges[0].id) : null;
+    const ends = ok ? edgeEnds(this.brep(edges[0].body), edges[0].id) : null;
     if (!ends) {
       this.stopTransform();
       this.toast("Move edge works on solids with only flat faces and straight edges (no curves or fillets)", "error");
@@ -1489,6 +2048,43 @@ class App implements ToolHost {
     this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyEdgeMove(r.vector), mid, (d) => this.previewEdgeMove(d));
     this.renderToolbarState();
     this.hint("Move edge: drag the gizmo (hold Ctrl to snap to grid / points) · Tab: exact offset · Enter/Esc: done");
+  }
+
+  /** G with a guide line selected: move it with the gizmo (Ctrl snaps to points, other guides, axes). */
+  private startGuideMove(keep = false): void {
+    if (!keep) {
+      this.endTool();
+      this.cancelOp();
+      this.lastXf = null;
+      this.repeatOps = [];
+    }
+    const g = this.selGuide;
+    const guide = this.doc.guides[g];
+    if (!guide) return this.stopTransform();
+    const mid: V3 = [(guide.a[0] + guide.b[0]) / 2, (guide.a[1] + guide.b[1]) / 2, (guide.a[2] + guide.b[2]) / 2];
+    this.xf = { mode: "translate", ids: [], pivot: mid, guide: g };
+    this.viewport.snapSkipGuide = g;
+    this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyGuideMove(r.vector), mid, (d) => this.previewGuideMove(d));
+    this.renderToolbarState();
+    this.hint("Move guide: drag the gizmo (hold Ctrl to snap to grid / points / other guides) · Tab: exact offset · Enter/Esc: done");
+  }
+
+  private movedGuides(v: V3): { a: V3; b: V3 }[] {
+    const g = this.xf?.guide ?? -1;
+    const add = (p: V3): V3 => [p[0] + v[0], p[1] + v[1], p[2] + v[2]];
+    return this.doc.guides.map((gd, i) => (i === g ? { ...gd, a: add(gd.a), b: add(gd.b) } : gd));
+  }
+
+  private previewGuideMove(d: V3): void {
+    if (this.xf?.guide === undefined) return;
+    this.viewport.setGuides(this.movedGuides(d), this.selGuide, -1);
+    this.hint(`Move guide: Δ ${d.map((n) => +n.toFixed(2)).join(", ")} · release to apply · Tab: exact offset · Enter/Esc: done`);
+  }
+
+  private applyGuideMove(v: V3): void {
+    if (this.xf?.guide === undefined) return;
+    if (Math.hypot(...v) > 1e-12) this.doc.setGuides(this.movedGuides(v), "Move guide");
+    this.startGuideMove(true); // the gizmo follows the guide for the next drag
   }
 
   /** The solids reshaped by moving `edges` by `d`, keyed by body id. Throws if a solid can't take it. */
@@ -1531,31 +2127,41 @@ class App implements ToolHost {
       this.startEdgeMove(true); // gizmo back on the unchanged edge
       return;
     }
-    const before = edges.map((e) => ({ body: e.body, ends: edgeEnds(this.doc.get(e.body)!.shape, e.id) }));
+    const before = edges.map((e) => ({ body: e.body, ends: edgeEnds(this.brep(e.body), e.id) }));
     this.doc.replaceShapes(shapes, edges.length > 1 ? "Move edges" : "Move edge");
     // Keep the moved edges selected (their ids change with the rebuilt solid); the gizmo follows them.
     const add = (p: V3): V3 => [p[0] + v[0], p[1] + v[1], p[2] + v[2]];
     const next = before.flatMap(({ body, ends }): SelItem[] => {
       const shape = this.doc.get(body)?.shape;
-      const id = shape && ends ? edgeBetween(shape, add(ends[0]), add(ends[1])) : null;
+      const id = shape && !isMesh(shape) && ends ? edgeBetween(shape, add(ends[0]), add(ends[1])) : null;
       return id !== null && id !== undefined ? [{ kind: "edge", body, id }] : [];
     });
     this.setSelection(next);
     if (!next.length) this.toast("Edge moved (it merged into a neighbouring face)");
   }
 
-  /** Line tool: split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
-  private pencilLine(bodyId: number, a: V3, b: V3): void {
+  /** Why Divide face can't work on this body (shown to the user), or null if it can. */
+  private divideRefusal(bodyId: number): string | null {
     const body = this.doc.get(bodyId);
-    if (!body || body.kind !== "solid") return this.hint("Line: draw on a solid's face");
+    if (!body) return "Divide face: click an edge of a solid";
+    if (body.kind === "face") return `Divide face works on solids only — "${body.name}" is a flat face. Push/Pull it (P) into a solid first.`;
+    if (body.kind === "mesh") return `Divide face can't edit "${body.name}" — it's an imported STL mesh`;
+    return null;
+  }
+
+  /** Divide face (L): split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
+  private divideFace(bodyId: number, a: V3, b: V3): void {
+    const why = this.divideRefusal(bodyId);
+    if (why) return this.toast(why, "error");
+    const body = this.doc.get(bodyId)!;
     let shape: Solid;
     try {
       shape = splitFaceByLine(body.shape as Solid, a, b);
     } catch (e) {
-      return this.hint(errorMessage(e)); // keep the tool so the user can retry
+      return this.toast(errorMessage(e), "error"); // keep the tool so the user can retry
     }
     this.endTool();
-    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Line");
+    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Divide face");
     const id = edgeBetween(shape, a, b, 1e-3);
     this.setMode("edge");
     this.setSelection(id === null ? [] : [{ kind: "edge", body: bodyId, id }]);
@@ -1565,7 +2171,7 @@ class App implements ToolHost {
   /** Adjacent flat faces of an edge, each with the edge seen from that face. */
   private edgeSides(bodyId: number, edgeId: number): EdgeSides | null {
     const b = this.doc.get(bodyId);
-    if (!b) return null;
+    if (!b || b.kind === "mesh") return null;
     const faces = b.shape.faces.flatMap((f) => {
       const ref = faceRefEdges(b.shape, f.hashCode)?.edges.find((e) => e.id === edgeId);
       return ref ? [{ faceId: f.hashCode, ref }] : [];
@@ -1582,9 +2188,18 @@ class App implements ToolHost {
     this.startTool(
       new GuideTool(this, (bid, eid) => this.edgeSides(bid, eid), (lines) => {
         this.endTool();
-        this.doc.setGuides([...this.doc.guides, ...lines], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
+        // Fix each guide's cut direction now: the face it lies on, or the view it was drawn in.
+        const view = this.viewDir();
+        const shapes = this.doc.bodies.map((b) => b.shape).filter(notMesh);
+        const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(shapes, l.a, l.b, view) }));
+        this.doc.setGuides([...this.doc.guides, ...made], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
         this.toast(`Added ${lines.length} guide line(s) — hold Ctrl to snap to them`);
       }).start(bodyId, edgeId),
+    );
+    this.toast(
+      bodyId !== undefined && edgeId !== undefined
+        ? "Guide line: move across the face, click (or type a distance) to add · Esc cancel"
+        : "Guide line: click an edge for a parallel guide, or click two points (locks to X / Y / Z when close) · Esc cancel",
     );
   }
 
@@ -1608,7 +2223,7 @@ class App implements ToolHost {
       new PointMoveTool(this, ids, (d) => {
         this.endTool();
         this.repeatOps = [{ type: "translate", vector: d }];
-        const shapes = new Map<number, Shape>();
+        const shapes = new Map<number, Geom>();
         for (const id of ids) {
           const b = this.doc.get(id);
           if (b) shapes.set(id, translateShape(b.shape, d));
@@ -1624,6 +2239,23 @@ class App implements ToolHost {
     );
   }
 
+  /**
+   * Copies just made by Shift+D: moving them in that same gizmo session is part of the Duplicate
+   * undo step (so Undo removes the copy, not just its move, which would leave it hidden in place).
+   */
+  private placing: { ids: string; version: number } | null = null;
+
+  /** Commit gizmo / Tab moves of the transformed bodies (folded into Duplicate while placing a copy). */
+  private commitTransform(shapes: Map<number, Geom>, label: string): void {
+    const p = this.placing;
+    if (p && this.xf && p.ids === this.xf.ids.join() && p.version === this.doc.version) {
+      this.doc.amend(this.doc.bodies.map((b) => (shapes.has(b.id) ? withShape(b, shapes.get(b.id)!) : b)));
+      p.version = this.doc.version;
+    } else {
+      this.doc.replaceShapes(shapes, label);
+    }
+  }
+
   /** Last gizmo drag, so Tab can prefill (and correct) it. */
   private lastXf: { r: TransformResult; ids: string } | null = null;
 
@@ -1632,14 +2264,14 @@ class App implements ToolHost {
     this.lastXf = { r, ids: this.xf.ids.join() };
     this.repeatOps.push(r);
     this.shiftPivot([r]);
-    const shapes = new Map<number, Shape>();
+    const shapes = new Map<number, Geom>();
     for (const id of this.xf.ids) {
       const b = this.doc.get(id);
       if (!b) continue;
       shapes.set(id, r.type === "translate" ? translateShape(b.shape, r.vector) : rotateShape(b.shape, r.angleDeg, r.center, r.axis));
     }
     const mode = this.xf.mode;
-    this.doc.replaceShapes(shapes, mode === "translate" ? "Move" : "Rotate");
+    this.commitTransform(shapes, mode === "translate" ? "Move" : "Rotate");
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
   }
 
@@ -1661,8 +2293,8 @@ class App implements ToolHost {
     if (!ops.length) return this.toast("Repeat: move or rotate something first (e.g. Shift+D then drag)", "error");
     const ids = this.selectedBodyIds();
     if (!ids.length) return this.toast("Repeat: select solids first", "error");
-    const xform = (s: Shape): Shape =>
-      ops.reduce<Shape>((acc, r) => (r.type === "translate" ? translateShape(acc, r.vector) : rotateShape(acc, r.angleDeg, r.center, r.axis)), s);
+    const xform = (s: Geom): Geom =>
+      ops.reduce<Geom>((acc, r) => (r.type === "translate" ? translateShape(acc, r.vector) : rotateShape(acc, r.angleDeg, r.center, r.axis)), s);
     // Rotations pivot on their original centre; moving that centre along with the copy keeps polar arrays working.
     const shiftOps = (): void => {
       let off: V3 = [0, 0, 0];
@@ -1682,7 +2314,7 @@ class App implements ToolHost {
       this.repeatCopyIds = copies.map((b) => b.id).join();
       this.toast(`Repeated copy (${copies.length})`);
     } else {
-      const shapes = new Map<number, Shape>();
+      const shapes = new Map<number, Geom>();
       for (const id of ids) {
         const b = this.doc.get(id);
         if (b) shapes.set(id, xform(b.shape));
@@ -1698,6 +2330,12 @@ class App implements ToolHost {
   /** Tab during Move/Rotate: exact offset or angles. */
   private transformDialog(): void {
     if (!this.xf) return;
+    if (this.xf.guide !== undefined) {
+      this.propsDialog("Move guide by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
+        if (x || y || z) this.applyGuideMove([x, y, z]);
+      }, "Move");
+      return;
+    }
     if (this.xf.edges) {
       this.propsDialog("Move edge by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
         if (x || y || z) this.applyEdgeMove([x, y, z]);
@@ -1705,15 +2343,15 @@ class App implements ToolHost {
       return;
     }
     const { mode, ids } = this.xf;
-    const apply = (fn: (s: Shape) => Shape, label: string, ...rs: TransformResult[]): void => {
+    const apply = (fn: (s: Geom) => Geom, label: string, ...rs: TransformResult[]): void => {
       this.repeatOps.push(...rs);
       this.shiftPivot(rs);
-      const shapes = new Map<number, Shape>();
+      const shapes = new Map<number, Geom>();
       for (const id of ids) {
         const b = this.doc.get(id);
         if (b) shapes.set(id, fn(b.shape));
       }
-      this.doc.replaceShapes(shapes, label);
+      this.commitTransform(shapes, label);
       this.startTransform(mode, true);
     };
     // Just dragged the gizmo? Edit that drag: same axis, prefilled with the dragged amount.
@@ -1776,7 +2414,11 @@ class App implements ToolHost {
       this.edgePreview = null;
       this.viewport.clearGhost();
     }
+    const wasGuide = this.xf.guide !== undefined;
+    this.viewport.snapSkipGuide = -1;
     this.xf = null;
+    this.placing = null;
+    if (wasGuide) this.showGuides(); // drop any unapplied preview
     this.viewport.stopTransform();
     this.refreshSelection();
   }
@@ -1813,7 +2455,7 @@ class App implements ToolHost {
     if (faceSel.length && faceSel.length === this.selection.length) {
       const faces = faceSel.flatMap((x) => {
         const b = this.doc.get(x.body);
-        const f = b && findFace(b.shape, x.id);
+        const f = b && b.kind !== "mesh" && findFace(b.shape, x.id);
         return f ? [this.doc.makeBody(cloneShape(f), "Face", "face")] : [];
       });
       if (!faces.length) return this.toast("Duplicate: could not copy face", "error");
@@ -1822,6 +2464,7 @@ class App implements ToolHost {
       this.setSelection(faces.map((b) => ({ kind: "body", body: b.id, id: 0 })));
       this.toast(`${faces.length} face${faces.length > 1 ? "s" : ""} copied — move it, then P to push/pull`);
       this.startTransform("translate");
+      this.placing = this.xf ? { ids: this.xf.ids.join(), version: this.doc.version } : null;
       this.repeatCopyIds = faces.map((b) => b.id).join();
       return;
     }
@@ -1838,6 +2481,7 @@ class App implements ToolHost {
     this.setMode("body");
     this.setSelection(copies.map((b) => ({ kind: "body", body: b.id, id: 0 })));
     this.startTransform("translate");
+    this.placing = this.xf ? { ids: this.xf.ids.join(), version: this.doc.version } : null;
     this.repeatCopyIds = copies.map((b) => b.id).join();
   }
 
@@ -2018,7 +2662,7 @@ class App implements ToolHost {
         const row = entry?.row ?? document.createElement("div");
         row.className = "ol-row";
         row.dataset.id = String(b.id);
-        row.innerHTML = `<span class="ol-swatch${b.kind === "face" ? " face" : ""}" title="${b.kind === "face" ? "Flat face" : "Solid"}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+        row.innerHTML = `<span class="ol-swatch${b.kind === "solid" ? "" : " " + b.kind}" title="${{ solid: "Solid", face: "Flat face", mesh: "Mesh (STL)" }[b.kind]}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
         entry = { row, body: b, hidden };
         this.olRows.set(b.id, entry);
       }
@@ -2070,7 +2714,7 @@ class App implements ToolHost {
     const tip = (html: string) => `<div class="tip">${html}</div>`;
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
-        tip(`Solids: <kbd>B</kbd> <kbd>B</kbd> box · <kbd>B</kbd> <kbd>C</kbd> cylinder · <kbd>B</kbd> <kbd>S</kbd> sphere<br>Faces: <kbd>E</kbd> <kbd>R</kbd> rectangle · <kbd>E</kbd> <kbd>C</kbd> circle · <kbd>E</kbd> <kbd>E</kbd> polygon → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
+        tip(`Solids: <kbd>B</kbd> <kbd>B</kbd> box · <kbd>B</kbd> <kbd>C</kbd> cylinder · <kbd>B</kbd> <kbd>S</kbd> sphere<br>Faces: <kbd>A</kbd> <kbd>A</kbd> rectangle · <kbd>A</kbd> <kbd>C</kbd> circle · <kbd>A</kbd> <kbd>P</kbd> polygon → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
       return;
     }
     const kind = sel[0].kind;
@@ -2082,12 +2726,16 @@ class App implements ToolHost {
         const b = this.doc.get(sel[0].body);
         if (b) {
           const [w, d, h] = boundingSize(b.shape);
-          rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : "Solid"]);
-          rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`], ["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length - seamEdgeIds(b.shape).size)]);
+          rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : b.kind === "mesh" ? "Mesh (STL)" : "Solid"]);
+          rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`]);
+          if (b.kind === "mesh") rows.push(["Triangles", b.shape.triangleCount.toLocaleString()]);
+          else rows.push(["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length - seamEdgeIds(b.shape).size)]);
         }
         hints = b?.kind === "face"
-          ? `<kbd>P</kbd> push/pull into a new solid · <kbd>G</kbd> move · <kbd>R</kbd> rotate`
-          : `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>F</kbd> fillet all edges · <kbd>Shift+D</kbd> duplicate`;
+          ? `<kbd>P</kbd> push/pull into a new solid · <kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale`
+          : b?.kind === "mesh"
+          ? `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale · <kbd>Shift+D</kbd> duplicate · File → Export STL (exported with the solids)<br>A mesh can't be edited (no faces or edges)`
+          : `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale · <kbd>C</kbd> cut by guide · <kbd>F</kbd> fillet all edges · <kbd>Shift+D</kbd> duplicate`;
       } else {
         hints = `<kbd>+</kbd> union · <kbd>−</kbd> subtract · <kbd>Shift+I</kbd> intersect<br>(first selected = target)`;
       }
@@ -2095,7 +2743,7 @@ class App implements ToolHost {
       rows.push(["Faces", String(sel.length)]);
       if (sel.length === 1) {
         const b = this.doc.get(sel[0].body);
-        const f = b && findFace(b.shape, sel[0].id);
+        const f = b && b.kind !== "mesh" && findFace(b.shape, sel[0].id);
         if (b) rows.push([b.kind === "face" ? "Flat face" : "Solid", escapeHtml(b.name)]);
         if (f) rows.push(["Surface", f.geomType]);
       }
@@ -2113,7 +2761,8 @@ class App implements ToolHost {
       this.snap = Number(select.value);
       this.viewport.axisSnapStep = this.snap;
       select.blur();
-      if (this.xf?.edges) this.startEdgeMove(true);
+      if (this.xf?.guide !== undefined) this.startGuideMove(true);
+      else if (this.xf?.edges) this.startEdgeMove(true);
       else if (this.xf) this.startTransform(this.xf.mode, true);
     });
   }
@@ -2126,6 +2775,80 @@ class App implements ToolHost {
     box.appendChild(t);
     while (box.children.length > 4) box.firstElementChild!.remove();
     setTimeout(() => t.remove(), kind === "error" ? 4500 : 2200);
+  }
+
+  /** Help walkthrough (Bird House, Cable Storage Box): which one, its next step (0 = not started) and the bodies it made. */
+  private tut: { def: Tutorial; step: number; ctx: TutCtx } | null = null;
+
+  /** Open a walkthrough (another one replaces it), or close it if it is already open. */
+  private toggleTutorial(def?: Tutorial): void {
+    const panel = $("tutorial");
+    const open = !!def && (panel.hidden === true || this.tut?.def !== def);
+    if (open && this.tut?.def !== def) this.tut = { def: def!, step: 0, ctx: new Map() };
+    panel.hidden = !open;
+    document.body.classList.toggle("tutorial-open", open);
+    if (open) this.renderTutorial();
+  }
+
+  private renderTutorial(): void {
+    if (!this.tut) return;
+    const panel = $("tutorial"), { def, step: n } = this.tut, total = def.steps.length;
+    const steps = def.steps.map((st, i) => `<li class="${i < n ? "done" : i === n ? "current" : ""}"><b>${st.title}</b><div>${st.how}</div></li>`).join("");
+    panel.innerHTML = `<div class="head"><h2>${def.title}</h2><button data-act="close" title="Close">×</button></div>
+      <p>Follow each step with the keys shown, or press <b>Do step</b> to see y3d do it (<kbd>Ctrl</kbd>+<kbd>Z</kbd> takes it back).</p>
+      <ol>${steps}</ol>
+      <div class="actions"><button class="btn" data-act="back" ${n ? "" : "disabled"}>◀ Back</button>
+      <button class="btn" data-act="all" ${n < total ? "" : "disabled"}>Do all</button>
+      <button data-act="do" class="btn primary" ${n < total ? "" : "disabled"}>${n >= total ? "Done ✓" : `${n ? "Do step" : "Start"} ${n + 1}/${total} ▶`}</button></div>`;
+    panel.onclick = (e) => {
+      const act = (e.target as HTMLElement).closest("button")?.dataset.act;
+      if (act === "close") this.toggleTutorial();
+      else if (act === "back") this.tutorialBack();
+      else if (act === "do") void this.tutorialDo(1);
+      else if (act === "all") void this.tutorialDo(total);
+    };
+    panel.querySelector("li.current")?.scrollIntoView({ block: "nearest" });
+  }
+
+  private tutorialLabel(i: number): string {
+    return `${this.tut!.def.title}: ${this.tut!.def.steps[i].title}`;
+  }
+
+  /** Do the next `count` walkthrough steps; the first one starts a new document. */
+  private async tutorialDo(count: number): Promise<void> {
+    const tut = this.tut;
+    if (!tut) return;
+    if (tut.step === 0) {
+      if (!(await this.confirmDiscard())) return;
+      this.endInteractions();
+      this.selection = [];
+      this.hidden.clear();
+      this.doc.reset();
+      tut.ctx = new Map();
+    }
+    this.endInteractions();
+    try {
+      for (let k = 0; k < count && tut.step < tut.def.steps.length; k++) {
+        tut.def.steps[tut.step].run(this.doc, tut.ctx, this.tutorialLabel(tut.step));
+        tut.step++;
+      }
+    } catch (e) {
+      this.toast(errorMessage(e), "error");
+    }
+    this.setSelection([]);
+    this.viewport.fit(undefined, $("tutorial").offsetWidth + 24); // keep the model clear of the panel
+    this.renderTutorial();
+  }
+
+  /** Back one step: undo it if it is the last thing done. */
+  private tutorialBack(): void {
+    const tut = this.tut;
+    if (!tut?.step) return;
+    this.endInteractions();
+    if (this.doc.undoLabel === this.tutorialLabel(tut.step - 1)) this.doc.undo();
+    tut.step--;
+    this.setSelection([]);
+    this.renderTutorial();
   }
 
   private toggleHelp(): void {
@@ -2141,23 +2864,26 @@ class App implements ToolHost {
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
-      ["E R · E C · E E", "Draw flat Rectangle · Circle · Polygon face (E alone starts a polygon; then P to push/pull into a solid)"],
+      ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
-      ["L", "Line: click two points on the edges of a flat face to split it (corners / midpoints snap); the new edge is selected"],
+      ["L", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap); the new edge is selected"],
+      ["G with a guide line selected", "Move the guide with the gizmo (Ctrl snaps to points / other guides) · Tab: exact ΔX,ΔY,ΔZ · Enter done"],
       ["G with edges selected", "Move edge: drag the edge, reshaping its flat-faced solid (bent faces split into triangles)"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
-      ["Hold Ctrl", "Snap: grid & object points while drawing / moving, 15° while rotating"],
-      ["P", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
-      ["F · Shift+F", "Fillet · Chamfer selected edges (or all edges of selected solids)"],
+      ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 15° while rotating"],
+      ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
+      ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list)"],
       ["H", "Shell / hollow (opens the selected faces)"],
-      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller); then P to push/pull"],
+      ["C", "Cut by guide: select solid(s), press C, click a guide line — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
+      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners; then P to push/pull"],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
-      ["Shift+L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds · click a guide + Del removes · Ctrl snaps to guides"],
+      ["Shift+L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["G · R", "Move · Rotate gizmo"],
+      ["S", "Scale selected objects about their bottom centre: drag the ring for Scale % or the red / green / blue boxes for X / Y / Z % (Ctrl snaps; per-axis works on curved shapes too)"],
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
@@ -2168,7 +2894,7 @@ class App implements ToolHost {
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
       ["Shift+X", "Toggle x-ray (semi-transparent solids, on by default)"],
-      ["Shift+V", "View menu (Top / Front / Right / Iso · V = opposite side, e.g. bottom)"],
+      ["V", "View menu at the cursor: Top 7 · Front 1 · Right 3 · Iso 5 · V again = opposite side (e.g. bottom)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
       ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],
     ];
@@ -2191,6 +2917,7 @@ class App implements ToolHost {
     this.hidden.clear();
     this.doc.reset();
     this.viewport.fit();
+    this.dropRecovery();
   }
 
   private async fileOpen(): Promise<void> {
@@ -2198,31 +2925,43 @@ class App implements ToolHost {
     const file = await window.y3d.openFile({ title: "Open model", filters: [{ name: "Y3D model", extensions: ["y3d"] }], binary: false });
     if (!file) return;
     try {
-      const json = JSON.parse(file.data as string) as { format: string; bodies: { name: string; kind?: BodyKind; brep: string }[]; guides?: Guide[] };
-      if (json.format !== "y3d") throw new Error("not a Y3D file");
-      const bodies = json.bodies.map((b) => {
-        const shape = deserialize(b.brep);
-        return { name: b.name, kind: b.kind ?? kindOf(shape), shape };
-      });
-      this.endInteractions();
-      this.selection = [];
-      this.hidden.clear();
-      this.doc.reset(bodies, file.path, json.guides ?? []);
-      this.viewport.fit();
+      this.loadModel(file.data as string, file.path);
       this.toast(`Opened ${file.path.split(/[\\/]/).pop()}`);
+      this.dropRecovery();
     } catch (e) {
       this.fail(e);
     }
   }
 
-  private async fileSave(saveAs: boolean): Promise<void> {
-    const data = JSON.stringify({
+  /** The model as a .y3d file (JSON with one B-rep per body). */
+  private modelText(): string {
+    return JSON.stringify({
       format: "y3d",
       version: 1,
       units: "mm",
-      bodies: this.doc.bodies.map((b) => ({ name: b.name, kind: b.kind, brep: serializeShape(b.shape) })),
+      bodies: this.doc.bodies.map((b) => (b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: b.shape.toBase64() } : { name: b.name, kind: b.kind, brep: serializeShape(b.shape) })),
       guides: this.doc.guides,
     });
+  }
+
+  /** Replace the document with a .y3d file's contents (throws if it isn't one). */
+  private loadModel(text: string, filePath: string | null): void {
+    const json = JSON.parse(text) as { format: string; bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string }[]; guides?: Guide[] };
+    if (json.format !== "y3d") throw new Error("not a Y3D file");
+    const bodies = json.bodies.map((b): BodyGeom & { name: string } => {
+      if (b.kind === "mesh") return { name: b.name, kind: "mesh", shape: TriMesh.fromBase64(b.mesh!) };
+      const shape = deserialize(b.brep!);
+      return { name: b.name, kind: b.kind === "face" || b.kind === "solid" ? b.kind : kindOf(shape), shape };
+    });
+    this.endInteractions();
+    this.selection = [];
+    this.hidden.clear();
+    this.doc.reset(bodies, filePath, json.guides ?? []);
+    this.viewport.fit();
+  }
+
+  private async fileSave(saveAs: boolean): Promise<void> {
+    const data = this.modelText();
     let path = this.doc.filePath;
     if (saveAs || !path) {
       path = await window.y3d.saveFile({ title: "Save model", defaultPath: "untitled.y3d", filters: [{ name: "Y3D model", extensions: ["y3d"] }], data });
@@ -2234,6 +2973,81 @@ class App implements ToolHost {
     this.doc.dirty = false;
     this.updateTitle();
     this.toast(`Saved ${path.split(/[\\/]/).pop()}`);
+    this.dropRecovery();
+  }
+
+  // ---------------------------------------------------------------- autosave / crash recovery
+
+  /** Version of the document last autosaved (or known safe on disk). */
+  private autosavedVersion = -1;
+  private autosaveTimer = 0;
+  /** When the oldest change not yet autosaved was made (autosave at most 30 s after it). */
+  private unsavedSince = 0;
+
+  /**
+   * Unsaved work is written to a recovery file ~5 s after the last change (at most 30 s after the
+   * first one), so a crash loses a few seconds at most; it is offered on the next start.
+   */
+  private scheduleAutosave(): void {
+    if (!window.y3d?.writeRecovery) return;
+    if (!this.unsavedSince) this.unsavedSince = performance.now();
+    clearTimeout(this.autosaveTimer);
+    const wait = Math.max(0, Math.min(5000, this.unsavedSince + 30000 - performance.now()));
+    this.autosaveTimer = window.setTimeout(() => void this.autosave(), wait);
+  }
+
+  private async autosave(): Promise<void> {
+    // Not in the middle of an operation or a drag (no hitch there): try again shortly.
+    if (this.op || this.tool || this.xf) {
+      this.autosaveTimer = window.setTimeout(() => void this.autosave(), 2000);
+      return;
+    }
+    const version = this.doc.version;
+    this.unsavedSince = 0;
+    if (version === this.autosavedVersion) return;
+    if (!this.doc.dirty || (!this.doc.bodies.length && !this.doc.guides.length)) {
+      this.dropRecovery();
+      return;
+    }
+    try {
+      await window.y3d.writeRecovery({ savedAt: Date.now(), filePath: this.doc.filePath, data: this.modelText() });
+      this.autosavedVersion = version;
+    } catch (e) {
+      console.warn("autosave failed", e);
+    }
+  }
+
+  /** The work is safe on disk (saved / opened / new): no recovery needed. */
+  private dropRecovery(): void {
+    clearTimeout(this.autosaveTimer);
+    this.unsavedSince = 0;
+    this.autosavedVersion = this.doc.version;
+    void window.y3d?.clearRecovery?.();
+  }
+
+  /** On start: offer unsaved work autosaved before a crash (or a forced quit). */
+  async offerRecovery(): Promise<void> {
+    const rec = await window.y3d?.readRecovery?.();
+    if (!rec) return;
+    const when = new Date(rec.savedAt);
+    const time = when.toDateString() === new Date().toDateString() ? when.toLocaleTimeString() : when.toLocaleString();
+    const name = rec.filePath ? rec.filePath.split(/[\\/]/).pop() : "an unsaved model";
+    const choice = await window.y3d.ask({
+      message: "Recover unsaved work?",
+      detail: `Y3D closed unexpectedly. Changes to ${name}, autosaved at ${time}, can be recovered.`,
+      buttons: ["Recover", "Discard"],
+    });
+    if (choice !== 0) return this.dropRecovery();
+    try {
+      this.loadModel(rec.data, rec.filePath);
+      // Not saved yet: keep it marked unsaved (and keep the recovery file until it is).
+      this.doc.dirty = true;
+      this.autosavedVersion = this.doc.version;
+      this.updateTitle();
+      this.toast(`Recovered work autosaved at ${time} — save it to keep it`);
+    } catch (e) {
+      this.fail(e);
+    }
   }
 
   /** Stress-test scene: `n` separate solids (alternating boxes / cylinders) on a square grid. */
@@ -2242,7 +3056,7 @@ class App implements ToolHost {
     const ground: Frame = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const cols = Math.ceil(Math.sqrt(n));
     const pitch = 20;
-    const bodies: { name: string; kind: BodyKind; shape: Shape }[] = [];
+    const bodies: (BodyGeom & { name: string })[] = [];
     for (let i = 0; i < n; i++) {
       const x = (i % cols) * pitch, y = Math.floor(i / cols) * pitch;
       const h = 5 + ((i * 7) % 11);
@@ -2271,20 +3085,176 @@ class App implements ToolHost {
     }
   }
 
+  /**
+   * STL import. A small closed mesh (a CAD part) becomes editable solids; a big one (a scan, a
+   * sculpt, a 3D-print model) or one with holes stays a mesh: turning 200k triangles into B-rep
+   * faces takes minutes and gives a solid too heavy to edit anyway.
+   */
+  private async fileImportStl(): Promise<void> {
+    const file = await window.y3d.openFile({ title: "Import STL", filters: [{ name: "STL", extensions: ["stl"] }], binary: true });
+    if (file) this.importStlData(file.data as Uint8Array, file.path.split(/[\\/]/).pop()!.replace(/\.stl$/i, ""));
+  }
+
+  /** Add an STL file's contents to the model (see fileImportStl). Returns the new bodies' ids. */
+  importStlData(data: Uint8Array, base: string): number[] {
+    try {
+      const mesh = parseStl(data);
+      if (!mesh.triangleCount) throw new Error("The STL file has no triangles");
+      let solids: Solid[] = [];
+      let why = `${mesh.triangleCount.toLocaleString()} triangles`;
+      if (mesh.triangleCount <= STL_SOLID_MAX) {
+        try {
+          const r = importStl(data);
+          if (r.open) why = "the mesh has holes";
+          else solids = r.solids;
+        } catch {
+          why = "the mesh has holes";
+        }
+      }
+      // Exporters keep their own origin (an assembly position, a print-bed corner), so the model
+      // could land far away: centre it on the origin in X/Y with its bottom on the ground.
+      const [lo, hi] = mesh.boundingBox.bounds;
+      const d: V3 = [-(lo[0] + hi[0]) / 2, -(lo[1] + hi[1]) / 2, -lo[2]];
+      const place = <T extends Solid | TriMesh>(g: T): T => (d.some((x) => Math.abs(x) > 1e-9) ? translateShape(g, d) : g);
+      const bodies = solids.length ? solids.map((s) => this.doc.makeBody(place(s), base)) : [this.doc.makeBody(place(mesh), base, "mesh")];
+      this.doc.commit([...this.doc.bodies, ...bodies], "Import STL");
+      this.setMode("body");
+      this.setSelection(bodies.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      this.viewport.fit();
+      if (solids.length) this.toast(`Imported ${solids.length} solid(s), ${solids.reduce((n, s) => n + s.faces.length, 0)} faces`);
+      else this.toast(`Imported as a mesh (${why}): move, rotate, scale, copy and export it with your solids — it can't be edited`);
+      return bodies.map((b) => b.id);
+    } catch (e) {
+      this.fail(e);
+      return [];
+    }
+  }
+
+  /**
+   * STL quality before exporting: Draft / Normal / Fine presets or custom values, with the
+   * resulting triangle count and file size. Remembers the last choice. Null if cancelled.
+   */
+  private stlQualityDialog(solids: (Solid | TriMesh)[]): Promise<StlQuality | null> {
+    const PRESETS: { name: string; q: StlQuality; hint: string }[] = [
+      { name: "Draft", q: { tolerance: 0.1, angle: 15 }, hint: "quick test prints, previews" },
+      { name: "Normal", q: { tolerance: 0.02, angle: 8 }, hint: "most 3D printing" },
+      { name: "Fine", q: { tolerance: 0.005, angle: 3 }, hint: "resin printers, smooth curves" },
+    ];
+    let last: StlQuality = PRESETS[1].q;
+    try {
+      const saved = JSON.parse(localStorage.getItem(STL_QUALITY_KEY) ?? "null") as StlQuality | null;
+      if (saved && saved.tolerance > 0 && saved.angle > 0) last = saved;
+    } catch {
+      // keep Normal
+    }
+    return new Promise((resolve) => {
+      document.getElementById("props-dlg")?.remove();
+      const dlg = document.createElement("form");
+      dlg.id = "props-dlg";
+      dlg.noValidate = true;
+      dlg.innerHTML =
+        `<h4>Export STL — quality</h4>` +
+        `<div class="stl-presets">${PRESETS.map((p, i) => `<label class="stl-preset"><input type="radio" name="preset" value="${i}"><span><b>${p.name}</b> <small>${p.q.tolerance} mm · ${p.q.angle}° — ${p.hint}</small></span></label>`).join("")}` +
+        `<label class="stl-preset"><input type="radio" name="preset" value="custom"><span><b>Custom</b></span></label></div>` +
+        `<label><span>Surface accuracy (mm)</span><input type="number" data-k="tolerance" step="0.005" min="0.0005"></label>` +
+        `<label><span>Angle (°)</span><input type="number" data-k="angle" step="1" min="0.5"></label>` +
+        `<div class="stl-estimate">…</div>` +
+        `<div class="op-buttons"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn primary">Export…</button></div>`;
+      const radios = [...dlg.querySelectorAll<HTMLInputElement>("input[name=preset]")];
+      const tol = dlg.querySelector<HTMLInputElement>("input[data-k=tolerance]")!, ang = dlg.querySelector<HTMLInputElement>("input[data-k=angle]")!;
+      const est = dlg.querySelector<HTMLElement>(".stl-estimate")!;
+      const read = (): StlQuality | null => {
+        const q = { tolerance: parseFloat(tol.value), angle: parseFloat(ang.value) };
+        return q.tolerance >= 0.0005 && q.angle >= 0.5 && q.angle <= 60 ? q : null;
+      };
+      let timer = 0;
+      const estimate = () => {
+        clearTimeout(timer);
+        est.textContent = "…";
+        timer = window.setTimeout(() => {
+          const q = read();
+          if (!q) return void (est.textContent = "Accuracy ≥ 0.0005 mm, angle 0.5–60°");
+          try {
+            const n = stlTriangleCount(solids, q);
+            const mb = (84 + 50 * n) / 1e6;
+            est.textContent = `≈ ${n.toLocaleString()} triangles · ${mb < 0.1 ? `${Math.max(1, Math.round(mb * 1000))} KB` : `${mb.toFixed(1)} MB`}`;
+          } catch (e) {
+            est.textContent = errorMessage(e);
+          }
+        }, 250);
+      };
+      const show = (q: StlQuality) => {
+        tol.value = String(q.tolerance);
+        ang.value = String(q.angle);
+        const i = PRESETS.findIndex((p) => p.q.tolerance === q.tolerance && p.q.angle === q.angle);
+        radios[i >= 0 ? i : radios.length - 1].checked = true;
+        estimate();
+      };
+      for (const r of radios) r.addEventListener("change", () => (r.value === "custom" ? tol.focus() : show(PRESETS[Number(r.value)].q)));
+      for (const i of [tol, ang]) i.addEventListener("input", () => show({ tolerance: parseFloat(tol.value), angle: parseFloat(ang.value) }));
+      const close = (q: StlQuality | null) => {
+        clearTimeout(timer);
+        dlg.remove();
+        $("viewport").focus?.();
+        resolve(q);
+      };
+      dlg.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const q = read();
+        if (!q) return this.toast("STL quality: accuracy at least 0.0005 mm, angle 0.5–60°", "error");
+        localStorage.setItem(STL_QUALITY_KEY, JSON.stringify(q));
+        close(q);
+      });
+      dlg.querySelector("[data-act=cancel]")!.addEventListener("click", () => close(null));
+      dlg.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") close(null);
+      });
+      $("viewport").appendChild(dlg);
+      show(last);
+      dlg.querySelector<HTMLButtonElement>("button[type=submit]")!.focus();
+    });
+  }
+
   private async fileExport(kind: "step" | "stl"): Promise<void> {
     const ids = this.selectedBodyIds();
     let bodies = ids.length ? this.doc.bodies.filter((b) => ids.includes(b.id)) : this.doc.bodies.filter((b) => !this.hidden.has(b.id));
     if (kind === "stl") {
-      const solids = bodies.filter((b) => b.kind === "solid");
-      if (solids.length < bodies.length) this.toast("STL skips flat faces (no volume) — exporting solids only");
+      // Solids and meshes go into one file (a slicer handles touching / overlapping parts).
+      const printable = bodies.filter((b) => b.kind !== "face");
+      if (printable.length < bodies.length) this.toast("STL skips flat faces (no volume) — exporting solids and meshes only");
+      bodies = printable;
+    } else {
+      const solids = bodies.filter((b) => b.kind !== "mesh");
+      const meshes = bodies.length - solids.length;
+      if (meshes) {
+        // STEP holds only solids: say so before writing a file that silently lacks the meshes.
+        const names = bodies.filter((b) => b.kind === "mesh").map((b) => `"${b.name}"`).join(", ");
+        const buttons = solids.length ? ["Export STEP without meshes", "Export STL instead", "Cancel"] : ["Export STL instead", "Cancel"];
+        const choice = await window.y3d.ask({
+          message: solids.length ? `STEP will not include ${meshes === 1 ? "the STL mesh" : `${meshes} STL meshes`}` : "STEP can't export STL meshes",
+          detail: `${names} ${meshes === 1 ? "is a mesh" : "are meshes"} (imported STL). STEP files hold only solids, so ${meshes === 1 ? "it" : "they"} would be left out.\n\nExport STL keeps the solids and the meshes together in one file.`,
+          buttons,
+        });
+        const act = buttons[choice];
+        if (act === "Export STL instead") return this.fileExport("stl");
+        if (act !== "Export STEP without meshes") return;
+      }
       bodies = solids;
     }
     if (!bodies.length) {
       this.toast("Nothing to export", "error");
       return;
     }
+    const shapes = bodies.map((b) => b.shape);
+    let quality: StlQuality | null = { tolerance: 0.02, angle: 8 };
+    if (kind === "stl" && shapes.some(notMesh)) {
+      // Only solids are meshed at a chosen quality; meshes are written as they are.
+      quality = await this.stlQualityDialog(shapes as (Solid | TriMesh)[]);
+      if (!quality) return;
+    }
     try {
-      const buf = kind === "step" ? await exportStep(bodies.map((b) => ({ shape: b.shape, name: b.name }))) : await exportStl(bodies.map((b) => b.shape as Solid));
+      const buf = kind === "step" ? await exportStep(shapes.filter(notMesh).map((shape, i) => ({ shape, name: bodies[i].name }))) : await exportStl(shapes as (Solid | TriMesh)[], quality!);
       const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.y3d$/, "") ?? "model";
       const path = await window.y3d.saveFile({
         title: `Export ${kind.toUpperCase()}`,
@@ -2307,10 +3277,11 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape }; // used by the smoke test
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume }; // used by the smoke test
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
+    else await app.offerRecovery();
   } catch (e) {
     loading.classList.add("error");
     loading.innerHTML = `<div>Failed to start the geometry kernel:</div><div>${escapeHtml(errorMessage(e))}</div>`;
