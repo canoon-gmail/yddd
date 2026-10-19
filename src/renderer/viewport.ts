@@ -224,8 +224,9 @@ export class Viewport {
     this.controls = new OrbitControls(this.camera, this.canvas);
     // Requirements:
     // 1) No right mouse drag (disabled)
-    // 2) Middle mouse drag = Orbit (ROTATE)
+    // 2) Middle mouse drag or Alt + Left drag = Orbit (ROTATE) — Alt for touchpads / mice without a middle button
     // 3) Shift + Left mouse drag = Pan (PAN)
+    // Two-finger slide on a touchpad arrives as the wheel: zoom.
     // Normal Left click/drag is reserved for select / draw tools (not camera orbit).
     this.controls.mouseButtons = {
       LEFT: THREE.MOUSE.ROTATE,
@@ -234,18 +235,21 @@ export class Viewport {
     } as unknown as OrbitControls["mouseButtons"];
 
     // Prevent regular Left-drag from rotating the view:
-    // Only allow Left-button actions when Shift is held down (which triggers PAN).
+    // Only allow Left-button actions when Shift (PAN) or Alt (orbit) is held down.
     this.canvas.addEventListener("pointerdown", (e) => {
-      if (e.button === 0 && !e.shiftKey) {
+      if (e.button === 0 && !e.shiftKey && !e.altKey) {
         // Normal left-click: temporarily disable rotate on OrbitControls for this gesture
         this.controls.enableRotate = false;
       } else {
         this.controls.enableRotate = true;
       }
+      // Alt + Left drag orbits even over the move / rotate gizmo.
+      if (e.button === 0 && e.altKey) this.tc.enabled = false;
     }, { capture: true });
 
     window.addEventListener("pointerup", () => {
       this.controls.enableRotate = true;
+      this.tc.enabled = true;
     }, { capture: true });
 
     this.controls.screenSpacePanning = true;

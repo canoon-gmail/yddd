@@ -353,7 +353,7 @@ function loadRecent(): string[] {
 }
 
 const MODE_HINTS: Record<SelMode, string> = {
-  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag orbit · Shift+Left-drag pan · Wheel zoom",
+  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag or Alt+drag orbit · Shift+Left-drag pan · Wheel / two-finger slide zoom",
   face: "Face mode: click faces (P push/pull, H shell), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
   edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add · Right-click a solid → Solid mode",
 };
@@ -861,7 +861,7 @@ class App implements ToolHost {
     // and zoom still work.
     c.parentElement!.addEventListener("pointerdown", (e) => {
       const dlg = this.valueDialog();
-      if (!dlg || e.target !== c || e.button !== 0 || e.shiftKey) return;
+      if (!dlg || e.target !== c || e.button !== 0 || e.shiftKey || e.altKey) return;
       e.preventDefault(); // no mousedown: the dialog keeps the focus
       e.stopPropagation();
       if (!dlg.contains(document.activeElement)) dlg.querySelector<HTMLInputElement>("input")?.focus();
@@ -885,7 +885,7 @@ class App implements ToolHost {
         this.rightDownAt = this.tool || this.op || this.viewport.gizmoHot ? null : { x: e.clientX, y: e.clientY };
         return;
       }
-      if (e.button !== 0) return;
+      if (e.button !== 0 || e.altKey) return; // Alt + drag orbits the view
       if (this.tool) {
         this.tool.down(e);
         return;
@@ -904,7 +904,7 @@ class App implements ToolHost {
         if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) this.rightClick(e);
         return;
       }
-      if (e.button === 0 && this.valueDialog()) return;
+      if (e.button === 0 && (this.valueDialog() || e.altKey)) return;
       if (e.button === 0 && this.tool?.up) {
         this.tool.up(e);
         return;
@@ -2966,9 +2966,9 @@ class App implements ToolHost {
       return;
     }
     const rows: [string, string][] = [
-      ["Middle-drag", "Orbit view"],
+      ["Middle-drag · Alt+Left-drag", "Orbit view"],
       ["Shift + Left-drag", "Pan view"],
-      ["Wheel", "Zoom to cursor"],
+      ["Wheel · two-finger slide (touchpad)", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],

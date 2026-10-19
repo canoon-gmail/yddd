@@ -32,7 +32,7 @@ Press **F1** in the app for all shortcuts.
 
 ## Mouse
  
-* **Middle-drag**: orbit
+* **Middle-drag** or **Alt + Left-drag**: orbit
 * **Shift + Left-drag**: pan
 * **Wheel**: zoom to cursor
 * **Left click**: select / draw / use tool

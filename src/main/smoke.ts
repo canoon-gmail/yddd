@@ -2025,6 +2025,60 @@ const SCENARIO_MESH = String.raw`
 })()
 `;
 
+/**
+ * Camera navigation with real (OS-level) input — OrbitControls needs pointer capture, which synthetic
+ * DOM events can't give: Alt + left drag orbits (no selection), a plain click still selects, the
+ * wheel (also a touchpad's two-finger slide) zooms.
+ */
+async function navigationChecks(win: BrowserWindow): Promise<unknown> {
+  const js = <T>(code: string) => win.webContents.executeJavaScript(code, true) as Promise<T>;
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const checks: { label: string; ok: boolean; got: unknown }[] = [];
+  const expect = (label: string, ok: boolean, got: unknown) => checks.push({ label, ok, got });
+  const at = await js<{ x: number; y: number }>(`(async () => {
+    const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+    // Esc until no tool is left (Measure: the 1st Esc only clears its result)
+    for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    app.doc.dirty = false; app.doc.reset([]);
+    const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    app.doc.commit([app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 30, 20), "Box")], "box");
+    app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit();
+    await new Promise((r) => setTimeout(r, 100));
+    const s = vp.toScreen(new vp.camera.position.constructor(0, 0, 10));
+    return { x: Math.round(s.x), y: Math.round(s.y) };
+  })()`);
+  const cam = () => js<{ p: number[]; d: number; sel: number }>(`(() => { const vp = window.y3dApp.viewport, c = vp.camera.position; return { p: c.toArray(), d: c.distanceTo(vp.controls.target), sel: window.y3dApp.selection.length }; })()`);
+  const send = async (e: Parameters<typeof win.webContents.sendInputEvent>[0]) => {
+    win.webContents.sendInputEvent(e);
+    await sleep(30);
+  };
+  const before = await cam();
+  await send({ type: "mouseMove", x: at.x, y: at.y });
+  await send({ type: "mouseDown", x: at.x, y: at.y, button: "left", clickCount: 1, modifiers: ["alt"] });
+  for (let k = 1; k <= 6; k++) await send({ type: "mouseMove", x: at.x + k * 15, y: at.y + k * 5, button: "left", modifiers: ["alt", "leftButtonDown"] } as never);
+  await send({ type: "mouseUp", x: at.x + 90, y: at.y + 30, button: "left", clickCount: 1, modifiers: ["alt"] });
+  const orbited = await cam();
+  const moved = Math.hypot(...orbited.p.map((v, k) => v - before.p[k]));
+  expect("navigation: Alt + left drag orbits the view and selects nothing", moved > 1 && Math.abs(orbited.d - before.d) < 1e-6 * before.d && orbited.sel === 0, { moved, before, orbited });
+  await send({ type: "mouseDown", x: at.x, y: at.y, button: "left", modifiers: ["alt"], clickCount: 1 });
+  await send({ type: "mouseUp", x: at.x, y: at.y, button: "left", modifiers: ["alt"], clickCount: 1 });
+  const altClick = await cam();
+  // (the orbit moved the box on screen: click where it is now)
+  const now = await js<{ x: number; y: number }>(`(() => { const vp = window.y3dApp.viewport; const s = vp.toScreen(new vp.camera.position.constructor(0, 0, 10)); return { x: Math.round(s.x), y: Math.round(s.y) }; })()`);
+  await send({ type: "mouseMove", x: now.x, y: now.y });
+  await send({ type: "mouseDown", x: now.x, y: now.y, button: "left", clickCount: 1 });
+  await send({ type: "mouseUp", x: now.x, y: now.y, button: "left", clickCount: 1 });
+  const clicked = await cam();
+  expect("navigation: Alt + click selects nothing; a plain click still selects", altClick.sel === 0 && clicked.sel === 1, { altClick: altClick.sel, clicked: clicked.sel });
+  await send({ type: "mouseWheel", x: now.x, y: now.y, deltaX: 0, deltaY: 120 }); // (Electron: + = scroll up / away)
+  await sleep(100);
+  const zoomed = await cam();
+  expect("navigation: the wheel / two-finger slide zooms in", zoomed.d < clicked.d * 0.99, { before: clicked.d, after: zoomed.d });
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("navigation failed: " + JSON.stringify(failed));
+  return [{ label: "navigation", passed: checks.length - failed.length, total: checks.length, checks }];
+}
+
 export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void> {
   await mkdir(outDir, { recursive: true });
   const errors: string[] = [];
@@ -2058,6 +2112,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("6-cablebox.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));
     await shot("7-measure.png");
+    report = report.concat(await navigationChecks(win));
   } catch (e) {
     errors.push(`scenario failed: ${String(e)}`);
     await shot("error.png").catch(() => {});
