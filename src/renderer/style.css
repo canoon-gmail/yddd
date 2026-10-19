@@ -72,8 +72,10 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 #viewport canvas { display: block; outline: none; }
 #view-label { position: absolute; left: 10px; bottom: 8px; color: var(--muted); font-size: 11px; pointer-events: none; }
 
+#sidebar-grip { width: 5px; margin-right: -5px; flex: none; cursor: col-resize; z-index: 6; position: relative; }
+#sidebar-grip:hover, #sidebar-grip.drag { background: var(--accent); opacity: 0.5; }
 #sidebar {
-  width: 270px; display: flex; flex-direction: column;
+  width: 270px; flex: none; display: flex; flex-direction: column;
   background: var(--panel); border-left: 1px solid var(--border);
 }
 #recent {
@@ -83,6 +85,11 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 #recent-list { display: flex; flex-direction: column; gap: 2px; }
 #recent-list .tb-btn { width: 100%; min-width: 0; }
 #recent-list .tb-btn span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+/* Pro layout: a narrow, text-only Recent strip. */
+body.pro #recent { width: 50px; padding: 4px 2px; }
+body.pro #recent-list .tb-btn { padding: 3px 1px; min-width: 0; }
+body.pro #recent-list .tb-btn svg { display: none; }
+body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .panel { padding: 8px 10px; border-bottom: 1px solid var(--border); overflow: auto; }
 .panel:first-child { flex: 1; min-height: 120px; }
 .panel h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
@@ -94,6 +101,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 .ol-row.hidden .ol-name { opacity: 0.45; }
 .ol-swatch { width: 10px; height: 10px; border-radius: 2px; background: #9aa5b1; flex: none; }
 .ol-swatch.face { background: transparent; border: 2px solid #6f9bd1; height: 6px; margin: 2px 0; }
+.ol-swatch.path { background: transparent; border-top: 2px solid #ff69b4; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
 .ol-swatch.mesh { background: repeating-linear-gradient(45deg, #9aa5b1 0 2px, #5d6670 2px 4px); }
 .ol-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ol-name input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 3px; }
@@ -194,6 +202,21 @@ kbd {
 #measure-panel .muted, #measure-panel .tip { color: var(--muted); font-size: 12px; }
 #measure-panel .tip { margin-top: 6px; }
 #measure-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+#sketch-panel {
+  position: absolute; top: 12px; left: 12px; width: 300px; padding: 10px 12px; z-index: 15;
+  background: rgba(38, 40, 44, 0.96); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); line-height: 1.5;
+}
+#sketch-panel h4 { margin: 0 0 6px; font-size: 13px; color: var(--accent-2); }
+#sketch-panel .modes { display: flex; flex-wrap: wrap; gap: 4px; }
+#sketch-panel .modes .btn { padding: 2px 8px; }
+#sketch-panel .tip { margin-top: 6px; }
+#sketch-panel .muted { color: var(--muted); font-size: 12px; margin-top: 4px; }
+#sketch-panel.compact { width: auto; padding: 6px 8px; }
+#sketch-panel.compact .modes { flex-wrap: nowrap; align-items: center; }
+#sketch-panel.compact .modes .spacer { width: 10px; }
+#sketch-panel.compact .modes kbd { display: none; }
+#sketch-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 button.btn:disabled { opacity: 0.45; cursor: default; filter: none; }
 
 button.btn {

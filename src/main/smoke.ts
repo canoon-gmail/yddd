@@ -1893,6 +1893,294 @@ const SCENARIO_MEASURE = String.raw`
 })()
 `;
 
+/** Sketch (K): on a face and on the ground — lines, tangent arcs, a hole, typed sizes, undo, Done / Cancel. */
+const SCENARIO_SKETCH = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  // Beginner layout (a Pro layout left on in the test profile would change the panel / hints)
+  localStorage.removeItem("y3d.pro"); document.body.classList.remove("pro");
+  for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  document.getElementById("tutorial").hidden = true; document.body.classList.remove("tutorial-open");
+  app.doc.dirty = false; app.doc.reset([]);
+  const box = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 30, 20), "Box");
+  app.doc.commit([box], "box");
+  app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(100);
+  const key = async (k, extra = {}) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra })); await sleep(10); };
+  const type = async (text) => { for (const ch of text) await key(ch); await key("Enter"); };
+  const pe = (t, p) => { const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+  const hover = async (p) => { pe("pointermove", p); await sleep(10); };
+  const click = async (p) => { pe("pointermove", p); pe("pointerdown", p); pe("pointerup", p); await sleep(10); };
+  const area = (b) => b.shape.faces.reduce((s, f) => s + K.faceInfo(b.shape, f.hashCode).area, 0);
+  const cam0 = vp.camera.position.toArray();
+  const top = box.shape.faces.find((f) => f.normalAt(f.center).toTuple()[2] > 0.99);
+  app.setSelection([{ kind: "face", body: box.id, id: top.hashCode }]);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", code: "KeyK", bubbles: true, cancelable: true })); await sleep(50);
+  const dir = vp.camera.getWorldDirection(new V());
+  expect("sketch: K on a top face starts the sketch, looking straight down, with its panel", app.tool && app.tool.name === "Sketch" && dir.z < -0.999 && document.getElementById("sketch-panel"), { tool: app.tool && app.tool.name, dir: dir.toArray() });
+  await key("g"); await key("5");
+  expect("sketch: other commands wait (G, view keys)", app.tool && app.tool.name === "Sketch" && vp.camera.getWorldDirection(new V()).z < -0.999, app.tool && app.tool.name);
+  const z = 20, at = (x, y) => [x, y, z];
+  // L shape (300 mm²) with a round hole (r 2) in it
+  for (const p of [[-10, -10], [10, -10], [10, 0], [0, 0], [0, 10], [-10, 10], [-10, -10]]) await click(at(...p));
+  await key("c"); await click(at(-5, -5)); await type("2");
+  // The middle of a sketch line snaps (the L's bottom edge: 0,-10)
+  await key("l"); await hover(at(0.3, -9.8));
+  const mid = app.tool.cursor;
+  expect("sketch: the middle of a sketch line snaps", mid && Math.abs(mid[0]) < 1e-9 && Math.abs(mid[1] + 10) < 1e-9, mid);
+  // A stray line, then Ctrl+Z twice takes it back (the line, then its first point)
+  await key("l"); await click(at(-18, 12)); await click(at(-15, 12)); await key("z", { ctrlKey: true }); await key("z", { ctrlKey: true });
+  const stray = app.tool.first === null && app.tool.path.length === 0;
+  // Slot beside the box (10 x 10 + two half circles r 5): line, arc, line, arc back to the start
+  await click(at(25, -5)); await hover(at(35, -5)); await type("10"); await key("a"); await click(at(35, 5)); await key("l"); await click(at(25, 5)); await key("a"); await click(at(25, -5));
+  expect("sketch: 3 closed outlines; undo took back the stray line", app.tool.loops.length === 3 && stray, { loops: app.tool.loops.length, stray });
+  const n0 = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(50);
+  const made = app.doc.bodies.slice(n0);
+  const areas = made.map(area).sort((a, b) => a - b);
+  const want = [300 - Math.PI * 4, 100 + Math.PI * 25].sort((a, b) => a - b);
+  expect("sketch: Done → 2 flat faces on the top (L with a hole, slot); view back", !app.tool && made.length === 2 && made.every((b) => b.kind === "face" && K.isValidShape(b.shape) && Math.abs(b.shape.boundingBox.bounds[0][2] - 20) < 1e-6) && areas.every((a, i) => Math.abs(a - want[i]) < 1e-3) && vp.camera.position.toArray().every((v, i) => Math.abs(v - cam0[i]) < 1e-6) && !document.getElementById("sketch-panel"),
+    { tool: app.tool && app.tool.name, made: made.length, areas, want });
+  app.run("edit.undo");
+  expect("sketch: one undo step removes the sketch faces", app.doc.bodies.length === n0, app.doc.bodies.length);
+  // On the ground (nothing selected): R + typed size; Cancel drops it, Done keeps it
+  app.setSelection([]);
+  app.run("tool.sketch"); await sleep(30);
+  await key("r"); await click([30, 30, 0]); await type("20,10");
+  // A circle round the rectangle's corner: where it crosses the bottom edge (35, 30) snaps
+  await key("c"); await click([30, 30, 0]); await type("5");
+  await key("l"); await hover([35.3, 30.2, 0]);
+  // Double-click: done drawing — the two lines stay open (a path)
+  const nLoops = app.tool.loops.length, nOpens = app.tool.opens.length;
+  await click([60, 0, 0]); await click([70, 0, 0]); await click([70, 10, 0]); await click([70, 10, 0]);
+  const tri = app.tool.opens[nOpens];
+  expect("sketch: double-click ends the lines, open (a path)", app.tool.loops.length === nLoops && app.tool.opens.length === nOpens + 1 && tri && tri.length === 2 && app.tool.first === null, { loops: app.tool.loops.length, tri });
+  // Capsule: line 30, arc with R 5 typed (clicked a little off the half turn — it snaps), line 30,
+  // arc R 5 clicked on the start point
+  await key("l"); await click([80, -20, 0]); await hover([120, -20, 0]); await type("30");
+  await key("a"); await type("5"); await click([110.4, -10.2, 0]);
+  await key("l"); await hover([70, -10, 0]); await type("30");
+  await key("a"); await type("5"); await click([80, -20, 0]);
+  const cap = app.tool.loops[app.tool.loops.length - 1];
+  // First arc: click its start and end (20 apart), type R + Enter, Enter again places it — R 10: a half circle, R 15: flatter
+  const firstArc = async (y, r) => { await key("l"); await key("a"); await click([0, y, 0]); await click([20, y, 0]); await hover([10, y - 8, 0]); await type(String(r)); await key("Enter"); const o = app.tool.opens[app.tool.opens.length - 1]; return o && o.length === 1 ? o[0] : null; };
+  const half = await firstArc(-40, 10), flat = await firstArc(-70, 15);
+  await key("a"); await key("a");
+  const stillArc = app.tool.mode === "arc";
+  const sag = 15 - Math.sqrt(15 * 15 - 10 * 10);
+  // Line, then A and the mouse a little off straight above the line's end: it lines up (same X) → a half circle
+  await key("l"); await click([200, -200, 0]); await click([230, -200, 0]); await key("a"); await hover([230.4, -190, 0]);
+  const lined = app.tool.cursor, guides = app.tool.aligned.length;
+  await click([230.4, -190, 0]);
+  const hc = app.tool.path[app.tool.path.length - 1];
+  expect("sketch: line, A, mouse near straight above its end → lines up (dashed guide) → exact half circle", lined && Math.abs(lined[0] - 230) < 1e-9 && guides >= 1 && hc && hc.kind === "arc" && Math.abs(hc.m[0] - 235) < 1e-6 && Math.abs(hc.m[1] + 195) < 1e-6, { lined, guides, hc });
+  await key("Escape");
+  // Too small a radius for the ends (20 apart): refused; a fitting one shows what to do next
+  await key("l"); await key("a"); await click([0, -100, 0]); await click([20, -100, 0]); await type("1");
+  const refused = app.tool.arcR === null;
+  await type("10");
+  const tip = document.querySelector("#sketch-panel .tip")?.textContent ?? "";
+  expect("sketch: arc R too small for its ends is refused; R 10 → tip says move to the bulge side, then click / Enter", refused && app.tool.arcR === 10 && /R 10 set — move the mouse to the side the arc should bulge/.test(tip), { refused, arcR: app.tool.arcR, tip });
+  await key("Escape"); await key("Escape");
+  const nearP = (p, q) => Math.abs(p[0] - q[0]) < 1e-6 && Math.abs(p[1] - q[1]) < 1e-6;
+  expect("sketch: A always means Arc (pressing it again stays on Arc)", stillArc, app.tool.mode);
+  expect("sketch: first arc — type R, Enter, Enter: placed, done — an open arc (R 10 → half circle, R 15 → flatter)", half && half.kind === "arc" && nearP(half.m, [10, -50]) && flat && flat.kind === "arc" && nearP(flat.m, [10, -70 - sag]), { half, flat });
+  const near2 = (p, q) => Math.abs(p[0] - q[0]) < 1e-6 && Math.abs(p[1] - q[1]) < 1e-6;
+  expect("sketch: typed arc R, then click: half circles (snapped) — a closed capsule", cap && cap.segs.length === 4 && cap.segs.map((g) => g.kind).join() === "line,arc,line,arc" && near2(cap.segs[1].m, [115, -15]) && near2(cap.segs[3].m, [75, -15]) && app.tool.first === null, cap);
+  await key("l"); await hover([35.3, 30.2, 0]);
+  const x = app.tool.cursor;
+  expect("sketch: where a circle crosses a line snaps", x && Math.abs(x[0] - 35) < 1e-9 && Math.abs(x[1] - 30) < 1e-9, x);
+  document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(30);
+  expect("sketch: Cancel drops the sketch", !app.tool && app.doc.bodies.length === n0, app.doc.bodies.length);
+  app.run("tool.sketch"); await sleep(30);
+  await key("r"); await hover([60, 60, 0]); await click([30, 30, 0]); await hover([60, 60, 0]); await type("20x10");
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const g = app.doc.bodies[app.doc.bodies.length - 1], gb = g.shape.boundingBox.bounds;
+  expect("sketch: on the ground, R + typed 20x10 → a 20 x 10 face at z 0", app.doc.bodies.length === n0 + 1 && Math.abs(area(g) - 200) < 1e-6 && Math.abs(gb[0][2]) < 1e-9 && Math.abs(gb[1][0] - gb[0][0] - 20) < 1e-6, { n: app.doc.bodies.length, area: area(g), gb });
+  // Rectangle, then a half circle on its right side (corner, corner, mouse out, Enter = done) and one on its
+  // left side (double-click = done): 3 separate faces (30 x 10, two half discs R 5)
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("r"); await click([100, 50, 0]); await click([130, 60, 0]);
+  await key("a"); await click([130, 50, 0]); await click([130, 60, 0]); await hover([135.2, 55.4, 0]); await key("Enter"); // (≈ a half circle: snaps to one)
+  await key("l"); await key("a"); await click([100, 60, 0]); await click([100, 50, 0]); await click([95, 55, 0]); await click([95, 55, 0]);
+  const nb = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const caps = app.doc.bodies.slice(nb).map(area).sort((a, b) => a - b);
+  const wantCaps = [Math.PI * 12.5, Math.PI * 12.5, 300];
+  expect("sketch: rectangle + half circles on its sides (mouse near the half circle + Enter, or double-click = done) → 3 faces", caps.length === 3 && caps.every((a, i) => Math.abs(a - wantCaps[i]) < 1e-6), { caps, wantCaps });
+  // Half circle face: A, click start, click end (20 apart), click the bulge, L, click the start → one closed outline; Done → a half disc
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("a"); await click([0, 200, 0]); await click([20, 200, 0]); await hover([10, 209, 0]); await click([10, 209.6, 0]);
+  const afterArc = { path: app.tool.path.length, first: app.tool.first, mode: app.tool.mode };
+  await key("l"); await hover([0.2, 200.1, 0]); await click([0, 200, 0]);
+  const hd = { loops: app.tool.loops.length, opens: app.tool.opens.length, path: app.tool.path.length, first: app.tool.first };
+  const nh = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const halfDisc = app.doc.bodies.slice(nh).map(area);
+  expect("sketch: half circle face — A, start, end, bulge, L, start → a half disc (157.08 mm²)", halfDisc.length === 1 && Math.abs(halfDisc[0] - Math.PI * 50) < 1e-6, { afterArc, hd, halfDisc });
+  // ...and the same without pressing L: in Arc mode, back to the start after one arc closes with a straight line
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("a"); await click([0, 200, 0]); await click([20, 200, 0]); await click([10, 209.6, 0]); await hover([0.2, 200.1, 0]); await click([0, 200, 0]);
+  const nh2 = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const halfDisc2 = app.doc.bodies.slice(nh2).map(area);
+  expect("sketch: half circle face without L — the click on the start closes with a straight line", halfDisc2.length === 1 && Math.abs(halfDisc2[0] - Math.PI * 50) < 1e-6, halfDisc2);
+  // Ended just short of the start (the closing click missed it by a few pixels) with a double-click: closes there exactly
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  const wpp = vp.worldPerPixel(new V(0, 400, 0));
+  // (big — 200 wide — so a 16 px miss is a small one next to it; the view is zoomed far out here)
+  await key("a"); await click([0, 400, 0]); await click([200, 400, 0]); await click([100, 499, 0]);
+  // (16 px off the start: outside the 12 px point snap)
+  await key("l"); const miss = [wpp * 16, 400 + wpp * 2, 0]; await click(miss);
+  const beforeEnd = { loops: app.tool.loops.length, path: app.tool.path.length };
+  await click(miss);
+  const nearLoops = app.tool.loops.length, nearOpens = app.tool.opens.length;
+  const nh3 = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const halfDisc3 = app.doc.bodies.slice(nh3).map(area);
+  expect("sketch: ended a few pixels short of the start → closes there exactly (a half disc)", beforeEnd.loops === 0 && beforeEnd.path === 2 && nearLoops === 1 && nearOpens === 0 && halfDisc3.length === 1 && Math.abs(halfDisc3[0] - Math.PI * 5000) < 1e-4, { beforeEnd, nearLoops, nearOpens, halfDisc3 });
+  // An arc ended with a double-click (an open path), then L, a click on the arc's end, a click on its other end: closed → a half disc
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("a"); await click([0, 600, 0]); await click([0, 400, 0]); await click([99, 500, 0]); await click([99, 500, 0]);
+  const openArc = app.tool.opens.length === 1 && !app.tool.first;
+  await key("l"); await click([0, 600, 0]); await click([0, 400, 0]);
+  const resumed = { loops: app.tool.loops.length, opens: app.tool.opens.length };
+  const nh4 = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const halfDisc4 = app.doc.bodies.slice(nh4).map(area);
+  expect("sketch: a click on an open path's end carries it on; clicking its other end closes it (a half disc)", openArc && resumed.loops === 1 && resumed.opens === 0 && halfDisc4.length === 1 && Math.abs(halfDisc4[0] - Math.PI * 5000) < 1e-4, { openArc, resumed, halfDisc4 });
+  // Select (Esc when nothing is being drawn): click inside an outline, Shift+click a path's line; Del deletes both, Ctrl+Z brings them back
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("r"); await click([300, 0, 0]); await click([340, 30, 0]);
+  await key("l"); await click([300, 60, 0]); await click([340, 60, 0]); await key("Enter");
+  await key("Escape");
+  const inSelect = app.tool.mode === "select";
+  await hover([320, 60.5, 0]);
+  const hovered = JSON.stringify(app.tool.hoverItem);
+  await click([320, 15, 0]);
+  const one = JSON.stringify(app.tool.selected);
+  const pe2 = (t, p, extra) => { const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true, ...extra })); };
+  pe2("pointermove", [320, 60.5, 0], {}); pe2("pointerdown", [320, 60.5, 0], { shiftKey: true }); pe2("pointerup", [320, 60.5, 0], { shiftKey: true }); await sleep(10);
+  const two = app.tool.selected.length;
+  await key("Delete");
+  const deleted = app.tool.loops.length === 0 && app.tool.opens.length === 0;
+  await key("z", { ctrlKey: true });
+  const back = app.tool.loops.length === 1 && app.tool.opens.length === 1;
+  await click([380, 15, 0]);
+  const none = app.tool.selected.length === 0;
+  // Drag the rectangle (+10, +10), then type 5,0 + Enter (+5, 0); Ctrl+Z takes the typed move back
+  const corner = () => app.tool.loops[0].segs[0].a;
+  pe2("pointermove", [320, 15, 0], {}); pe2("pointerdown", [320, 15, 0], {});
+  for (let k = 1; k <= 5; k++) pe2("pointermove", [320 + 2 * k, 15 + 2 * k, 0], {});
+  pe2("pointerup", [330, 25, 0], {}); await sleep(10);
+  const dragged = corner();
+  await type("5,0");
+  const typedMove = corner();
+  await key("z", { ctrlKey: true });
+  const undone = corner();
+  const nearQ = (p, q) => Math.abs(p[0] - q[0]) < 1e-6 && Math.abs(p[1] - q[1]) < 1e-6;
+  expect("sketch: Select — drag moves the selection; typed dx,dy moves it exactly; Ctrl+Z undoes a move", nearQ(dragged, [310, 10]) && nearQ(typedMove, [315, 10]) && nearQ(undone, [310, 10]) && Math.abs(app.tool.opens[0][0].a[0] - 300) < 1e-6, { dragged, typedMove, undone });
+  expect("sketch: Select — Esc switches to it; click inside an outline, Shift+click a path; Del deletes, Ctrl+Z undoes; empty click clears", inSelect && hovered === JSON.stringify({ kind: "open", i: 0 }) && one === JSON.stringify([{ kind: "loop", i: 0 }]) && two === 2 && deleted && back && none, { inSelect, hovered, one, two, deleted, back, none });
+  document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
+  // Join (J): rectangle + a half circle on each side, selected and joined → ONE capsule face at Done
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("r"); await click([500, 0, 0]); await click([700, 100, 0]);
+  await key("a"); await click([700, 0, 0]); await click([700, 100, 0]); await hover([749, 50, 0]); await key("Enter");
+  await key("a"); await click([500, 100, 0]); await click([500, 0, 0]); await hover([451, 50, 0]); await key("Enter");
+  const threeLoops = app.tool.loops.length;
+  await key("Escape"); await click([600, 50, 0]);
+  pe2("pointermove", [740, 50, 0], {}); pe2("pointerdown", [740, 50, 0], { shiftKey: true }); pe2("pointerup", [740, 50, 0], { shiftKey: true }); await sleep(10);
+  pe2("pointermove", [460, 50, 0], {}); pe2("pointerdown", [460, 50, 0], { shiftKey: true }); pe2("pointerup", [460, 50, 0], { shiftKey: true }); await sleep(10);
+  const sel3 = app.tool.selected.length;
+  await key("j");
+  await click([600, 50, 0]);
+  const groupSel = app.tool.selected.length;
+  const nj = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const capsule = app.doc.bodies.slice(nj).map(area);
+  expect("sketch: Join — rectangle + 2 half circles → one capsule face; clicking one selects the joined group", threeLoops === 3 && sel3 === 3 && groupSel === 3 && capsule.length === 1 && Math.abs(capsule[0] - (200 * 100 + Math.PI * 2500)) < 1e-3, { threeLoops, sel3, groupSel, capsule });
+  // Join paths: two open paths meeting end to end → one path
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("l"); await click([500, 300, 0]); await click([600, 300, 0]); await key("Enter");
+  await click([500, 400, 0]); await click([500, 300, 0]); await key("Enter");
+  const twoPaths = app.tool.opens.length;
+  await key("Escape"); await click([550, 300.5, 0]);
+  pe2("pointermove", [500.5, 350, 0], {}); pe2("pointerdown", [500.5, 350, 0], { shiftKey: true }); pe2("pointerup", [500.5, 350, 0], { shiftKey: true }); await sleep(10);
+  await key("j");
+  const joinedPath = app.tool.opens.length === 1 && app.tool.opens[0].length === 2;
+  expect("sketch: Join — two paths meeting end to end → one path", twoPaths === 2 && joinedPath, { twoPaths, opens: app.tool.opens });
+  document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
+  // The Rectangle tool (A) takes 40x25 too
+  app.setSelection([]); app.run("tool.rectangle"); await sleep(20);
+  await hover([-100, -100, 0]); await click([-100, -100, 0]); await hover([-50, -50, 0]); await type("40x25");
+  const rf = app.doc.bodies[app.doc.bodies.length - 1], rb = rf.shape.boundingBox.bounds;
+  expect("rectangle tool: typed 40x25 → a 40 x 25 face", !app.tool && Math.abs(rb[1][0] - rb[0][0] - 40) < 1e-6 && Math.abs(rb[1][1] - rb[0][1] - 25) < 1e-6, { tool: app.tool && app.tool.name, rb });
+  // Open lines become a path object at Done: picked by its line in Solid mode, moved, saved / loaded; Push/Pull refuses it
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("l"); await click([-100, 60, 0]); await click([-60, 60, 0]); await key("a"); await click([-60, 140, 0]); await key("Enter"); // (big: the view is zoomed far out here)
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const pb = app.doc.bodies[app.doc.bodies.length - 1];
+  const kinds = pb && pb.shape.edges.map((e) => e.geomType).join();
+  app.setSelection([]); app.run("mode.body");
+  const sc = vp.toScreen(new V(-80, 60, 0));
+  canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }));
+  canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20);
+  const picked = app.selection.length === 1 && app.selection[0].body === pb.id;
+  app.run("op.pushpull"); await sleep(20);
+  const ppRefused = !document.querySelector("#op-panel h4");
+  app.doc.replaceShapes(new Map([[pb.id, K.translateShape(pb.shape, [0, 0, 5])]]), "Move"); await sleep(20);
+  const moved = Math.abs(app.doc.get(pb.id).shape.boundingBox.bounds[0][2] - 5) < 1e-6;
+  app.loadModel(app.modelText(), null); await sleep(20);
+  const reread = app.doc.bodies.find((b) => b.kind === "path" && b.shape.edges.length === 2);
+  expect("sketch: open lines → a path object (line + arc): picked by its line, Push/Pull refuses it, moves, saved as a path", pb && pb.kind === "path" && kinds === "LINE,CIRCLE" && picked && ppRefused && moved && !!reread, { kind: pb && pb.kind, kinds, picked, ppRefused, moved, reloaded: !!reread });
+  // Pro layout (Ctrl+Shift+F1 / View menu): one-row sketch panel, text-only Recent strip, short hints; back again
+  {
+    const hintEl = document.getElementById("status-hint");
+    app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+    const fullTip = !!document.querySelector("#sketch-panel .tip");
+    app.run("view.pro"); await sleep(30);
+    const pro = document.body.classList.contains("pro"), compact = document.getElementById("sketch-panel").classList.contains("compact") && !document.querySelector("#sketch-panel .tip") && !!document.querySelector("#sketch-panel button[data-act=done]");
+    const sketchHint = hintEl.textContent;
+    document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
+    app.hint("Solid mode: click to select · Shift+click to add");
+    const shortHint = hintEl.textContent;
+    const svg = document.querySelector("#recent-list .tb-btn svg");
+    const noIcons = !svg || getComputedStyle(svg).display === "none";
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+    const back = !document.body.classList.contains("pro") && localStorage.getItem("y3d.pro") === "0";
+    expect("pro layout: Ctrl+Shift+F1 → compact sketch panel, short hints, text-only Recent; Ctrl+Shift+P back", fullTip && pro && compact && /Enter: done/.test(sketchHint) && shortHint === "Solid mode: click to select" && noIcons && back, { fullTip, pro, compact, sketchHint, shortHint, noIcons, back });
+    // The Pro tip comes once, with the 20th save
+    localStorage.setItem("y3d.saves", "18"); localStorage.removeItem("y3d.proTip");
+    const tips = () => [...document.querySelectorAll("#toasts .toast")].filter((t) => /Pro layout/.test(t.textContent)).length;
+    const t0 = tips(); app.noteSaved(); const t19 = tips(); app.noteSaved(); const t20 = tips(); app.noteSaved(); const t21 = tips();
+    expect("pro layout: a one-time tip with the 20th save", t19 === t0 && t20 === t0 + 1 && t21 === t20 && localStorage.getItem("y3d.proTip") === "1", { t0, t19, t20, t21 });
+    for (const k of ["y3d.saves", "y3d.proTip", "y3d.pro"]) localStorage.removeItem(k);
+  }
+  // Left open for the screenshot (cancelled afterwards), on a fresh model with just the box: a slot
+  // drawn on the box top, a circle, a line on the way lined up with the slot's end (dashed guide)
+  app.doc.reset([]);
+  const box2 = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 30, 20), "Box");
+  app.doc.commit([box2], "box");
+  // ...and a path beside it (an L with a bend), to see how paths look
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("l"); await click([30, -10, 0]); await click([45, -10, 0]); await key("a"); await click([50, -5, 0]); await key("l"); await click([50, 15, 0]); await key("Enter");
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  app.setSelection([{ kind: "face", body: box2.id, id: box2.shape.faces.find((f) => f.normalAt(f.center).toTuple()[2] > 0.99).hashCode }]);
+  app.run("tool.sketch"); await sleep(30);
+  for (const p of [[-15, -8], [5, -8]]) await click(at(...p));
+  await key("a"); await click(at(5, 2)); await key("l"); await click(at(-15, 2)); await key("a"); await click(at(-15, -8));
+  await key("c"); await click(at(12, 6)); await click(at(15, 6));
+  await key("l"); await click(at(-12, 9)); await hover(at(5.2, 12)); // (lined up with the slot's right end: a dashed guide)
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("sketch scenario failed: " + JSON.stringify(failed));
+  return [{ label: "sketch", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Mesh bodies (big or open STLs): import, pick, transform, guards, save/load, combined STL export. */
 const SCENARIO_MESH = String.raw`
 (async () => {
@@ -2088,6 +2376,23 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   await sleep(100);
   const zoomed = await cam();
   expect("navigation: the wheel / two-finger slide zooms in", zoomed.d < clicked.d * 0.99, { before: clicked.d, after: zoomed.d });
+  // The right panel: drag its left edge to resize it (remembered); double-click → default width
+  const side = () => js<{ w: number; saved: string | null; gx: number; gy: number; vw: number }>(`(() => { const s = document.getElementById("sidebar").getBoundingClientRect(), g = document.getElementById("sidebar-grip").getBoundingClientRect(); return { w: s.width, saved: localStorage.getItem("y3d.sidebarWidth"), gx: Math.round(g.left + g.width / 2), gy: Math.round(g.top + g.height / 2), vw: document.getElementById("viewport").getBoundingClientRect().width }; })()`);
+  const s0 = await side();
+  await send({ type: "mouseMove", x: s0.gx, y: s0.gy });
+  await send({ type: "mouseDown", x: s0.gx, y: s0.gy, button: "left", clickCount: 1 });
+  for (let k = 1; k <= 5; k++) await send({ type: "mouseMove", x: s0.gx - k * 20, y: s0.gy, button: "left", modifiers: ["leftButtonDown"] } as never);
+  await send({ type: "mouseUp", x: s0.gx - 100, y: s0.gy, button: "left", clickCount: 1 });
+  await sleep(100);
+  const s1 = await side();
+  const g1 = s1;
+  await send({ type: "mouseDown", x: g1.gx, y: g1.gy, button: "left", clickCount: 1 });
+  await send({ type: "mouseUp", x: g1.gx, y: g1.gy, button: "left", clickCount: 1 });
+  await send({ type: "mouseDown", x: g1.gx, y: g1.gy, button: "left", clickCount: 2 });
+  await send({ type: "mouseUp", x: g1.gx, y: g1.gy, button: "left", clickCount: 2 });
+  await sleep(100);
+  const s2 = await side();
+  expect("right panel: drag its edge → 100 px wider (viewport narrower, remembered); double-click → default", Math.abs(s1.w - s0.w - 100) < 2 && s1.vw < s0.vw - 90 && Number(s1.saved) === s1.w && Math.abs(s2.w - s0.w) < 1 && s2.saved === null, { s0, s1, s2 });
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("navigation failed: " + JSON.stringify(failed));
   return [{ label: "navigation", passed: checks.length - failed.length, total: checks.length, checks }];
@@ -2126,6 +2431,9 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("6-cablebox.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));
     await shot("7-measure.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
+    await shot("8-sketch.png");
+    await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);
     report = report.concat(await navigationChecks(win));
   } catch (e) {
     errors.push(`scenario failed: ${String(e)}`);

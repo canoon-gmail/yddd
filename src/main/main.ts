@@ -86,6 +86,8 @@ function buildMenu(): void {
         item("Right", "view.right"),
         item("Isometric", "view.iso"),
         { type: "separator" },
+        item("Pro Layout (less text) on / off", "view.pro", "CmdOrCtrl+Shift+F1"),
+        { type: "separator" },
         { label: "Reload", click: (_m, w) => (w as BrowserWindow | undefined)?.webContents.reload() }, // no shortcut: Ctrl+R is Redo
         { role: "toggleDevTools" },
         { role: "togglefullscreen" },

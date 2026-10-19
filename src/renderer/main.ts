@@ -40,6 +40,8 @@ import {
   seamEdgeIds,
   kindOf,
   faceAxis,
+  planarFaceFrame,
+  faceInfo,
   faceRefEdges,
   offsetFace,
   offsetRing,
@@ -67,17 +69,19 @@ import {
   type Geom,
   type Shape,
   type Solid,
+  type Wire,
   TriMesh,
   isMesh,
   parseStl,
 } from "./kernel";
-import { Doc, withShape, type Body, type BodyGeom, type Dimension, type Guide, type ShapeBody } from "./document";
+import { Doc, isBrep, withShape, type Body, type BodyGeom, type Dimension, type Guide, type ShapeBody } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
 import { MeasureTool } from "./measure";
+import { SketchTool } from "./sketch";
 import type { TutCtx, Tutorial } from "./tutorials";
 
 /** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
@@ -87,7 +91,7 @@ function relinkDimensions(dims: readonly Dimension[], prev: readonly Body[], nex
     const before = prev.find((b) => b.id === d.body), after = next.find((b) => b.id === d.body);
     if (before && after && before.shape === after.shape) return d;
     const { body: _, ...unlinked } = d;
-    if (!before || !after || before.kind === "mesh" || after.kind === "mesh") return unlinked;
+    if (!before || !after || !isBrep(before) || !isBrep(after)) return unlinked;
     try {
       const e = d.kind === "radius" ? matchCircleEdge(after.shape, before.shape, d.a, d.b, d.n!) : matchStraightEdge(after.shape, before.shape, d.a, d.b);
       return e ? { ...d, a: e[0], b: e[1] } : unlinked;
@@ -99,6 +103,9 @@ function relinkDimensions(dims: readonly Dimension[], prev: readonly Body[], nex
 
 /** Why an editing command can't run on a mesh body (an imported STL). */
 const meshOnly = (action: string, name: string) => `${action}: "${name}" is a mesh (imported STL) — it can be moved, rotated, scaled, copied and exported, not edited`;
+/** Why an editing command can't run on a mesh or a path. */
+const notEditable = (action: string, b: Body) =>
+  b.kind === "path" ? `${action}: "${b.name}" is a path (open lines from a sketch) — it can be moved, rotated, scaled, copied and deleted, not edited` : meshOnly(action, b.name);
 
 const notMesh = (g: Geom): g is Shape => !isMesh(g);
 
@@ -205,6 +212,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "A" },
       { cmd: "tool.circle", icon: "circle", label: "Circle", key: "A C" },
       { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "A P" },
+      { cmd: "tool.sketch", icon: "sketch", label: "Sketch", key: "K" },
     ],
   },
   {
@@ -273,12 +281,24 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
   },
 ];
 
+/** Commands that work during a sketch (anything else waits for Done / Cancel). */
+const SKETCH_COMMANDS = new Set(["view.fit", "view.fitSelection", "view.xray", "view.pro", "help.shortcuts"]);
+
+/** localStorage: Pro layout on ("1"); saves so far; the Pro tip was shown (or not needed). */
+const PRO_KEY = "y3d.pro", SAVES_KEY = "y3d.saves", PRO_TIP_KEY = "y3d.proTip";
+/** The right panel's width: localStorage key and limits (px). */
+const SIDEBAR_KEY = "y3d.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
+/** The Pro layout tip comes with this save. */
+const PRO_TIP_SAVES = 20;
+const isPro = () => document.body.classList.contains("pro");
+
 const KEYMAP: Record<string, string> = {
   "1": "mode.body",
   "2": "mode.face",
   "3": "mode.edge",
   b: "tool.box",
   a: "tool.rectangle",
+  k: "tool.sketch",
   p: "op.pushpull",
   Space: "op.pushpull",
   f: "op.fillet",
@@ -405,6 +425,8 @@ class App implements ToolHost {
   private opPanel = $("op-panel");
 
   constructor() {
+    document.body.classList.toggle("pro", localStorage.getItem(PRO_KEY) === "1");
+    this.bindSidebarGrip();
     const container = $("viewport");
     this.viewport = new Viewport(container);
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
@@ -432,7 +454,58 @@ class App implements ToolHost {
   }
 
   hint(text: string): void {
-    $("status-hint").textContent = text;
+    // Pro layout: just the first part of a hint ("Tool: what to do"), not the list of extras after it.
+    $("status-hint").textContent = isPro() ? text.split(" · ")[0] : text;
+  }
+
+  /** Pro layout (Ctrl+Shift+F1, remembered): less help text — a one-row sketch panel, a small text-only Recent strip, short hints. */
+  private togglePro(): void {
+    const on = !isPro();
+    document.body.classList.toggle("pro", on);
+    localStorage.setItem(PRO_KEY, on ? "1" : "0");
+    localStorage.setItem(PRO_TIP_KEY, "1"); // found it: no need for the tip
+    this.toast(on ? "Pro layout — less text (Ctrl+Shift+F1 switches back)" : "Beginner layout — full help text (Ctrl+Shift+F1: Pro layout)");
+    if (this.tool instanceof SketchTool) this.tool.refresh();
+    else if (!this.tool && !this.op) this.refreshSelection();
+  }
+
+  /** The right panel's left edge: drag to resize it (remembered), double-click for the default width. */
+  private bindSidebarGrip(): void {
+    const grip = $("sidebar-grip"), side = $("sidebar");
+    const set = (w: number) => {
+      side.style.width = `${Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, w)))}px`; // (the viewport follows: it watches its size)
+    };
+    const saved = Number(localStorage.getItem(SIDEBAR_KEY));
+    if (saved) set(saved);
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      grip.setPointerCapture(e.pointerId);
+      grip.classList.add("drag");
+      const x0 = e.clientX, w0 = side.getBoundingClientRect().width;
+      const move = (m: PointerEvent) => set(w0 + x0 - m.clientX);
+      const up = () => {
+        grip.classList.remove("drag");
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        localStorage.setItem(SIDEBAR_KEY, String(side.getBoundingClientRect().width));
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+    });
+    grip.addEventListener("dblclick", () => {
+      side.style.width = "";
+      localStorage.removeItem(SIDEBAR_KEY);
+    });
+  }
+
+  /** Count saves; at the 20th, one tip about the Pro layout (once, and only if it's not on already). */
+  private noteSaved(): void {
+    const n = Number(localStorage.getItem(SAVES_KEY) ?? 0) + 1;
+    localStorage.setItem(SAVES_KEY, String(n));
+    if (n < PRO_TIP_SAVES || isPro() || localStorage.getItem(PRO_TIP_KEY)) return;
+    localStorage.setItem(PRO_TIP_KEY, "1");
+    this.toast("Tip: you're getting fast — try the Pro layout (Ctrl+Shift+F1, also in the View menu) for less text on screen", "info", 10000);
   }
 
   hud(text: string | null, at?: THREE.Vector3): void {
@@ -587,6 +660,11 @@ class App implements ToolHost {
   // ================================================================ commands
 
   run(cmd: string, recordRecent = true): void {
+    // While sketching, only the view may change: Ctrl+Z undoes a sketch step, Done / Cancel end it.
+    if (this.tool instanceof SketchTool && !SKETCH_COMMANDS.has(cmd)) {
+      if (cmd === "edit.undo") return this.tool.undo();
+      return this.toast("Sketch: click Done (keep the outlines as faces) or Cancel first", "error");
+    }
     try {
       this.dispatch(cmd);
       if (recordRecent) this.pushRecent(cmd);
@@ -634,6 +712,7 @@ class App implements ToolHost {
       case "tool.rectangle": return this.startTool(new BoxTool(this, true).start());
       case "tool.circle": return this.startTool(new CylinderTool(this, true).start());
       case "tool.polygon": return this.startTool(new PolygonTool(this, true).start());
+      case "tool.sketch": return this.startSketch();
 
       case "op.pushpull": return this.opPushPull();
       case "op.fillet": return this.opEdges("fillet");
@@ -700,6 +779,7 @@ class App implements ToolHost {
       case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
       case "help.cablebox": return this.toggleTutorial(CABLE_STORAGE_BOX);
       case "view.menu": return this.showViewMenu();
+      case "view.pro": return this.togglePro();
     }
   }
 
@@ -830,7 +910,7 @@ class App implements ToolHost {
       const edges = new Map<number, Set<number>>();
       for (const s of this.selection) {
         const body = this.doc.get(s.body);
-        if (s.kind !== "face" || !body || body.kind === "mesh") continue;
+        if (s.kind !== "face" || !body || !isBrep(body)) continue;
         const set = edges.get(s.body) ?? new Set<number>();
         for (const id of faceEdgeIds(body.shape, s.id)) set.add(id);
         edges.set(s.body, set);
@@ -1016,6 +1096,11 @@ class App implements ToolHost {
           }
           this.setSelection([]);
         }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyP") {
+        e.preventDefault();
+        this.run("view.pro"); // (a second key for Ctrl+Shift+F1)
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyZ") {
@@ -1334,22 +1419,22 @@ class App implements ToolHost {
   private solidOf(id: number, action: string): Solid {
     const b = this.doc.get(id)!;
     if (b.kind === "face") throw new Error(`${action} needs a solid — "${b.name}" is a flat face (Push/Pull it first)`);
-    if (b.kind === "mesh") throw new Error(meshOnly(action, b.name));
+    if (!isBrep(b)) throw new Error(notEditable(action, b));
     return b.shape as Solid;
   }
 
   /** The B-rep of a body picked by face or edge (a mesh never is: it is always picked whole). */
   private brep(id: number): Shape {
     const b = this.doc.get(id)!;
-    if (b.kind === "mesh") throw new Error(meshOnly("Edit", b.name));
+    if (!isBrep(b)) throw new Error(notEditable("Edit", b));
     return b.shape;
   }
 
-  /** The body if it is a solid or flat face; for a mesh, says what it can do and returns null. */
+  /** The body if it is a solid or flat face; for a mesh or a path, says what it can do and returns null. */
   private shapeBody(id: number, action: string): ShapeBody | null {
     const b = this.doc.get(id);
-    if (b?.kind !== "mesh") return b ?? null;
-    this.toast(meshOnly(action, b.name), "error");
+    if (!b || isBrep(b)) return b ?? null;
+    this.toast(notEditable(action, b), "error");
     return null;
   }
 
@@ -2191,8 +2276,8 @@ class App implements ToolHost {
     // Keep the moved edges selected (their ids change with the rebuilt solid); the gizmo follows them.
     const add = (p: V3): V3 => [p[0] + v[0], p[1] + v[1], p[2] + v[2]];
     const next = before.flatMap(({ body, ends }): SelItem[] => {
-      const shape = this.doc.get(body)?.shape;
-      const id = shape && !isMesh(shape) && ends ? edgeBetween(shape, add(ends[0]), add(ends[1])) : null;
+      const b = this.doc.get(body), shape = b && isBrep(b) ? b.shape : null;
+      const id = shape && ends ? edgeBetween(shape, add(ends[0]), add(ends[1])) : null;
       return id !== null && id !== undefined ? [{ kind: "edge", body, id }] : [];
     });
     this.setSelection(next);
@@ -2230,7 +2315,7 @@ class App implements ToolHost {
   /** Adjacent flat faces of an edge, each with the edge seen from that face. */
   private edgeSides(bodyId: number, edgeId: number): EdgeSides | null {
     const b = this.doc.get(bodyId);
-    if (!b || b.kind === "mesh") return null;
+    if (!b || !isBrep(b)) return null;
     const faces = b.shape.faces.flatMap((f) => {
       const ref = faceRefEdges(b.shape, f.hashCode)?.edges.find((e) => e.id === edgeId);
       return ref ? [{ faceId: f.hashCode, ref }] : [];
@@ -2242,7 +2327,7 @@ class App implements ToolHost {
   private startMeasure(): void {
     const shapeOf = (id: number) => {
       const b = this.doc.get(id);
-      return b && b.kind !== "mesh" ? b.shape : null;
+      return b && isBrep(b) ? b.shape : null;
     };
     const dims = {
       preview: (d: Dimension | null) => this.showDimensions(d),
@@ -2260,6 +2345,42 @@ class App implements ToolHost {
       },
     };
     this.startTool(new MeasureTool(this, shapeOf, (item) => this.viewport.setHighlight(this.selection, item), () => this.endTool(), dims).start());
+  }
+
+  /**
+   * Sketch (K) on the selected flat face (or flat face object) — or, with nothing like that
+   * selected, on the ground. Done adds the closed outlines as flat faces.
+   */
+  private startSketch(): void {
+    let frame = { origin: new THREE.Vector3(), x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
+    let center = new THREE.Vector3(), what = "the ground";
+    const s = this.selection.length === 1 ? this.selection[0] : null;
+    const b = s ? this.doc.get(s.body) : undefined;
+    const faceId = s?.kind === "face" ? s.id : s?.kind === "body" && b?.kind === "face" ? b.shape.faces[0].hashCode : null;
+    if (b && faceId !== null) {
+      const f = isBrep(b) ? planarFaceFrame(b.shape, faceId) : null;
+      if (!f || !isBrep(b)) return this.toast("Sketch: select a flat face — or nothing, to sketch on the ground", "error");
+      const v = (t: V3) => new THREE.Vector3(...t);
+      frame = { origin: v(f.origin), x: v(f.x), y: v(f.y), z: v(f.z) };
+      center = v(faceAxis(b.shape, faceId)?.center ?? f.origin);
+      what = b.kind === "face" ? `"${b.name}"` : `a face of "${b.name}"`;
+    }
+    this.endInteractions();
+    this.setSelection([]); // (the face's selection colour would cover the sketch)
+    const tool = new SketchTool(this, frame, center, what, (faces, paths) => {
+      this.endTool();
+      if (!faces.length && !paths.length) return this.toast("Sketch closed — nothing drawn to keep");
+      const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))];
+      this.doc.commit([...this.doc.bodies, ...made], "Sketch");
+      this.setMode("body");
+      this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
+      const n = (k: number, what: string) => (k ? `${k} ${what}${k > 1 ? "s" : ""}` : "");
+      this.toast(`${[n(faces.length, "face"), n(paths.length, "path")].filter(Boolean).join(" and ")} from the sketch${faces.length ? " — press P to push/pull a face" : ""}`);
+    }, () => {
+      this.endTool();
+      this.toast("Sketch cancelled");
+    });
+    this.startTool(tool.start());
   }
 
   /** Guide line tool; with an edge given (edge + Shift+D) it starts from that edge. */
@@ -2561,7 +2682,7 @@ class App implements ToolHost {
     if (faceSel.length && faceSel.length === this.selection.length) {
       const faces = faceSel.flatMap((x) => {
         const b = this.doc.get(x.body);
-        const f = b && b.kind !== "mesh" && findFace(b.shape, x.id);
+        const f = b && isBrep(b) && findFace(b.shape, x.id);
         return f ? [this.doc.makeBody(cloneShape(f), "Face", "face")] : [];
       });
       if (!faces.length) return this.toast("Duplicate: could not copy face", "error");
@@ -2770,7 +2891,7 @@ class App implements ToolHost {
         const row = entry?.row ?? document.createElement("div");
         row.className = "ol-row";
         row.dataset.id = String(b.id);
-        row.innerHTML = `<span class="ol-swatch${b.kind === "solid" ? "" : " " + b.kind}" title="${{ solid: "Solid", face: "Flat face", mesh: "Mesh (STL)" }[b.kind]}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+        row.innerHTML = `<span class="ol-swatch${b.kind === "solid" ? "" : " " + b.kind}" title="${{ solid: "Solid", face: "Flat face", mesh: "Mesh (STL)", path: "Path (open lines from a sketch)" }[b.kind]}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
         entry = { row, body: b, hidden };
         this.olRows.set(b.id, entry);
       }
@@ -2837,6 +2958,7 @@ class App implements ToolHost {
           rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : b.kind === "mesh" ? "Mesh (STL)" : "Solid"]);
           rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`]);
           if (b.kind === "mesh") rows.push(["Triangles", b.shape.triangleCount.toLocaleString()]);
+          else if (b.kind === "path") rows.push(["Lines / arcs", String(b.shape.edges.length)]);
           else rows.push(["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length - seamEdgeIds(b.shape).size)]);
         }
         hints = b?.kind === "face"
@@ -2851,7 +2973,7 @@ class App implements ToolHost {
       rows.push(["Faces", String(sel.length)]);
       if (sel.length === 1) {
         const b = this.doc.get(sel[0].body);
-        const f = b && b.kind !== "mesh" && findFace(b.shape, sel[0].id);
+        const f = b && isBrep(b) && findFace(b.shape, sel[0].id);
         if (b) rows.push([b.kind === "face" ? "Flat face" : "Solid", escapeHtml(b.name)]);
         if (f) rows.push(["Surface", f.geomType]);
       }
@@ -2875,14 +2997,14 @@ class App implements ToolHost {
     });
   }
 
-  toast(msg: string, kind: "info" | "error" = "info"): void {
+  toast(msg: string, kind: "info" | "error" = "info", ms = kind === "error" ? 4500 : 2200): void {
     const t = document.createElement("div");
     t.className = `toast ${kind}`;
     t.textContent = msg;
     const box = $("toasts");
     box.appendChild(t);
     while (box.children.length > 4) box.firstElementChild!.remove();
-    setTimeout(() => t.remove(), kind === "error" ? 4500 : 2200);
+    setTimeout(() => t.remove(), ms);
   }
 
   /** Help walkthrough (Bird House, Cable Storage Box): which one, its next step (0 = not started) and the bodies it made. */
@@ -2973,6 +3095,7 @@ class App implements ToolHost {
       ["Click / Shift+click", "Select / add to selection"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
+      ["K", "Sketch on the selected flat face (or the ground): the view turns square to it with a 3D view in the corner · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
@@ -3005,6 +3128,7 @@ class App implements ToolHost {
       ["Shift+X", "Toggle x-ray (semi-transparent solids, on by default)"],
       ["V", "View menu at the cursor: Top 7 · Front 1 · Right 3 · Iso 5 · V again = opposite side (e.g. bottom)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
+      ["Ctrl+Shift+F1", "Pro layout on / off: less text — a one-row sketch panel, a small text-only Recent strip, short hints (also in the View menu)"],
       ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],
     ];
     help.innerHTML = `<div class="card"><h2>Keyboard &amp; mouse</h2><table>${rows.map(([k, v]) => `<tr><td><kbd>${k}</kbd></td><td>${v}</td></tr>`).join("")}</table></div>`;
@@ -3065,6 +3189,7 @@ class App implements ToolHost {
     const bodies = json.bodies.map((b): BodyGeom & { name: string } => {
       if (b.kind === "mesh") return { name: b.name, kind: "mesh", shape: TriMesh.fromBase64(b.mesh!) };
       const shape = deserialize(b.brep!);
+      if (b.kind === "path") return { name: b.name, kind: "path", shape: shape as unknown as Wire };
       return { name: b.name, kind: b.kind === "face" || b.kind === "solid" ? b.kind : kindOf(shape), shape };
     });
     this.endInteractions();
@@ -3088,6 +3213,7 @@ class App implements ToolHost {
     this.updateTitle();
     this.toast(`Saved ${path.split(/[\\/]/).pop()}`);
     this.dropRecovery();
+    this.noteSaved();
   }
 
   // ---------------------------------------------------------------- autosave / crash recovery
@@ -3333,6 +3459,10 @@ class App implements ToolHost {
   private async fileExport(kind: "step" | "stl"): Promise<void> {
     const ids = this.selectedBodyIds();
     let bodies = ids.length ? this.doc.bodies.filter((b) => ids.includes(b.id)) : this.doc.bodies.filter((b) => !this.hidden.has(b.id));
+    if (bodies.some((b) => b.kind === "path")) {
+      this.toast(`${kind.toUpperCase()} skips paths (open lines from a sketch) — they have no surface`);
+      bodies = bodies.filter((b) => b.kind !== "path");
+    }
     if (kind === "stl") {
       // Solids and meshes go into one file (a slicer handles touching / overlapping parts).
       const printable = bodies.filter((b) => b.kind !== "face");
@@ -3391,7 +3521,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume }; // used by the smoke test
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo }; // used by the smoke test
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

@@ -185,7 +185,7 @@ abstract class DrawTool implements Tool {
     if (!f) return workPlane(this.host.viewport.camera);
     const key = `${f.body.id}:${f.faceId}`;
     if (!this.faceCache.has(key)) {
-      const k = f.body.kind === "mesh" ? null : planarFaceFrame(f.body.shape, f.faceId);
+      const k = f.body.kind === "solid" || f.body.kind === "face" ? planarFaceFrame(f.body.shape, f.faceId) : null;
       this.faceCache.set(key, k ? PlaneFrame.from(k) : null);
     }
     return this.faceCache.get(key) ?? workPlane(this.host.viewport.camera);
@@ -284,12 +284,12 @@ abstract class DrawTool implements Tool {
       return true;
     }
     if (this.stage === 0) return false;
-    if (/^[0-9.,\-]$/.test(e.key)) {
-      this.typed += e.key;
+    if (/^[0-9.,\-]$/.test(e.key) || (/^[xX*]$/.test(e.key) && /\d$/.test(this.typed))) {
+      this.typed += e.key === "*" ? "x" : e.key.toLowerCase(); // 40x25 = 40,25
     } else if (e.key === "Backspace" && this.typed) {
       this.typed = this.typed.slice(0, -1);
     } else if (e.key === "Enter" && this.typed) {
-      const nums = this.typed.split(",").map(Number);
+      const nums = this.typed.split(/[,x]/).map(Number);
       this.typed = "";
       if (nums.every((n) => Number.isFinite(n))) this.applyTyped(nums);
     } else {
@@ -326,7 +326,7 @@ export class BoxTool extends DrawTool {
     const n = this.name;
     return [
       `${n}: click the first corner (on the grid or on a planar face)`,
-      `${n}: click the opposite corner — or type width,depth + Enter`,
+      `${n}: click the opposite corner — or type width,depth (or 40x25) + Enter`,
       `${n}: move to set the height and click — or type height + Enter`,
     ];
   }

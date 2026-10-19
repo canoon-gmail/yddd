@@ -24,6 +24,7 @@ import {
   assembleWire,
   makeFace,
   makeLine,
+  makeThreePointArc,
   makeSolid,
   makeVertex,
   measureArea,
@@ -51,7 +52,9 @@ import {
 export type Solid = Shape3D;
 /** Any body geometry: a solid or a flat face. */
 export type Shape = Shape3D | Face;
-export type BodyKind = "solid" | "face" | "mesh";
+export type BodyKind = "solid" | "face" | "mesh" | "path";
+/** An open path: lines / arcs end to end. */
+export type { Wire };
 
 export function isFaceShape(shape: Shape): shape is Face {
   return shape instanceof Face;
@@ -130,7 +133,7 @@ export class TriMesh {
 }
 
 /** Body geometry: a B-rep shape, or an imported triangle mesh. */
-export type Geom = Shape | TriMesh;
+export type Geom = Shape | TriMesh | Wire;
 
 export function isMesh(g: Geom): g is TriMesh {
   return g instanceof TriMesh;
@@ -253,7 +256,7 @@ export interface Tessellation {
   edges: ShapeEdgeMesh;
 }
 
-export function tessellate(shape: Shape, preview = false): Tessellation {
+export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   // Size from points along the edges (a bounding box of B-spline faces is slow to compute — tens
   // of ms); midpoints too, for a whole circle whose one edge starts and ends at the same point.
   const ends = shape.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
@@ -263,6 +266,7 @@ export function tessellate(shape: Shape, preview = false): Tessellation {
   // A live preview is redrawn on every change: 4x coarser (about a quarter of the triangles,
   // several times faster to mesh), still smooth on screen. Bodies get the full quality.
   const opts = preview ? { tolerance: tolerance * 4, angularTolerance: 0.3 } : { tolerance, angularTolerance: 0.15 };
+  if (shape instanceof Wire) return { faces: shape.mesh(opts), edges: shape.meshEdges(opts) }; // a path: lines only
   return { faces: shape.mesh(opts), edges: withoutSeams(shape.meshEdges(opts), seamEdgeIds(shape)) };
 }
 
@@ -346,6 +350,45 @@ function orientFace(face: Face, frame: Frame): Face {
   const n = face.normalAt(face.center).toTuple();
   const dot = n[0] * frame.z[0] + n[1] * frame.z[1] + n[2] * frame.z[2];
   return dot < 0 ? face.flipOrientation() : face;
+}
+
+/** A closed sketch outline on a plane: straight lines / arcs (through `m`) end to end, or a full circle. */
+export type SketchLoop =
+  | { kind: "path"; segs: ({ kind: "line"; a: V3; b: V3 } | { kind: "arc"; a: V3; m: V3; b: V3 })[] }
+  | { kind: "circle"; c: V3; r: number };
+
+/** An open sketch path (lines / arcs end to end) as a wire. */
+export function sketchPath(segs: Extract<SketchLoop, { kind: "path" }>["segs"]): Wire {
+  return assembleWire(segs.map((g) => (g.kind === "line" ? makeLine(g.a, g.b) : makeThreePointArc(g.a, g.m, g.b))));
+}
+
+/**
+ * Flat face(s) of a sketch outline with the outlines inside it cut out as holes, facing `normal`.
+ * Usually one face; a hole touching the outline can split it into several.
+ */
+export function sketchFaces(outer: SketchLoop, holes: SketchLoop[], normal: V3): Face[] {
+  const face = (loop: SketchLoop): Face => {
+    const wire = loop.kind === "circle"
+      ? assembleWire([makeCircle(loop.r, loop.c, normal)])
+      : assembleWire(loop.segs.map((g) => (g.kind === "line" ? makeLine(g.a, g.b) : makeThreePointArc(g.a, g.m, g.b))));
+    let f = makeFace(wire);
+    if (dot3(f.normalAt().toTuple() as V3, normal) < 0) f = f.flipOrientation();
+    if (!isValidShape(f)) throw new Error("Sketch: an outline crosses itself");
+    return f;
+  };
+  const f = face(outer);
+  if (!holes.length) return [f];
+  const faces = boolean("cut", f as unknown as Shape3D, holes.map((h) => face(h) as unknown as Shape3D)).faces;
+  if (!faces.length || faces.some((x) => !isValidShape(x))) throw new Error("Sketch: could not cut the inner outlines out");
+  return faces.map((x) => (dot3(x.normalAt().toTuple() as V3, normal) < 0 ? x.flipOrientation() : x));
+}
+
+/** Flat faces on one plane joined into one (where they touch or overlap), facing `normal`. */
+export function joinFlatFaces(faces: Face[], normal: V3): Face[] {
+  if (faces.length < 2) return faces;
+  const joined = boolean("fuse", faces[0] as unknown as Shape3D, faces.slice(1) as unknown as Shape3D[]).simplify().faces;
+  if (!joined.length || joined.some((f) => !isValidShape(f))) throw new Error("Sketch: could not join the outlines");
+  return joined.map((f) => (dot3(f.normalAt().toTuple() as V3, normal) < 0 ? f.flipOrientation() : f));
 }
 
 /** Flat w×d rectangle face centered at `center` on the frame's plane. */
@@ -449,7 +492,7 @@ export function axisCrossEdge(shape: Shape, edgeId: number, origin: V3, k: numbe
   }
 }
 
-export function nearestOnEdge(shape: Shape, edgeId: number, p: V3): V3 | null {
+export function nearestOnEdge(shape: Shape | Wire, edgeId: number, p: V3): V3 | null {
   const edge = shape.edges.find((e) => e.hashCode === edgeId);
   if (!edge) return null;
   const v = makeVertex(p);
@@ -2592,6 +2635,12 @@ export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
   if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
   if (isMesh(shape)) return shape.transformed([f[0], 0, 0, 0, f[1], 0, 0, 0, f[2]], [center[0] * (1 - f[0]), center[1] * (1 - f[1]), center[2] * (1 - f[2])]);
   if (Math.abs(f[0] - f[1]) < 1e-9 && Math.abs(f[1] - f[2]) < 1e-9) return shape.clone().scale(f[0], center) as Shape;
+  if (shape instanceof Wire) {
+    // A path of straight lines stretches point by point; arcs would turn into ellipses.
+    if (shape.edges.some((e) => e.geomType !== "LINE")) throw new Error("Scale: a path with arcs can only be scaled evenly (the same % in X, Y and Z)");
+    const map = (p: V3): V3 => [center[0] + (p[0] - center[0]) * f[0], center[1] + (p[1] - center[1]) * f[1], center[2] + (p[2] - center[2]) * f[2]];
+    return assembleWire(shape.edges.map((e) => makeLine(map(e.startPoint.toTuple() as V3), map(e.endPoint.toTuple() as V3))));
+  }
   if (!isPolyhedral(shape)) return stretchCurved(shape, f, center);
   const map = (p: V3): V3 => [center[0] + (p[0] - center[0]) * f[0], center[1] + (p[1] - center[1]) * f[1], center[2] + (p[2] - center[2]) * f[2]];
   const faces = shape.faces.map((src) => {
@@ -2618,7 +2667,7 @@ export function cloneShape<T extends Geom>(shape: T): T {
  * B-rep text for saving. Written from a copy without the display meshes (triangulations) OpenCascade
  * keeps on the shape — they are rebuilt on load anyway and can be most of the file (megabytes).
  */
-export function serializeShape(shape: Shape): string {
+export function serializeShape(shape: Shape | Wire): string {
   const t = new oc.gp_Trsf();
   const mk = new oc.BRepBuilderAPI_Transform(shape.wrapped, t, true, false);
   try {

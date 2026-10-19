@@ -10,6 +10,7 @@ export const ICONS: Record<string, string> = {
   edge: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" stroke-opacity="0.45"/><path d="M12 12v9" stroke-width="3"/>`),
   box: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>`),
   cylinder: svg(`<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/>`),
+  sketch: svg(`<path d="M3 21l7-1 10-10-6-6L4 14z" ${FILL}/><path d="M3 21h18" stroke-dasharray="2.5 2"/><path d="M14 4l6 6"/>`),
   pencil: svg(`<path d="M4 20l1-4L16 5l3 3L8 19z" ${FILL}/><path d="M14 7l3 3M4 20l4-1"/>`),
   rectangle: svg(`<rect x="4" y="7" width="16" height="10" rx="0.5" ${FILL}/>`),
   circle: svg(`<circle cx="12" cy="12" r="7.5" ${FILL}/>`),

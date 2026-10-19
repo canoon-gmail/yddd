@@ -3,7 +3,7 @@
  * Every edit produces a new snapshot (array of Body); bodies and their shapes
  * are never mutated, so snapshots can share them.
  */
-import { isMesh, type Geom, type Shape, type TriMesh, type V3 } from "./kernel";
+import { isMesh, type Geom, type Shape, type TriMesh, type V3, type Wire } from "./kernel";
 
 /** A construction (guide) line: a snap target only, not geometry. */
 export interface Guide {
@@ -56,10 +56,19 @@ export interface MeshBody extends BodyBase {
   readonly shape: TriMesh;
 }
 
-export type Body = ShapeBody | MeshBody;
+/** An open path (lines / arcs end to end, from a sketch): moved, rotated, scaled, copied — a Pipe follows it. */
+export interface PathBody extends BodyBase {
+  readonly kind: "path";
+  readonly shape: Wire;
+}
+
+export type Body = ShapeBody | MeshBody | PathBody;
+
+/** A solid or flat face: exact B-rep geometry that the modelling operations work on. */
+export const isBrep = (b: Body): b is ShapeBody => b.kind === "solid" || b.kind === "face";
 
 /** A body's content without its id / name (what makeBody and reset take). */
-export type BodyGeom = { kind: "solid" | "face"; shape: Shape } | { kind: "mesh"; shape: TriMesh };
+export type BodyGeom = { kind: "solid" | "face"; shape: Shape } | { kind: "mesh"; shape: TriMesh } | { kind: "path"; shape: Wire };
 
 type Snapshot = readonly Body[];
 interface HistoryEntry {
@@ -130,6 +139,7 @@ export class Doc {
   /** Create a new (not yet committed) body with an auto-generated name. */
   makeBody(shape: Shape, baseName: string, kind?: "solid" | "face"): ShapeBody;
   makeBody(shape: TriMesh, baseName: string, kind: "mesh"): MeshBody;
+  makeBody(shape: Wire, baseName: string, kind: "path"): PathBody;
   makeBody(shape: Geom, baseName: string, kind: Body["kind"]): Body;
   makeBody(shape: Geom, baseName: string, kind: Body["kind"] = "solid"): Body {
     const n = (this.counters.get(baseName) ?? 0) + 1;

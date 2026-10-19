@@ -26,7 +26,7 @@ export const GROUND: Frame = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z:
 /** The body that plays `role`; throws (shown as a toast) if the user deleted or replaced it. */
 export function roleBody(doc: Doc, ctx: TutCtx, role: string): Body & { shape: Shape } {
   const b = doc.get(ctx.get(role) ?? -1);
-  if (!b || b.kind === "mesh") throw new Error(`The ${role} is missing — go Back or start again`);
+  if (!b || (b.kind !== "solid" && b.kind !== "face")) throw new Error(`The ${role} is missing — go Back or start again`);
   return b;
 }
 

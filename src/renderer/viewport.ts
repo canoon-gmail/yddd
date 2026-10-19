@@ -182,6 +182,8 @@ export class Viewport {
       new THREE.MeshStandardMaterial({ color: 0xf0d78c, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
     ],
     edge: new LineMaterial({ color: 0x15171a, linewidth: 1.4 }),
+    /** Paths (open lines from a sketch): bright, so they show on the dark background and on solids. */
+    pathEdge: new LineMaterial({ color: 0xff69b4, linewidth: 2.4 }),
     edgeHover: new LineMaterial({ color: 0xe2e5e8, linewidth: 3.5 }),
     edgeSelected: new LineMaterial({ color: 0xffe08a, linewidth: 3.5 }),
     outlineHover: new LineMaterial({ color: 0x7cc4ff, linewidth: 2 }),
@@ -237,7 +239,10 @@ export class Viewport {
     // Prevent regular Left-drag from rotating the view:
     // Only allow Left-button actions when Shift (PAN) or Alt (orbit) is held down.
     this.canvas.addEventListener("pointerdown", (e) => {
-      if (e.button === 0 && !e.shiftKey && !e.altKey) {
+      if (this.viewLocked) {
+        // Sketch: the view stays square to the plane — pan and zoom only.
+        this.controls.enableRotate = false;
+      } else if (e.button === 0 && !e.shiftKey && !e.altKey) {
         // Normal left-click: temporarily disable rotate on OrbitControls for this gesture
         this.controls.enableRotate = false;
       } else {
@@ -346,7 +351,7 @@ export class Viewport {
     this.renderer.setSize(this.width, this.height);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
-    for (const m of [this.mats.edge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker]) m.resolution.set(this.width, this.height);
+    for (const m of [this.mats.edge, this.mats.pathEdge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker]) m.resolution.set(this.width, this.height);
     this.stamp++;
     this.render();
   }
@@ -371,7 +376,99 @@ export class Viewport {
     this.flushBatches();
     this.renderer.render(this.scene, this.camera);
     this.renderGlow();
+    this.renderInset();
     this.placeDimLabels();
+  }
+
+  // ------------------------------------------------------------ sketch view
+
+  /** Orbit off (pan / zoom still work): the sketch view stays square to its plane. */
+  viewLocked = false;
+
+  /** The camera, to put it back after a sketch. */
+  cameraState(): { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 } {
+    return { position: this.camera.position.clone(), target: this.controls.target.clone(), up: this.camera.up.clone() };
+  }
+
+  restoreCamera(s: { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 }): void {
+    this.camera.up.copy(s.up);
+    this.camera.position.copy(s.position);
+    this.controls.target.copy(s.target);
+    this.camera.lookAt(s.target);
+    this.controls.update();
+  }
+
+  /**
+   * Look straight at a plane (from the `normal` side) with `up` pointing up on screen, centred on
+   * `center`, far enough back to see every body (or `radius` around the centre, if larger).
+   */
+  lookAtPlane(center: THREE.Vector3, normal: THREE.Vector3, up: THREE.Vector3, radius = 0): void {
+    const box = new THREE.Box3();
+    for (const v of this.views.values()) if (v.group.visible) box.expandByObject(v.mesh);
+    let r = Math.max(radius, 30);
+    if (!box.isEmpty()) {
+      const sphere = box.getBoundingSphere(new THREE.Sphere());
+      r = Math.max(r, sphere.radius + sphere.center.distanceTo(center) * 0.5);
+    }
+    const dist = (r / Math.sin(THREE.MathUtils.degToRad(this.camera.fov / 2))) * 1.1 * Math.max(1, this.height / this.width);
+    this.camera.up.copy(up).normalize();
+    this.controls.target.copy(center);
+    this.camera.position.copy(center).addScaledVector(normal.clone().normalize(), dist);
+    this.camera.lookAt(center);
+    this.controls.update();
+  }
+
+  /** Small 3D preview in the top-right corner (during a sketch): an iso view of the bodies and `extra` points. */
+  private inset: { camera: THREE.PerspectiveCamera; light: THREE.Light } | null = null;
+  private static readonly INSET = 220;
+
+  setInset(on: boolean, extra: THREE.Vector3[] = []): void {
+    if (!on) {
+      if (this.inset) this.scene.remove(this.inset.camera);
+      this.inset = null;
+      this.requestRender();
+      return;
+    }
+    if (!this.inset) {
+      const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100000);
+      camera.up.set(0, 0, 1);
+      const light = new THREE.DirectionalLight(0xffffff, 1.6);
+      light.position.set(1, 1.5, 2);
+      light.visible = false; // only while the inset is drawn
+      camera.add(light);
+      this.scene.add(camera);
+      this.inset = { camera, light };
+    }
+    const box = new THREE.Box3();
+    for (const v of this.views.values()) if (v.group.visible) box.expandByObject(v.mesh);
+    for (const p of extra) box.expandByPoint(p);
+    if (box.isEmpty()) box.set(new THREE.Vector3(-30, -30, 0), new THREE.Vector3(30, 30, 20));
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const cam = this.inset.camera;
+    const dist = (Math.max(sphere.radius, 1) / Math.sin(THREE.MathUtils.degToRad(cam.fov / 2))) * 1.1;
+    cam.position.copy(sphere.center).addScaledVector(new THREE.Vector3(1, -1.2, 0.9).normalize(), dist);
+    cam.near = Math.max(0.01, dist / 2000);
+    cam.far = dist * 200;
+    cam.lookAt(sphere.center);
+    cam.updateProjectionMatrix();
+    this.requestRender();
+  }
+
+  private renderInset(): void {
+    if (!this.inset) return;
+    const r = this.renderer, size = Viewport.INSET, m = 12;
+    const x = this.width - size - m, y = this.height - size - m; // (WebGL: y from the bottom)
+    const clear = r.getClearColor(new THREE.Color()), alpha = r.getClearAlpha();
+    r.setScissorTest(true);
+    r.setScissor(x, y, size, size);
+    r.setViewport(x, y, size, size);
+    r.setClearColor(0x2b2e33, 1);
+    this.inset.light.visible = true;
+    r.render(this.scene, this.inset.camera);
+    this.inset.light.visible = false;
+    r.setClearColor(clear, alpha);
+    r.setScissorTest(false);
+    r.setViewport(0, 0, this.width, this.height);
   }
 
   /** Soft glow just outside the silhouettes of the selected (blue) and hovered (silver) bodies. */
@@ -434,7 +531,7 @@ export class Viewport {
     if (edgePos.length >= 6) {
       const eg = new LineSegmentsGeometry();
       eg.setPositions(edgePos);
-      lines = new LineSegments2(eg, this.mats.edge);
+      lines = new LineSegments2(eg, body.kind === "path" ? this.mats.pathEdge : this.mats.edge);
       lines.raycast = () => {};
     }
     const edgeIds: number[] = [];
@@ -468,9 +565,13 @@ export class Viewport {
     }
   }
 
+  /** Path bodies (picked by their lines: they have no faces). */
+  private pathIds = new Set<number>();
+
   /** Bring the scene in line with the document snapshot (rebuilds only changed bodies). */
   sync(bodies: readonly Body[]): void {
     const live = new Set<number>();
+    this.pathIds = new Set(bodies.filter((b) => b.kind === "path").map((b) => b.id));
     for (const body of bodies) {
       live.add(body.id);
       const existing = this.views.get(body.id);
@@ -586,18 +687,21 @@ export class Viewport {
       geom.computeBoundingSphere();
       c.root.add(mesh);
     }
-    let ne = 0;
-    for (const v of members) ne += v.edgePos.length;
-    if (ne >= 6) {
+    // Edges: solids' / faces' in one batch, paths' (drawn brighter) in another.
+    for (const paths of [false, true]) {
+      const list = members.filter((v) => (v.body.kind === "path") === paths);
+      let ne = 0;
+      for (const v of list) ne += v.edgePos.length;
+      if (ne < 6) continue;
       const ep = new Float32Array(ne);
       let o = 0;
-      for (const v of members) {
+      for (const v of list) {
         ep.set(v.edgePos, o);
         o += v.edgePos.length;
       }
       const eg = new LineSegmentsGeometry();
       eg.setPositions(ep);
-      const lines = new LineSegments2(eg, this.mats.edge);
+      const lines = new LineSegments2(eg, paths ? this.mats.pathEdge : this.mats.edge);
       lines.raycast = () => {};
       c.root.add(lines);
     }
@@ -694,6 +798,8 @@ export class Viewport {
     faceDist: number | null,
     tol = EDGE_PICK_PX,
     only?: (body: number, edgeId: number) => boolean,
+    /** Bodies to look at (others are skipped before their edges are projected). */
+    bodies?: Set<number>,
   ): { view: BodyView; edgeId: number; point: THREE.Vector3; d: number } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left;
@@ -704,7 +810,7 @@ export class Viewport {
     const a = new THREE.Vector3();
     const b = new THREE.Vector3();
     for (const v of this.views.values()) {
-      if (!v.group.visible) continue;
+      if (!v.group.visible || (bodies && !bodies.has(v.body.id))) continue;
       const proj = this.projected(v);
       for (let e = 0; e < v.edgeIds.length; e++) {
         if (only && !only(v.body.id, v.edgeIds[e])) continue;
@@ -749,6 +855,9 @@ export class Viewport {
       const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, only === undefined ? undefined : (b) => b === only);
       return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
     }
+    // Paths have no faces: in front of any face hit, the nearest path line picks the path.
+    const path = this.pathIds.size ? this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, undefined, this.pathIds) : null;
+    if (path) return { kind: "body", body: path.view.body.id, id: 0, point: path.point };
     if (!hit) return null;
     // A mesh has no faces to pick: it is always picked whole.
     if (mode === "body" || hit.view.body.kind === "mesh") return { kind: "body", body: hit.view.body.id, id: 0, point: hit.point };
@@ -1247,9 +1356,11 @@ export class Viewport {
     this.hl.painted.clear();
     this.hl.sel = selection;
     // Object mode: a hovered (unselected) body gets a glow round its outline, nothing on the body.
-    const bodyHover = hover?.kind === "body" && !selection.some((s) => sameItem(s, hover)) ? hover.body : null;
+    // A path has no outline to glow: its lines are drawn in the selection / hover colour instead.
+    const isPath = (it: SelItem) => it.kind === "body" && this.views.get(it.body)?.body.kind === "path";
+    const bodyHover = hover?.kind === "body" && !isPath(hover) && !selection.some((s) => sameItem(s, hover)) ? hover.body : null;
     this.glowBody = bodyHover;
-    this.glowSel = selection.filter((s) => s.kind === "body").map((s) => s.body);
+    this.glowSel = selection.filter((s) => s.kind === "body" && !isPath(s)).map((s) => s.body);
     this.hl.hover = bodyHover === null ? hover : null;
     this.paintHighlight();
 
@@ -1274,8 +1385,8 @@ export class Viewport {
       return out;
     };
     const isSelected = hover && selection.some((s) => sameItem(s, hover));
-    this.setOverlayLines(this.selEdges, edgePoints(selection));
-    this.setOverlayLines(this.hoverEdges, hover && !isSelected ? edgePoints([hover]) : []);
+    this.setOverlayLines(this.selEdges, [...edgePoints(selection), ...edgePoints(selection.filter(isPath), true)]);
+    this.setOverlayLines(this.hoverEdges, hover && !isSelected ? edgePoints([hover], isPath(hover)) : []);
     // Selected bodies: gold fill + a blue glow round the outline (renderGlow), no edge lines.
     this.setOverlayLines(this.selOutline, []);
     this.setOverlayLines(this.hoverOutline, hover && !isSelected && bodyHover === null ? edgePoints([hover], true) : []);
