@@ -2070,6 +2070,20 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   await send({ type: "mouseUp", x: now.x, y: now.y, button: "left", clickCount: 1 });
   const clicked = await cam();
   expect("navigation: Alt + click selects nothing; a plain click still selects", altClick.sel === 0 && clicked.sel === 1, { altClick: altClick.sel, clicked: clicked.sel });
+  // Ctrl + left drag: no pan (Ctrl is snapping); Ctrl + middle drag pans
+  const drag = async (button: "left" | "middle", mods: string[], x0: number, y0: number) => {
+    await send({ type: "mouseMove", x: x0, y: y0 });
+    await send({ type: "mouseDown", x: x0, y: y0, button, clickCount: 1, modifiers: mods } as never);
+    for (let k = 1; k <= 6; k++) await send({ type: "mouseMove", x: x0 + k * 15, y: y0 + k * 5, button, modifiers: [...mods, button === "left" ? "leftButtonDown" : "middleButtonDown"] } as never);
+    await send({ type: "mouseUp", x: x0 + 90, y: y0 + 30, button, clickCount: 1, modifiers: mods } as never);
+  };
+  const p0 = await cam();
+  await drag("left", ["control"], now.x + 200, now.y - 150); // empty space
+  const p1 = await cam();
+  await drag("middle", ["control"], now.x + 200, now.y - 150);
+  const p2 = await cam();
+  const dist = (a: number[], b: number[]) => Math.hypot(...a.map((v, k) => v - b[k]));
+  expect("navigation: Ctrl + left drag doesn't pan; Ctrl + middle drag pans", dist(p1.p, p0.p) < 1e-9 && dist(p2.p, p1.p) > 1 && Math.abs(p2.d - p1.d) < 1e-6 * p1.d, { leftMoved: dist(p1.p, p0.p), middleMoved: dist(p2.p, p1.p) });
   await send({ type: "mouseWheel", x: now.x, y: now.y, deltaX: 0, deltaY: 120 }); // (Electron: + = scroll up / away)
   await sleep(100);
   const zoomed = await cam();

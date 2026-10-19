@@ -245,10 +245,13 @@ export class Viewport {
       }
       // Alt + Left drag orbits even over the move / rotate gizmo.
       if (e.button === 0 && e.altKey) this.tc.enabled = false;
+      // Ctrl + Left is snapping (tools, dragged points), not pan (OrbitControls would pan): only Shift pans.
+      if (e.button === 0 && (e.ctrlKey || e.metaKey) && !e.shiftKey) this.controls.enablePan = false;
     }, { capture: true });
 
     window.addEventListener("pointerup", () => {
       this.controls.enableRotate = true;
+      this.controls.enablePan = true;
       this.tc.enabled = true;
     }, { capture: true });
 

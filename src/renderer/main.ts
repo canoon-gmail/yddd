@@ -2967,7 +2967,7 @@ class App implements ToolHost {
     }
     const rows: [string, string][] = [
       ["Middle-drag · Alt+Left-drag", "Orbit view"],
-      ["Shift + Left-drag", "Pan view"],
+      ["Shift + Left-drag · Ctrl + Middle-drag", "Pan view"],
       ["Wheel · two-finger slide (touchpad)", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
