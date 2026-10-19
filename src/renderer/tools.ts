@@ -55,6 +55,8 @@ export interface Tool {
   up?(e: PointerEvent): void;
   /** Returns true if the key was consumed. */
   key(e: KeyboardEvent): boolean;
+  /** Optional: a right click (no drag) in the viewport. */
+  rightClick?(e: PointerEvent): void;
   /** Optional: mouse wheel in the viewport. Return true to consume it (no zoom). */
   wheel?(e: WheelEvent): boolean;
   dispose(): void;

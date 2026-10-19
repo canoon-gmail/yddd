@@ -9,19 +9,26 @@
  * on one straight edge of an outline (a half circle on a rectangle's side): then it closes along it.
  * Done (button) keeps the closed outlines as flat faces — an outline inside another is a hole — and
  * the open ones as paths;
- * Cancel drops the sketch. Esc only drops the outline being drawn (then switches to Select: click an
- * outline or a path to select it, Shift+click adds, drag moves (typed dx,dy too), J joins — outlines
- * into one face, paths end to end into one path —, Del deletes);
+ * Cancel drops the sketch. Esc only drops the outline being drawn (then switches to Select — a right
+ * click goes straight there, keeping what is being drawn: click an
+ * outline or a path to select it, Shift+click adds, drag moves (typed dx,dy too), S scales about the
+ * selection's centre (mouse or a typed %), J joins — outlines into one face, paths end to end into
+ * one path —, Del deletes);
  * Ctrl+Z / Backspace undo a step.
  */
 import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
-import { joinFlatFaces, sketchFaces, sketchPath, type Shape, type SketchLoop, type V3, type Wire } from "./kernel";
+import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type V3, type Wire } from "./kernel";
 import { num } from "./format";
 
 /** A point in the sketch plane: [u, v] along the frame's x / y. */
 type P = [number, number];
-type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P };
+/**
+ * spline: a freeform curve (what an arc / circle becomes when stretched unevenly) — rational quadratic
+ * pieces end to end: `pts` = 2n+1 control points (pts[0] = a, the last = b, every 2nd one on the curve),
+ * `w` their weights. Exact for circles / arcs, and stays exact when scaled (only the points move).
+ */
+type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P } | { kind: "spline"; a: P; b: P; pts: P[]; w: number[] };
 /** A closed outline; `g`: its join group (outlines joined with J become one face at Done). */
 type Loop = ({ kind: "path"; segs: Seg[] } | { kind: "circle"; c: P; r: number }) & { g?: number };
 type Mode = "select" | "line" | "arc" | "rect" | "circle";
@@ -34,7 +41,33 @@ const PICK_PX = 6;
 const DRAG_PX = 4;
 
 const moveP = (p: P, d: P): P => [p[0] + d[0], p[1] + d[1]];
-const moveSeg = (g: Seg, d: P): Seg => (g.kind === "line" ? { kind: "line", a: moveP(g.a, d), b: moveP(g.b, d) } : { kind: "arc", a: moveP(g.a, d), m: moveP(g.m, d), b: moveP(g.b, d) });
+/** A segment with each of its points mapped by f. */
+const mapSeg = (g: Seg, f: (p: P) => P): Seg => {
+  if (g.kind === "line") return { kind: "line", a: f(g.a), b: f(g.b) };
+  if (g.kind === "arc") return { kind: "arc", a: f(g.a), m: f(g.m), b: f(g.b) };
+  const pts = g.pts.map(f);
+  return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w };
+};
+const moveSeg = (g: Seg, d: P): Seg => mapSeg(g, (p) => moveP(p, d));
+/** The same segment run the other way. */
+const revSeg = (g: Seg): Seg => (g.kind === "line" ? { kind: "line", a: g.b, b: g.a } : g.kind === "arc" ? { kind: "arc", a: g.b, m: g.m, b: g.a } : { kind: "spline", a: g.b, b: g.a, pts: [...g.pts].reverse(), w: [...g.w].reverse() });
+/** Scaling about c by kx along X, ky along Y — unevenly, arcs / circles become freeform curves (they'd be ellipses). */
+const scaleP = (p: P, c: P, kx: number, ky: number): P => [c[0] + (p[0] - c[0]) * kx, c[1] + (p[1] - c[1]) * ky];
+const scaleSeg = (g: Seg, c: P, kx: number, ky: number): Seg => {
+  const even = Math.abs(kx - ky) < 1e-12;
+  return mapSeg(g.kind === "arc" && !even ? arcSpline(g) : g, (p) => scaleP(p, c, kx, ky));
+};
+const scaleLoop = (l: Loop, c: P, kx: number, ky: number): Loop => {
+  if (l.kind === "circle" && Math.abs(kx - ky) < 1e-12) return { ...l, c: scaleP(l.c, c, kx, ky), r: l.r * Math.abs(kx) };
+  const segs = l.kind === "circle" ? [circleSpline(l.c, l.r)] : l.segs;
+  return { ...l, kind: "path", segs: segs.map((g) => scaleSeg(g, c, kx, ky)) } as Loop;
+};
+/** Scale gizmo handles: X (red square), Y (green square), XY (yellow ring, even). */
+type Handle = "x" | "y" | "xy";
+/** How near (px) the cursor must be to grab a handle; how far (px) the handles sit outside the selection. */
+const HANDLE_PX = 10, HANDLE_PAD_PX = 16;
+/** Ctrl while scaling: the nearest of these. */
+const SCALE_STEPS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 10];
 const moveLoop = (l: Loop, d: P): Loop => (l.kind === "circle" ? { ...l, c: moveP(l.c, d) } : { ...l, segs: l.segs.map((g) => moveSeg(g, d)) });
 
 export interface SketchFrame {
@@ -88,6 +121,7 @@ function arcGeom(g: Extract<Seg, { kind: "arc" }>): { c: P; r: number; a0: numbe
 /** Points along a segment, from a (included) to b (left out). */
 function segPoints(g: Seg): P[] {
   if (g.kind === "line") return [g.a];
+  if (g.kind === "spline") return splinePoints(g);
   const k = arcGeom(g);
   if (!k) return [g.a];
   const n = Math.max(6, Math.ceil(Math.abs(k.sweep) / 0.08));
@@ -100,6 +134,11 @@ function segPoints(g: Seg): P[] {
 /** Direction of travel at the end of a segment. */
 function endDir(g: Seg): P {
   if (g.kind === "line") return norm(sub(g.b, g.a));
+  if (g.kind === "spline") {
+    // (along the last control point → the end; a piece squeezed flat: from further back)
+    const q = [...g.pts].reverse().find((p) => !same(p, g.b));
+    return norm(q ? sub(g.b, q) : sub(g.b, g.a));
+  }
   const k = arcGeom(g);
   if (!k) return norm(sub(g.b, g.a));
   const r = sub(g.b, k.c);
@@ -127,17 +166,68 @@ function threePointArc(a: P, p: P, b: P): Seg | null {
   return { kind: "arc", a, m: [g.c[0] + g.r * Math.cos(mid), g.c[1] + g.r * Math.sin(mid)], b };
 }
 
+/** Rational quadratic pieces of a circle arc (centre c, radius r, from angle a0, signed sweep): ≤ 90° each. */
+function arcPieces(c: P, r: number, a0: number, sweep: number): { pts: P[]; w: number[] } {
+  const n = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2) - 1e-9)), th = sweep / n, wm = Math.cos(th / 2);
+  const at = (t: number, k = r): P => [c[0] + k * Math.cos(t), c[1] + k * Math.sin(t)];
+  const pts: P[] = [at(a0)], w = [1];
+  for (let i = 0; i < n; i++) {
+    pts.push(at(a0 + th * (i + 0.5), r / wm), at(a0 + th * (i + 1)));
+    w.push(wm, 1);
+  }
+  return { pts, w };
+}
+
+/** An arc as a freeform curve (the same shape — exact). */
+function arcSpline(g: Extract<Seg, { kind: "arc" }>): Seg {
+  const k = arcGeom(g);
+  if (!k) return { kind: "line", a: g.a, b: g.b };
+  const { pts, w } = arcPieces(k.c, k.r, k.a0, k.sweep);
+  pts[0] = g.a;
+  pts[pts.length - 1] = g.b;
+  return { kind: "spline", a: g.a, b: g.b, pts, w };
+}
+
+/** A full circle as one closed freeform curve (starting and ending on its right-hand side). */
+function circleSpline(c: P, r: number): Seg {
+  const { pts, w } = arcPieces(c, r, 0, TAU);
+  pts[pts.length - 1] = pts[0];
+  return { kind: "spline", a: pts[0], b: pts[0], pts, w };
+}
+
+/** Point on piece i (0-based) of a freeform curve at t ∈ [0, 1]. */
+function splineAt(g: Extract<Seg, { kind: "spline" }>, i: number, t: number): P {
+  const [p0, p1, p2] = g.pts.slice(2 * i, 2 * i + 3), [w0, w1, w2] = g.w.slice(2 * i, 2 * i + 3);
+  const b0 = (1 - t) * (1 - t) * w0, b1 = 2 * t * (1 - t) * w1, b2 = t * t * w2, s = b0 + b1 + b2;
+  return [(b0 * p0[0] + b1 * p1[0] + b2 * p2[0]) / s, (b0 * p0[1] + b1 * p1[1] + b2 * p2[1]) / s];
+}
+
+/** Points along a freeform curve, from a (included) to b (left out); `per`: per piece. */
+function splinePoints(g: Extract<Seg, { kind: "spline" }>, per = 24): P[] {
+  const n = (g.pts.length - 1) / 2, out: P[] = [];
+  for (let i = 0; i < n; i++) for (let j = 0; j < per; j++) out.push(splineAt(g, i, j / per));
+  return out;
+}
+
+/** A segment's middle point (a freeform curve: the middle of its pieces). */
+function segMid(g: Seg): P {
+  if (g.kind === "line") return mul(add(g.a, g.b), 0.5);
+  if (g.kind === "arc") return g.m;
+  const n = (g.pts.length - 1) / 2;
+  return n % 2 ? splineAt(g, (n - 1) / 2, 0.5) : g.pts[n];
+}
+
 function loopPolygon(l: Loop): P[] {
   if (l.kind === "circle") return Array.from({ length: 72 }, (_, i) => [l.c[0] + l.r * Math.cos((i / 72) * TAU), l.c[1] + l.r * Math.sin((i / 72) * TAU)] as P);
   return l.segs.flatMap(segPoints);
 }
 
 /** A sketch line, or a circle / arc (sweep: signed, ±2π for a full circle). */
-type Curve = { kind: "line"; a: P; b: P } | { kind: "arc"; c: P; r: number; a0: number; sweep: number };
+type Curve = { kind: "line"; a: P; b: P } | { kind: "arc"; c: P; r: number; a0: number; sweep: number } | Extract<Seg, { kind: "spline" }>;
 
 function curvesOf(loops: Loop[], path: Seg[]): Curve[] {
   const seg = (g: Seg): Curve | null => {
-    if (g.kind === "line") return g;
+    if (g.kind !== "arc") return g;
     const k = arcGeom(g);
     return k && { kind: "arc", ...k };
   };
@@ -161,6 +251,15 @@ function onArc(k: Extract<Curve, { kind: "arc" }>, p: P): boolean {
 /** Where two sketch curves cross (or touch). */
 function crossings(p: Curve, q: Curve): P[] {
   const EPS = 1e-9;
+  if (p.kind !== "spline" && q.kind === "spline") return crossings(q, p);
+  if (p.kind === "spline") {
+    // With a line: exact (each piece put into the line's equation is a quadratic in t). Else: along
+    // short chords of the freeform curve (close enough to snap to).
+    if (q.kind === "line") return splineLineCrossings(p, q);
+    const pts = [...splinePoints(p, 64), p.b], out: P[] = [];
+    for (let i = 0; i + 1 < pts.length; i++) out.push(...crossings(q, { kind: "line", a: pts[i], b: pts[i + 1] }));
+    return out;
+  }
   if (p.kind === "line" && q.kind === "line") {
     const r = sub(p.b, p.a), s = sub(q.b, q.a), den = cross(r, s);
     if (Math.abs(den) < EPS * len(r) * len(s)) return [];
@@ -186,6 +285,32 @@ function crossings(p: Curve, q: Curve): P[] {
   return (h < EPS ? [m] : [add(m, mul(n, h)), sub(m, mul(n, h))]).filter((pt) => onArc(a, pt) && onArc(b, pt));
 }
 
+/** Where a freeform curve crosses a line segment. */
+function splineLineCrossings(g: Extract<Seg, { kind: "spline" }>, l: { a: P; b: P }): P[] {
+  const EPS = 1e-9, d = sub(l.b, l.a), L = len(d);
+  if (L < EPS) return [];
+  const nrm: P = [-d[1] / L, d[0] / L], out: P[] = [];
+  for (let i = 0; i < (g.pts.length - 1) / 2; i++) {
+    // Σ wk·Bk(t)·hk = 0, hk: the control points' signed distances from the line.
+    const [h0, h1, h2] = [0, 1, 2].map((k) => g.w[2 * i + k] * dot(sub(g.pts[2 * i + k], l.a), nrm));
+    const A = h0 - 2 * h1 + h2, B = 2 * (h1 - h0), C = h0;
+    let ts: number[];
+    if (Math.abs(A) < 1e-12) ts = Math.abs(B) < 1e-12 ? [] : [-C / B];
+    else {
+      const disc = B * B - 4 * A * C;
+      if (disc < -EPS) continue;
+      const sq = Math.sqrt(Math.max(0, disc));
+      ts = [(-B - sq) / (2 * A), (-B + sq) / (2 * A)];
+    }
+    for (const t of ts) {
+      if (t < -EPS || t > 1 + EPS) continue;
+      const x = splineAt(g, i, Math.min(1, Math.max(0, t))), u = dot(sub(x, l.a), d) / (L * L);
+      if (u >= -EPS && u <= 1 + EPS && !out.some((y) => same(x, y))) out.push(x);
+    }
+  }
+  return out;
+}
+
 function polyArea(pts: P[]): number {
   let s = 0;
   for (let i = 0; i < pts.length; i++) s += cross(pts[i], pts[(i + 1) % pts.length]);
@@ -201,15 +326,31 @@ function inside(p: P, poly: P[]): boolean {
   return c;
 }
 
+/** Distance from p to a closed polygon's outline. */
+function edgeDist(p: P, poly: P[]): number {
+  let d = Infinity;
+  for (let k = 0; k < poly.length; k++) {
+    const a = poly[k], ab = sub(poly[(k + 1) % poly.length], a), l2 = dot(ab, ab);
+    const t = l2 > 0 ? Math.min(1, Math.max(0, dot(sub(p, a), ab) / l2)) : 0;
+    d = Math.min(d, dist(p, add(a, mul(ab, t))));
+  }
+  return d;
+}
+
 /**
  * Outer outlines with their holes: an outline inside an odd number of others is a hole of the
- * smallest one around it. (Inside = most of its points are: an outline that only touches another,
- * e.g. a half circle on a rectangle's side, isn't.)
+ * smallest one around it. Inside = all of it inside or on the other's outline (one that only touches
+ * or overlaps another — a half circle on a rectangle's side, two crossing circles — isn't); outlines
+ * joined with J are never holes of each other.
  */
 function nest(loops: Loop[]): { outer: number; holes: number[] }[] {
   const polys = loops.map(loopPolygon), areas = polys.map(polyArea);
-  const within = (i: number, j: number) => polys[i].filter((p) => inside(p, polys[j])).length * 2 > polys[i].length;
-  const parents = loops.map((_, i) => loops.map((_, j) => j).filter((j) => j !== i && areas[j] > areas[i] && within(i, j)));
+  const within = (i: number, j: number) => {
+    const tol = 1e-6 * Math.max(1, Math.sqrt(areas[j]));
+    return polys[i].every((p) => inside(p, polys[j]) || edgeDist(p, polys[j]) < tol);
+  };
+  const joined = (i: number, j: number) => loops[i].g !== undefined && loops[i].g === loops[j].g;
+  const parents = loops.map((_, i) => loops.map((_, j) => j).filter((j) => j !== i && !joined(i, j) && areas[j] > areas[i] && within(i, j)));
   const depth = parents.map((p) => p.length);
   return loops
     .map((_, i) => i)
@@ -234,6 +375,24 @@ export class SketchTool implements Tool {
   /** Select mode: the selected outlines / paths, and the one under the cursor. */
   private selected: Item[] = [];
   private hoverItem: Item | null = null;
+  /** Scaling the selection (S): about c; the cursor's distance from c over r0 is the factor. */
+  private scaling: {
+    c: P;
+    /** Half the selection's size (X, Y): where the handles sit. */
+    ext: P;
+    kx: number;
+    ky: number;
+    /** The selection has arcs / circles (scaled unevenly they become freeform curves). */
+    curves: boolean;
+    loops: Loop[];
+    opens: Seg[][];
+    snap: string;
+    /** The handle being dragged (from `grab`, the factors then `k0`), or under the cursor. */
+    handle: Handle | null;
+    grab: P | null;
+    k0: P;
+    hover: Handle | null;
+  } | null = null;
   /** Select: a press on a selected outline / path — dragging it moves the selection. */
   private drag: { x: number; y: number; at: P; loops: Loop[]; opens: Seg[][]; snap: string; moved: boolean; item: Item; wasSelected: boolean } | null = null;
   /** Finished open lines (Enter / double-click): paths. */
@@ -263,6 +422,7 @@ export class SketchTool implements Tool {
   /** Bumped on every change to the outlines (keeps the crossing points cached until then). */
   private version = 0;
   private crossCache: { version: number; pts: P[] } | null = null;
+  private groupCache: { version: number; views: Map<number, { tris: THREE.BufferGeometry; lines: THREE.BufferGeometry } | null> } | null = null;
   private saved: { camera: ReturnType<ToolHost["viewport"]["cameraState"]>; xray: boolean } | null = null;
   private readonly mats = {
     line: new THREE.LineBasicMaterial({ color: 0xffd166, depthTest: false, transparent: true }),
@@ -295,6 +455,7 @@ export class SketchTool implements Tool {
       else if (b.dataset.act === "done") this.finish();
       else if (b.dataset.act === "cancel") this.cancel();
       else if (b.dataset.act === "join") this.join();
+      else if (b.dataset.act === "scale") this.scaling ? this.endScale(true) : this.startScale();
     });
     host.viewport.canvas.parentElement!.appendChild(this.panel);
   }
@@ -321,7 +482,7 @@ export class SketchTool implements Tool {
     vp.setOverlay([]);
     this.host.hud(null);
     this.panel.remove();
-    for (const m of Object.values(this.mats)) m.dispose();
+    for (const m of [...Object.values(this.mats), ...this.gizmoMats.values()]) m.dispose();
   }
 
   // ------------------------------------------------------------ geometry helpers
@@ -349,7 +510,7 @@ export class SketchTool implements Tool {
     const pts: { p: P; kind: "vertex" | "midpoint" | "center" }[] = [];
     const seg = (g: Seg) => {
       pts.push({ p: g.a, kind: "vertex" }, { p: g.b, kind: "vertex" });
-      pts.push({ p: g.kind === "line" ? mul(add(g.a, g.b), 0.5) : g.m, kind: "midpoint" });
+      pts.push({ p: segMid(g), kind: "midpoint" });
     };
     for (const l of this.loops) {
       if (l.kind === "circle") pts.push({ p: l.c, kind: "center" });
@@ -431,6 +592,31 @@ export class SketchTool implements Tool {
   move(e: PointerEvent): void {
     this.last = e;
     if (this.mode === "select") {
+      const sc = this.scaling;
+      if (sc) {
+        if (!sc.handle) {
+          const h = this.handleAt(e);
+          if (h !== sc.hover) {
+            sc.hover = h;
+            this.update();
+          }
+          return;
+        }
+        const q = this.planeAt(e), g = sc.grab!;
+        if (!q) return;
+        const ratio = (k: 0 | 1) => (Math.abs(g[k] - sc.c[k]) > 1e-9 ? (q[k] - sc.c[k]) / (g[k] - sc.c[k]) : 1);
+        const f = sc.handle === "xy" ? dist(q, sc.c) / Math.max(dist(g, sc.c), 1e-9) : ratio(sc.handle === "x" ? 0 : 1);
+        const snapK = (k: number) => (this.host.snapStep(e) > 0 ? SCALE_STEPS.reduce((b, x) => (Math.abs(x - k) < Math.abs(b - k) ? x : b)) : k);
+        let kx = sc.k0[0], ky = sc.k0[1];
+        if (sc.handle === "x") kx = snapK(Math.max(0.01, sc.k0[0] * f));
+        else if (sc.handle === "y") ky = snapK(Math.max(0.01, sc.k0[1] * f));
+        else {
+          kx = snapK(Math.max(0.01, sc.k0[0] * f));
+          ky = kx * (sc.k0[1] / sc.k0[0]);
+        }
+        this.scaleTo(kx, ky);
+        return;
+      }
       if (this.drag) return this.dragTo(e);
       const h = this.itemAt(e);
       if (sameItem(h, this.hoverItem) || (!h && !this.hoverItem)) return;
@@ -488,7 +674,7 @@ export class SketchTool implements Tool {
     // Paths: chain them end to end (turning a path round where needed).
     let chain: Seg[] | null = null;
     if (openIdx.length >= 2) {
-      const rev = (o: Seg[]): Seg[] => [...o].reverse().map((g) => (g.kind === "line" ? { kind: "line", a: g.b, b: g.a } : { kind: "arc", a: g.b, m: g.m, b: g.a }));
+      const rev = (o: Seg[]): Seg[] => [...o].reverse().map(revSeg);
       const left = openIdx.map((i) => this.opens[i]);
       chain = left.shift()!;
       while (left.length) {
@@ -504,29 +690,106 @@ export class SketchTool implements Tool {
     }
     this.undoStack.push(JSON.stringify(this.state()));
     this.version++;
+    // The result stays selected (e.g. S scales it next).
+    const result: Item[] = [];
     if (loopIdx.length >= 2) {
       const g = Math.max(-1, ...this.loops.map((l) => l.g ?? -1)) + 1;
       const old = new Set(loopIdx.map((i) => this.loops[i].g).filter((x) => x !== undefined));
       this.loops = this.loops.map((l, i) => (loopIdx.includes(i) || (l.g !== undefined && old.has(l.g)) ? { ...l, g } : l));
+      this.loops.forEach((l, i) => l.g === g && result.push({ kind: "loop", i }));
     }
     if (chain) {
       this.opens = this.opens.filter((_, i) => !openIdx.includes(i));
-      if (same(chain[0].a, chain[chain.length - 1].b)) this.loops.push({ kind: "path", segs: chain });
-      else this.opens.push(chain);
+      if (same(chain[0].a, chain[chain.length - 1].b)) {
+        this.loops.push({ kind: "path", segs: chain });
+        result.push({ kind: "loop", i: this.loops.length - 1 });
+      } else {
+        this.opens.push(chain);
+        result.push({ kind: "open", i: this.opens.length - 1 });
+      }
     }
-    this.selected = [];
+    this.selected = result;
     this.hoverItem = null;
     this.host.toast(chain && same(chain[0].a, chain[chain.length - 1].b) ? "Joined: the paths close into an outline" : "Joined");
     this.update();
   }
 
+  /** The selection's centre (middle of its bounding box). */
+  private selectionCenter(): P | null {
+    const pts = this.selected.flatMap((it) => (it.kind === "loop" ? loopPolygon(this.loops[it.i]) : this.opens[it.i].flatMap((g) => [...segPoints(g), g.b])));
+    if (!pts.length) return null;
+    const lo = [Math.min(...pts.map((p) => p[0])), Math.min(...pts.map((p) => p[1]))], hi = [Math.max(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[1]))];
+    return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2];
+  }
+
+  /** S: the scale gizmo round the selection — drag its X / Y / XY handles; Enter or a click elsewhere applies. */
+  private startScale(): void {
+    const c = this.selectionCenter();
+    if (!c) return this.host.hint("Scale: select outlines / paths first");
+    const pts = this.selected.flatMap((it) => (it.kind === "loop" ? loopPolygon(this.loops[it.i]) : this.opens[it.i].flatMap((g) => [...segPoints(g), g.b])));
+    const ext: P = [Math.max(...pts.map((p) => Math.abs(p[0] - c[0]))), Math.max(...pts.map((p) => Math.abs(p[1] - c[1])))];
+    const curves = this.selected.some((it) => (it.kind === "loop" ? this.loops[it.i].kind === "circle" || (this.loops[it.i] as { segs: Seg[] }).segs.some((g) => g.kind === "arc") : this.opens[it.i].some((g) => g.kind === "arc")));
+    this.scaling = { c, ext, kx: 1, ky: 1, curves, loops: this.loops, opens: this.opens, snap: JSON.stringify(this.state()), handle: null, grab: null, k0: [1, 1], hover: null };
+    this.update();
+  }
+
+  /** Where a handle of the scale gizmo is (in the plane). */
+  handlePos(h: Handle): P {
+    const sc = this.scaling!, pad = HANDLE_PAD_PX * this.host.viewport.worldPerPixel(this.world(sc.c));
+    const x = sc.c[0] + sc.ext[0] * sc.kx + pad, y = sc.c[1] + sc.ext[1] * sc.ky + pad;
+    return h === "x" ? [x, sc.c[1]] : h === "y" ? [sc.c[0], y] : [x, y];
+  }
+
+  /** The handle under the cursor. */
+  private handleAt(e: PointerEvent): Handle | null {
+    const vp = this.host.viewport;
+    for (const h of ["xy", "x", "y"] as Handle[]) {
+      const s = vp.toScreen(this.world(this.handlePos(h)));
+      if (Math.hypot(s.x - e.clientX, s.y - e.clientY) <= HANDLE_PX) return h;
+    }
+    return null;
+  }
+
+  /** Scale the selection (from where it was when S was pressed) by kx, ky; unevenly, its arcs / circles become freeform curves. */
+  private scaleTo(kx: number, ky = kx): boolean {
+    const sc = this.scaling!;
+    sc.kx = kx;
+    sc.ky = ky;
+    const sel = (kind: Item["kind"], i: number) => this.selected.some((x) => x.kind === kind && x.i === i);
+    this.loops = sc.loops.map((l, i) => (sel("loop", i) ? scaleLoop(l, sc.c, kx, ky) : l));
+    this.opens = sc.opens.map((o, i) => (sel("open", i) ? o.map((g) => scaleSeg(g, sc.c, kx, ky)) : o));
+    this.version++;
+    this.update();
+    return true;
+  }
+
+  private endScale(apply: boolean): void {
+    const sc = this.scaling;
+    if (!sc) return;
+    this.scaling = null;
+    if (apply && (Math.abs(sc.kx - 1) > 1e-12 || Math.abs(sc.ky - 1) > 1e-12)) this.undoStack.push(sc.snap);
+    else {
+      this.loops = sc.loops;
+      this.opens = sc.opens;
+      this.version++;
+    }
+    this.host.hud(null);
+    this.update();
+  }
+
   up(e: PointerEvent): void {
+    if (this.scaling?.handle) {
+      // (one handle let go: the gizmo stays for more; Enter / a click elsewhere applies)
+      this.scaling.handle = null;
+      this.scaling.grab = null;
+      return this.update();
+    }
     const dr = this.drag;
     if (!dr || e.button !== 0) return;
     this.drag = null;
     if (dr.moved) this.undoStack.push(dr.snap);
     // A click (no drag) on one of several selected: just that one.
-    else if (dr.wasSelected && !e.shiftKey) this.selected = [dr.item];
+    else if (dr.wasSelected && !e.shiftKey) this.selected = this.groupOf(dr.item); // (a joined outline: its whole group)
     this.host.hud(null);
     this.update();
   }
@@ -580,6 +843,12 @@ export class SketchTool implements Tool {
   down(e: PointerEvent): void {
     if (e.button !== 0) return;
     if (this.mode === "select") {
+      if (this.scaling) {
+        const h = this.handleAt(e), q = this.planeAt(e);
+        if (!h || !q) return this.endScale(true); // (a click away from the handles: done)
+        Object.assign(this.scaling, { handle: h, grab: q, k0: [this.scaling.kx, this.scaling.ky] });
+        return this.update();
+      }
       const it = this.itemAt(e);
       const wasSelected = !!it && this.selected.some((s) => sameItem(s, it));
       // (an outline joined to others brings its whole group along)
@@ -593,11 +862,12 @@ export class SketchTool implements Tool {
       return this.update();
     }
     const prev = this.lastDown, now = performance.now();
-    const drawing = (this.mode === "line" || this.mode === "arc") && !!this.first;
-    const double = drawing && !!prev && now - prev.t < 400 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 5;
+    const lines = this.mode === "line" || this.mode === "arc";
+    const double = lines && !!prev && now - prev.t < 400 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 5;
     this.lastDown = double ? null : { t: now, x: e.clientX, y: e.clientY };
-    // The 2nd click of a double-click only ends the lines (on an arc it would start another one).
-    if (double) return this.endLines();
+    // The 2nd click of a double-click only ends the lines (on an arc it would start another one) —
+    // or, when the 1st click closed the outline (on its start point), does nothing.
+    if (double) return this.first ? this.endLines() : undefined;
     const p = this.pointAt(e);
     if (p) this.click(p);
   }
@@ -632,7 +902,7 @@ export class SketchTool implements Tool {
     const a = vp.toScreen(this.world(first)), b = vp.toScreen(this.world(end));
     if (same(first, end) || Math.hypot(a.x - b.x, a.y - b.y) > NEAR_START_PX) return null;
     const last = this.path[this.path.length - 1];
-    const moved: Seg | null = last.kind === "line" ? (same(last.a, first) ? null : { ...last, b: first }) : threePointArc(last.a, last.m, first);
+    const moved: Seg | null = last.kind === "line" ? (same(last.a, first) ? null : { ...last, b: first }) : last.kind === "arc" ? threePointArc(last.a, last.m, first) : null;
     if (!moved) return null;
     const segs = [...this.path.slice(0, -1), moved];
     return polyArea(segs.flatMap(segPoints)) > 1e-9 ? segs : null;
@@ -686,8 +956,7 @@ export class SketchTool implements Tool {
     for (const [i, o] of this.opens.entries()) {
       const flip = same(p, o[0].a) && !same(p, o[o.length - 1].b);
       if (!flip && !same(p, o[o.length - 1].b)) continue;
-      const rev = (g: Seg): Seg => (g.kind === "line" ? { kind: "line", a: g.b, b: g.a } : { kind: "arc", a: g.b, m: g.m, b: g.a });
-      this.path = flip ? [...o].reverse().map(rev) : [...o];
+      this.path = flip ? [...o].reverse().map(revSeg) : [...o];
       this.first = this.path[0].a;
       this.opens = this.opens.filter((_, k) => k !== i);
       return true;
@@ -782,6 +1051,10 @@ export class SketchTool implements Tool {
       return true;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (k === "Escape" && this.scaling && !this.typed) {
+      this.endScale(false);
+      return true;
+    }
     if (k === "Escape") {
       if (this.typed) this.typed = "";
       else if (this.arcR) this.arcR = null;
@@ -796,6 +1069,10 @@ export class SketchTool implements Tool {
       } else if (this.selected.length) this.selected = [];
       else this.host.hint("Sketch: click Done to keep the closed outlines as faces, or Cancel to drop the sketch");
       this.update();
+      return true;
+    }
+    if ((k === "s" || k === "S") && !e.shiftKey && this.mode === "select") {
+      if (!this.scaling) this.startScale();
       return true;
     }
     if ((k === "j" || k === "J") && !e.shiftKey) {
@@ -819,6 +1096,7 @@ export class SketchTool implements Tool {
     }
     if (k === "Enter") {
       if (this.typed) this.applyTyped();
+      else if (this.scaling) this.endScale(true);
       else if ((this.mode === "arc" || this.mode === "line") && this.first) {
         // Nothing typed: done drawing — an arc shown (e.g. after typing its radius) is placed first.
         if (this.mode === "arc" && this.cursor && this.cur && (this.path.length || this.arcEnd) && this.arcAt(this.cur, this.cursor)) this.click(this.cursor);
@@ -826,7 +1104,10 @@ export class SketchTool implements Tool {
       }
       return true;
     }
-    if (k === "Tab") return true;
+    if (k === "Tab") {
+      this.dialog();
+      return true;
+    }
     const mode = ({ l: "line", a: "arc", r: "rect", c: "circle" } as Record<string, Mode>)[k.toLowerCase()];
     if (mode && !e.shiftKey) {
       this.setMode(mode);
@@ -836,6 +1117,7 @@ export class SketchTool implements Tool {
   }
 
   private setMode(mode: Mode): void {
+    if (this.scaling) this.endScale(false);
     this.mode = mode;
     this.typed = "";
     this.arcEnd = null;
@@ -865,7 +1147,20 @@ export class SketchTool implements Tool {
     this.typed = "";
     if (!vals.length || vals.some((v) => !Number.isFinite(v))) return this.update();
     if (this.mode === "select") {
-      // Select: dx,dy moves the selection exactly.
+      // Select: a % scales the selection about its centre (also without S); dx,dy moves it exactly.
+      if (this.selected.length && vals.length === 1) {
+        if (!(vals[0] > 0)) return this.update();
+        if (!this.scaling) this.startScale();
+        if (!this.scaling) return this.update();
+        this.scaleTo(vals[0] / 100);
+        return this.endScale(true);
+      }
+      if (this.scaling && vals.length >= 2) {
+        // While scaling: x%,y%
+        if (this.scaleTo(vals[0] / 100, vals[1] / 100)) this.endScale(true);
+        return this.update();
+      }
+      if (this.scaling) return this.update();
       if (this.selected.length && vals.length >= 2) {
         this.undoStack.push(JSON.stringify(this.state()));
         this.translateSelection([vals[0], vals[1]]);
@@ -906,8 +1201,97 @@ export class SketchTool implements Tool {
     return { loops: this.loops, opens: this.opens, path: this.path, first: this.first, arcEnd: this.arcEnd, anchor: this.anchor };
   }
 
+  /**
+   * Tab: exact values for what is being drawn (Y3D's Tab), filled in from the preview — the first point
+   * (X, Y), a line (length, angle), an arc (radius, angle; a first arc: its end, then its radius), a
+   * rectangle (width, height), a circle (radius), or the selection (ΔX, ΔY, scale %).
+   */
+  private dialog(): void {
+    const c = this.cursor, r4 = (n: number) => +n.toFixed(4);
+    const deg = (d: P) => r4((Math.atan2(d[1], d[0]) * 180) / Math.PI);
+    const ask = (title: string, fields: { label: string; value: number; min?: number }[], ok: (v: number[]) => void) =>
+      this.host.propsDialog(title, fields.map((f) => ({ ...f, value: r4(f.value) })), ok, "OK");
+    const scaleFields = (x: number, y: number) => [{ label: "Scale (%)", value: 100, min: 0 }, { label: "X (%)", value: x, min: 0 }, { label: "Y (%)", value: y, min: 0 }];
+    const factors = ([s, x, y]: number[]): P | null => (s > 0 && x > 0 && y > 0 ? [(s * x) / 1e4, (s * y) / 1e4] : (this.host.toast("Scale must be greater than 0", "error"), null));
+    if (this.scaling) {
+      // While scaling: the overall % times X % / Y % (from the size before S).
+      const sc = this.scaling;
+      return ask("Scale", scaleFields(sc.kx * 100, sc.ky * 100), (v) => {
+        const k = factors(v);
+        if (k && this.scaleTo(k[0], k[1])) this.endScale(true);
+      });
+    }
+    if (this.mode === "select") {
+      if (!this.selected.length) return this.host.hint("Sketch: select outlines / paths first, then Tab to move or scale them exactly");
+      return ask("Move / scale selection", [{ label: "ΔX (mm)", value: 0 }, { label: "ΔY (mm)", value: 0 }, ...scaleFields(100, 100)], ([dx, dy, ...v]) => {
+        const k = factors(v);
+        if (!k) return;
+        const before = JSON.stringify(this.state());
+        if (dx || dy) this.translateSelection([dx, dy]);
+        if (Math.abs(k[0] - 1) > 1e-12 || Math.abs(k[1] - 1) > 1e-12) {
+          this.startScale();
+          const ok = this.scaleTo(k[0], k[1]);
+          this.scaling = null;
+          if (!ok) return this.update();
+        }
+        this.undoStack.push(before); // (one undo step: the move and the scale)
+        this.update();
+      });
+    }
+    if (this.mode === "rect" || this.mode === "circle") {
+      if (!this.anchor && c) this.click(c); // (anchored where the cursor is)
+      const a = this.anchor;
+      if (!a) return this.host.hint("Sketch: move the cursor over the sketch, then press Tab");
+      if (this.mode === "circle") return ask("Circle", [{ label: "Radius (mm)", value: c ? dist(c, a) : 10, min: 0 }], ([r]) => (r > 0 ? this.click([a[0] + r, a[1]]) : undefined));
+      const sx = c && c[0] < a[0] ? -1 : 1, sy = c && c[1] < a[1] ? -1 : 1;
+      return ask("Rectangle", [{ label: "Width (mm)", value: c ? Math.abs(c[0] - a[0]) : 20, min: 0 }, { label: "Height (mm)", value: c ? Math.abs(c[1] - a[1]) : 10, min: 0 }], ([w, h]) =>
+        w > 0 && h > 0 ? this.click([a[0] + sx * w, a[1] + sy * h]) : this.host.toast("Width and height must be greater than 0", "error"));
+    }
+    const from = this.cur;
+    if (!from) return ask("First point", [{ label: "X (mm)", value: c ? c[0] : 0 }, { label: "Y (mm)", value: c ? c[1] : 0 }], ([x, y]) => this.click([x, y]));
+    const end = (len: number, angle: number): P => {
+      const p = add(from, [len * Math.cos((angle * Math.PI) / 180), len * Math.sin((angle * Math.PI) / 180)]);
+      return this.first && dist(p, this.first) < 1e-6 ? this.first : p; // (back on the start: close there exactly)
+    };
+    if (this.mode === "line" || (!this.path.length && !this.arcEnd)) {
+      const d = c && !same(c, from) ? sub(c, from) : ([10, 0] as P);
+      return ask(this.mode === "line" ? "Line" : "Arc: its end", [{ label: "Length (mm)", value: len(d), min: 0 }, { label: "Angle (°)", value: deg(d) }], ([l, a]) => (l > 0 ? this.click(end(l, a)) : undefined));
+    }
+    if (this.arcEnd) {
+      const g = c && this.arcAt(from, c), k = g && arcGeom(g as Extract<Seg, { kind: "arc" }>);
+      return ask("Arc", [{ label: "Radius (mm)", value: k ? k.r : dist(from, this.arcEnd) / 2, min: 0 }], ([r]) => {
+        if (!(r > 0)) return;
+        if (r < dist(from, this.arcEnd!) / 2 - 1e-6) return this.host.toast(`Arc: the radius must be at least ${num(dist(from, this.arcEnd!) / 2)} mm`, "error");
+        this.arcR = r;
+        const arc = this.arcAt(from, c ?? add(mul(add(from, this.arcEnd!), 0.5), [0, 1]));
+        if (arc && arc.kind === "arc") this.click(arc.m);
+      });
+    }
+    // On from a segment: radius and angle, bending toward the cursor's side.
+    const t = endDir(this.path[this.path.length - 1]);
+    const g = c && this.arcAt(from, c), k = g && arcGeom(g as Extract<Seg, { kind: "arc" }>);
+    ask("Arc", [{ label: "Radius (mm)", value: k ? k.r : 10, min: 0 }, { label: "Angle (°)", value: k ? Math.abs((k.sweep * 180) / Math.PI) : 180, min: 0 }], ([r, a]) => {
+      if (!(r > 0) || !(a > 0 && a < 360)) return this.host.toast("Arc: radius > 0 and angle between 0 and 360°", "error");
+      const sd = c && cross(t, sub(c, from)) < 0 ? -1 : 1;
+      const center = add(from, mul([-t[1] * sd, t[0] * sd], r));
+      const a1 = Math.atan2(from[1] - center[1], from[0] - center[0]) + (sd * a * Math.PI) / 180;
+      const p: P = [center[0] + r * Math.cos(a1), center[1] + r * Math.sin(a1)];
+      this.arcR = null;
+      this.click(this.first && dist(p, this.first) < 1e-6 ? this.first : p);
+    });
+  }
+
+  /** Right click: to Select (the lines being drawn are kept, as with Enter); in Select, clears the selection. */
+  rightClick(): void {
+    if (this.scaling) return this.endScale(false);
+    if (this.mode !== "select") return this.setMode("select");
+    this.selected = [];
+    this.update();
+  }
+
   /** Undo the last sketch step (Ctrl+Z / Backspace). */
   undo(): void {
+    if (this.scaling) return this.endScale(false);
     const s = this.undoStack.pop();
     if (!s) return this.host.hint("Sketch: nothing to undo");
     const st = JSON.parse(s) as State;
@@ -922,22 +1306,62 @@ export class SketchTool implements Tool {
   // ------------------------------------------------------------ done
 
   /** Done: the closed outlines become flat faces. */
+  private kernelLoop(l: Loop): SketchLoop {
+    return l.kind === "circle"
+      ? { kind: "circle", c: this.v3(l.c), r: l.r }
+      : { kind: "path", segs: l.segs.map((g) => this.kernelSeg(g)) };
+  }
+
+  private kernelSeg(g: Seg): Extract<SketchLoop, { kind: "path" }>["segs"][number] {
+    if (g.kind === "line") return { kind: "line", a: this.v3(g.a), b: this.v3(g.b) };
+    if (g.kind === "arc") return { kind: "arc", a: this.v3(g.a), m: this.v3(g.m), b: this.v3(g.b) };
+    return { kind: "spline", pts: g.pts.map((p) => this.v3(p)), w: g.w };
+  }
+
+  /** The face(s) of the outlines joined in group g (with their holes): merged into one where they touch / overlap. */
+  private groupFaces(g: number, groups = nest(this.loops)): Shape[] {
+    const n = this.frame.z.toArray() as V3;
+    const faces = groups.filter((x) => this.loops[x.outer].g === g).flatMap((x) => sketchFaces(this.kernelLoop(this.loops[x.outer]), x.holes.map((h) => this.kernelLoop(this.loops[h])), n));
+    return joinFlatFaces(faces as Parameters<typeof joinFlatFaces>[0], n);
+  }
+
+  /** Joined outlines on screen: their merged shape (fill + outline), worked out again only when the sketch changes. */
+  private groupView(g: number): { tris: THREE.BufferGeometry; lines: THREE.BufferGeometry } | null {
+    if (this.groupCache?.version !== this.version) this.groupCache = { version: this.version, views: new Map() };
+    const views = this.groupCache.views;
+    if (!views.has(g)) {
+      try {
+        const pos: number[] = [], idx: number[] = [], seg: number[] = [];
+        for (const f of this.groupFaces(g)) {
+          const t = tessellate(f);
+          const o = pos.length / 3;
+          pos.push(...t.faces.vertices);
+          idx.push(...t.faces.triangles.map((k) => k + o));
+          seg.push(...t.edges.lines);
+        }
+        const tris = new THREE.BufferGeometry();
+        tris.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        tris.setIndex(idx);
+        const lines = new THREE.BufferGeometry();
+        lines.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
+        views.set(g, { tris, lines });
+      } catch {
+        views.set(g, null); // (can't be merged: shown outline by outline)
+      }
+    }
+    return views.get(g) ?? null;
+  }
+
   private finish(): void {
     const groups = nest(this.loops);
-    const toKernel = (l: Loop): SketchLoop =>
-      l.kind === "circle"
-        ? { kind: "circle", c: this.v3(l.c), r: l.r }
-        : { kind: "path", segs: l.segs.map((g) => (g.kind === "line" ? { kind: "line", a: this.v3(g.a), b: this.v3(g.b) } : { kind: "arc", a: this.v3(g.a), m: this.v3(g.m), b: this.v3(g.b) })) };
     try {
       const n = this.frame.z.toArray() as V3;
       // Faces of each outline (with its holes); outlines joined with J are merged into one face.
-      const byOuter = groups.map((g) => ({ g: this.loops[g.outer].g, faces: sketchFaces(toKernel(this.loops[g.outer]), g.holes.map((h) => toKernel(this.loops[h])), n) }));
-      const faces = byOuter.filter((x) => x.g === undefined).flatMap((x) => x.faces);
-      for (const g of new Set(byOuter.map((x) => x.g).filter((x): x is number => x !== undefined))) faces.push(...joinFlatFaces(byOuter.filter((x) => x.g === g).flatMap((x) => x.faces), n));
+      const faces = groups.filter((x) => this.loops[x.outer].g === undefined).flatMap((x) => sketchFaces(this.kernelLoop(this.loops[x.outer]), x.holes.map((h) => this.kernelLoop(this.loops[h])), n)) as Shape[];
+      for (const g of new Set(this.loops.map((l) => l.g).filter((x): x is number => x !== undefined))) faces.push(...this.groupFaces(g, groups));
       // Open lines (also the ones still being drawn) become paths.
       const opens = this.path.length ? [...this.opens, this.path] : this.opens;
-      const v3seg = (g: Seg) => (g.kind === "line" ? { kind: "line" as const, a: this.v3(g.a), b: this.v3(g.b) } : { kind: "arc" as const, a: this.v3(g.a), m: this.v3(g.m), b: this.v3(g.b) });
-      this.done(faces, opens.map((o) => sketchPath(o.map(v3seg))));
+      this.done(faces, opens.map((o) => sketchPath(o.map((g) => this.kernelSeg(g)))));
     } catch (e) {
       this.host.toast(e instanceof Error ? e.message : String(e), "error");
     }
@@ -958,8 +1382,20 @@ export class SketchTool implements Tool {
       m.scale.setScalar(vp.worldPerPixel(w) * 3.5);
       objs.push(m);
     };
+    // Joined outlines: their merged shape (one fill, one outline); geometry is cached, so draw clones.
+    const groupObj = (g: number, fill: THREE.Material | null, line: THREE.LineBasicMaterial) => {
+      const v = this.groupView(g);
+      if (!v) return false;
+      if (fill) objs.push(new THREE.Mesh(v.tris.clone(), fill));
+      objs.push(new THREE.LineSegments(v.lines.clone(), line));
+      return true;
+    };
+    const merged = new Set<number>();
+    for (const g of new Set(this.loops.map((l) => l.g).filter((x): x is number => x !== undefined))) if (groupObj(g, this.mats.fill, this.mats.line)) merged.add(g);
+    const shown = (l: Loop) => l.g === undefined || !merged.has(l.g);
     // Closed outlines: filled (holes left open) and outlined.
     for (const { outer, holes } of nest(this.loops)) {
+      if (!shown(this.loops[outer])) continue;
       const shape = new THREE.Shape(loopPolygon(this.loops[outer]).map(([u, v]) => new THREE.Vector2(u, v)));
       for (const h of holes) shape.holes.push(new THREE.Path(loopPolygon(this.loops[h]).map(([u, v]) => new THREE.Vector2(u, v))));
       const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), this.mats.fill);
@@ -967,14 +1403,27 @@ export class SketchTool implements Tool {
       mesh.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
       objs.push(mesh);
     }
-    for (const l of this.loops) lines(loopPolygon(l), this.mats.line, true);
+    for (const l of this.loops) if (shown(l)) lines(loopPolygon(l), this.mats.line, true);
     // Open paths, and the lines being drawn.
     // (open lines in pink — the colour of the paths they become: not a closed outline)
     for (const o of this.opens) lines([...o.flatMap(segPoints), o[o.length - 1].b], this.mats.open);
     if (this.path.length) lines([...this.path.flatMap(segPoints), this.cur!], this.mats.line);
     for (const p of [this.first, this.arcEnd, this.anchor]) if (p) dot(p);
     // Select: the selected outlines / paths in blue (outlines also filled), the one under the cursor in white.
+    // (a joined outline: its group's merged shape, once)
+    const done = new Set<string>();
+    const asGroup = (it: Item, fill: THREE.Material | null, line: THREE.LineBasicMaterial) => {
+      const g = it.kind === "loop" ? this.loops[it.i].g : undefined;
+      if (g === undefined || !merged.has(g)) return false;
+      const key = `${g}:${line.uuid}:${fill ? 1 : 0}`;
+      if (!done.has(key)) {
+        done.add(key);
+        groupObj(g, fill, line);
+      }
+      return true;
+    };
     const itemLines = (it: Item, mat: THREE.LineBasicMaterial) => {
+      if (asGroup(it, null, mat)) return;
       if (it.kind === "loop") lines(loopPolygon(this.loops[it.i]), mat, true);
       else {
         const o = this.opens[it.i];
@@ -982,7 +1431,7 @@ export class SketchTool implements Tool {
       }
     };
     const itemFill = (it: Item, mat: THREE.Material) => {
-      if (it.kind !== "loop") return;
+      if (it.kind !== "loop" || asGroup(it, mat, this.mats.line)) return;
       const mesh = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(loopPolygon(this.loops[it.i]).map(([u, v]) => new THREE.Vector2(u, v)))), mat);
       mesh.matrixAutoUpdate = false;
       mesh.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
@@ -1043,14 +1492,52 @@ export class SketchTool implements Tool {
       dot(c);
       if (this.first && same(c, this.first) && from && !same(from, this.first)) hud = "Close the outline";
     }
+    // Scaling: the gizmo — lines from the centre to the X (red) / Y (green) squares, the XY ring (yellow);
+    // the handle under the cursor bigger.
+    const sc = this.scaling;
+    if (sc) {
+      const w = vp.worldPerPixel(this.world(sc.c));
+      dot(sc.c);
+      const color = (h: Handle) => (h === "x" ? 0xe5484d : h === "y" ? 0x30a46c : 0xffd84a);
+      for (const h of ["x", "y", "xy"] as Handle[]) {
+        const p = this.handlePos(h), mat = this.gizmoMat(color(h), "line") as THREE.LineBasicMaterial;
+        const size = w * (sc.hover === h || sc.handle === h ? 8 : 6);
+        if (h !== "xy") lines([sc.c, p], mat);
+        const shape = h === "xy"
+          ? Array.from({ length: 24 }, (_, i) => [p[0] + size * Math.cos((i / 24) * TAU), p[1] + size * Math.sin((i / 24) * TAU)] as P)
+          : ([[p[0] - size, p[1] - size], [p[0] + size, p[1] - size], [p[0] + size, p[1] + size], [p[0] - size, p[1] + size]] as P[]);
+        lines(shape, mat, true);
+        if (h !== "xy") {
+          const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(shape.map(([u, v]) => new THREE.Vector2(u, v)))), this.gizmoMat(color(h), "fill"));
+          m.matrixAutoUpdate = false;
+          m.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
+          objs.push(m);
+        }
+      }
+      hud = Math.abs(sc.kx - sc.ky) < 1e-9 ? `Scale ${num(sc.kx * 100)}%` : `Scale X ${num(sc.kx * 100)}% · Y ${num(sc.ky * 100)}%`;
+    }
     vp.setOverlay(objs);
-    this.host.hud(this.typed ? `⌨ ${this.typed}_` : hud, c ? this.world(c) : undefined);
+    this.host.hud(this.typed ? `⌨ ${this.typed}_` : hud, sc ? this.world(this.handlePos("xy")) : c ? this.world(c) : undefined);
     // The 3D corner view frames the model and the closed outlines.
     if (this.insetLoops !== this.loops.length) {
       this.insetLoops = this.loops.length;
       vp.setInset(true, this.loops.flatMap((l) => loopPolygon(l).map((p) => this.world(p))));
     }
     this.renderPanel();
+  }
+
+  /** Scale gizmo materials, one per colour (made once). */
+  private gizmoMats = new Map<string, THREE.Material>();
+  private gizmoMat(color: number, kind: "line" | "fill"): THREE.Material {
+    const key = `${kind}:${color}`;
+    let m = this.gizmoMats.get(key);
+    if (!m) {
+      m = kind === "line"
+        ? new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true })
+        : new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.85 });
+      this.gizmoMats.set(key, m);
+    }
+    return m;
   }
 
   /** Redraw the panel (e.g. after switching the Pro layout). */
@@ -1062,7 +1549,8 @@ export class SketchTool implements Tool {
   private renderPanel(): void {
     const nSel = this.selected.length;
     const tips: Record<Mode, string> = {
-      select: nSel ? `${nSel} selected · drag to move (Ctrl: grid steps) or type dx,dy + Enter · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
+      select: this.scaling ? `Scale: drag the red square (X), green (Y) or the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} — Ctrl: round steps · Tab: exact % · Enter / click elsewhere: apply · Esc / right click: cancel`
+        : nSel ? `${nSel} selected · drag to move (Ctrl: grid steps) or type dx,dy + Enter · S: scale (or type a % + Enter) · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
       line: this.first ? "Click the next point · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
@@ -1072,15 +1560,16 @@ export class SketchTool implements Tool {
     };
     const btn = (m: Mode, label: string, key: string) => `<button type="button" class="btn${this.mode === m ? " primary" : ""}" data-mode="${m}" title="${label} (${key})">${label} <kbd>${key}</kbd></button>`;
     const closed = this.loops.length, open = this.opens.length;
+    const scaleBtn = this.mode === "select" ? `<button type="button" class="btn${this.scaling ? " primary" : ""}" data-act="scale" ${nSel ? "" : "disabled"} title="Scale the selection about its centre — S (or type a % + Enter)">Scale <kbd>S</kbd></button>` : "";
     const joinBtn = this.mode === "select" ? `<button type="button" class="btn" data-act="join" ${nSel >= 2 ? "" : "disabled"} title="Join the selected outlines into one face (paths: end to end into one) — J">Join <kbd>J</kbd></button>` : "";
     const html = `<h4>Sketch on ${this.what}</h4>
-      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${joinBtn}</div>
+      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${scaleBtn}${joinBtn}</div>
       <div class="tip">${tips[this.mode]}</div>
-      <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · ${this.mode === "select" ? "L A R C: draw" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>
+      <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · Tab: exact values · ${this.mode === "select" ? "L A R C: draw" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>
       <div class="op-buttons"><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces">Done</button><button type="button" class="btn" data-act="cancel" title="Drop the sketch">Cancel</button></div>`;
     // Pro layout: one row of modes, Done / Cancel — no tips.
     const pro = document.body.classList.contains("pro");
-    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Done</button><button type="button" class="btn" data-act="cancel" title="Drop the sketch">Cancel</button></div>`;
+    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${scaleBtn}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Done</button><button type="button" class="btn" data-act="cancel" title="Drop the sketch">Cancel</button></div>`;
     const out = pro ? proHtml : html;
     this.panel.classList.toggle("compact", pro);
     if (out !== this.panelHtml) this.panel.innerHTML = this.panelHtml = out;

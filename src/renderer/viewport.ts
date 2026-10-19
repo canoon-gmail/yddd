@@ -740,10 +740,10 @@ export class Viewport {
     return this.raycaster.ray.clone();
   }
 
-  private raycastFaces(cx: number, cy: number, only?: number): { view: BodyView; faceId: number; point: THREE.Vector3; distance: number } | null {
+  private raycastFaces(cx: number, cy: number, only?: number, skip?: Set<number>): { view: BodyView; faceId: number; point: THREE.Vector3; distance: number } | null {
     this.setRay(cx, cy);
     const meshes: THREE.Object3D[] = [];
-    for (const v of this.views.values()) if (v.group.visible && (only === undefined || v.body.id === only)) meshes.push(v.mesh);
+    for (const v of this.views.values()) if (v.group.visible && (only === undefined || v.body.id === only) && !skip?.has(v.body.id)) meshes.push(v.mesh);
     const hits = this.raycaster.intersectObjects(meshes, false);
     if (!hits.length || hits[0].faceIndex == null) return null;
     const groupOf = (view: BodyView, faceIndex: number): number => {
@@ -1002,7 +1002,9 @@ export class Viewport {
   snapPoint(cx: number, cy: number, exclude?: Set<number>): { point: THREE.Vector3; kind: SnapKind } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left, py = cy - r.top;
-    const faceHit = exclude?.size ? null : this.raycastFaces(cx, cy);
+    // (what's in front, leaving out the excluded bodies — e.g. the one being moved — so points hidden
+    // behind the rest still don't count)
+    const faceHit = this.raycastFaces(cx, cy, undefined, exclude);
     let best: { score: number; view: BodyView; i: number } | null = null;
     const p = new THREE.Vector3();
     for (const [id, v] of this.views) {

@@ -14,7 +14,10 @@ import {
   cutFaceByPlane,
   edgeEnds,
   edgeBetween,
-  isPolyhedral,
+  canMoveEdges,
+  edgeLoopFace,
+  isEdgeLoop,
+  MOVE_EDGE_REFUSED,
   errorMessage,
   filletEdges,
   filletDragAxis,
@@ -80,6 +83,8 @@ import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideToo
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
+import { HOUSE } from "./house";
+import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
 import { SketchTool } from "./sketch";
 import type { TutCtx, Tutorial } from "./tutorials";
@@ -123,6 +128,20 @@ interface OpField {
   /** "select": `value` is the index into `options`. */
   type?: "number" | "checkbox" | "select";
   options?: string[];
+  /**
+   * A % field that also takes sizes: the size (mm) at 100 % — then "+10mm" / "-10mm" (that much
+   * bigger / smaller), "60mm" (that size) and "+10%" / "-10%" work besides a plain %.
+   */
+  mm?: number;
+}
+
+/** A % field's text (see OpField.mm) as a %; NaN if it isn't one of the forms. */
+function parsePercent(text: string, mm?: number): number {
+  const m = /^([+-]?)(\d*\.?\d+)(mm|%)?$/.exec(text.trim().toLowerCase().replace(/\s+/g, ""));
+  if (!m) return NaN;
+  const [, sign, num, unit] = m, n = Number(num) * (sign === "-" ? -1 : 1);
+  if (unit === "mm") return mm && mm > 1e-9 ? ((sign ? mm + n : n) / mm) * 100 : NaN;
+  return unit === "%" && sign ? 100 + n : n;
 }
 
 type OpInput = HTMLInputElement | HTMLSelectElement;
@@ -158,6 +177,11 @@ interface OpDrag {
   color?: string;
   line?: boolean;
   title?: string;
+  /**
+   * Shift while dragging sets the checkbox field `key` (off without Shift); while it's on, the
+   * handle runs from `origin` along `dir` with `unit` instead (e.g. Scale about the centre, not the base).
+   */
+  shift?: { key: string; origin: V3; dir: V3; unit: number };
 }
 
 interface OpSpec {
@@ -375,7 +399,7 @@ function loadRecent(): string[] {
 const MODE_HINTS: Record<SelMode, string> = {
   body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag or Alt+drag orbit · Shift+Left-drag pan · Wheel / two-finger slide zoom",
   face: "Face mode: click faces (P push/pull, H shell), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
-  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge).  Shift+click to add · Right-click a solid → Solid mode",
+  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge — a closed loop of edges: a face copy).  Shift+click to add · Right-click a solid → Solid mode",
 };
 
 class App implements ToolHost {
@@ -410,6 +434,12 @@ class App implements ToolHost {
   private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; edges?: SelItem[]; guide?: number } | null = null;
   /** Latest edge-move drag offset waiting for its (once per frame) preview. */
   private edgePreview: V3 | null = null;
+  /**
+   * The last edge / guide move dragged with the gizmo and the document version right after it (and,
+   * for edges, where they were and are), so Tab can show and replace it.
+   */
+  private lastEdgeMove: { v: V3; edges: SelItem[]; after: SelItem[]; version: number } | null = null;
+  private lastGuideMove: { v: V3; guide: number; version: number } | null = null;
   private snap = 1;
   private downAt: { x: number; y: number } | null = null;
   private recent: string[] = loadRecent();
@@ -523,7 +553,26 @@ class App implements ToolHost {
   /** World mm per field unit of `drag`, including its `mul` field. */
   private dragUnit(drag: OpDrag): number {
     const m = drag.mul && this.op?.inputs.find((i) => i.dataset.key === drag.mul);
-    return (drag.unit ?? 1) * (m ? (Number(m.value) || 0) / 100 : 1);
+    return ((this.dragShifted(drag) ? drag.shift!.unit : drag.unit) ?? 1) * (m ? (this.opNum(m) || 0) / 100 : 1);
+  }
+
+  /** An op field's number (a % field also takes sizes — see OpField.mm). */
+  private opNum(i: OpInput): number {
+    return i.dataset.mm !== undefined ? parsePercent(i.value, Number(i.dataset.mm)) : Number(i.value);
+  }
+
+  /** Whether the drag's Shift checkbox (see OpDrag.shift) is on. */
+  private dragShifted(drag: OpDrag): boolean {
+    const box = drag.shift && this.op?.inputs.find((i) => i.dataset.key === drag.shift!.key);
+    return !!box && (box as HTMLInputElement).checked;
+  }
+
+  private dragOrigin(drag: OpDrag): V3 {
+    return this.dragShifted(drag) ? drag.shift!.origin : drag.origin;
+  }
+
+  private dragDir(drag: OpDrag): V3 {
+    return this.dragShifted(drag) ? drag.shift!.dir : drag.dir;
   }
 
   /** (Re)create one handle element per op drag, wired to start a drag on that handle. */
@@ -576,8 +625,8 @@ class App implements ToolHost {
         el.hidden = true;
         return;
       }
-      const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
-      const P = O.clone().addScaledVector(D, (Number(input.value) || 0) * this.dragUnit(drag));
+      const O = new THREE.Vector3(...this.dragOrigin(drag)), D = new THREE.Vector3(...this.dragDir(drag)).normalize();
+      const P = O.clone().addScaledVector(D, (this.opNum(input) || 0) * this.dragUnit(drag));
       const s = this.viewport.toScreen(P), s1 = this.viewport.toScreen(P.clone().add(D));
       const look = drag.look ?? "arrow";
       const ang = Math.atan2(s1.y - s.y, s1.x - s.x) * (180 / Math.PI) + 90;
@@ -778,6 +827,8 @@ class App implements ToolHost {
       case "help.shortcuts": return this.toggleHelp();
       case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
       case "help.cablebox": return this.toggleTutorial(CABLE_STORAGE_BOX);
+      case "help.house": return this.toggleTutorial(HOUSE);
+      case "help.planter": return this.toggleTutorial(PLANTER);
       case "view.menu": return this.showViewMenu();
       case "view.pro": return this.togglePro();
     }
@@ -853,7 +904,17 @@ class App implements ToolHost {
       if (own && own.point.distanceTo(pick.point) < tol) item = { kind: "body", body: sel, id: 0 };
     }
     if (!item) {
-      if (!e.shiftKey) this.setSelection([]);
+      // (on a selected face's edge where it's the solid's outline on screen, the click can just miss the solid)
+      const edge = e.shiftKey || e.ctrlKey ? null : this.selectedEdgeHit(e);
+      if (edge) {
+        this.setMode("edge");
+        this.setSelection([edge]);
+        return;
+      }
+      // Face mode, on an edge where it's the outline: the face along it turned most towards the camera.
+      const face = this.mode === "face" ? this.outlineFaceAt(e) : null;
+      if (face) this.setSelection(e.shiftKey || e.ctrlKey ? [...this.selection.filter((s) => !sameItem(s, face)), face] : [face]);
+      else if (!e.shiftKey) this.setSelection([]);
       return;
     }
     if (e.shiftKey || e.ctrlKey) {
@@ -904,6 +965,23 @@ class App implements ToolHost {
   }
 
   /** In Face mode: the edge near the cursor (generous tolerance) if it bounds one of the selected faces. */
+  /** The face along the edge under the cursor that faces the camera most (for clicks just off a solid's outline). */
+  private outlineFaceAt(e: PointerEvent): SelItem | null {
+    const hit = this.viewport.pick(e.clientX, e.clientY, "edge");
+    const body = hit && this.doc.get(hit.body);
+    if (!hit || !body || !isBrep(body)) return null;
+    const eye = this.viewport.camera.position;
+    let best: SelItem | null = null, bestDot = -Infinity;
+    for (const f of body.shape.faces) {
+      if (!faceEdgeIds(body.shape, f.hashCode).has(hit.id)) continue;
+      const c = f.center, n = f.normalAt(c);
+      const to = new THREE.Vector3(eye.x - c.x, eye.y - c.y, eye.z - c.z).normalize();
+      const d = n.x * to.x + n.y * to.y + n.z * to.z;
+      if (d > bestDot) [best, bestDot] = [{ kind: "face", body: hit.body, id: f.hashCode }, d];
+    }
+    return best;
+  }
+
   private selectedEdgeHit(e: PointerEvent): SelItem | null {
     if (this.mode !== "face" || !this.selection.length) return null;
     if (this.selEdgeCache?.sel !== this.selection) {
@@ -962,7 +1040,8 @@ class App implements ToolHost {
     });
     c.addEventListener("pointerdown", (e) => {
       if (e.button === 2) {
-        this.rightDownAt = this.tool || this.op || this.viewport.gizmoHot ? null : { x: e.clientX, y: e.clientY };
+        const toolTakes = !!this.tool?.rightClick;
+        this.rightDownAt = (this.tool && !toolTakes) || this.op || this.viewport.gizmoHot ? null : { x: e.clientX, y: e.clientY };
         return;
       }
       if (e.button !== 0 || e.altKey) return; // Alt + drag orbits the view
@@ -981,7 +1060,10 @@ class App implements ToolHost {
       if (e.button === 2) {
         const d = this.rightDownAt;
         this.rightDownAt = null;
-        if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) this.rightClick(e);
+        if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) {
+          if (this.tool?.rightClick) this.tool.rightClick(e);
+          else this.rightClick(e);
+        }
         return;
       }
       if (e.button === 0 && (this.valueDialog() || e.altKey)) return;
@@ -1210,6 +1292,18 @@ class App implements ToolHost {
         input.type = "checkbox";
         input.checked = f.value !== 0;
         label.classList.add("check");
+      } else if (f.mm !== undefined) {
+        // (text: also takes "+10mm", "60mm"... — shown as the % once left)
+        input.type = "text";
+        input.inputMode = "decimal";
+        input.dataset.mm = String(f.mm);
+        input.dataset.step = String(f.step ?? 1);
+        input.title = "%, or a size: +10mm / -10mm (that much bigger / smaller), 60mm (that size), +10% / -10%";
+        input.value = String(f.value);
+        input.addEventListener("change", () => {
+          const v = this.opNum(input);
+          if (Number.isFinite(v) && input.value !== fmt(v)) input.value = fmt(v);
+        });
       } else {
         input.type = "number";
         input.step = String(f.step ?? 1);
@@ -1248,10 +1342,10 @@ class App implements ToolHost {
           this.cancelOp();
         }
       });
-      if (input instanceof HTMLInputElement && input.type === "number") input.addEventListener("wheel", (e) => {
+      if (input instanceof HTMLInputElement && (input.type === "number" || input.dataset.mm)) input.addEventListener("wheel", (e) => {
         e.preventDefault();
-        const step = Number(input.step) * (e.shiftKey ? 10 : 1);
-        input.value = fmt(Number(input.value) + (e.deltaY < 0 ? step : -step));
+        const step = Number(input.step || input.dataset.step) * (e.shiftKey ? 10 : 1);
+        input.value = fmt((this.opNum(input) || 0) + (e.deltaY < 0 ? step : -step));
         this.scheduleOpPreview();
       });
     }
@@ -1263,9 +1357,9 @@ class App implements ToolHost {
     this.renderToolbarState();
     this.previewOp();
     this.positionHandle();
-    const first = inputs.find((i) => i.type === "number") ?? inputs[0];
+    const first = inputs.find((i) => i.type === "number" || i.dataset.mm) ?? inputs[0];
     first?.focus();
-    if (first instanceof HTMLInputElement && first.type === "number") first.select();
+    if (first instanceof HTMLInputElement && (first.type === "number" || first.dataset.mm)) first.select();
   }
 
   /** Map mouse movement along the drag axis to the op's value (relative to where the drag started). */
@@ -1275,7 +1369,14 @@ class App implements ToolHost {
     if (!drag) return;
     const input = op.inputs.find((i) => i.dataset.key === drag.key);
     if (!input) return;
-    const O = new THREE.Vector3(...drag.origin), D = new THREE.Vector3(...drag.dir).normalize();
+    // Shift: its checkbox follows (e.g. Scale about the centre), the preview with it.
+    const box = drag.shift && (op.inputs.find((i) => i.dataset.key === drag.shift!.key) as HTMLInputElement | undefined);
+    if (box && box.checked !== e.shiftKey) {
+      box.checked = e.shiftKey;
+      this.scheduleOpPreview();
+      this.positionHandle();
+    }
+    const O = new THREE.Vector3(...this.dragOrigin(drag)), D = new THREE.Vector3(...this.dragDir(drag)).normalize();
     // Screen-space mapping: mouse movement projected onto the axis' on-screen direction,
     // so the result doesn't depend on where the pointer is (e.g. started from a toolbar icon).
     const s0 = this.viewport.toScreen(O), s1 = this.viewport.toScreen(O.clone().addScaledVector(D, 10));
@@ -1283,7 +1384,7 @@ class App implements ToolHost {
     const pxPer10 = Math.hypot(ax, ay);
     if (pxPer10 < 5) return; // looking straight down the axis
     if (!op.anchor) {
-      op.anchor = { x: e.clientX, y: e.clientY, v: Number(input.value) || 0 };
+      op.anchor = { x: e.clientX, y: e.clientY, v: this.opNum(input) || 0 };
       return;
     }
     const unit = this.dragUnit(drag);
@@ -1324,7 +1425,7 @@ class App implements ToolHost {
     const exact = this.op!.exact;
     for (const i of this.op!.inputs) {
       const k = i.dataset.key!;
-      values[k] = i instanceof HTMLInputElement && i.type === "checkbox" ? (i.checked ? 1 : 0) : exact?.key === k && i.value === exact.shown ? exact.value : Number(i.value);
+      values[k] = i instanceof HTMLInputElement && i.type === "checkbox" ? (i.checked ? 1 : 0) : exact?.key === k && i.value === exact.shown ? exact.value : this.opNum(i);
     }
     return { values, key: JSON.stringify(values) };
   }
@@ -1808,33 +1909,43 @@ class App implements ToolHost {
         hi[i] = Math.max(hi[i], b[i]);
       }
     }
-    const pivot: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
-    // Gizmo: X / Y / Z boxes on axis lines from the pivot set the per-axis %; the ring on the
-    // top corner (dragged along the diagonal) sets the overall Scale %.
+    const size = [0, 1, 2].map((i) => hi[i] - lo[i]);
+    // About the bottom centre (the base stays put); "From the centre" (Shift while dragging the ring): about the middle.
+    const base: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
+    const centre: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    // Gizmo: X / Y / Z boxes on axis lines from the base set the per-axis %; the ring on the
+    // top corner (dragged along the diagonal) sets the overall Scale % — with Shift, from the centre.
     const corner: V3 = [hi[0], hi[1], hi[2]];
-    const diag: V3 = [corner[0] - pivot[0], corner[1] - pivot[1], corner[2] - pivot[2]];
+    const diag: V3 = [corner[0] - base[0], corner[1] - base[1], corner[2] - base[2]];
+    const half: V3 = [corner[0] - centre[0], corner[1] - centre[1], corner[2] - centre[2]];
     const len = Math.hypot(...diag);
     const drags: OpDrag[] = [];
     const axes = [["x", "#e5484d"], ["y", "#30a46c"], ["z", "#3e8bff"]] as const;
     axes.forEach(([key, color], i) => {
-      const ext = hi[i] - pivot[i];
+      const ext = hi[i] - base[i];
       if (ext < 1e-9) return; // flat along this axis
       const dir: V3 = [0, 0, 0];
       dir[i] = 1;
-      drags.push({ origin: pivot, dir, key, unit: ext / 100, mul: "s", look: "box", color, line: true, title: `Drag to scale along ${key.toUpperCase()}` });
+      drags.push({ origin: base, dir, key, unit: ext / 100, mul: "s", look: "box", color, line: true, title: `Drag to scale along ${key.toUpperCase()}` });
     });
-    if (len > 1e-9) drags.push({ origin: pivot, dir: diag, key: "s", unit: len / 100, look: "ring", color: "#ffd84a", line: true, title: "Drag to scale in all directions" });
+    if (len > 1e-9) {
+      drags.push({ origin: base, dir: diag, key: "s", unit: len / 100, look: "ring", color: "#ffd84a", line: true, title: "Drag to scale in all directions (Shift: about the centre)",
+        shift: { key: "center", origin: centre, dir: half, unit: Math.hypot(...half) / 100 } });
+    }
     const pct = (k: number) => k / 100;
     this.startOp({
       title: "Scale",
       label: "Scale",
       fields: [
-        { key: "s", label: "Scale (%)", value: 100, step: 5, min: 0 },
-        { key: "x", label: "X (%)", value: 100, step: 5, min: 0 },
-        { key: "y", label: "Y (%)", value: 100, step: 5, min: 0 },
-        { key: "z", label: "Z (%)", value: 100, step: 5, min: 0 },
+        // (a typed size: "+10mm" / "60mm"... — X / Y / Z along that axis, Scale on the longest side)
+        { key: "s", label: "Scale (% or ±mm)", value: 100, step: 5, min: 0, mm: Math.max(...size) },
+        { key: "x", label: "X (% or ±mm)", value: 100, step: 5, min: 0, mm: size[0] },
+        { key: "y", label: "Y (% or ±mm)", value: 100, step: 5, min: 0, mm: size[1] },
+        { key: "z", label: "Z (% or ±mm)", value: 100, step: 5, min: 0, mm: size[2] },
+        { key: "center", label: "From the centre (Shift while dragging the ring)", value: 0, type: "checkbox" },
       ],
-      compute: ({ s, x, y, z }) => {
+      compute: ({ s, x, y, z, center }) => {
+        const pivot = center ? centre : base;
         const f: V3 = [pct(s) * pct(x), pct(s) * pct(y), pct(s) * pct(z)];
         if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
         // Preview: the current meshes stretched on the GPU (instant); the exact solids are built on Apply.
@@ -2175,21 +2286,21 @@ class App implements ToolHost {
       this.repeatOps = [];
     }
     const edges = this.selection.filter((s) => s.kind === "edge");
-    const ok = edges.length > 0 && edges.every((s) => {
-      const b = this.doc.get(s.body);
-      return b?.kind === "solid" && isPolyhedral(b.shape);
+    const ok = edges.length > 0 && [...new Set(edges.map((s) => s.body))].every((id) => {
+      const b = this.doc.get(id);
+      return b?.kind === "solid" && canMoveEdges(b.shape, new Set(edges.filter((s) => s.body === id).map((s) => s.id)));
     });
     const ends = ok ? edgeEnds(this.brep(edges[0].body), edges[0].id) : null;
     if (!ends) {
       this.stopTransform();
-      this.toast("Move edge works on solids with only flat faces and straight edges (no curves or fillets)", "error");
+      this.toast(MOVE_EDGE_REFUSED, "error");
       return;
     }
     const mid: V3 = [(ends[0][0] + ends[1][0]) / 2, (ends[0][1] + ends[1][1]) / 2, (ends[0][2] + ends[1][2]) / 2];
     this.edgePreview = null;
     this.viewport.clearGhost();
     this.xf = { mode: "translate", ids: [], pivot: mid, edges };
-    this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyEdgeMove(r.vector), mid, (d) => this.previewEdgeMove(d));
+    this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyEdgeMove(r.vector, true), mid, (d) => this.previewEdgeMove(d));
     this.renderToolbarState();
     this.hint("Move edge: drag the gizmo (hold Ctrl to snap to grid / points) · Tab: exact offset · Enter/Esc: done");
   }
@@ -2208,7 +2319,7 @@ class App implements ToolHost {
     const mid: V3 = [(guide.a[0] + guide.b[0]) / 2, (guide.a[1] + guide.b[1]) / 2, (guide.a[2] + guide.b[2]) / 2];
     this.xf = { mode: "translate", ids: [], pivot: mid, guide: g };
     this.viewport.snapSkipGuide = g;
-    this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyGuideMove(r.vector), mid, (d) => this.previewGuideMove(d));
+    this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyGuideMove(r.vector, true), mid, (d) => this.previewGuideMove(d));
     this.renderToolbarState();
     this.hint("Move guide: drag the gizmo (hold Ctrl to snap to grid / points / other guides) · Tab: exact offset · Enter/Esc: done");
   }
@@ -2225,9 +2336,12 @@ class App implements ToolHost {
     this.hint(`Move guide: Δ ${d.map((n) => +n.toFixed(2)).join(", ")} · release to apply · Tab: exact offset · Enter/Esc: done`);
   }
 
-  private applyGuideMove(v: V3): void {
+  private applyGuideMove(v: V3, dragged = false): void {
     if (this.xf?.guide === undefined) return;
-    if (Math.hypot(...v) > 1e-12) this.doc.setGuides(this.movedGuides(v), "Move guide");
+    if (Math.hypot(...v) > 1e-12) {
+      this.doc.setGuides(this.movedGuides(v), "Move guide");
+      this.lastGuideMove = dragged ? { v, guide: this.xf.guide, version: this.doc.version } : null;
+    }
     this.startGuideMove(true); // the gizmo follows the guide for the next drag
   }
 
@@ -2258,7 +2372,7 @@ class App implements ToolHost {
     });
   }
 
-  private applyEdgeMove(v: V3): void {
+  private applyEdgeMove(v: V3, dragged = false): void {
     const edges = this.xf?.edges;
     if (!edges) return;
     this.edgePreview = null;
@@ -2273,6 +2387,7 @@ class App implements ToolHost {
     }
     const before = edges.map((e) => ({ body: e.body, ends: edgeEnds(this.brep(e.body), e.id) }));
     this.doc.replaceShapes(shapes, edges.length > 1 ? "Move edges" : "Move edge");
+    const version = this.doc.version;
     // Keep the moved edges selected (their ids change with the rebuilt solid); the gizmo follows them.
     const add = (p: V3): V3 => [p[0] + v[0], p[1] + v[1], p[2] + v[2]];
     const next = before.flatMap(({ body, ends }): SelItem[] => {
@@ -2280,6 +2395,7 @@ class App implements ToolHost {
       const id = shape && ends ? edgeBetween(shape, add(ends[0]), add(ends[1])) : null;
       return id !== null && id !== undefined ? [{ kind: "edge", body, id }] : [];
     });
+    this.lastEdgeMove = dragged ? { v, edges, after: next, version } : null;
     this.setSelection(next);
     if (!next.length) this.toast("Edge moved (it merged into a neighbouring face)");
   }
@@ -2552,15 +2668,43 @@ class App implements ToolHost {
   /** Tab during Move/Rotate: exact offset or angles. */
   private transformDialog(): void {
     if (!this.xf) return;
+    const r3 = (n: number) => +n.toFixed(3);
+    const fields = (v: V3) => [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }];
+    const same = (a: V3, b: number[]) => a.every((x, k) => Math.abs(x - b[k]) < 1e-9);
     if (this.xf.guide !== undefined) {
-      this.propsDialog("Move guide by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
-        if (x || y || z) this.applyGuideMove([x, y, z]);
+      // Just moved (dragged)? Prefilled with that move; OK replaces it (one undo step).
+      const last = this.lastGuideMove?.version === this.doc.version && this.lastGuideMove.guide === this.xf.guide ? this.lastGuideMove : null;
+      this.propsDialog(last ? "Move guide (last drag)" : "Move guide by", fields(last?.v ?? [0, 0, 0]), ([x, y, z]) => {
+        if (last) {
+          if (same(last.v, [x, y, z])) return;
+          this.doc.undo();
+        }
+        if (x || y || z || last) this.applyGuideMove([x, y, z]);
       }, "Move");
       return;
     }
     if (this.xf.edges) {
-      this.propsDialog("Move edge by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
-        if (x || y || z) this.applyEdgeMove([x, y, z]);
+      // Just moved (dragged)? Prefilled with that move; OK replaces it (one undo step).
+      // (only while the gizmo is still on the edges that drag left — not after picking others)
+      const key = (items: SelItem[]) => items.map((x) => `${x.body}:${x.id}`).sort().join();
+      const last = this.lastEdgeMove?.version === this.doc.version && key(this.lastEdgeMove.after) === key(this.xf.edges) ? this.lastEdgeMove : null;
+      this.propsDialog(last ? "Move edge (last drag)" : "Move edge by", fields(last?.v ?? [0, 0, 0]), ([x, y, z]) => {
+        if (!last) {
+          if (x || y || z) this.applyEdgeMove([x, y, z]);
+          return;
+        }
+        if (same(last.v, [x, y, z])) return;
+        const moved = this.selection;
+        this.doc.undo();
+        const version = this.doc.version;
+        this.setSelection(last.edges); // (the gizmo back on the edges where they were)
+        if (!(x || y || z)) return; // (all 0: the drag is just taken back)
+        this.applyEdgeMove([x, y, z]);
+        if (this.doc.version === version) {
+          // (refused: put the dragged move back)
+          this.doc.redo();
+          this.setSelection(moved);
+        }
       }, "Move");
       return;
     }
@@ -2578,7 +2722,6 @@ class App implements ToolHost {
     };
     // Just dragged the gizmo? Edit that drag: same axis, prefilled with the dragged amount.
     const last = this.lastXf && this.lastXf.ids === ids.join() ? this.lastXf.r : null;
-    const r3 = (n: number) => +n.toFixed(3);
     if (last?.type === "rotate" && mode === "rotate") {
       const ax = last.axis.map((n) => Math.abs(n));
       const name = ax[0] > 0.999 ? "X" : ax[1] > 0.999 ? "Y" : ax[2] > 0.999 ? "Z" : "gizmo axis";
@@ -2677,6 +2820,25 @@ class App implements ToolHost {
   private duplicate(): void {
     this.endInteractions();
     const edgeSel = this.selection.filter((x) => x.kind === "edge");
+    // A closed loop of edges (a circle, or edges end to end round a face / a hole): copied as a flat face.
+    const loopBody = edgeSel.length === this.selection.length && new Set(edgeSel.map((x) => x.body)).size === 1 ? this.doc.get(edgeSel[0].body) : undefined;
+    if (loopBody && isBrep(loopBody) && isEdgeLoop(loopBody.shape, edgeSel.map((x) => x.id))) {
+      let face: Shape;
+      try {
+        face = edgeLoopFace(loopBody.shape, edgeSel.map((x) => x.id));
+      } catch (e) {
+        return this.toast(errorMessage(e), "error");
+      }
+      const b = this.doc.makeBody(face, "Face", "face");
+      this.doc.commit([...this.doc.bodies, b], "Duplicate loop");
+      this.setMode("body");
+      this.setSelection([{ kind: "body", body: b.id, id: 0 }]);
+      this.toast("Loop copied as a face — move it, then P to push/pull");
+      this.startTransform("translate");
+      this.placing = this.xf ? { ids: this.xf.ids.join(), version: this.doc.version } : null;
+      this.repeatCopyIds = String(b.id);
+      return;
+    }
     if (edgeSel.length === 1 && this.selection.length === 1) return this.startGuide(edgeSel[0].body, edgeSel[0].id);
     const faceSel = this.selection.filter((x) => x.kind === "face");
     if (faceSel.length && faceSel.length === this.selection.length) {
@@ -3007,7 +3169,7 @@ class App implements ToolHost {
     setTimeout(() => t.remove(), ms);
   }
 
-  /** Help walkthrough (Bird House, Cable Storage Box): which one, its next step (0 = not started) and the bodies it made. */
+  /** Help walkthrough (Bird House, Cable Storage Box, House, Planter): which one, its next step (0 = not started) and the bodies it made. */
   private tut: { def: Tutorial; step: number; ctx: TutCtx } | null = null;
 
   /** Open a walkthrough (another one replaces it), or close it if it is already open. */
@@ -3055,6 +3217,7 @@ class App implements ToolHost {
       this.hidden.clear();
       this.doc.reset();
       tut.ctx = new Map();
+      this.viewport.setView("iso"); // (the steps say "back left", "front top edge"... as seen from the start-up view)
     }
     this.endInteractions();
     try {
@@ -3095,7 +3258,7 @@ class App implements ToolHost {
       ["Click / Shift+click", "Select / add to selection"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
-      ["K", "Sketch on the selected flat face (or the ground): the view turns square to it with a 3D view in the corner · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch"],
+      ["K", "Sketch on the selected flat face (or the ground): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), Ctrl: round steps, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
@@ -3120,7 +3283,7 @@ class App implements ToolHost {
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
-      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or on an edge: add a guide line (like Shift+L)"],
+      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+L)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
@@ -3521,7 +3684,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo }; // used by the smoke test
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, splitFaceByLine }; // used by the smoke test
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

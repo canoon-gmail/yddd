@@ -17,7 +17,7 @@ const SCENARIO = String.raw`
   const vp = app.viewport;
   const V = vp.camera.position.constructor;
   const canvas = vp.canvas;
-  const S = (p) => vp.toScreen(new V(p[0], p[1], p[2]));
+  const S = (p) => window.__see(new V(p[0], p[1], p[2]));
   const ev = (type, p, extra = {}) => {
     const s = S(p);
     canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ...extra }));
@@ -68,7 +68,7 @@ const SCENARIO_2 = String.raw`
   const vp = app.viewport;
   const V = vp.camera.position.constructor;
   const canvas = vp.canvas;
-  const S = (p) => vp.toScreen(new V(p[0], p[1], p[2]));
+  const S = (p) => window.__see(new V(p[0], p[1], p[2]));
   const ev = (type, p) => { const s = S(p); canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ctrlKey: true })); }; // ctrlKey: Ctrl held = snapping on
   const toolClicks = (pts) => { for (const p of pts) { ev("pointermove", p); ev("pointerdown", p); } };
   const pickAt = (p, mode) => { const s = S(p); const k = vp.pick(s.x, s.y, mode); return k && { kind: k.kind, body: k.body, id: k.id }; };
@@ -293,7 +293,7 @@ const SCENARIO_3 = String.raw`
   const vp = app.viewport;
   const V = vp.camera.position.constructor;
   const canvas = vp.canvas;
-  const S = (p) => vp.toScreen(new V(p[0], p[1], p[2]));
+  const S = (p) => window.__see(new V(p[0], p[1], p[2]));
   const ev = (type, p) => { const s = S(p); canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ctrlKey: true })); };
   const toolClicks = (pts) => { for (const p of pts) { ev("pointermove", p); ev("pointerdown", p); } };
   const pickAt = (p, mode) => { const s = S(p); const k = vp.pick(s.x, s.y, mode); return k && { kind: k.kind, body: k.body, id: k.id }; };
@@ -554,6 +554,238 @@ const SCENARIO_3 = String.raw`
     expect("13 move edge threw", false, String(e && e.stack || e));
   }
 
+  // 13b) Move edge on a solid with a curved part elsewhere (box + cylinder): only the faces round the edge must be flat
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    // 40 × 30 × 20 box at x -20..20, y 685..715 with a R10 cylinder on its +X side; the -X face divided at z = 10
+    let u = K.booleanOp("union", K.makeBox(G, [0, 700, 0], 40, 30, 20), [K.makeCylinder(G, [25, 700, 0], 10, 30)]);
+    u = K.splitFaceByLine(u, [-20, 685, 10], [-20, 715, 10]);
+    const b = app.doc.makeBody(u, "Box + cylinder");
+    app.doc.commit([...app.doc.bodies, b], "box + cylinder");
+    const mid = (x = -20) => app.doc.get(b.id).shape.edges.find((e) => near(e.startPoint.x, x) && near(e.endPoint.x, x) && near(e.startPoint.z, 10) && near(e.endPoint.z, 10));
+    const v0 = K.solidVolume(app.doc.get(b.id).shape);
+    app.run("mode.edge");
+    app.setSelection([{ kind: "edge", body: b.id, id: mid().hashCode }]);
+    app.run("xf.move");
+    const started = !!(app.xf && app.xf.edges);
+    key("Tab", "Tab");
+    dialog([-5, 0, 0]);
+    const sh = app.doc.get(b.id).shape, moved = mid(-25), v1 = K.solidVolume(sh);
+    const curved = sh.faces.filter((f) => f.geomType === "CYLINDRE").length;
+    // (the -X side becomes a wedge sticking out 5: + 30 × 20 × 5 / 2)
+    expect("13b G on the divided edge of a box fused with a cylinder: moves it, the cylinder stays", started && K.isValidShape(sh) && !!moved && curved >= 1 && Math.abs(v1 - v0 - 1500) < 1e-3, { started, valid: K.isValidShape(sh), moved: !!moved, curved, dv: v1 - v0 });
+    key("Enter", "Enter");
+    app.setSelection([{ kind: "body", body: b.id, id: 0 }]); app.run("mode.body"); app.run("edit.delete");
+  } catch (e) {
+    expect("13b move edge (box + cylinder) threw", false, String(e && e.stack || e));
+  }
+
+  // 13c) …and a vertical edge whose ends lie on faces with arcs (the cylinder cuts into the top / bottom): those stay flat
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    // 40 × 30 × 20 box at x -20..20, y 685..715, a R10 cylinder round its back edge; the front face divided at x = 0
+    let u = K.booleanOp("union", K.makeBox(G, [0, 700, 0], 40, 30, 20), [K.makeCylinder(G, [0, 715, 0], 10, 30)]);
+    u = K.splitFaceByLine(u, [0, 685, 0], [0, 685, 20]);
+    const b = app.doc.makeBody(u, "Box + cylinder 2");
+    app.doc.commit([...app.doc.bodies, b], "box + cylinder 2");
+    const edgeAt = (y) => app.doc.get(b.id).shape.edges.find((e) => near(e.startPoint.x, 0) && near(e.endPoint.x, 0) && near(e.startPoint.y, y) && near(e.endPoint.y, y) && !near(e.startPoint.z, e.endPoint.z));
+    const v0 = K.solidVolume(app.doc.get(b.id).shape);
+    app.run("mode.edge");
+    app.setSelection([{ kind: "edge", body: b.id, id: edgeAt(685).hashCode }]);
+    app.run("xf.move");
+    const started = !!(app.xf && app.xf.edges);
+    key("Tab", "Tab");
+    dialog([0, -5, 0]);
+    const sh = app.doc.get(b.id).shape, v1 = K.solidVolume(sh);
+    const arcs = sh.edges.filter((e) => e.geomType === "CIRCLE").length;
+    // (a wedge out the front: 40 × 5 / 2 × 20)
+    expect("13c G on a vertical edge ending on faces with arcs (box + cylinder): moves it, the faces keep their arcs", started && K.isValidShape(sh) && !!edgeAt(680) && arcs >= 2 && Math.abs(v1 - v0 - 2000) < 1e-3, { started, valid: K.isValidShape(sh), moved: !!edgeAt(680), arcs, dv: v1 - v0 });
+    key("Enter", "Enter");
+    app.setSelection([{ kind: "body", body: b.id, id: 0 }]); app.run("mode.body"); app.run("edit.delete");
+  } catch (e) {
+    expect("13c move edge (vertical, faces with arcs) threw", false, String(e && e.stack || e));
+  }
+
+  // 13d) Shift+D on a closed loop of edges → a flat face copy (on the move gizmo); a single straight edge still starts a guide
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    const cyl = app.doc.makeBody(K.makeCylinder(G, [0, 900, 0], 10, 20), "Cylinder"), box = app.doc.makeBody(K.makeBox(G, [60, 900, 0], 40, 30, 20), "Box");
+    app.doc.commit([...app.doc.bodies, cyl, box], "loop shapes");
+    const area = (b) => b.shape.faces.reduce((s, f) => s + K.faceInfo(b.shape, f.hashCode).area, 0);
+    const dup = (items) => { app.run("mode.edge"); app.setSelection(items); const n = app.doc.bodies.length; key("D", "KeyD", { shiftKey: true }); const made = app.doc.bodies.length > n ? last() : null; const r = { made, gizmo: !!app.xf, mode: app.mode }; key("Escape", "Escape"); return r; };
+    // The cylinder's top circle (one closed edge)
+    const rim = app.doc.get(cyl.id).shape.edges.find((e) => e.geomType === "CIRCLE" && near(e.startPoint.z, 20));
+    const c = dup([{ kind: "edge", body: cyl.id, id: rim.hashCode }]);
+    const cOk = c.made && c.made.kind === "face" && Math.abs(area(c.made) - Math.PI * 100) < 1e-6 && c.gizmo && c.mode === "body";
+    // The box's 4 top edges (end to end, round the top face)
+    const tops = app.doc.get(box.id).shape.edges.filter((e) => near(e.startPoint.z, 20) && near(e.endPoint.z, 20));
+    const b = dup(tops.map((e) => ({ kind: "edge", body: box.id, id: e.hashCode })));
+    const bOk = tops.length === 4 && b.made && b.made.kind === "face" && Math.abs(area(b.made) - 1200) < 1e-6;
+    // 3 of them: not a loop → no face
+    const n3 = app.doc.bodies.length;
+    const t = dup(tops.slice(0, 3).map((e) => ({ kind: "edge", body: box.id, id: e.hashCode })));
+    const openOk = !(t.made && t.made.kind === "face");
+    if (app.doc.bodies.length > n3) app.run("edit.undo");
+    // One straight edge: the guide line tool, as before
+    app.run("mode.edge"); app.setSelection([{ kind: "edge", body: box.id, id: tops[0].hashCode }]);
+    key("D", "KeyD", { shiftKey: true });
+    const guide = app.tool && app.tool.name;
+    key("Escape", "Escape"); key("Escape", "Escape");
+    expect("13d Shift+D on a closed loop → a flat face copy on the gizmo (circle: π·10², box top: 40 × 30); 3 edges: no face; one edge: guide", cOk && bOk && openOk && guide === "Guide line",
+      { c: c.made && { kind: c.made.kind, area: area(c.made), gizmo: c.gizmo, mode: c.mode }, b: b.made && { kind: b.made.kind, area: area(b.made) }, tops: tops.length, openOk, guide });
+    app.run("mode.body");
+    app.setSelection([cyl, box, c.made, b.made].filter(Boolean).map((x) => ({ kind: "body", body: x.id, id: 0 }))); app.run("edit.delete");
+  } catch (e) {
+    expect("13d Shift+D on a loop threw", false, String(e && e.stack || e));
+  }
+
+  // 13e) Scale: the ring dragged with Shift scales about the centre (without: the base stays put); the X / Y / Z boxes ignore Shift
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const r3 = (v) => Math.round(v * 1e6) / 1e6;
+    const bx = app.doc.makeBody(K.makeBox(G, [0, 1100, 0], 40, 30, 20), "Box");
+    app.doc.commit([...app.doc.bodies, bx], "scale box");
+    const ringDrag = async (shift) => {
+      app.run("mode.body"); app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("xf.scale"); await sleep(30);
+      const drags = app.op.spec.drag, ri = drags.findIndex((d) => d.look === "ring");
+      {
+        // (the ring's axis pointing near the camera can't be dragged on screen: then from the top)
+        const d0 = drags[ri], a = vp.toScreen(new V(...d0.origin)), b = vp.toScreen(new V(...d0.origin).addScaledVector(new V(...d0.dir).normalize(), 10));
+        if (Math.hypot(b.x - a.x, b.y - a.y) < 10) { vp.setView("top"); vp.fit([bx.id]); await sleep(30); }
+      }
+      app.op.active = ri; app.op.anchor = undefined;
+      const h = document.querySelectorAll("#op-handles .op-handle")[ri].getBoundingClientRect();
+      const x0 = h.left + h.width / 2, y0 = h.top + h.height / 2;
+      app.opDrag(new PointerEvent("pointermove", { clientX: x0, clientY: y0, shiftKey: shift }));
+      // outward along the ring's axis on screen (from the base — or with Shift the centre — to the corner)
+      const drag = drags[ri], o = new V(...app.dragOrigin(drag)), dv = new V(...app.dragDir(drag)).normalize();
+      const s0 = vp.toScreen(o), s1 = vp.toScreen(o.clone().addScaledVector(dv, 10)), ul = Math.hypot(s1.x - s0.x, s1.y - s0.y), ux = s1.x - s0.x, uy = s1.y - s0.y;
+      for (const k of [20, 40, 60]) app.opDrag(new PointerEvent("pointermove", { clientX: x0 + ux / ul * k, clientY: y0 + uy / ul * k, shiftKey: shift }));
+      const box = document.querySelector("#op-panel input[data-key=center]").checked, sv = Number(document.querySelector("#op-panel input[data-key=s]").value);
+      app.applyOp(); await sleep(30);
+      const [lo, hi] = app.doc.get(bx.id).shape.boundingBox.bounds;
+      return { box, sv, lo: lo.map(r3), hi: hi.map(r3) };
+    };
+    const a = await ringDrag(true);
+    const aOk = a.box && a.sv > 101 && Math.abs((a.lo[2] + a.hi[2]) / 2 - 10) < 1e-6 && a.lo[2] < -1e-3 && Math.abs((a.lo[1] + a.hi[1]) / 2 - 1100) < 1e-6;
+    app.run("edit.undo"); await sleep(30);
+    const b = await ringDrag(false);
+    const bOk = !b.box && b.sv > 101 && Math.abs(b.lo[2]) < 1e-6 && b.hi[2] > 20.001;
+    app.run("edit.undo"); await sleep(30);
+    // An axis box with Shift: no centre checkbox change
+    app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("xf.scale"); await sleep(30);
+    const xi = app.op.spec.drag.findIndex((d) => d.key === "x");
+    app.op.active = xi; app.op.anchor = undefined;
+    app.opDrag(new PointerEvent("pointermove", { clientX: 100, clientY: 100, shiftKey: true }));
+    app.opDrag(new PointerEvent("pointermove", { clientX: 140, clientY: 100, shiftKey: true }));
+    const xBox = document.querySelector("#op-panel input[data-key=center]").checked;
+    app.cancelOp();
+    expect("13e Scale ring + Shift: about the centre (centre stays at z 10); without Shift: base stays at z 0; X box ignores Shift", aOk && bOk && !xBox, { a, b, xBox });
+    app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("edit.delete");
+  } catch (e) {
+    expect("13e scale ring + Shift threw", false, String(e && e.stack || e));
+  }
+
+  // 13f) Scale panel: sizes typed into the % fields — X "+10mm", Z "-5mm"; Scale "60mm" (the longest side → 60)
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const bx = app.doc.makeBody(K.makeBox(G, [0, 1200, 0], 40, 30, 20), "Box");
+    app.doc.commit([...app.doc.bodies, bx], "scale box mm");
+    const field = (k) => document.querySelector("#op-panel input[data-key=" + k + "]");
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("xf.scale"); await sleep(30);
+    opValue("x", "+10mm"); opValue("z", "-5 mm");
+    field("x").dispatchEvent(new Event("change", { bubbles: true }));
+    const shownX = field("x").value;
+    app.applyOp(); await sleep(30);
+    const s1 = size(bx.id);
+    app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("xf.scale"); await sleep(30);
+    opValue("s", "60mm"); app.applyOp(); await sleep(30);
+    const s2 = size(bx.id);
+    app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("xf.scale"); await sleep(30);
+    opValue("y", "+10%"); app.applyOp(); await sleep(30);
+    const s3 = size(bx.id);
+    expect("13f Scale fields take sizes: X +10mm → 50 (shown 125), Z -5mm → 15; Scale 60mm → longest side 60; Y +10% → ×1.1", eq(s1, [50, 30, 15]) && shownX === "125" && eq(s2, [60, 36, 18]) && eq(s3, [60, 39.6, 18]), { s1, shownX, s2, s3 });
+    app.setSelection([{ kind: "body", body: bx.id, id: 0 }]); app.run("edit.delete");
+  } catch (e) {
+    expect("13f scale sizes threw", false, String(e && e.stack || e));
+  }
+
+  // 13g) Tapered planter (300 square top, 220 bottom, 450 high): box, G each bottom edge 40 inward (Tab), Shell the top open
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    const pl = app.doc.makeBody(K.makeBox(G, [0, 2000, 0], 300, 300, 450), "Planter");
+    app.doc.commit([...app.doc.bodies, pl], "planter box");
+    const sh = () => app.doc.get(pl.id).shape;
+    // bottom edge on a side (x = ±150 or y = 2000 ± 150 — where it is before its own move), moved 40 inward
+    const sides = [[(e) => near(e.startPoint.y, 1850) && near(e.endPoint.y, 1850), [0, 40, 0]], [(e) => near(e.startPoint.y, 2150) && near(e.endPoint.y, 2150), [0, -40, 0]],
+      [(e) => near(e.startPoint.x, -150) && near(e.endPoint.x, -150), [40, 0, 0]], [(e) => near(e.startPoint.x, 150) && near(e.endPoint.x, 150), [-40, 0, 0]]];
+    app.run("mode.edge");
+    const moved = [];
+    for (const [pick, d] of sides) {
+      const e = sh().edges.find((e) => near(e.startPoint.z, 0) && near(e.endPoint.z, 0) && pick(e));
+      moved.push(!!e);
+      if (!e) break;
+      app.setSelection([{ kind: "edge", body: pl.id, id: e.hashCode }]); app.run("xf.move");
+      key("Tab", "Tab"); dialog(d); key("Enter", "Enter"); await sleep(20);
+    }
+    const tapered = sh(), [lo, hi] = tapered.boundingBox.bounds;
+    const bottom = tapered.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] < -0.99);
+    const bb = bottom && bottom.boundingBox.bounds;
+    const frustum = 450 / 3 * (300 * 300 + 220 * 220 + 300 * 220), v0 = K.solidVolume(tapered);
+    const top = tapered.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] > 0.99);
+    app.run("mode.face"); app.setSelection([{ kind: "face", body: pl.id, id: top.hashCode }]); app.run("op.shell"); opValue("t", 30); app.applyOp(); await sleep(30);
+    const v1 = K.solidVolume(sh());
+    // Hollow: the cavity is a frustum from z 30 to 450, its sides 2 × 30 / cos(taper) narrower than the outside's
+    const w = 2 * 30 * Math.hypot(450, 40) / 450, side = (z) => 220 + 80 * z / 450 - w, a = side(450), b = side(30);
+    const shelled = v0 - 420 / 3 * (a * a + b * b + a * b);
+    expect("13g tapered planter: 4 bottom edges G'd 40 inward → 220 square bottom, 6 flat faces, frustum volume; Shell 30 top open → hollow",
+      moved.every(Boolean) && moved.length === 4 && tapered.faces.length === 6 && bb && near(bb[1][0] - bb[0][0], 220) && near(bb[1][1] - bb[0][1], 220) && near(hi[0] - lo[0], 300) && near(hi[2] - lo[2], 450)
+        && Math.abs(v0 - frustum) < 1e-3 && K.isValidShape(sh()) && Math.abs(v1 - shelled) < 1e-2,
+      { moved, faces: tapered.faces.length, bottom: bb && [bb[1][0] - bb[0][0], bb[1][1] - bb[0][1]], v0, frustum, v1, shelled });
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: pl.id, id: 0 }]); app.run("edit.delete");
+  } catch (e) {
+    expect("13g tapered planter threw", false, String(e && e.stack || e));
+  }
+
+  // 13h) Move edge: Tab right after a drag shows that drag's offset; OK replaces it (one undo step back to the box)
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const near = (a, b) => Math.abs(a - b) < 1e-6;
+    const pb = app.doc.makeBody(K.makeBox(G, [0, 2600, 0], 300, 300, 450), "Box");
+    app.doc.commit([...app.doc.bodies, pb], "edge tab box");
+    const sh = () => app.doc.get(pb.id).shape;
+    const e = sh().edges.find((e) => near(e.startPoint.z, 0) && near(e.endPoint.z, 0) && near(e.startPoint.y, 2450) && near(e.endPoint.y, 2450));
+    app.run("mode.edge"); app.setSelection([{ kind: "edge", body: pb.id, id: e.hashCode }]); app.run("xf.move");
+    app.applyEdgeMove([7, 0, 0], true); // (what a drag of the gizmo along X ends with)
+    key("Tab", "Tab"); await sleep(20);
+    const d = document.getElementById("props-dlg");
+    const shown = d ? [...d.querySelectorAll("input")].map((i) => Number(i.value)) : null, title = d && d.textContent;
+    dialog([0, 40, 0]); await sleep(20);
+    const [lo, hi] = sh().boundingBox.bounds;
+    const bottom = sh().faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] < -0.99), bb = bottom.boundingBox.bounds;
+    const after = { x: [lo[0], hi[0]], bottomY: bb[0][1], faces: sh().faces.length, sel: app.selection.length, gizmo: !!(app.xf && app.xf.edges) };
+    // A drag on that edge, then another edge picked: Tab starts from 0 (it doesn't touch the other's drag)
+    app.applyEdgeMove([5, 0, 0], true);
+    const other = sh().edges.find((e) => near(e.startPoint.z, 450) && near(e.endPoint.z, 450) && near(e.startPoint.y, 2750) && near(e.endPoint.y, 2750));
+    app.setSelection([{ kind: "edge", body: pb.id, id: other.hashCode }]); await sleep(20);
+    key("Tab", "Tab"); await sleep(20);
+    const d2 = document.getElementById("props-dlg"), shown2 = d2 ? [...d2.querySelectorAll("input")].map((i) => Number(i.value)).join() : null;
+    if (d2) d2.querySelector("[data-act=cancel]")?.click();
+    key("Escape", "Escape"); key("Enter", "Enter"); await sleep(20);
+    app.run("edit.undo"); await sleep(20);
+    app.run("edit.undo"); await sleep(20);
+    const back = sh().faces.length === 6 && near(sh().boundingBox.bounds[0][1], 2450) && K.solidVolume(sh()) > 300 * 300 * 450 - 1e-3;
+    expect("13h Move edge: Tab after a drag shows it (7, 0, 0 — 'last drag'), typed 0, 40, 0 replaces it; one undo → the box", !!shown && shown.join() === "7,0,0" && /last drag/.test(title) && near(after.x[0], -150) && near(after.x[1], 150) && near(after.bottomY, 2490) && after.faces === 6 && after.sel === 1 && after.gizmo && back && shown2 === "0,0,0",
+      { shown, title: title && title.slice(0, 40), after, back, shown2 });
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: pb.id, id: 0 }]); app.run("edit.delete");
+  } catch (e) {
+    expect("13h edge move Tab after drag threw", false, String(e && e.stack || e));
+  }
+
   // 14) Divide face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
   try {
     const valid = window.y3dKernel.isValidShape;
@@ -723,7 +955,7 @@ const SCENARIO_3 = String.raw`
     const [a, b] = app.doc.get(sid).shape.boundingBox.bounds;
     const c = [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
     await sleep(50);
-    const o = S(c); const sp = vp.snapPoint(o.x + 3, o.y + 2);
+    const o = vp.toScreen(new V(...c)); const sp = vp.snapPoint(o.x + 3, o.y + 2); // (inside the sphere on purpose: not __see)
     expect("18 sphere centre snap", sp && sp.kind === "center" && sp.point.distanceTo(new V(...c)) < 1e-6, sp && [sp.kind, sp.point.toArray().map(r), c.map(r)]);
     app.setSelection([{ kind: "body", body: sid, id: 0 }]); app.run("edit.delete");
   } catch (e) {
@@ -791,10 +1023,14 @@ const SCENARIO_3 = String.raw`
     const sid = last().id;
     const [a, b] = app.doc.get(sid).shape.boundingBox.bounds;
     const c = [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
-    app.setSelection([{ kind: "body", body: sid, id: 0 }]); app.run("view.front"); app.run("view.fitSelection"); app.setSelection([]); await sleep(50);
+    app.setSelection([{ kind: "body", body: sid, id: 0 }]); app.run("view.front");
+    // (straight from the front — what this check is about — also when an orbit run turns every view)
+    const camDist = vp.camera.position.distanceTo(vp.controls.target);
+    vp.camera.position.copy(vp.controls.target).add(new V(0, -camDist, 0)); vp.controls.update();
+    app.run("view.fitSelection"); app.setSelection([]); await sleep(50);
     const at = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
     const guideFromCentre = (dx, dy) => {
-      const o = S(c);
+      const o = vp.toScreen(new V(...c)); // (the centre, inside the sphere on purpose: not __see)
       app.run("tool.guide");
       at("pointermove", o.x + 2, o.y + 1); at("pointerdown", o.x + 2, o.y + 1);
       at("pointermove", o.x + dx, o.y + dy); at("pointerdown", o.x + dx, o.y + dy);
@@ -1370,14 +1606,17 @@ const SCENARIO_3 = String.raw`
     app.run("tool.guide");
     plain("pointermove", [0, 0, 20]); plain("pointerdown", [0, 0, 20]);
     plain("pointermove", [15, 0, 20]);
+    const hudFirst = app.hudEl.textContent; // (X or Y — whichever runs across the screen)
+    key("x", "KeyX");
+    plain("pointermove", [15, 0, 20]);
     const hudX = app.hudEl.textContent;
     key("y", "KeyY");
     plain("pointermove", [0, 15, 20]);
     const hudY = app.hudEl.textContent;
     plain("pointerdown", [0, 15, 20]);
     const zg = app.doc.guides[app.doc.guides.length - 1];
-    const zOk = hudX === "X = 15" && hudY === "Y = 15" && !!zg && r(zg.a[0]) === 0 && r(zg.a[1]) === 15 && r(zg.b[1]) === 15 && zg.a[2] < -100 && zg.b[2] > 100;
-    expect("40c guide from Z: label X = 15, Y key → moves along Y (Y = 15)", zOk, { hudX, hudY, guide: zg && { a: zg.a.map(r), b: zg.b.map(r) } });
+    const zOk = /^[XY] = -?[\d.]+$/.test(hudFirst) && hudX === "X = 15" && hudY === "Y = 15" && !!zg && r(zg.a[0]) === 0 && r(zg.a[1]) === 15 && r(zg.b[1]) === 15 && zg.a[2] < -100 && zg.b[2] > 100;
+    expect("40c guide from Z: the label names its direction; X key → X = 15, Y key → Y = 15", zOk, { hudFirst, hudX, hudY, guide: zg && { a: zg.a.map(r), b: zg.b.map(r) } });
     expect("40b iso view: X-axis guide on the ground (z = 0); G moves it up 10", isoOk && !!moved && r(moved.a[2]) === 10 && r(moved.b[2]) === 10 && r(moved.a[1]) === 25,
       { iso: iso && { a: iso.a.map(r), b: iso.b.map(r) }, moved: moved && { a: moved.a.map(r), b: moved.b.map(r) } });
     app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guides");
@@ -1396,9 +1635,12 @@ const SCENARIO_3 = String.raw`
     const bx = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 12, 12, 8), "Small");
     app.doc.commit([...app.doc.bodies, bx], "box");
     const g0 = app.doc.guides.length;
-    app.doc.setGuides([...app.doc.guides, { a: [-500, 7.17, 0], b: [500, 7.17, 0], n: [0, 1, 0] }], "guide");
     vp.setView("iso"); vp.fit([bx.id]); await sleep(30);
-    const rect = vp.canvas.getBoundingClientRect(), A = new V(-500, 7.17, 0), B = new V(500, 7.17, 0);
+    // (along X or Y — whichever the camera looks along more, so the guide runs past it from any view)
+    const look = vp.controls.target.clone().sub(vp.camera.position), alongX = Math.abs(look.x) >= Math.abs(look.y);
+    const ga = alongX ? [-500, 7.17, 0] : [7.17, -500, 0], gb = alongX ? [500, 7.17, 0] : [7.17, 500, 0];
+    app.doc.setGuides([...app.doc.guides, { a: ga, b: gb, n: alongX ? [0, 1, 0] : [1, 0, 0] }], "guide"); await sleep(30);
+    const rect = vp.canvas.getBoundingClientRect(), A = new V(...ga), B = new V(...gb);
     const behind = [A, B].filter((P) => P.clone().applyMatrix4(vp.camera.matrixWorldInverse).z > 0).length;
     let visible = 0, picked = 0;
     for (let k = 0; k <= 400; k++) {
@@ -1585,6 +1827,111 @@ const SCENARIO_STEP = String.raw`
 `;
 
 /** Help → Bird House: the walkthrough builds a valid bird house step by step; Back undoes a step. */
+/** Help → House: every step valid, then one hollow L-shaped house with valleys, chimney, door and window. */
+const SCENARIO_HOUSE = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
+  const press = async (act) => { document.querySelector("#tutorial button[data-act=" + act + "]").click(); await sleep(60); };
+  app.doc.dirty = false;
+  document.querySelectorAll("#toasts .toast").forEach((t) => t.remove()); // (older ones would expire mid-way and upset the count)
+  app.run("help.house"); await sleep(30);
+  const panel = document.getElementById("tutorial");
+  const titles = [...panel.querySelectorAll("li b:first-child")].map((b) => b.textContent);
+  const total = titles.length;
+  expect("house: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "House" && total === 12, titles);
+  const before = toasts().length, vols = {};
+  for (let i = 0; i < total; i++) {
+    if (titles[i] === "Push the wing back") {
+      // By hand, as the step says: Shift+G on the wing, press the top of its back gable, drag (then Ctrl + Shift) onto the main ridge
+      const vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+      const pe = (type, p, mods = {}) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(type, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true, ...mods })); };
+      const wing = app.doc.bodies.find((b) => b.name === "Wing 1");
+      app.run("mode.body"); app.setSelection([{ kind: "body", body: wing.id, id: 0 }]);
+      app.run("xf.moveFrom"); await sleep(30);
+      const tool = app.tool && app.tool.name;
+      pe("pointermove", [-45, -35, 65]); pe("pointerdown", [-45, -35, 65]);
+      const mods = { ctrlKey: true, shiftKey: true };
+      for (const y of [-25, -12, -3]) pe("pointermove", [-43, y, 65], mods);
+      pe("pointermove", [-42, 0, 65], mods); pe("pointerup", [-42, 0, 65], mods); await sleep(30);
+      const wb = app.doc.get(wing.id).shape.boundingBox.bounds, r = (v) => Math.round(v * 1e6) / 1e6;
+      expect("house: Shift+G from the wing's back gable top, Ctrl + Shift onto the main ridge → exactly 35 back", tool === "Move from point" && [wb[0].map(r), wb[1].map(r)].join() === "-80,-95,0,-10,0,65", { tool, lo: wb[0].map(r), hi: wb[1].map(r) });
+      app.run("edit.undo"); await sleep(30);
+      app.setSelection([]);
+    }
+    await press("do");
+    const bad = app.doc.bodies.filter((b) => !K.isValidShape(b.shape)).map((b) => b.name);
+    if (bad.length || toasts().length > before) { expect("house: step " + (i + 1) + " valid", false, { bad, errors: toasts() }); break; }
+    const h = app.doc.bodies.find((b) => b.name === "House 1");
+    vols[titles[i]] = h && K.solidVolume(h.shape);
+  }
+  const names = app.doc.bodies.map((b) => b.name);
+  expect("house: all steps done, no errors, one body", panel.querySelectorAll("li.done").length === total && toasts().length === before && names.join() === "House 1", { done: panel.querySelectorAll("li.done").length, errors: toasts(), names });
+  const h = app.doc.bodies[0];
+  if (h) {
+    const [lo, hi] = h.shape.boundingBox.bounds, r = (v) => Math.round(v * 1000) / 1000;
+    // Solid (before Shell): main 160×70×40 + roof, wing 70×95×40 + roof, less their overlap (box + where
+    // the roofs overlap: 70 × 35 × 25/3), and the chimney above the roof
+    const solid = (160 * 70 * 40 + 0.5 * 70 * 25 * 160) + (70 * 95 * 40 + 0.5 * 70 * 25 * 95) - (70 * 35 * 40 + 70 * 35 * 25 / 3) + (8 * 8 * 72 - 8 * (65 * 8 - (25 / 70) * (18 * 18 - 10 * 10)));
+    const shelled = vols["Hollow it"], door = vols["Hollow it"] - vols["Door"], win = vols["Door"] - vols["Window"];
+    expect("house: L-shaped, 72 high with the chimney; solid, then hollow (3 mm walls, open below)", [lo.map(r), hi.map(r)].join() === "-80,-95,0,80,35,72" && Math.abs(vols["Chimney"] - solid) < 1e-3 && shelled > 0.1 * solid && shelled < 0.3 * solid,
+      { lo: lo.map(r), hi: hi.map(r), solid: vols["Chimney"], want: solid, shelled });
+    expect("house: door and window cut right through the 3 mm wall", Math.abs(door - 16 * 30 * 3) < 1e-3 && Math.abs(win - 18 * 14 * 3) < 1e-3, { door, win });
+  }
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("house scenario failed: " + JSON.stringify(failed));
+  return checks;
+})()
+`;
+
+/** Help → Planter: every step valid; the tapered frustum, hollowed (exact volume), then the drainage hole. */
+const SCENARIO_PLANTER = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
+  const press = async (act) => { document.querySelector("#tutorial button[data-act=" + act + "]").click(); await sleep(60); };
+  app.doc.dirty = false;
+  document.querySelectorAll("#toasts .toast").forEach((t) => t.remove()); // (older ones would expire mid-way and upset the count)
+  app.run("help.planter"); await sleep(30);
+  const panel = document.getElementById("tutorial");
+  const titles = [...panel.querySelectorAll("li b:first-child")].map((b) => b.textContent);
+  const total = titles.length;
+  expect("planter: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Planter" && total === 7, titles);
+  const before = toasts().length, vols = {}, faces = {};
+  for (let i = 0; i < total; i++) {
+    await press("do");
+    const bad = app.doc.bodies.filter((b) => !K.isValidShape(b.shape)).map((b) => b.name);
+    if (bad.length || toasts().length > before) { expect("planter: step " + (i + 1) + " valid", false, { bad, errors: toasts() }); break; }
+    const p = app.doc.bodies.find((b) => b.name === "Planter 1");
+    vols[titles[i]] = p && K.solidVolume(p.shape);
+    faces[titles[i]] = p && p.shape.faces.length;
+  }
+  const names = app.doc.bodies.map((b) => b.name);
+  expect("planter: all steps done, no errors, one body", panel.querySelectorAll("li.done").length === total && toasts().length === before && names.join() === "Planter 1", { done: panel.querySelectorAll("li.done").length, errors: toasts(), names });
+  const p = app.doc.bodies[0];
+  if (p) {
+    const [lo, hi] = p.shape.boundingBox.bounds, r = (v) => Math.round(v * 1000) / 1000;
+    const frustum = 450 / 3 * (300 * 300 + 220 * 220 + 300 * 220);
+    // Hollow: the cavity is a frustum from z 30 to 450, its sides 2 × 30 / cos(taper) narrower than the outside's
+    const w = 2 * 30 * Math.hypot(450, 40) / 450, side = (z) => 220 + 80 * z / 450 - w, a = side(450), b = side(30);
+    const shelled = frustum - 420 / 3 * (a * a + b * b + a * b), hole = Math.PI * 15 * 15 * 30;
+    const v = vols, ok = Math.abs(v["Taper the right"] - frustum) < 1e-3 && faces["Taper the right"] === 6 && Math.abs(v["Hollow it"] - shelled) < 1e-2 && Math.abs(v["Hollow it"] - v["Drainage hole"] - hole) < 1e-2;
+    expect("planter: 300 top, 220 bottom, 450 high; frustum, hollow (30 walls, open top), 30 mm hole through the floor",
+      [lo.map(r), hi.map(r)].join() === "-150,-150,0,150,150,450" && ok,
+      { lo: lo.map(r), hi: hi.map(r), tapered: v["Taper the right"], frustum, faces: faces["Taper the right"], hollow: v["Hollow it"], shelled, hole: v["Hollow it"] - v["Drainage hole"], wantHole: hole });
+  }
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("planter scenario failed: " + JSON.stringify(failed));
+  return checks;
+})()
+`;
+
 const SCENARIO_BIRD = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1605,7 +1952,7 @@ const SCENARIO_BIRD = String.raw`
       const vp = app.viewport, V = vp.camera.position.constructor;
       const base = app.doc.bodies.find((b) => b.name === "Base 1"), house = app.doc.bodies.find((b) => b.name === "House 1");
       vp.setView("top"); vp.flipView(); vp.fit(); await sleep(50);
-      const at = () => { const sc = vp.toScreen(new V(20, 20, 15)); return vp.pick(sc.x, sc.y, "face"); };
+      const at = () => { const sc = vp.toScreen(new V(20, 20, 15)); return vp.pick(sc.x, sc.y, "face"); }; // (hidden on purpose: not __see)
       const covered = at();
       const eye = () => document.querySelector('#outliner .ol-row[data-id="' + base.id + '"] .ol-eye').click();
       eye(); await sleep(50);
@@ -1653,19 +2000,26 @@ const SCENARIO_CABLE = String.raw`
   const r = (n) => +n.toFixed(3);
   const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
   const press = async (act) => { document.querySelector("#tutorial button[data-act=" + act + "]").click(); await sleep(60); };
-  const ev = (type, p) => { const s = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ctrlKey: true })); };
+  const ev = (type, p) => { const s = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ctrlKey: true })); };
   const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
   const dialog = (vals) => { const d = document.getElementById("props-dlg"); if (!d) return false; const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => { if (q[i]) q[i].value = String(v); }); d.requestSubmit(); return true; };
   app.doc.dirty = false;
+  vp.setView("top"); vp.flipView(); // (looking from below: Start must turn back to the start-up iso view — the steps say "back left"...)
+  document.querySelectorAll("#toasts .toast").forEach((t) => t.remove()); // (older ones would expire mid-way and upset the count)
   app.run("help.cablebox"); await sleep(30);
   const panel = document.getElementById("tutorial");
   const total = panel.querySelectorAll("li").length;
   expect("cable: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Cable storage box" && total === 6, total);
   const before = toasts().length;
   for (let i = 0; i < total; i++) {
+    if (i === 1) {
+      const dir = () => vp.camera.position.clone().sub(vp.controls.target).normalize(), o = dir(), pos = vp.camera.position.clone();
+      vp.setView("iso"); const iso = dir(); vp.camera.position.copy(pos); vp.controls.update();
+      expect("cable: Start turns the view to the start-up iso view", o.dot(iso) > 0.9999, { o: o.toArray(), iso: iso.toArray() });
+    }
     if (i === 3) {
       // "First divider" by hand: Box tool, Ctrl-click the back-left inner floor corner, a little inside, Tab 4 × 112 × 56
-      app.run("view.iso"); vp.fit(); await sleep(50);
+      vp.fit(); await sleep(50);
       const n0 = app.doc.bodies.length;
       app.run("tool.box");
       ev("pointermove", [-116, 56, 4]); ev("pointerdown", [-116, 56, 4]);
@@ -1718,7 +2072,7 @@ const SCENARIO_MEASURE = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "=", code: "Equal", bubbles: true, cancelable: true }));
   await sleep(20);
   expect("measure: = starts the Measure tool", app.tool && app.tool.name === "Measure", app.tool && app.tool.name);
-  const hover = async (p) => { const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); return app.hudEl.hidden ? null : app.hudEl.textContent; };
+  const hover = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); return app.hudEl.hidden ? null : app.hudEl.textContent; };
   const cases = [
     ["corner", [20, -15, 20], "Corner\nX 20  Y -15  Z 20"],
     ["edge", [5, -15, 20], "Edge\nLength 40 mm"],
@@ -1731,7 +2085,7 @@ const SCENARIO_MEASURE = String.raw`
     expect("measure: hover " + what, got === want, got);
   }
   expect("measure: the hovered face is highlighted, nothing selected", app.selection.length === 0, app.selection);
-  const click = async (p) => { await hover(p); const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); };
+  const click = async (p) => { await hover(p); const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); };
   const esc = async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20); };
   const panel = () => document.getElementById("measure-panel")?.textContent.replace(/\s+/g, " ") ?? "";
   await click([20, -15, 20]); await click([-20, -15, 20]);
@@ -1745,9 +2099,9 @@ const SCENARIO_MEASURE = String.raw`
   {
     // Off any snap point, a few pixels beside the X direction from the 1st point: locked onto the X axis
     // (a spot with no point or edge under it — those win over the lock)
-    const s1 = vp.toScreen(new V(20, -15, 20));
+    const s1 = window.__see(new V(20, -15, 20));
     const spot = [20, 25, 30, 35, 40, 45].map((dx) => {
-      const s2 = vp.toScreen(new V(20 + dx, -15, 20)), ux = s2.x - s1.x, uy = s2.y - s1.y, ul = Math.hypot(ux, uy);
+      const s2 = window.__see(new V(20 + dx, -15, 20)), ux = s2.x - s1.x, uy = s2.y - s1.y, ul = Math.hypot(ux, uy);
       return { dx, x: s2.x - uy / ul * 2, y: s2.y + ux / ul * 2 };
     }).find((q) => !vp.snapPoint(q.x, q.y) && !vp.pick(q.x, q.y, "edge"));
     if (spot) canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: spot.x, clientY: spot.y, button: 0, bubbles: true })); await sleep(20);
@@ -1758,7 +2112,9 @@ const SCENARIO_MEASURE = String.raw`
   // Cylinder height: a point on the bottom circle, then the top circle a little off straight up → the point on the top circle straight above
   app.run("tool.measure"); await sleep(20);
   const rim = (a, z) => [60 + 10 * Math.cos(a), 10 * Math.sin(a), z];
-  await click(rim(-1.2, 0)); await hover(rim(-1.15, 30));
+  // (on the side facing the camera — the default view: -1.2)
+  const facing = Math.atan2(vp.camera.position.y - vp.controls.target.y, vp.camera.position.x - vp.controls.target.x) - 0.324;
+  await click(rim(facing, 0)); await hover(rim(facing + 0.05, 30));
   const hudH = app.hudEl.hidden ? null : app.hudEl.textContent;
   expect("measure: on a curve near the Z direction → the curve's point straight above (cylinder height 30)", /Length 30 mm ΔX 0ΔY 0ΔZ 30/.test(panel()) && /^On Z axis/.test(hudH ?? ""), { panel: panel(), hud: hudH });
   await esc();
@@ -1783,7 +2139,7 @@ const SCENARIO_MEASURE = String.raw`
   await key("Escape", "Escape");
   expect("dimension: Tab on an edge previews it, Esc cancels and stays in Measure", preview === "40" && app.doc.dimensions.length === 0 && app.tool && app.tool.name === "Measure", { preview, dims: app.doc.dimensions.length, tool: app.tool && app.tool.name });
   await hover([5, -15, 20]); await key("Tab", "Tab"); await hover([5, -15, 32]);
-  const sc = vp.toScreen(new V(5, -15, 32)); canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(30);
+  const sc = window.__see(new V(5, -15, 32)); canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(30);
   const dim = app.doc.dimensions[0];
   const near = (p, q) => p.every((v, k) => Math.abs(v - q[k]) < 1e-6);
   expect("dimension: placed on the edge's ends, offset square to it, text 40", app.doc.dimensions.length === 1 && [dim.a, dim.b].some((p) => near(p, [20, -15, 20])) && [dim.a, dim.b].some((p) => near(p, [-20, -15, 20])) && Math.abs(dim.o[0]) < 1e-6 && Math.hypot(...dim.o) > 2 && labels().join() === "40",
@@ -1837,9 +2193,13 @@ const SCENARIO_MEASURE = String.raw`
   {
     app.run("tool.measure"); await sleep(20);
     const n0 = app.doc.dimensions.length;
-    await click([-20, -15, 20]); await click([20, 15, 20]); await key("Tab", "Tab"); await hover([0, 0, 35]);
+    await click([-20, -15, 20]); await click([20, 15, 20]); await key("Tab", "Tab");
+    // Place it 60 px beside the line on screen (from any view, well off the line)
+    const sa = window.__see(new V(-20, -15, 20)), sb = window.__see(new V(20, 15, 20)), ll = Math.hypot(sb.x - sa.x, sb.y - sa.y) || 1;
+    const at = { clientX: (sa.x + sb.x) / 2 - ((sb.y - sa.y) / ll) * 60, clientY: (sa.y + sb.y) / 2 + ((sb.x - sa.x) / ll) * 60, button: 0, bubbles: true };
+    canvas.dispatchEvent(new PointerEvent("pointermove", at)); await sleep(20);
     const preview = document.querySelector("#dim-labels .dim-label.preview")?.textContent;
-    await click([0, 0, 35]);
+    canvas.dispatchEvent(new PointerEvent("pointerdown", at)); canvas.dispatchEvent(new PointerEvent("pointerup", at)); await sleep(20);
     const d = app.doc.dimensions[n0];
     const near = (p, q) => p.every((v, k) => Math.abs(v - q[k]) < 1e-6);
     expect("dimension: 2 clicks + Tab dimensions the measured length (50), then a new measurement", preview === "50" && app.doc.dimensions.length === n0 + 1 && d.body === undefined && near(d.a, [-20, -15, 20]) && near(d.b, [20, 15, 20]) && Math.hypot(...d.o) > 2 && labels().includes("50") && !/Length/.test(panel()),
@@ -1911,7 +2271,7 @@ const SCENARIO_SKETCH = String.raw`
   app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(100);
   const key = async (k, extra = {}) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra })); await sleep(10); };
   const type = async (text) => { for (const ch of text) await key(ch); await key("Enter"); };
-  const pe = (t, p) => { const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+  const pe = (t, p) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
   const hover = async (p) => { pe("pointermove", p); await sleep(10); };
   const click = async (p) => { pe("pointermove", p); pe("pointerdown", p); pe("pointerup", p); await sleep(10); };
   const area = (b) => b.shape.faces.reduce((s, f) => s + K.faceInfo(b.shape, f.hashCode).area, 0);
@@ -2062,7 +2422,7 @@ const SCENARIO_SKETCH = String.raw`
   const hovered = JSON.stringify(app.tool.hoverItem);
   await click([320, 15, 0]);
   const one = JSON.stringify(app.tool.selected);
-  const pe2 = (t, p, extra) => { const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true, ...extra })); };
+  const pe2 = (t, p, extra) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true, ...extra })); };
   pe2("pointermove", [320, 60.5, 0], {}); pe2("pointerdown", [320, 60.5, 0], { shiftKey: true }); pe2("pointerup", [320, 60.5, 0], { shiftKey: true }); await sleep(10);
   const two = app.tool.selected.length;
   await key("Delete");
@@ -2096,12 +2456,27 @@ const SCENARIO_SKETCH = String.raw`
   pe2("pointermove", [460, 50, 0], {}); pe2("pointerdown", [460, 50, 0], { shiftKey: true }); pe2("pointerup", [460, 50, 0], { shiftKey: true }); await sleep(10);
   const sel3 = app.tool.selected.length;
   await key("j");
+  const afterJ = app.tool.selected.map((x) => x.kind + x.i).join();
   await click([600, 50, 0]);
   const groupSel = app.tool.selected.length;
   const nj = app.doc.bodies.length;
   document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
   const capsule = app.doc.bodies.slice(nj).map(area);
-  expect("sketch: Join — rectangle + 2 half circles → one capsule face; clicking one selects the joined group", threeLoops === 3 && sel3 === 3 && groupSel === 3 && capsule.length === 1 && Math.abs(capsule[0] - (200 * 100 + Math.PI * 2500)) < 1e-3, { threeLoops, sel3, groupSel, capsule });
+  expect("sketch: Join — rectangle + 2 half circles → one capsule face; the result stays selected; clicking one selects the joined group", threeLoops === 3 && sel3 === 3 && afterJ === "loop0,loop1,loop2" && groupSel === 3 && capsule.length === 1 && Math.abs(capsule[0] - (200 * 100 + Math.PI * 2500)) < 1e-3, { threeLoops, sel3, afterJ, groupSel, capsule });
+  // Join overlapping outlines: two circles (most of the small one lies inside the big one,
+  // but not all: not a hole) → one face, the area of their union
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  // (big — the view is zoomed far out here: R 200 and R 150, 100 apart)
+  await key("c"); await click([500, -1000, 0]); await type("200"); await click([600, -1000, 0]); await type("150");
+  await key("Escape"); await click([320, -1000, 0]);
+  pe2("pointermove", [740, -1000, 0], {}); pe2("pointerdown", [740, -1000, 0], { shiftKey: true }); pe2("pointerup", [740, -1000, 0], { shiftKey: true }); await sleep(10);
+  await key("j");
+  const nu = app.doc.bodies.length;
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const uni = app.doc.bodies.slice(nu).map(area);
+  const lens = (d, r1, r2) => r1 * r1 * Math.acos((d * d + r1 * r1 - r2 * r2) / (2 * d * r1)) + r2 * r2 * Math.acos((d * d + r2 * r2 - r1 * r1) / (2 * d * r2)) - 0.5 * Math.sqrt((-d + r1 + r2) * (d + r1 - r2) * (d - r1 + r2) * (d + r1 + r2));
+  const wantU = Math.PI * 40000 + Math.PI * 22500 - lens(100, 200, 150);
+  expect("sketch: Join — two overlapping circles → one face of their union area", uni.length === 1 && Math.abs(uni[0] - wantU) < 1e-2, { uni, wantU });
   // Join paths: two open paths meeting end to end → one path
   app.setSelection([]); app.run("tool.sketch"); await sleep(30);
   await key("l"); await click([500, 300, 0]); await click([600, 300, 0]); await key("Enter");
@@ -2111,7 +2486,17 @@ const SCENARIO_SKETCH = String.raw`
   pe2("pointermove", [500.5, 350, 0], {}); pe2("pointerdown", [500.5, 350, 0], { shiftKey: true }); pe2("pointerup", [500.5, 350, 0], { shiftKey: true }); await sleep(10);
   await key("j");
   const joinedPath = app.tool.opens.length === 1 && app.tool.opens[0].length === 2;
-  expect("sketch: Join — two paths meeting end to end → one path", twoPaths === 2 && joinedPath, { twoPaths, opens: app.tool.opens });
+  const pathSel = app.tool.selected.map((x) => x.kind + x.i).join();
+  await key("s");
+  const sAfterJ = !!app.tool.scaling;
+  await key("Escape");
+  expect("sketch: Join — two paths meeting end to end → one path, left selected (S scales it)", twoPaths === 2 && joinedPath && pathSel === "open0" && sAfterJ, { twoPaths, opens: app.tool.opens, pathSel, sAfterJ });
+  document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
+  // Lines, then a double-click on the start point: the outline closes — and no new line starts there
+  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  await key("l"); await click([0, -400, 0]); await click([200, -400, 0]); await click([200, -250, 0]); await click([0, -400, 0]); await click([0, -400, 0]);
+  const dbl = { loops: app.tool.loops.length, first: app.tool.first, opens: app.tool.opens.length };
+  expect("sketch: double-click on the start point closes the outline, no new line after it", dbl.loops === 1 && dbl.first === null && dbl.opens === 0, dbl);
   document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
   // The Rectangle tool (A) takes 40x25 too
   app.setSelection([]); app.run("tool.rectangle"); await sleep(20);
@@ -2119,13 +2504,15 @@ const SCENARIO_SKETCH = String.raw`
   const rf = app.doc.bodies[app.doc.bodies.length - 1], rb = rf.shape.boundingBox.bounds;
   expect("rectangle tool: typed 40x25 → a 40 x 25 face", !app.tool && Math.abs(rb[1][0] - rb[0][0] - 40) < 1e-6 && Math.abs(rb[1][1] - rb[0][1] - 25) < 1e-6, { tool: app.tool && app.tool.name, rb });
   // Open lines become a path object at Done: picked by its line in Solid mode, moved, saved / loaded; Push/Pull refuses it
-  app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+  // (on an empty model: the checks before left bodies far apart, zooming the view out)
+  app.doc.reset([]); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(30);
+  app.run("tool.sketch"); await sleep(30);
   await key("l"); await click([-100, 60, 0]); await click([-60, 60, 0]); await key("a"); await click([-60, 140, 0]); await key("Enter"); // (big: the view is zoomed far out here)
   document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
   const pb = app.doc.bodies[app.doc.bodies.length - 1];
   const kinds = pb && pb.shape.edges.map((e) => e.geomType).join();
   app.setSelection([]); app.run("mode.body");
-  const sc = vp.toScreen(new V(-80, 60, 0));
+  const sc = window.__see(new V(-80, 60, 0));
   canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }));
   canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }));
   canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20);
@@ -2137,6 +2524,95 @@ const SCENARIO_SKETCH = String.raw`
   app.loadModel(app.modelText(), null); await sleep(20);
   const reread = app.doc.bodies.find((b) => b.kind === "path" && b.shape.edges.length === 2);
   expect("sketch: open lines → a path object (line + arc): picked by its line, Push/Pull refuses it, moves, saved as a path", pb && pb.kind === "path" && kinds === "LINE,CIRCLE" && picked && ppRefused && moved && !!reread, { kind: pb && pb.kind, kinds, picked, ppRefused, moved, reloaded: !!reread });
+  // Scale (Select): typed 200 doubles about the centre, Ctrl+Z undoes; S: the gizmo (X / Y / XY handles), Tab, Esc
+  {
+    app.doc.reset([]); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(30);
+    app.run("tool.sketch"); await sleep(30);
+    await key("r"); await click([0, 0, 0]); await click([40, 20, 0]);
+    await key("Escape"); await click([20, 10, 0]);
+    const corners = () => app.tool.loops[0].segs.map((g) => g.a.map((v) => +v.toFixed(6)).join(",")).join(" ");
+    await type("200");
+    const doubled = corners();
+    await key("z", { ctrlKey: true });
+    const undone = corners();
+    await click([20, 10, 0]); // (undo clears the selection)
+    // The gizmo: drag the XY ring to 1.5× its distance from the centre, Enter → 150%
+    const dlg = (vals) => { const d = document.getElementById("props-dlg"); if (!d) return false; const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => { if (q[i]) q[i].value = String(v); }); d.requestSubmit(); return true; };
+    const dragHandle = async (h, f) => {
+      const c = app.tool.scaling.c, hp = app.tool.handlePos(h);
+      const to = h === "x" ? [c[0] + (hp[0] - c[0]) * f, hp[1]] : h === "y" ? [hp[0], c[1] + (hp[1] - c[1]) * f] : [c[0] + (hp[0] - c[0]) * f, c[1] + (hp[1] - c[1]) * f];
+      pe("pointermove", [hp[0], hp[1], 0]); pe("pointerdown", [hp[0], hp[1], 0]);
+      for (let k = 1; k <= 4; k++) pe("pointermove", [hp[0] + (to[0] - hp[0]) * k / 4, hp[1] + (to[1] - hp[1]) * k / 4, 0]);
+      pe("pointerup", [to[0], to[1], 0]); await sleep(10);
+    };
+    await key("s"); await dragHandle("xy", 1.5);
+    const live = +app.tool.scaling.kx.toFixed(6);
+    await key("Enter");
+    const k150 = corners();
+    // X only: drag the red square to 2× → twice as wide, same height
+    await click([20, 10, 0]); await key("s"); await dragHandle("x", 2); await key("Enter");
+    const x2 = corners();
+    // Tab while scaling: X 50 %, Y 200 %
+    await click([20, 10, 0]); await key("s"); await key("Tab"); await sleep(10); const dOk = dlg([100, 50, 200]); await sleep(10);
+    const tabbed = corners();
+    // Esc cancels a gizmo drag
+    await click([20, 10, 0]); await key("s"); await dragHandle("xy", 2); await key("Escape");
+    const cancelled = corners();
+    // A circle: evenly it stays a circle; X 50 % / Y 200 % → a freeform curve (an exact 5 × 20 ellipse)
+    await key("c"); await click([100, 0, 0]); await type("10"); await key("Escape"); await click([100, 0, 0]);
+    await type("150");
+    const circleR = app.tool.loops[1] && app.tool.loops[1].kind === "circle" && app.tool.loops[1].r;
+    await key("s");
+    const curves = app.tool.scaling && app.tool.scaling.curves;
+    await key("Tab"); await sleep(10); dlg([100, 100 / 3, 400 / 3]); await sleep(10);
+    const ell = app.tool.loops[1];
+    const ellOk = ell && ell.kind === "path" && ell.segs.length === 1 && ell.segs[0].kind === "spline";
+    const ellPts = ellOk ? ell.segs[0].pts.filter((_, i) => i % 2 === 0).map((q) => q.map((v) => +v.toFixed(6)).join(",")).join(" ") : null;
+    const nb = app.doc.bodies.length;
+    document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+    const made = app.doc.bodies.slice(nb), ellBody = made.find((b) => b.shape.edges.length === 1);
+    const ellArea = ellBody && area(ellBody), ellEdge = ellBody && ellBody.shape.edges[0].geomType;
+    // (the edge exactly on the ellipse; the area only roughly — OpenCascade integrates B-spline outlines numerically)
+    const ellOff = ellBody ? Math.max(...Array.from({ length: 50 }, (_, i) => { const q = ellBody.shape.edges[0].pointAt(i / 50); return Math.abs(((q.x - 100) / 5) ** 2 + (q.y / 20) ** 2 - 1); })) : 1;
+    expect("sketch: Scale gizmo — XY ring 150%, X square 2× wide only, Tab X 50% / Y 200%, Esc cancels; a circle: X / Y unevenly → an exact freeform ellipse", doubled === "-20,-10 60,-10 60,30 -20,30" && undone === "0,0 40,0 40,20 0,20" && live === 1.5 && k150 === "-10,-5 50,-5 50,25 -10,25" && x2 === "-40,-5 80,-5 80,25 -40,25" && dOk && tabbed === "-10,-20 50,-20 50,40 -10,40" && cancelled === tabbed && curves === true && Math.abs(circleR - 15) < 1e-6 && ellOk && ellPts === "105,0 100,20 95,0 100,-20 105,0" && made.length === 2 && ellEdge === "BSPLINE_CURVE" && ellOff < 1e-9 && Math.abs(ellArea - Math.PI * 100) < 0.1, { doubled, undone, live, k150, x2, tabbed, cancelled, curves, circleR, ellPts, n: made.length, ellEdge, ellOff, ellArea });
+  }
+  // Tab (Y3D's exact values): a capsule drawn only with Tab dialogs; a rectangle; then the selection moved + scaled
+  {
+    const dialog = (vals) => { const d = document.getElementById("props-dlg"); if (!d) return false; const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => { if (q[i]) q[i].value = String(v); }); d.requestSubmit(); return true; };
+    const tab = async (vals) => { await key("Tab"); await sleep(10); const ok = dialog(vals); await sleep(10); return ok; };
+    app.doc.reset([]); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(30);
+    app.run("tool.sketch"); await sleep(30);
+    const oks = [];
+    await key("l"); await hover([5, 5, 0]); oks.push(await tab([0, 0]));
+    oks.push(await tab([40, 0]));
+    await key("a"); await hover([45, 15, 0]); oks.push(await tab([10, 180]));
+    await key("l"); oks.push(await tab([40, 180]));
+    await key("a"); await hover([-5, 10, 0]); oks.push(await tab([10, 180]));
+    const cap = app.tool.loops[0];
+    const capOk = cap && cap.segs.map((g) => g.kind).join() === "line,arc,line,arc" && app.tool.first === null;
+    await key("r"); await hover([100, 0, 0]); oks.push(await tab([30, 10]));
+    const rect = app.tool.loops[1];
+    await key("Escape"); await click([115, 5, 0]); oks.push(await tab([10, 0, 200]));
+    const moved = app.tool.loops[1].segs.map((g) => g.a.map((v) => +v.toFixed(6)).join(",")).join(" ");
+    const nt = app.doc.bodies.length;
+    document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+    const areas = app.doc.bodies.slice(nt).map(area).sort((x, y) => x - y);
+    expect("sketch: Tab — dialogs for the first point, line, arc, rectangle and the selection (move + scale)", oks.every(Boolean) && capOk && !!rect && moved === "95,-5 155,-5 155,15 95,15" && areas.length === 2 && Math.abs(areas[0] - (800 + Math.PI * 100)) < 1e-6 && Math.abs(areas[1] - 1200) < 1e-6, { oks, capOk, moved, areas });
+  }
+  // Right click → Select, keeping the lines being drawn (as Enter); in Select it clears the selection
+  {
+    app.doc.reset([]); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(30);
+    app.run("tool.sketch"); await sleep(30);
+    const rclick = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); for (const t of ["pointerdown", "pointerup"]) canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 2, bubbles: true })); await sleep(10); };
+    await key("l"); await click([0, 0, 0]); await click([30, 0, 0]); await click([30, 20, 0]); await rclick([50, 50, 0]);
+    const r1 = { mode: app.tool.mode, opens: app.tool.opens.length, first: app.tool.first };
+    await click([15, 0.3, 0]);
+    const sel1 = app.tool.selected.length;
+    await rclick([50, 50, 0]);
+    const r2 = { mode: app.tool.mode, sel: app.tool.selected.length, tool: app.tool && app.tool.name };
+    expect("sketch: right click → Select, the lines kept (a path); right click again clears the selection", r1.mode === "select" && r1.opens === 1 && r1.first === null && sel1 === 1 && r2.mode === "select" && r2.sel === 0 && r2.tool === "Sketch", { r1, sel1, r2 });
+    document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
+  }
   // Pro layout (Ctrl+Shift+F1 / View menu): one-row sketch panel, text-only Recent strip, short hints; back again
   {
     const hintEl = document.getElementById("status-hint");
@@ -2411,6 +2887,96 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
   };
   let report: unknown[] = [];
   try {
+    // window.__see(v): a world point on screen, for the scenarios' clicks / hovers. In orbit runs a point
+    // hidden behind a solid first turns the view (round its centre) to the first iso corner — or the top
+    // view — that shows it, and one behind the camera pans to it, all at the same zoom, so a check isn't
+    // lost to a fixed point it can't see.
+    await win.webContents.executeJavaScript(`(async () => {
+      for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100));
+      const vp = window.y3dApp.viewport, orbit = ${!!process.env.Y3D_SMOKE_ORBIT};
+      // (off screen is fine: the events go straight to the canvas and the tools follow the 3D ray —
+      // and turning the view in the middle of a gesture, e.g. a box's height click, would break it)
+      const seen = (v) => {
+        vp.camera.updateMatrixWorld(); // (just moved: its matrices only follow on the next frame)
+        const s = vp.toScreen(v);
+        const hit = vp.faceUnder(s.x, s.y);
+        if (!hit) return true;
+        // (on the ground seen from below, any face behind it is seen through the grid — the tools take that)
+        if (Math.abs(v.z) < 1e-9 && vp.camera.position.z < 0) return false;
+        const cam = vp.camera.position, d = cam.distanceTo(v), tol = Math.max(0.05, d * 2e-3);
+        return hit.point.distanceTo(v) < tol || cam.distanceTo(hit.point) >= d - tol;
+      };
+      // Behind the camera (its screen point would be mirrored) or far off screen.
+      const outOfView = (v) => {
+        vp.camera.updateMatrixWorld();
+        const ndc = v.clone().project(vp.camera);
+        return v.clone().applyMatrix4(vp.camera.matrixWorldInverse).z > -vp.camera.near || Math.abs(ndc.x) > 2 || Math.abs(ndc.y) > 2;
+      };
+      // (in orbit runs a sketch starts from a fitted view — its picks are a few px)
+      if (orbit) {
+        const run = window.y3dApp.run.bind(window.y3dApp);
+        window.y3dApp.run = (cmd, ...rest) => { if (cmd === "tool.sketch") vp.fit(); return run(cmd, ...rest); };
+      }
+      // Look at v from the camera's direction d at the same distance — the same zoom (the scenarios' snap /
+      // pick tolerances are a few px, so e.g. a radius 10 away must stay well apart from its centre).
+      const lookAt = (v, d) => {
+        const dist = vp.camera.position.distanceTo(vp.controls.target);
+        vp.controls.target.copy(v);
+        vp.camera.position.copy(v).add(d.clone().normalize().multiplyScalar(dist));
+        vp.controls.update();
+      };
+      window.__see = (v) => {
+        // (behind the camera / far off screen: pan to it)
+        if (orbit && !vp.viewLocked && outOfView(v)) lookAt(v, vp.camera.position.clone().sub(vp.controls.target));
+        if (orbit && !vp.viewLocked && !seen(v)) {
+          // (the four iso corners, then straight down: never edge-on to the ground — later clicks on it
+          // would land anywhere)
+          const pos = vp.camera.position.clone(), target = vp.controls.target.clone();
+          const dirs = [[1, -1.2, 0.9], [-1, -1.2, 0.9], [-1, 1.2, 0.9], [1, 1.2, 0.9], [0, -1e-4, 1]];
+          let found = false;
+          // (framing the bodies at the point — what the check works on — not every body left from earlier
+          // checks, spread far apart: that would zoom out so far a few px are many mm)
+          const at = window.y3dApp.doc.bodies.filter((b) => {
+            const [lo, hi] = b.shape.boundingBox.bounds, pad = 5 + 0.2 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+            return [0, 1, 2].every((k) => v.getComponent(k) >= lo[k] - pad && v.getComponent(k) <= hi[k] + pad);
+          }).map((b) => b.id);
+          for (const d of dirs) {
+            if (!at.length) vp.fit([-1]); // (a bare point: the empty scene's framing, then centred on it)
+            lookAt(v, new pos.constructor(...d));
+            if (at.length) vp.fit(at);
+            if (!outOfView(v) && seen(v)) { found = true; break; }
+          }
+          if (!found) { vp.camera.position.copy(pos); vp.controls.target.copy(target); vp.controls.update(); }
+        }
+        vp.camera.updateMatrixWorld();
+        return vp.toScreen(v);
+      };
+      return 0;
+    })()`, true);
+    // Y3D_SMOKE_ORBIT="az,el[,all]": every iso view (with ",all": every view) and the starting camera
+    // turned az° about Z and tilted el° — the same checks seen from other angles.
+    if (process.env.Y3D_SMOKE_ORBIT) {
+      const [az, el, all] = process.env.Y3D_SMOKE_ORBIT.split(",");
+      await win.webContents.executeJavaScript(`(async () => {
+        for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100));
+        const vp = window.y3dApp.viewport, az = ${Number(az) || 0} * Math.PI / 180, el = ${Number(el) || 0} * Math.PI / 180, all = ${all === "all"};
+        const orbit = () => {
+          const t = vp.controls.target, o = vp.camera.position.clone().sub(t), V = o.constructor;
+          o.applyAxisAngle(new V(0, 0, 1), az);
+          const right = new V(0, 0, 1).cross(o).normalize();
+          if (right.lengthSq() > 0.5) {
+            const tilted = o.clone().applyAxisAngle(right, -el);
+            if (Math.abs(tilted.clone().normalize().z) < 0.995) o.copy(tilted);
+          }
+          vp.camera.position.copy(t).add(o);
+          vp.controls.update();
+        };
+        const setView = vp.setView.bind(vp);
+        vp.setView = (name) => { setView(name); if (all || name === "iso") orbit(); };
+        orbit();
+        return 0;
+      })()`, true);
+    }
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO, true));
     await shot("1-fillet-preview.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_2, true));
@@ -2427,6 +2993,10 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("4-mesh.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BIRD, true));
     await shot("5-birdhouse.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_HOUSE, true));
+    await shot("5b-house.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PLANTER, true));
+    await shot("5c-planter.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CABLE, true));
     await shot("6-cablebox.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));

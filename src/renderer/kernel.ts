@@ -41,6 +41,7 @@ import {
   cast,
   Face,
   Wire,
+  Edge,
   type AnyShape,
   type Sketch,
   type Shape3D,
@@ -352,14 +353,45 @@ function orientFace(face: Face, frame: Frame): Face {
   return dot < 0 ? face.flipOrientation() : face;
 }
 
-/** A closed sketch outline on a plane: straight lines / arcs (through `m`) end to end, or a full circle. */
+/**
+ * A closed sketch outline on a plane: straight lines / arcs (through `m`) / freeform curves end to
+ * end, or a full circle. A freeform curve: rational quadratic pieces — `pts` 2n+1 control points
+ * (the first / last are its ends), `w` their weights.
+ */
 export type SketchLoop =
-  | { kind: "path"; segs: ({ kind: "line"; a: V3; b: V3 } | { kind: "arc"; a: V3; m: V3; b: V3 })[] }
+  | { kind: "path"; segs: ({ kind: "line"; a: V3; b: V3 } | { kind: "arc"; a: V3; m: V3; b: V3 } | { kind: "spline"; pts: V3[]; w: number[] })[] }
   | { kind: "circle"; c: V3; r: number };
+type SketchSeg = Extract<SketchLoop, { kind: "path" }>["segs"][number];
 
-/** An open sketch path (lines / arcs end to end) as a wire. */
-export function sketchPath(segs: Extract<SketchLoop, { kind: "path" }>["segs"]): Wire {
-  return assembleWire(segs.map((g) => (g.kind === "line" ? makeLine(g.a, g.b) : makeThreePointArc(g.a, g.m, g.b))));
+/** A sketch freeform curve as one B-spline edge (degree 2, rational). */
+function sketchSplineEdge(pts: V3[], w: number[]): Edge {
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const n = (pts.length - 1) / 2;
+    const poles = keep(new oc.NCollection_Array1_gp_Pnt(1, pts.length)), weights = keep(new oc.NCollection_Array1_double(1, pts.length));
+    pts.forEach((p, i) => {
+      poles.SetValue(i + 1, keep(new oc.gp_Pnt(...p)));
+      weights.SetValue(i + 1, w[i]);
+    });
+    const knots = keep(new oc.NCollection_Array1_double(1, n + 1)), mults = keep(new oc.NCollection_Array1_int(1, n + 1));
+    for (let i = 0; i <= n; i++) {
+      knots.SetValue(i + 1, i);
+      mults.SetValue(i + 1, i === 0 || i === n ? 3 : 2);
+    }
+    const bs = new oc.Geom_BSplineCurve(poles, weights, knots, mults, 2, false, true);
+    const mk = keep(new oc.BRepBuilderAPI_MakeEdge(bs as never));
+    return cast(mk.Edge()) as Edge;
+  } finally {
+    tmp.forEach((o) => o.delete());
+  }
+}
+
+const sketchEdge = (g: SketchSeg): Edge => (g.kind === "line" ? makeLine(g.a, g.b) : g.kind === "arc" ? makeThreePointArc(g.a, g.m, g.b) : sketchSplineEdge(g.pts, g.w));
+
+/** An open sketch path (lines / arcs / freeform curves end to end) as a wire. */
+export function sketchPath(segs: SketchSeg[]): Wire {
+  return assembleWire(segs.map(sketchEdge));
 }
 
 /**
@@ -370,7 +402,7 @@ export function sketchFaces(outer: SketchLoop, holes: SketchLoop[], normal: V3):
   const face = (loop: SketchLoop): Face => {
     const wire = loop.kind === "circle"
       ? assembleWire([makeCircle(loop.r, loop.c, normal)])
-      : assembleWire(loop.segs.map((g) => (g.kind === "line" ? makeLine(g.a, g.b) : makeThreePointArc(g.a, g.m, g.b))));
+      : assembleWire(loop.segs.map(sketchEdge));
     let f = makeFace(wire);
     if (dot3(f.normalAt().toTuple() as V3, normal) < 0) f = f.flipOrientation();
     if (!isValidShape(f)) throw new Error("Sketch: an outline crosses itself");
@@ -1562,13 +1594,95 @@ export function edgeBetween(shape: Shape, a: V3, b: V3, tol = 1e-5): number | nu
   return null;
 }
 
-/** True if every face is flat and every edge straight (the shapes `moveEdges` can reshape). */
+export const MOVE_EDGE_REFUSED = "Move edge: the edge must be straight, and the faces at its ends flat with straight edges meeting its ends (no curves or fillets there)";
+
+/**
+ * Whether these edges of a shape form one closed loop (a single closed edge — a circle — or edges
+ * end to end back to the start): each corner shared by exactly two of them, all connected.
+ */
+export function isEdgeLoop(shape: Shape, edgeIds: number[]): boolean {
+  const edges = shape.edges.filter((e) => edgeIds.includes(e.hashCode));
+  if (!edges.length || edges.length !== new Set(edgeIds).size) return false;
+  const count = new Map<string, number>();
+  for (const e of edges) for (const p of [e.startPoint, e.endPoint]) count.set(ptKey(p.toTuple() as V3), (count.get(ptKey(p.toTuple() as V3)) ?? 0) + 1);
+  if ([...count.values()].some((n) => n !== 2)) return false;
+  try {
+    return chainEdges(edges).length === edges.length;
+  } catch {
+    return false; // (two separate loops)
+  }
+}
+
+/** A flat face filling a closed loop of a shape's edges (see isEdgeLoop); throws if the loop isn't flat. */
+export function edgeLoopFace(shape: Shape, edgeIds: number[]): Face {
+  const edges = chainEdges(shape.edges.filter((e) => edgeIds.includes(e.hashCode))).map((e) => e.clone());
+  let face: Face;
+  try {
+    face = makeFace(assembleWire(edges));
+  } catch {
+    throw new Error("Duplicate: the loop isn't flat — only a flat loop becomes a face");
+  }
+  if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error("Duplicate: the loop isn't flat — only a flat loop becomes a face");
+  return face;
+}
+
+/** True if every face is flat and every edge straight. */
 export function isPolyhedral(shape: Shape): boolean {
   return shape.faces.every((f) => f.geomType === "PLANE") && shape.edges.every((e) => e.geomType === "LINE");
 }
 
 const add3 = (p: V3, q: V3): V3 => [p[0] + q[0], p[1] + q[1], p[2] + q[2]];
 const ptKey = (p: V3) => p.map((x) => Math.round(x * 1e5)).join();
+
+/** The corners (point keys) moved with the given edges; null unless they're all straight. */
+function movedCorners(shape: Shape, edgeIds: Set<number>): Set<string> | null {
+  const moved = new Set<string>();
+  for (const e of shape.edges) {
+    if (!edgeIds.has(e.hashCode)) continue;
+    if (e.geomType !== "LINE") return null;
+    moved.add(ptKey(e.startPoint.toTuple() as V3));
+    moved.add(ptKey(e.endPoint.toTuple() as V3));
+  }
+  return moved.size ? moved : null;
+}
+
+/** Whether a face has one of these corners. */
+const hasCorner = (f: Face, moved: Set<string>) => f.edges.some((e) => moved.has(ptKey(e.startPoint.toTuple() as V3)) || moved.has(ptKey(e.endPoint.toTuple() as V3)));
+
+/** Whether an edge starts or ends at one of these corners. */
+const edgeAtCorner = (e: Face["edges"][number], moved: Set<string>) => moved.has(ptKey(e.startPoint.toTuple() as V3)) || moved.has(ptKey(e.endPoint.toTuple() as V3));
+
+/**
+ * Whether `moveEdges` can move these edges: they're straight, the faces round their corners are flat
+ * and the edges meeting those corners straight (curved edges elsewhere on those faces, and curved
+ * faces elsewhere on the solid, stay as they are).
+ */
+export function canMoveEdges(shape: Shape, edgeIds: Set<number>): boolean {
+  const moved = movedCorners(shape, edgeIds);
+  return !!moved && shape.faces.filter((f) => hasCorner(f, moved)).every((f) => f.geomType === "PLANE" && f.edges.every((e) => e.geomType === "LINE" || !edgeAtCorner(e, moved)));
+}
+
+/** Edges put in order end to end (for a wire). */
+function chainEdges<E extends { startPoint: { toTuple(): number[] }; endPoint: { toTuple(): number[] } }>(edges: E[]): E[] {
+  const ends = (e: E) => [ptKey(e.startPoint.toTuple() as V3), ptKey(e.endPoint.toTuple() as V3)];
+  const left = [...edges], out = [left.shift()!];
+  let [head, tail] = ends(out[0]);
+  while (left.length) {
+    const i = left.findIndex((e) => ends(e).includes(tail));
+    if (i >= 0) {
+      const [a, b] = ends(left[i]);
+      tail = a === tail ? b : a;
+      out.push(left.splice(i, 1)[0]);
+      continue;
+    }
+    const j = left.findIndex((e) => ends(e).includes(head));
+    if (j < 0) throw new Error("Move edge: a face boundary is not a closed loop");
+    const [a, b] = ends(left[j]);
+    head = a === head ? b : a;
+    out.unshift(left.splice(j, 1)[0]);
+  }
+  return out;
+}
 
 /** Wire edges chained into an ordered loop of corner points. */
 function loopPoints(edges: { startPoint: { toTuple(): number[] }; endPoint: { toTuple(): number[] } }[]): V3[] {
@@ -1634,19 +1748,13 @@ function polyWire(pts: V3[]) {
 }
 
 /**
- * Move the given straight edges of a flat-faced solid by `v`, reshaping the
- * faces around them. Faces that stay flat stay single faces; faces that bend
- * are split into triangles. Coplanar neighbours are merged again afterwards.
+ * Move the given straight edges of a solid by `v`, reshaping the faces around them (those must be
+ * flat with straight edges; the rest — curved faces too — stay as they are). Faces that stay flat
+ * stay single faces; faces that bend are split into triangles. Coplanar neighbours are merged again afterwards.
  */
 export function moveEdges(shape: Solid, edgeIds: Set<number>, v: V3): Solid {
-  if (!isPolyhedral(shape)) throw new Error("Move edge works on solids with only flat faces and straight edges (no curves or fillets)");
-  const moved = new Set<string>();
-  for (const e of shape.edges) {
-    if (!edgeIds.has(e.hashCode)) continue;
-    moved.add(ptKey(e.startPoint.toTuple() as V3));
-    moved.add(ptKey(e.endPoint.toTuple() as V3));
-  }
-  if (!moved.size) throw new Error("Move edge: edge not found on this solid");
+  if (!canMoveEdges(shape, edgeIds)) throw new Error(MOVE_EDGE_REFUSED);
+  const moved = movedCorners(shape, edgeIds)!;
   const mv = (p: V3): V3 => (moved.has(ptKey(p)) ? add3(p, v) : p);
   // Drop corners that collapse onto their neighbour.
   const clean = (pts: V3[]) => pts.filter((p, i) => ptKey(p) !== ptKey(pts[(i + 1) % pts.length]));
@@ -1655,12 +1763,27 @@ export function moveEdges(shape: Solid, edgeIds: Set<number>, v: V3): Solid {
   const tol = 1e-6 * Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + Math.hypot(...v));
   const faces: Face[] = [];
   for (const f of shape.faces) {
-    // outerWire / innerWires delete the face they are called on.
-    const loops = [f.clone().outerWire(), ...f.clone().innerWires()].map((w) => loopPoints(w.edges));
-    if (!loops.some((l) => l.some((p) => moved.has(ptKey(p))))) {
+    if (!hasCorner(f, moved)) {
       faces.push(f);
       continue;
     }
+    if (f.edges.some((e) => e.geomType !== "LINE")) {
+      // A face with curved edges (away from the moved corners): rebuilt with its straight edges
+      // moved and the curved ones as they are — it must stay flat.
+      const n = norm3(f.normalAt().toTuple() as V3), c = f.center.toTuple() as V3;
+      if (f.edges.some((e) => [e.startPoint, e.endPoint].some((q) => Math.abs(dot3(sub3(mv(q.toTuple() as V3), c), n)) > tol)))
+        throw new Error("Move edge: this would bend a face that has curved edges (move the edge along that face instead)");
+      const wire = (w: Wire) =>
+        assembleWire(chainEdges(w.edges.flatMap((e) => {
+          if (e.geomType !== "LINE") return [e];
+          const a = mv(e.startPoint.toTuple() as V3), b = mv(e.endPoint.toTuple() as V3);
+          return ptKey(a) === ptKey(b) ? [] : [makeLine(a, b)];
+        })));
+      faces.push(makeFace(wire(f.clone().outerWire()), f.clone().innerWires().map(wire)));
+      continue;
+    }
+    // outerWire / innerWires delete the face they are called on.
+    const loops = [f.clone().outerWire(), ...f.clone().innerWires()].map((w) => loopPoints(w.edges));
     const outer0 = loops[0];
     const outer = clean(outer0.map(mv));
     const holes = loops.slice(1).map((l) => clean(l.map(mv)));
