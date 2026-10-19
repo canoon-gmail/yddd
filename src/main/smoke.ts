@@ -435,6 +435,9 @@ const SCENARIO_3 = String.raw`
   const afterUndo = app.doc.bodies.length;
   app.run("edit.redo");
   expect("9 undo removes the last copy, redo restores", afterUndo === 2 && app.doc.bodies.length === 3, [afterUndo, app.doc.bodies.length]);
+  app.run("edit.undo");
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+  expect("9 Ctrl+Shift+Z redoes too", app.doc.bodies.length === 3, app.doc.bodies.length);
 
   // 10) Shift+G: click a mark → move gizmo appears at that mark; dragging keeps the pivot on the body
   {
@@ -609,6 +612,20 @@ const SCENARIO_3 = String.raw`
       const f = last().shape, arcs = f.edges.filter((e) => e.geomType === "CIRCLE").length;
       expect("15 round offset " + d, last().id !== ob && eq(size(last().id), want) && arcs === 4 && window.y3dKernel.isValidShape(f), [size(last().id), arcs]);
     }
+    // Make ring: only the band between the top's outline and the offset outline (a face with one hole)
+    const check = (k, on) => { const cb = document.querySelector("#op-panel input[data-key=" + k + "]"); cb.checked = on; cb.dispatchEvent(new Event("change", { bubbles: true })); };
+    for (const [d, want] of [[5, [50, 40, 0]], [-5, [40, 30, 0]]]) {
+      app.setSelection([{ kind: "face", body: ob, id: topOf(ob).hashCode }]);
+      app.run("op.offset"); opValue("d", d); check("round", false); check("ring", true);
+      app.applyOp();
+      const f = last().shape, holes = f.faces.length === 1 ? f.faces[0].clone().innerWires().length : -1;
+      expect("15 offset ring " + d, last().id !== ob && eq(size(last().id), want) && holes === 1 && window.y3dKernel.isValidShape(f), [size(last().id), holes]);
+    }
+    // Right click on empty space clears the selection (like a left click)
+    app.setSelection([{ kind: "body", body: ob, id: 0 }]);
+    const r = canvas.getBoundingClientRect();
+    for (const t of ["pointerdown", "pointerup"]) canvas.dispatchEvent(new PointerEvent(t, { clientX: r.left + 3, clientY: r.top + 3, button: 2, bubbles: true }));
+    expect("15 right click on nothing clears the selection", app.selection.length === 0, app.selection.length);
     app.run("mode.body");
   } catch (e) {
     expect("15 round offset threw", false, String(e && e.stack || e));
@@ -1683,6 +1700,199 @@ const SCENARIO_CABLE = String.raw`
 })()
 `;
 
+/** Measure (=): hovering a corner, an edge, faces and a circle shows their sizes in the HUD. */
+const SCENARIO_MEASURE = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  document.getElementById("tutorial").hidden = true; document.body.classList.remove("tutorial-open");
+  app.doc.dirty = false;
+  app.doc.reset([]);
+  const box = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 30, 20), "Box");
+  const cyl = app.doc.makeBody(K.makeCylinder(G, [60, 0, 0], 10, 30), "Cylinder");
+  app.doc.commit([box, cyl], "shapes");
+  app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(100);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "=", code: "Equal", bubbles: true, cancelable: true }));
+  await sleep(20);
+  expect("measure: = starts the Measure tool", app.tool && app.tool.name === "Measure", app.tool && app.tool.name);
+  const hover = async (p) => { const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); return app.hudEl.hidden ? null : app.hudEl.textContent; };
+  const cases = [
+    ["corner", [20, -15, 20], "Corner\nX 20  Y -15  Z 20"],
+    ["edge", [5, -15, 20], "Edge\nLength 40 mm"],
+    ["flat face", [-8, -5, 20], "Flat face\n40 × 30 mm\nArea 1,200 mm²"],
+    ["cylinder side", [60 + 10 * Math.cos(-1.2), 10 * Math.sin(-1.2), 12], "Cylinder\nR 10  ·  Ø 20  ·  Height 30\nArea 1,884.96 mm²"],
+    ["circle edge", [60 + 10 * Math.cos(-0.9), 10 * Math.sin(-0.9), 30], "Circle\nR 10  ·  Ø 20\nLength 62.83 mm"],
+  ];
+  for (const [what, p, want] of cases) {
+    const got = await hover(p);
+    expect("measure: hover " + what, got === want, got);
+  }
+  expect("measure: the hovered face is highlighted, nothing selected", app.selection.length === 0, app.selection);
+  const click = async (p) => { await hover(p); const sc = vp.toScreen(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); };
+  const esc = async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20); };
+  const panel = () => document.getElementById("measure-panel")?.textContent.replace(/\s+/g, " ") ?? "";
+  await click([20, -15, 20]); await click([-20, -15, 20]);
+  expect("measure: 2 clicks → length in the corner panel", /Length 40 mm\s*ΔX -40\s*ΔY 0\s*ΔZ 0\s*Slope 0° from level/.test(panel()) && !/Angle/.test(panel()), panel());
+  await click([-20, -15, 0]);
+  expect("measure: 3rd click → angle at the 2nd point", /Angle 90°/.test(panel()) && /Second length 20 mm/.test(panel()), panel());
+  await esc();
+  expect("measure: Esc after a result clears it, still measuring", app.tool && app.tool.name === "Measure" && !/Length/.test(panel()), { tool: app.tool && app.tool.name, panel: panel() });
+  await click([20, -15, 20]); await hover([20, -15, 0]);
+  expect("measure: live length while choosing the 2nd point (slope 90°)", /Length 20 mm/.test(panel()) && /Slope 90°/.test(panel()), panel());
+  {
+    // Off any snap point, a few pixels beside the X direction from the 1st point: locked onto the X axis
+    // (a spot with no point or edge under it — those win over the lock)
+    const s1 = vp.toScreen(new V(20, -15, 20));
+    const spot = [20, 25, 30, 35, 40, 45].map((dx) => {
+      const s2 = vp.toScreen(new V(20 + dx, -15, 20)), ux = s2.x - s1.x, uy = s2.y - s1.y, ul = Math.hypot(ux, uy);
+      return { dx, x: s2.x - uy / ul * 2, y: s2.y + ux / ul * 2 };
+    }).find((q) => !vp.snapPoint(q.x, q.y) && !vp.pick(q.x, q.y, "edge"));
+    if (spot) canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: spot.x, clientY: spot.y, button: 0, bubbles: true })); await sleep(20);
+    const hud = app.hudEl.hidden ? null : app.hudEl.textContent;
+    expect("measure: 2nd point locks onto the X axis through the 1st", spot && new RegExp("ΔX " + spot.dx + "(\\.\\d+)?ΔY 0ΔZ 0").test(panel()) && /^On X axis/.test(hud ?? ""), { spot, panel: panel(), hud });
+  }
+  await esc();
+  // Cylinder height: a point on the bottom circle, then the top circle a little off straight up → the point on the top circle straight above
+  app.run("tool.measure"); await sleep(20);
+  const rim = (a, z) => [60 + 10 * Math.cos(a), 10 * Math.sin(a), z];
+  await click(rim(-1.2, 0)); await hover(rim(-1.15, 30));
+  const hudH = app.hudEl.hidden ? null : app.hudEl.textContent;
+  expect("measure: on a curve near the Z direction → the curve's point straight above (cylinder height 30)", /Length 30 mm ΔX 0ΔY 0ΔZ 30/.test(panel()) && /^On Z axis/.test(hudH ?? ""), { panel: panel(), hud: hudH });
+  await esc();
+  expect("measure: Esc after only the 1st click exits the tool", !app.tool && !document.getElementById("measure-panel"), app.tool && app.tool.name);
+  app.run("tool.measure"); await sleep(20);
+  document.querySelector("#measure-panel button[data-act=cancel]").click(); await sleep(20);
+  expect("measure: Cancel exits the tool", !app.tool && !document.getElementById("measure-panel"), app.tool && app.tool.name);
+  app.run("tool.measure"); await sleep(20);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  await sleep(20);
+  expect("measure: Esc ends it and hides the HUD", !app.tool && app.hudEl.hidden, { tool: app.tool && app.tool.name, hud: app.hudEl.hidden });
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "+", code: "Equal", shiftKey: true, bubbles: true, cancelable: true }));
+  await sleep(20);
+  expect("measure: + (Shift+=) is still Union, not Measure", !app.tool, app.tool && app.tool.name);
+  const failed = checks.filter((c) => !c.ok);
+  // Tab over an edge → dimension: Esc cancels, click places it; text = length; select + Del, undo, save/load
+  const key = async (k, code) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true })); await sleep(20); };
+  const labels = () => [...document.querySelectorAll("#dim-labels .dim-label:not(.preview)")].map((l) => l.textContent);
+  app.run("tool.measure"); await sleep(20);
+  await hover([5, -15, 20]); await key("Tab", "Tab"); await hover([5, -15, 32]);
+  const preview = document.querySelector("#dim-labels .dim-label.preview")?.textContent;
+  await key("Escape", "Escape");
+  expect("dimension: Tab on an edge previews it, Esc cancels and stays in Measure", preview === "40" && app.doc.dimensions.length === 0 && app.tool && app.tool.name === "Measure", { preview, dims: app.doc.dimensions.length, tool: app.tool && app.tool.name });
+  await hover([5, -15, 20]); await key("Tab", "Tab"); await hover([5, -15, 32]);
+  const sc = vp.toScreen(new V(5, -15, 32)); canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); canvas.dispatchEvent(new PointerEvent("pointerup", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(30);
+  const dim = app.doc.dimensions[0];
+  const near = (p, q) => p.every((v, k) => Math.abs(v - q[k]) < 1e-6);
+  expect("dimension: placed on the edge's ends, offset square to it, text 40", app.doc.dimensions.length === 1 && [dim.a, dim.b].some((p) => near(p, [20, -15, 20])) && [dim.a, dim.b].some((p) => near(p, [-20, -15, 20])) && Math.abs(dim.o[0]) < 1e-6 && Math.hypot(...dim.o) > 2 && labels().join() === "40",
+    { dim, labels: labels() });
+  const saved = app.modelText();
+  app.run("edit.undo"); await sleep(20);
+  const undone = app.doc.dimensions.length === 0 && labels().length === 0;
+  app.run("edit.redo"); await sleep(20);
+  expect("dimension: undo / redo", undone && app.doc.dimensions.length === 1 && labels().join() === "40", { undone, dims: app.doc.dimensions.length });
+  await key("Escape", "Escape"); await key("Escape", "Escape");
+  const lab = document.querySelector("#dim-labels .dim-label");
+  if (!lab) expect("dimension: label present before selecting", false, { html: document.getElementById("dim-labels")?.outerHTML, dims: app.doc.dimensions.length, tool: app.tool && app.tool.name });
+  lab?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 })); await sleep(20);
+  const selected = document.querySelector("#dim-labels .dim-label.sel") !== null;
+  await key("Delete", "Delete");
+  expect("dimension: click its text selects it, Del removes it", selected && app.doc.dimensions.length === 0 && labels().length === 0, { selected, dims: app.doc.dimensions.length });
+  app.doc.dirty = false; app.loadModel(saved, null); await sleep(50);
+  expect("dimension: saved in the .y3d file", app.doc.dimensions.length === 1 && labels().join() === "40", app.doc.dimensions);
+  // Linked to the edge: push/pull the box's +X end → 50; move the box → the dimension moves with it; undo → back
+  {
+    const boxB = app.doc.bodies.find((b) => b.name === "Box 1");
+    expect("dimension: linked to the box after reopening", app.doc.dimensions[0].body === boxB.id, { dim: app.doc.dimensions[0], box: boxB.id });
+    const endFace = boxB.shape.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[0] > 0.99).hashCode;
+    app.doc.replaceShapes(new Map([[boxB.id, K.pushPull(boxB.shape, endFace, 10)]]), "Push/Pull"); await sleep(20);
+    const d1 = app.doc.dimensions[0], l1 = labels().join();
+    app.doc.replaceShapes(new Map([[boxB.id, K.translateShape(app.doc.get(boxB.id).shape, [0, 30, 0])]]), "Move"); await sleep(20);
+    const d2 = app.doc.dimensions[0], l2 = labels().join();
+    const topFace = app.doc.get(boxB.id).shape.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] > 0.99).hashCode;
+    app.doc.replaceShapes(new Map([[boxB.id, K.pushPull(app.doc.get(boxB.id).shape, topFace, 5)]]), "Push/Pull"); await sleep(20);
+    const d3 = app.doc.dimensions[0], l3 = labels().join();
+    app.run("edit.undo"); app.run("edit.undo"); app.run("edit.undo"); await sleep(20);
+    const d4 = app.doc.dimensions[0], l4 = labels().join();
+    const ends = (d) => [d.a, d.b].map((p) => p.map((v) => +v.toFixed(3)).join(" ")).sort().join(" | ");
+    expect("dimension: follows its edge — longer (50), moved (+30 Y), raised (top +5); undo puts it back", l1 === "50" && ends(d1) === "-20 -15 20 | 30 -15 20" && l2 === "50" && ends(d2) === "-20 15 20 | 30 15 20" && l3 === "50" && ends(d3) === "-20 15 25 | 30 15 25" && d3.body === boxB.id && l4 === "40" && ends(d4) === "-20 -15 20 | 20 -15 20",
+      { l1, d1: ends(d1), l2, d2: ends(d2), l3, d3: ends(d3), l4, d4: ends(d4) });
+  }
+  // "Delete all dimensions" in the Measure panel: one undo step; disabled with none
+  {
+    app.run("tool.measure"); await sleep(20);
+    const btn = () => document.querySelector("#measure-panel button[data-act=clear-dims]");
+    const before = app.doc.dimensions.length, enabled = btn() && !btn().disabled;
+    btn().click(); await sleep(20);
+    const cleared = app.doc.dimensions.length === 0 && labels().length === 0 && btn()?.disabled;
+    app.run("edit.undo"); await sleep(20); // (undo ends the tool, as for every tool)
+    app.run("tool.measure"); await sleep(20);
+    expect("dimension: Delete all in the Measure panel, undo brings them back", before >= 1 && enabled && cleared && app.doc.dimensions.length === before && labels().length === before && btn() && !btn().disabled,
+      { before, enabled, cleared, after: app.doc.dimensions.length, disabled: btn() && btn().disabled });
+    await key("Escape", "Escape");
+  }
+  // 2 clicks then Tab → a dimension of that length (not linked to an edge); the measurement is cleared once it's placed
+  {
+    app.run("tool.measure"); await sleep(20);
+    const n0 = app.doc.dimensions.length;
+    await click([-20, -15, 20]); await click([20, 15, 20]); await key("Tab", "Tab"); await hover([0, 0, 35]);
+    const preview = document.querySelector("#dim-labels .dim-label.preview")?.textContent;
+    await click([0, 0, 35]);
+    const d = app.doc.dimensions[n0];
+    const near = (p, q) => p.every((v, k) => Math.abs(v - q[k]) < 1e-6);
+    expect("dimension: 2 clicks + Tab dimensions the measured length (50), then a new measurement", preview === "50" && app.doc.dimensions.length === n0 + 1 && d.body === undefined && near(d.a, [-20, -15, 20]) && near(d.b, [20, 15, 20]) && Math.hypot(...d.o) > 2 && labels().includes("50") && !/Length/.test(panel()),
+      { preview, dims: app.doc.dimensions.length, d, labels: labels(), panel: panel() });
+    app.run("edit.undo"); await sleep(20);
+  }
+  // 3 clicks then Tab → an angle dimension (90°); the arc goes through the mouse; the measurement is cleared once it's placed
+  {
+    app.run("tool.measure"); await sleep(20);
+    const n0 = app.doc.dimensions.length;
+    await click([-20, -15, 20]); await click([20, -15, 20]); await click([20, 15, 20]); await key("Tab", "Tab"); await hover([12, -7, 20]);
+    const preview = document.querySelector("#dim-labels .dim-label.preview")?.textContent;
+    await click([12, -7, 20]);
+    const d = app.doc.dimensions[n0];
+    const near = (p, q) => p.every((v, k) => Math.abs(v - q[k]) < 1e-6);
+    expect("dimension: 3 clicks + Tab adds the angle (90°), its arc through the mouse", preview === "90°" && d && d.kind === "angle" && near(d.a, [-20, -15, 20]) && near(d.b, [20, -15, 20]) && near(d.c, [20, 15, 20]) && Math.abs(d.r - Math.hypot(8, 8)) < 1e-6 && labels().includes("90°") && !/Angle/.test(panel()),
+      { preview, d, labels: labels(), panel: panel() });
+    app.run("edit.undo"); await sleep(20);
+  }
+  // Tab over a circle → radius dimension "R 10", pointing where the mouse is; it follows the circle (resized, moved, pushed up)
+  {
+    app.run("tool.measure"); await sleep(20);
+    const n0 = app.doc.dimensions.length;
+    const cylB = app.doc.bodies.find((b) => b.name.startsWith("Cylinder"));
+    const rim = (a, z, r = 10) => [60 + r * Math.cos(a), r * Math.sin(a), z];
+    await hover(rim(-0.9, 30)); await key("Tab", "Tab"); await hover(rim(-1.6, 30, 25));
+    const preview = document.querySelector("#dim-labels .dim-label.preview")?.textContent;
+    await click(rim(-1.6, 30, 25));
+    const d = app.doc.dimensions[n0];
+    const near = (p, q) => p.every((v, k) => Math.abs(v - q[k]) < 1e-6);
+    expect("dimension: Tab on a circle adds its radius (R 10), pointing at the mouse", preview === "R 10" && d && d.kind === "radius" && d.body === cylB.id && near(d.a, [60, 0, 30]) && near(d.b, rim(-1.6, 30)) && labels().includes("R 10"),
+      { preview, d, labels: labels() });
+    const lab = () => labels()[n0];
+    app.doc.replaceShapes(new Map([[cylB.id, K.makeCylinder(G, [60, 0, 0], 12, 30)]]), "Resize"); await sleep(20);
+    const l1 = lab(), d1 = app.doc.dimensions[n0];
+    app.doc.replaceShapes(new Map([[cylB.id, K.translateShape(app.doc.get(cylB.id).shape, [0, 30, 0])]]), "Move"); await sleep(20);
+    const l2 = lab(), d2 = app.doc.dimensions[n0];
+    const top = app.doc.get(cylB.id).shape.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] > 0.99).hashCode;
+    app.doc.replaceShapes(new Map([[cylB.id, K.pushPull(app.doc.get(cylB.id).shape, top, 5)]]), "Push/Pull"); await sleep(20);
+    const l3 = lab(), d3 = app.doc.dimensions[n0];
+    app.run("edit.undo"); app.run("edit.undo"); app.run("edit.undo"); await sleep(20);
+    const l4 = lab();
+    expect("dimension: a radius follows its circle — resized (R 12), moved (+30 Y), raised (top +5); undo puts it back", l1 === "R 12" && near(d1.a, [60, 0, 30]) && near(d1.b, rim(-1.6, 30, 12)) && l2 === "R 12" && near(d2.a, [60, 30, 30]) && l3 === "R 12" && near(d3.a, [60, 30, 35]) && d3.body === cylB.id && l4 === "R 10",
+      { l1, l2, l3, l4, d1, d2, d3 });
+    app.run("edit.undo"); await sleep(20);
+    expect("dimension: undo removes the radius", app.doc.dimensions.length === n0, app.doc.dimensions.length);
+  }
+  app.run("tool.measure"); await click([-20, -15, 20]); await click([20, -15, 20]); await click([20, 15, 20]); await hover([60 + 10 * Math.cos(-1.2), 10 * Math.sin(-1.2), 12]); // left on for the screenshot
+  if (failed.length) console.error("measure scenario failed: " + JSON.stringify(failed));
+  return [{ label: "measure tool", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Mesh bodies (big or open STLs): import, pick, transform, guards, save/load, combined STL export. */
 const SCENARIO_MESH = String.raw`
 (async () => {
@@ -1846,6 +2056,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("5-birdhouse.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CABLE, true));
     await shot("6-cablebox.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));
+    await shot("7-measure.png");
   } catch (e) {
     errors.push(`scenario failed: ${String(e)}`);
     await shot("error.png").catch(() => {});

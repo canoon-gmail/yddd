@@ -17,6 +17,28 @@ export interface Guide {
   readonly n?: V3;
 }
 
+/**
+ * A length dimension: the distance between `a` and `b` (e.g. an edge's ends), drawn along a line
+ * shifted from them by `o` (perpendicular to a–b), with extension lines back to `a` and `b`.
+ * With `body`, a–b is a straight edge of that body: when the body changes, the dimension follows
+ * the edge (see Doc.relinkDims); without it (or once the edge is gone) it stays where it is.
+ */
+export interface Dimension {
+  readonly a: V3;
+  readonly b: V3;
+  readonly o: V3;
+  readonly body?: number;
+  /**
+   * "radius": a circle's / arc's radius — `a` its centre, `b` a point on it, `n` its axis (`o` unused);
+   * with `body` it follows that circle.
+   * "angle": the angle at `b` between b→a and b→`c`, drawn as an arc of radius `r` round `b` (`o` unused).
+   */
+  readonly kind?: "radius" | "angle";
+  readonly n?: V3;
+  readonly c?: V3;
+  readonly r?: number;
+}
+
 interface BodyBase {
   readonly id: number;
   readonly name: string;
@@ -43,6 +65,7 @@ type Snapshot = readonly Body[];
 interface HistoryEntry {
   bodies: Snapshot;
   guides: readonly Guide[];
+  dims: readonly Dimension[];
   label: string;
 }
 
@@ -51,6 +74,7 @@ const MAX_HISTORY = 200;
 export class Doc {
   private snapshot: Snapshot = [];
   private guideList: readonly Guide[] = [];
+  private dimList: readonly Dimension[] = [];
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
   private nextId = 1;
@@ -73,6 +97,15 @@ export class Doc {
   /** Replace the guide lines in one undoable step. */
   setGuides(next: readonly Guide[], label: string): void {
     this.commit(this.snapshot, label, next);
+  }
+
+  get dimensions(): readonly Dimension[] {
+    return this.dimList;
+  }
+
+  /** Replace the dimensions in one undoable step. */
+  setDimensions(next: readonly Dimension[], label: string): void {
+    this.commit(this.snapshot, label, this.guideList, next);
   }
 
   get(id: number): Body | undefined {
@@ -104,12 +137,24 @@ export class Doc {
     return { id: this.nextId++, name: `${baseName} ${n}`, kind, shape } as Body;
   }
 
-  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList): void {
-    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, label });
+  /**
+   * Re-find the edges of linked dimensions after bodies change (set by the app; it needs the
+   * kernel). Applied in the same step as the change, so undo / redo keep them in step.
+   */
+  relinkDims: ((dims: readonly Dimension[], prev: Snapshot, next: Snapshot) => readonly Dimension[]) | null = null;
+
+  private relinked(dims: readonly Dimension[], next: Snapshot): readonly Dimension[] {
+    return this.relinkDims && next !== this.snapshot && dims.some((d) => d.body !== undefined) ? this.relinkDims(dims, this.snapshot, next) : dims;
+  }
+
+  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList): void {
+    dims = this.relinked(dims, next);
+    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, dims: this.dimList, label });
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
     this.redoStack = [];
     this.snapshot = next;
     this.guideList = guides;
+    this.dimList = dims;
     this.dirty = true;
     this.version++;
     this.emit();
@@ -119,6 +164,7 @@ export class Doc {
   amend(next: Snapshot): void {
     if (!this.undoStack.length) return this.commit(next, "Edit");
     this.redoStack = [];
+    this.dimList = this.relinked(this.dimList, next);
     this.snapshot = next;
     this.dirty = true;
     this.version++;
@@ -146,9 +192,10 @@ export class Doc {
   undo(): string | null {
     const entry = this.undoStack.pop();
     if (!entry) return null;
-    this.redoStack.push({ bodies: this.snapshot, guides: this.guideList, label: entry.label });
+    this.redoStack.push({ bodies: this.snapshot, guides: this.guideList, dims: this.dimList, label: entry.label });
     this.snapshot = entry.bodies;
     this.guideList = entry.guides;
+    this.dimList = entry.dims;
     this.dirty = true;
     this.version++;
     this.emit();
@@ -158,21 +205,26 @@ export class Doc {
   redo(): string | null {
     const entry = this.redoStack.pop();
     if (!entry) return null;
-    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, label: entry.label });
+    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, dims: this.dimList, label: entry.label });
     this.snapshot = entry.bodies;
     this.guideList = entry.guides;
+    this.dimList = entry.dims;
     this.dirty = true;
     this.version++;
     this.emit();
     return entry.label;
   }
 
-  /** Start over with the given bodies (used by New / Open). Clears history. */
-  reset(bodies: (BodyGeom & { name: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = []): void {
+  /**
+   * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
+   * is an index into `bodies` (as saved in a file), turned into that body's new id.
+   */
+  reset(bodies: (BodyGeom & { name: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = []): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;
     this.snapshot = bodies.map((b) => ({ ...b, id: this.nextId++ }));
+    this.dimList = dims.map(({ body, ...d }) => (body !== undefined && this.snapshot[body] ? { ...d, body: this.snapshot[body].id } : d));
     this.undoStack = [];
     this.redoStack = [];
     this.filePath = filePath;

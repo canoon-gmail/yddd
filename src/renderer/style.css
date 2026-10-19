@@ -124,7 +124,7 @@ kbd {
 #hud {
   position: absolute; pointer-events: none; transform: translate(14px, -28px);
   padding: 3px 7px; border-radius: 4px; background: rgba(20, 21, 24, 0.85);
-  border: 1px solid var(--border); color: var(--accent-2); font-variant-numeric: tabular-nums; white-space: nowrap;
+  border: 1px solid var(--border); color: var(--accent-2); font-variant-numeric: tabular-nums; white-space: pre; line-height: 1.4;
 }
 #op-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .op-handle {
@@ -174,6 +174,28 @@ kbd {
 #op-panel label.check input { width: auto; accent-color: var(--accent); }
 #op-panel .op-error { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 4px; }
 #op-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+#dim-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+.dim-label {
+  position: absolute; left: 0; top: 0; padding: 0 5px; border-radius: 3px; pointer-events: auto; cursor: pointer;
+  background: rgba(20, 21, 24, 0.8); color: #e6e9ee; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.dim-label.sel { color: #1d1f23; background: #ffd166; }
+.dim-label.preview { color: #8fd3ff; pointer-events: none; }
+
+#measure-panel {
+  position: absolute; top: 12px; left: 12px; width: 250px; padding: 10px 12px; z-index: 15;
+  background: rgba(38, 40, 44, 0.96); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); font-variant-numeric: tabular-nums; line-height: 1.5;
+}
+#measure-panel h4 { margin: 0 0 6px; font-size: 13px; color: var(--accent-2); }
+#measure-panel .big { font-size: 15px; color: #ffd166; }
+#measure-panel .axes { display: flex; gap: 10px; }
+#measure-panel .x { color: #e05555; } #measure-panel .y { color: #4fbf6a; } #measure-panel .z { color: #4f8fe0; }
+#measure-panel .muted, #measure-panel .tip { color: var(--muted); font-size: 12px; }
+#measure-panel .tip { margin-top: 6px; }
+#measure-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+button.btn:disabled { opacity: 0.45; cursor: default; filter: none; }
+
 button.btn {
   padding: 4px 12px; font: inherit; color: var(--text); cursor: pointer;
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px;

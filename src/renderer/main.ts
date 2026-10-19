@@ -42,8 +42,11 @@ import {
   faceAxis,
   faceRefEdges,
   offsetFace,
+  offsetRing,
   scaleShape,
   guidePlaneNormal,
+  matchStraightEdge,
+  matchCircleEdge,
   pushPullMoves,
   edgesAlong,
   asPreview,
@@ -68,13 +71,31 @@ import {
   isMesh,
   parseStl,
 } from "./kernel";
-import { Doc, withShape, type Body, type BodyGeom, type Guide, type ShapeBody } from "./document";
+import { Doc, withShape, type Body, type BodyGeom, type Dimension, type Guide, type ShapeBody } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
+import { MeasureTool } from "./measure";
 import type { TutCtx, Tutorial } from "./tutorials";
+
+/** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
+function relinkDimensions(dims: readonly Dimension[], prev: readonly Body[], next: readonly Body[]): readonly Dimension[] {
+  return dims.map((d) => {
+    if (d.body === undefined) return d;
+    const before = prev.find((b) => b.id === d.body), after = next.find((b) => b.id === d.body);
+    if (before && after && before.shape === after.shape) return d;
+    const { body: _, ...unlinked } = d;
+    if (!before || !after || before.kind === "mesh" || after.kind === "mesh") return unlinked;
+    try {
+      const e = d.kind === "radius" ? matchCircleEdge(after.shape, before.shape, d.a, d.b, d.n!) : matchStraightEdge(after.shape, before.shape, d.a, d.b);
+      return e ? { ...d, a: e[0], b: e[1] } : unlinked;
+    } catch {
+      return unlinked;
+    }
+  });
+}
 
 /** Why an editing command can't run on a mesh body (an imported STL). */
 const meshOnly = (action: string, name: string) => `${action}: "${name}" is a mesh (imported STL) — it can be moved, rotated, scaled, copied and exported, not edited`;
@@ -224,6 +245,10 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     ],
   },
   {
+    title: "Measure",
+    items: [{ cmd: "tool.measure", icon: "measure", label: "Measure", key: "=" }],
+  },
+  {
     title: "Delete",
     items: [{ cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" }],
   },
@@ -231,7 +256,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     title: "History",
     items: [
       { cmd: "edit.undo", icon: "undo", label: "Undo", key: "Ctrl+Z" },
-      { cmd: "edit.redo", icon: "redo", label: "Redo", key: "Ctrl+R" },
+      { cmd: "edit.redo", icon: "redo", label: "Redo", key: "Ctrl+R · Ctrl+Shift+Z" },
     ],
   },
   {
@@ -284,7 +309,7 @@ const KEYMAP: Record<string, string> = {
   NumpadAdd: "bool.union",
   NumpadSubtract: "bool.subtract",
   "+": "bool.union",
-  "=": "bool.union", // unshifted "+" key
+  "=": "tool.measure",
   "-": "bool.subtract",
   "Shift+I": "bool.intersect",
   v: "view.menu",
@@ -371,7 +396,7 @@ class App implements ToolHost {
   private selEdgeCache: { sel: SelItem[]; edges: Map<number, Set<number>> } | null = null;
   private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, edgesWhich: 0 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -382,6 +407,8 @@ class App implements ToolHost {
   constructor() {
     const container = $("viewport");
     this.viewport = new Viewport(container);
+    this.viewport.onDimensionClick = (i) => this.selectDimension(i);
+    this.doc.relinkDims = (dims, prev, next) => relinkDimensions(dims, prev, next);
     this.buildToolbar();
     this.renderRecent();
     this.bindViewportEvents();
@@ -616,6 +643,7 @@ class App implements ToolHost {
       case "op.cut": return this.startCut();
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
+      case "tool.measure": return this.startMeasure();
       case "tool.divideFace": return this.startTool(new DivideFaceTool(this, (id, a, b) => this.divideFace(id, a, b), (id) => this.divideRefusal(id)).start());
       case "edit.clearGuides":
         if (!this.doc.guides.length) return this.toast("No guide lines");
@@ -721,6 +749,10 @@ class App implements ToolHost {
   }
 
   private click(e: PointerEvent): void {
+    if (this.selDim >= 0) {
+      this.selDim = -1;
+      this.showDimensions();
+    }
     const g = this.viewport.guideAt(e.clientX, e.clientY);
     if (g !== this.selGuide) {
       this.selGuide = g;
@@ -767,7 +799,20 @@ class App implements ToolHost {
   /** Smart object select: right-click on a solid switches to Solid mode and selects it (Shift/Ctrl toggles). */
   private rightClick(e: PointerEvent): void {
     const pick = this.viewport.pick(e.clientX, e.clientY, "body");
-    if (!pick) return;
+    if (!pick) {
+      // Empty space (no guide either) clears the selection, like a left click.
+      if (e.shiftKey || e.ctrlKey || this.viewport.guideAt(e.clientX, e.clientY) >= 0) return;
+      if (this.selDim >= 0) {
+        this.selDim = -1;
+        this.showDimensions();
+      }
+      if (this.selGuide >= 0) {
+        this.selGuide = -1;
+        this.showGuides();
+      }
+      this.setSelection([]);
+      return;
+    }
     const item: SelItem = { kind: "body", body: pick.body, id: 0 };
     this.setMode("body");
     if (e.shiftKey || e.ctrlKey) {
@@ -964,7 +1009,18 @@ class App implements ToolHost {
         if (this.tool) this.endTool();
         else if (this.op) this.cancelOp();
         else if (this.xf) this.stopTransform();
-        else this.setSelection([]);
+        else {
+          if (this.selDim >= 0) {
+            this.selDim = -1;
+            this.showDimensions();
+          }
+          this.setSelection([]);
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyZ") {
+        e.preventDefault();
+        this.run("edit.redo"); // Redo's second shortcut (the menu shows Ctrl+R)
         return;
       }
       if (e.ctrlKey || e.altKey || e.metaKey) return; // handled by native menu accelerators
@@ -1577,21 +1633,24 @@ class App implements ToolHost {
       fields: [
         { key: "d", label: "Distance (mm)", value: this.defaults.offset, step: 1 },
         { key: "round", label: "Round corners", value: this.defaults.offsetRound ? 1 : 0, type: "checkbox" },
+        { key: "ring", label: "Make ring", value: this.defaults.offsetRing ? 1 : 0, type: "checkbox" },
       ],
-      compute: ({ d, round }) => {
-        const face = offsetFace(body.shape, faceId, d, !!round);
+      compute: ({ d, round, ring }) => {
+        // Ring: only the band between the face's outline and the offset outline.
+        const faces = ring ? offsetRing(body.shape, faceId, d, !!round) : [offsetFace(body.shape, faceId, d, !!round)];
         return {
-          ghost: new Map([[-1, face]]),
+          ghost: new Map(faces.map((f, i) => [-1 - i, f] as [number, Shape])),
           commit: () => {
-            const nb = this.doc.makeBody(face, "Face", "face");
-            this.doc.commit([...this.doc.bodies, nb], "Offset face");
-            return { select: [nb.id], solidMode: true };
+            const made = faces.map((f) => this.doc.makeBody(f, ring ? "Ring" : "Face", "face"));
+            this.doc.commit([...this.doc.bodies, ...made], ring ? "Offset ring" : "Offset face");
+            return { select: made.map((b) => b.id), solidMode: true };
           },
         };
       },
-      remember: ({ d, round }) => {
+      remember: ({ d, round, ring }) => {
         this.defaults.offset = d;
         this.defaults.offsetRound = !!round;
+        this.defaults.offsetRing = !!ring;
       },
       drag: axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined,
     });
@@ -2179,6 +2238,30 @@ class App implements ToolHost {
     return faces.length ? { bodyId, faces } : null;
   }
 
+  /** Measure (=): hover a point, edge or face to see its sizes in the HUD. */
+  private startMeasure(): void {
+    const shapeOf = (id: number) => {
+      const b = this.doc.get(id);
+      return b && b.kind !== "mesh" ? b.shape : null;
+    };
+    const dims = {
+      preview: (d: Dimension | null) => this.showDimensions(d),
+      add: (d: Dimension) => {
+        this.doc.setDimensions([...this.doc.dimensions, d], "Add dimension");
+        this.toast("Dimension added — click its text to select it, Del removes it");
+      },
+      count: () => this.doc.dimensions.length,
+      clear: () => {
+        const n = this.doc.dimensions.length;
+        if (!n) return;
+        this.selDim = -1;
+        this.doc.setDimensions([], "Delete all dimensions");
+        this.toast(`Deleted ${n} dimension${n > 1 ? "s" : ""} — Ctrl+Z brings ${n > 1 ? "them" : "it"} back`);
+      },
+    };
+    this.startTool(new MeasureTool(this, shapeOf, (item) => this.viewport.setHighlight(this.selection, item), () => this.endTool(), dims).start());
+  }
+
   /** Guide line tool; with an edge given (edge + Shift+D) it starts from that edge. */
   private startGuide(bodyId?: number, edgeId?: number): void {
     if (bodyId !== undefined && edgeId !== undefined && !this.edgeSides(bodyId, edgeId)) {
@@ -2205,6 +2288,24 @@ class App implements ToolHost {
 
   private selGuide = -1;
   private hoverGuide = -1;
+  /** Selected dimension (click its text), -1 = none. */
+  private selDim = -1;
+
+  /** Draw the dimensions (and `preview`, one being placed by Measure + Tab). */
+  private showDimensions(preview: Dimension | null = null): void {
+    if (this.selDim >= this.doc.dimensions.length) this.selDim = -1;
+    this.viewport.setDimensions(this.doc.dimensions, this.selDim, preview);
+  }
+
+  private selectDimension(i: number): void {
+    if (i < 0) return;
+    this.selDim = i;
+    this.selGuide = -1;
+    this.showGuides();
+    this.setSelection([]);
+    this.showDimensions();
+    this.hint("Dimension selected · Del removes it · Esc deselects");
+  }
 
   private showGuides(): void {
     if (this.selGuide >= this.doc.guides.length) this.selGuide = -1;
@@ -2433,6 +2534,11 @@ class App implements ToolHost {
 
   private deleteSelected(): void {
     this.endInteractions();
+    if (this.selDim >= 0) {
+      const i = this.selDim;
+      this.selDim = -1;
+      return this.doc.setDimensions(this.doc.dimensions.filter((_, k) => k !== i), "Delete dimension");
+    }
     if (this.selGuide >= 0) {
       const i = this.selGuide;
       this.selGuide = -1;
@@ -2490,6 +2596,8 @@ class App implements ToolHost {
   private onDocChange(): void {
     this.viewport.sync(this.doc.bodies);
     this.showGuides();
+    this.showDimensions();
+    if (this.tool instanceof MeasureTool) this.tool.refresh();
     const live = new Set(this.doc.bodies.map((b) => b.id));
     for (const id of [...this.hidden]) if (!live.has(id)) this.hidden.delete(id);
     this.selection = this.selection.filter((s) => this.viewport.isValid(s));
@@ -2878,10 +2986,11 @@ class App implements ToolHost {
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list)"],
       ["H", "Shell / hollow (opens the selected faces)"],
       ["C", "Cut by guide: select solid(s), press C, click a guide line — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
-      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners; then P to push/pull"],
+      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Shift+L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
+      ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo"],
       ["S", "Scale selected objects about their bottom centre: drag the ring for Scale % or the red / green / blue boxes for X / Y / Z % (Ctrl snaps; per-axis works on curved shapes too)"],
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
@@ -2890,7 +2999,7 @@ class App implements ToolHost {
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), or on an edge: add a guide line (like Shift+L)"],
       ["Del / X", "Delete selected objects"],
-      ["Ctrl+Z · Ctrl+R", "Undo · Redo"],
+      ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
       ["Shift+X", "Toggle x-ray (semi-transparent solids, on by default)"],
@@ -2941,12 +3050,17 @@ class App implements ToolHost {
       units: "mm",
       bodies: this.doc.bodies.map((b) => (b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: b.shape.toBase64() } : { name: b.name, kind: b.kind, brep: serializeShape(b.shape) })),
       guides: this.doc.guides,
+      // A linked dimension's body as its index in `bodies` (ids are renumbered on open).
+      dimensions: this.doc.dimensions.map(({ body, ...d }) => {
+        const i = this.doc.bodies.findIndex((b) => b.id === body);
+        return i < 0 ? d : { ...d, body: i };
+      }),
     });
   }
 
   /** Replace the document with a .y3d file's contents (throws if it isn't one). */
   private loadModel(text: string, filePath: string | null): void {
-    const json = JSON.parse(text) as { format: string; bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string }[]; guides?: Guide[] };
+    const json = JSON.parse(text) as { format: string; bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string }[]; guides?: Guide[]; dimensions?: Dimension[] };
     if (json.format !== "y3d") throw new Error("not a Y3D file");
     const bodies = json.bodies.map((b): BodyGeom & { name: string } => {
       if (b.kind === "mesh") return { name: b.name, kind: "mesh", shape: TriMesh.fromBase64(b.mesh!) };
@@ -2956,7 +3070,7 @@ class App implements ToolHost {
     this.endInteractions();
     this.selection = [];
     this.hidden.clear();
-    this.doc.reset(bodies, filePath, json.guides ?? []);
+    this.doc.reset(bodies, filePath, json.guides ?? [], json.dimensions ?? []);
     this.viewport.fit();
   }
 
@@ -3005,7 +3119,7 @@ class App implements ToolHost {
     const version = this.doc.version;
     this.unsavedSince = 0;
     if (version === this.autosavedVersion) return;
-    if (!this.doc.dirty || (!this.doc.bodies.length && !this.doc.guides.length)) {
+    if (!this.doc.dirty || (!this.doc.bodies.length && !this.doc.guides.length && !this.doc.dimensions.length)) {
       this.dropRecovery();
       return;
     }

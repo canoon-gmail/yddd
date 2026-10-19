@@ -28,6 +28,7 @@ import {
   makeVertex,
   measureArea,
   measureDistanceBetween,
+  measureLength,
   measureVolume,
   basicFaceExtrusion,
   deserializeShape,
@@ -422,6 +423,32 @@ export function faceAxis(shape: Shape, faceId: number): { center: V3; normal: V3
 }
 
 /** The point of edge `edgeId` of `shape` nearest `p` (exact B-rep curve), or null. */
+/**
+ * Where the line through `origin` along world axis k (0 = X, 1 = Y, 2 = Z) meets an edge: the
+ * point on the edge nearest that line, or null if the line passes it by (more than 1e-6 mm).
+ */
+export function axisCrossEdge(shape: Shape, edgeId: number, origin: V3, k: number): V3 | null {
+  const edge = shape.edges.find((e) => e.hashCode === edgeId);
+  if (!edge) return null;
+  const a: V3 = [...origin], b: V3 = [...origin];
+  a[k] -= 1e5;
+  b[k] += 1e5;
+  const line = makeLine(a, b);
+  const d = new oc.BRepExtrema_DistShapeShape(line.wrapped, edge.wrapped);
+  try {
+    if (!d.IsDone() || d.NbSolution() < 1 || d.Value() > 1e-6) return null;
+    const q = d.PointOnShape2(1);
+    const out: V3 = [q.X(), q.Y(), q.Z()];
+    q.delete();
+    return out;
+  } catch {
+    return null;
+  } finally {
+    d.delete();
+    line.delete();
+  }
+}
+
 export function nearestOnEdge(shape: Shape, edgeId: number, p: V3): V3 | null {
   const edge = shape.edges.find((e) => e.hashCode === edgeId);
   if (!edge) return null;
@@ -933,6 +960,202 @@ function cylinderSweep(face: Face, distance: number): Shape3D | null {
     return lo > 1e-9 ? boolean("cut", sector(hi), sector(lo)) : sector(hi);
   } catch {
     return null;
+  } finally {
+    for (const o of tmp) o.delete();
+  }
+}
+
+// ---------------------------------------------------------------- measure (hover info)
+
+/** What the Measure tool shows for an edge: its length, and for a circle / arc its radius, centre and angle. */
+export interface EdgeInfo {
+  type: "line" | "circle" | "arc" | "curve";
+  length: number;
+  radius?: number;
+  center?: V3;
+  /** Arc angle in degrees. */
+  angle?: number;
+}
+
+export function edgeInfo(shape: Shape, edgeId: number): EdgeInfo | null {
+  const e = shape.edges.find((x) => x.hashCode === edgeId);
+  if (!e) return null;
+  const length = measureLength(e);
+  if (e.geomType === "LINE") return { type: "line", length };
+  if (e.geomType !== "CIRCLE") return { type: "curve", length };
+  const ad = new oc.BRepAdaptor_Curve(e.wrapped);
+  try {
+    const c = ad.Circle(), loc = c.Location();
+    const radius = c.Radius(), center: V3 = [loc.X(), loc.Y(), loc.Z()];
+    const angle = ((ad.LastParameter() - ad.FirstParameter()) * 180) / Math.PI;
+    c.delete();
+    loc.delete();
+    return angle > 359.999 ? { type: "circle", length, radius, center } : { type: "arc", length, radius, center, angle };
+  } finally {
+    ad.delete();
+  }
+}
+
+/**
+ * The straight edge of `shape` that an edge a–b of `old` (the same body before an edit) became, as
+ * [new a, new b] with a's end first; null if none fits. In order: the same edge; the edge moved with
+ * the whole body (same size, shifted); the edge on the same line sharing an end (an end face was
+ * pushed / pulled); the nearest parallel edge within the body's size (a side face moved, scaling).
+ */
+export function matchStraightEdge(shape: Shape, old: Shape, a: V3, b: V3): [V3, V3] | null {
+  const [lo, hi] = shape.boundingBox.bounds, [olo, ohi] = old.boundingBox.bounds;
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const tol = 1e-6 * Math.max(1, diag);
+  const same = (p: V3, q: V3) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < tol;
+  const u = norm3(sub3(b, a)), len = Math.hypot(...sub3(b, a));
+  const lines = shape.edges.filter((e) => e.geomType === "LINE").map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] as [V3, V3]);
+  /** The edge as [a-side, b-side] (oriented like a→b), if it runs between p and q. */
+  const between = (p: V3, q: V3) => {
+    const e = lines.find(([s, t]) => (same(s, p) && same(t, q)) || (same(s, q) && same(t, p)));
+    return e ? ([p, q] as [V3, V3]) : null;
+  };
+  const exact = between(a, b);
+  if (exact) return exact;
+  // Moved as a whole (G / Shift+G / Tab move): same size, shifted bounding box.
+  const size = (l: number[], h: number[]) => [0, 1, 2].map((k) => h[k] - l[k]);
+  if (size(lo, hi).every((v, k) => Math.abs(v - size(olo, ohi)[k]) < tol)) {
+    const v: V3 = [lo[0] - olo[0], lo[1] - olo[1], lo[2] - olo[2]];
+    const moved = between([a[0] + v[0], a[1] + v[1], a[2] + v[2]], [b[0] + v[0], b[1] + v[1], b[2] + v[2]]);
+    if (moved) return moved;
+  }
+  const parallel = lines
+    .map(([s, t]): [V3, V3] => (dot3(sub3(t, s), u) >= 0 ? [s, t] : [t, s]))
+    .filter(([s, t]) => {
+      const l = Math.hypot(...sub3(t, s));
+      return l > tol && Math.abs(dot3(sub3(t, s), u) / l) > 1 - 1e-9;
+    });
+  const onLine = (p: V3) => {
+    const d = sub3(p, a), along = dot3(d, u);
+    return Math.hypot(d[0] - u[0] * along, d[1] - u[1] * along, d[2] - u[2] * along) < tol;
+  };
+  // Longer / shorter along its own line, one end kept.
+  const stretched = parallel.find(([s, t]) => onLine(s) && onLine(t) && (same(s, a) || same(t, b)));
+  if (stretched) return stretched;
+  // Nearest parallel edge (prefer one of the old length), not further away than the body is big.
+  const mid = (s: V3, t: V3): V3 => [(s[0] + t[0]) / 2, (s[1] + t[1]) / 2, (s[2] + t[2]) / 2];
+  const m0 = mid(a, b);
+  let best: { e: [V3, V3]; score: number } | null = null;
+  for (const e of parallel) {
+    const d = Math.hypot(...sub3(mid(...e), m0));
+    if (d > diag) continue;
+    const score = d + Math.abs(Math.hypot(...sub3(e[1], e[0])) - len);
+    if (!best || score < best.score) best = { e, score };
+  }
+  return best?.e ?? null;
+}
+
+/** A circle or arc edge's centre, unit normal (its axis) and radius; null for other edges. */
+export function circleOf(shape: Shape, edgeId: number): { center: V3; normal: V3; radius: number } | null {
+  const e = shape.edges.find((x) => x.hashCode === edgeId);
+  if (!e || e.geomType !== "CIRCLE") return null;
+  const ad = new oc.BRepAdaptor_Curve(e.wrapped);
+  const c = ad.Circle(), loc = c.Location(), ax = c.Axis(), dir = ax.Direction();
+  try {
+    return { center: [loc.X(), loc.Y(), loc.Z()], normal: [dir.X(), dir.Y(), dir.Z()], radius: c.Radius() };
+  } finally {
+    for (const o of [dir, ax, loc, c, ad]) o.delete();
+  }
+}
+
+/**
+ * The circle / arc of `shape` that a circle edge of `old` (centre `center`, through `rim`, axis
+ * `normal`) became, as [new centre, new rim point] — the rim kept in the same direction from the
+ * centre (on an arc: the nearest point of it). In order: the same circle; moved with the whole body
+ * (same size, shifted); the nearest circle on a parallel axis (pushed / pulled, resized, scaled).
+ */
+export function matchCircleEdge(shape: Shape, old: Shape, center: V3, rim: V3, normal: V3): [V3, V3] | null {
+  const [lo, hi] = shape.boundingBox.bounds, [olo, ohi] = old.boundingBox.bounds;
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const tol = 1e-6 * Math.max(1, diag);
+  const r0 = Math.hypot(...sub3(rim, center)), dir = norm3(sub3(rim, center));
+  const circles = shape.edges.flatMap((e) => {
+    const c = e.geomType === "CIRCLE" ? circleOf(shape, e.hashCode) : null;
+    return c && Math.abs(dot3(c.normal, normal)) > 1 - 1e-9 ? [{ id: e.hashCode, ...c }] : [];
+  });
+  const at = (c: (typeof circles)[number]): [V3, V3] => {
+    const p = add3(c.center, [dir[0] * c.radius, dir[1] * c.radius, dir[2] * c.radius]);
+    return [c.center, nearestOnEdge(shape, c.id, p) ?? p];
+  };
+  const find = (p: V3, r: number) => circles.find((c) => Math.hypot(...sub3(c.center, p)) < tol && Math.abs(c.radius - r) < tol);
+  const exact = find(center, r0);
+  if (exact) return at(exact);
+  const size = (l: number[], h: number[]) => [0, 1, 2].map((k) => h[k] - l[k]);
+  if (size(lo, hi).every((v, k) => Math.abs(v - size(olo, ohi)[k]) < tol)) {
+    const moved = find(add3(center, sub3(lo as V3, olo as V3)), r0);
+    if (moved) return at(moved);
+  }
+  let best: { c: (typeof circles)[number]; score: number } | null = null;
+  for (const c of circles) {
+    const d = Math.hypot(...sub3(c.center, center));
+    if (d > diag) continue;
+    const score = d + Math.abs(c.radius - r0);
+    if (!best || score < best.score) best = { c, score };
+  }
+  return best ? at(best.c) : null;
+}
+
+/** What the Measure tool shows for a face: its area, plus the sizes that describe its kind. */
+export interface FaceInfo {
+  type: "flat" | "cylinder" | "cone" | "sphere" | "torus" | "curved";
+  area: number;
+  /** Flat rectangle: its two side lengths. */
+  rect?: [number, number];
+  radius?: number;
+  /** Torus: the tube radius. */
+  minorRadius?: number;
+  /** Cylinder: length along the axis. */
+  height?: number;
+  /** Cylinder / cone part of a turn (fillets), in degrees; absent for a full turn. */
+  angle?: number;
+  /** Cone: half-angle in degrees. */
+  halfAngle?: number;
+}
+
+export function faceInfo(shape: Shape, faceId: number): FaceInfo | null {
+  const f = findFace(shape, faceId);
+  if (!f) return null;
+  const area = measureArea(f);
+  if (f.geomType === "PLANE") {
+    const edges = f.edges;
+    if (edges.length === 4 && edges.every((e) => e.geomType === "LINE")) {
+      const len = edges.map((e) => measureLength(e)).sort((a, b) => a - b);
+      const tol = 1e-6 * Math.max(1, len[3]);
+      // Two pairs of equal sides with area = side × side: a rectangle (not a rhombus / parallelogram).
+      if (Math.abs(len[0] - len[1]) < tol && Math.abs(len[2] - len[3]) < tol && Math.abs(len[0] * len[2] - area) < 1e-6 * Math.max(1, area)) {
+        return { type: "flat", area, rect: [len[3], len[0]] };
+      }
+    }
+    return { type: "flat", area };
+  }
+  const ad = new oc.BRepAdaptor_Surface(f.wrapped, true);
+  const tmp: { delete(): void }[] = [ad];
+  const keep = <T extends { delete(): void }>(o: T) => (tmp.push(o), o);
+  try {
+    const turn = ((ad.LastUParameter() - ad.FirstUParameter()) * 180) / Math.PI;
+    const angle = turn < 359.999 ? turn : undefined;
+    switch (f.geomType) {
+      case "CYLINDRE":
+        return { type: "cylinder", area, radius: keep(ad.Cylinder()).Radius(), height: ad.LastVParameter() - ad.FirstVParameter(), angle };
+      case "CONE": {
+        const cone = keep(ad.Cone());
+        return { type: "cone", area, radius: cone.RefRadius(), halfAngle: (Math.abs(cone.SemiAngle()) * 180) / Math.PI, angle };
+      }
+      case "SPHERE":
+        return { type: "sphere", area, radius: keep(ad.Sphere()).Radius() };
+      case "TORUS": {
+        const t = keep(ad.Torus());
+        return { type: "torus", area, radius: t.MajorRadius(), minorRadius: t.MinorRadius() };
+      }
+      default:
+        return { type: "curved", area };
+    }
+  } catch {
+    return { type: "curved", area };
   } finally {
     for (const o of tmp) o.delete();
   }
@@ -1600,6 +1823,20 @@ export function offsetFace(shape: Shape, faceId: number, distance: number, round
   if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
   // Arc joins only round the corners that open up; to shrink with round corners, shrink twice as far, then grow back round.
   return round && distance < 0 ? offsetPlanar(offsetPlanar(face, 2 * distance, false), -distance, true) : offsetPlanar(face, distance, round);
+}
+
+/**
+ * The band between a flat face's outline and its offset outline (see offsetFace): the larger
+ * face with the smaller cut out. Holes get their own bands, so the result can be several faces.
+ */
+export function offsetRing(shape: Shape, faceId: number, distance: number, round = false): Face[] {
+  const face = findFace(shape, faceId)!;
+  const offset = offsetFace(shape, faceId, distance, round);
+  const [big, small] = distance > 0 ? [offset, face] : [face, offset];
+  const faces = boolean("cut", big as unknown as Shape3D, small as unknown as Shape3D).faces;
+  if (!faces.length) throw new Error("Offset: the ring is empty at this distance");
+  if (faces.some((f) => !isValidShape(f))) throw new Error("Offset: the ring is not a valid face");
+  return faces;
 }
 
 function offsetPlanar(face: Face, distance: number, round: boolean): Face {

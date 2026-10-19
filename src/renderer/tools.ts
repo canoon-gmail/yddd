@@ -1042,8 +1042,41 @@ export interface EdgeSides {
  * click adds the guide line(s). Guides are snap targets (Ctrl) for drawing and moving.
  */
 const AXIS_COLORS = [0xe5484d, 0x30a46c, 0x3e8bff];
-/** Within ~4° of an axis on screen, a 2-point guide locks onto it. */
+/** Within ~4° of an axis on screen, a 2-point guide (or a measurement) locks onto it. */
 const AXIS_LOCK_COS = Math.cos((4 * Math.PI) / 180);
+
+/**
+ * Axis lock: when the cursor's direction from `p1` is within a few degrees (on screen) of a world
+ * axis, the point on that axis through `p1` closest to the cursor ray (rounded to `step` if > 0),
+ * and the axis (0 = X, 1 = Y, 2 = Z). Null when no axis is close or the cursor is on `p1`.
+ */
+export function axisLockPoint(vp: Viewport, p1: THREE.Vector3, e: PointerEvent, step: number): { point: THREE.Vector3; k: number } | null {
+  const s1 = vp.toScreen(p1);
+  const dx = e.clientX - s1.x, dy = e.clientY - s1.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 12) return null;
+  const reach = vp.worldPerPixel(p1) * 100;
+  let best: { k: number; cos: number } | null = null;
+  for (let k = 0; k < 3; k++) {
+    const d = new THREE.Vector3().setComponent(k, reach);
+    const s2 = vp.toScreen(p1.clone().add(d));
+    const ax = s2.x - s1.x, ay = s2.y - s1.y, al = Math.hypot(ax, ay);
+    if (al < 25) continue; // axis points (nearly) at the camera
+    const cos = Math.abs(dx * ax + dy * ay) / (len * al);
+    if (cos > AXIS_LOCK_COS && (!best || cos > best.cos)) best = { k, cos };
+  }
+  if (!best) return null;
+  // Closest point on the axis line through p1 to the cursor ray.
+  const d = new THREE.Vector3().setComponent(best.k, 1);
+  const ray = vp.ray(e.clientX, e.clientY);
+  const w = p1.clone().sub(ray.origin);
+  const b = d.dot(ray.direction), denom = 1 - b * b;
+  if (denom < 1e-9) return null;
+  let t = (b * w.dot(ray.direction) - w.dot(d)) / denom;
+  if (step > 0) t = Math.round(t / step) * step;
+  if (Math.abs(t) < 1e-9) return null;
+  return { point: p1.clone().setComponent(best.k, p1.getComponent(best.k) + t), k: best.k };
+}
 
 export class GuideTool implements Tool {
   readonly name = "Guide line";
@@ -1172,41 +1205,12 @@ export class GuideTool implements Tool {
     return vp.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(n, this.p1!), new THREE.Vector3());
   }
 
-  /**
-   * Axis lock: when the cursor's direction from the first point is within a few degrees (on
-   * screen) of a world axis, the second point lies exactly on that axis through the first point,
-   * so the guide is exactly horizontal / vertical (e.g. across a sphere in front view).
-   */
+  /** Axis lock (see axisLockPoint): the guide is exactly horizontal / vertical (e.g. across a sphere in front view). */
   private axisLock(e: PointerEvent): THREE.Vector3 | null {
-    const vp = this.host.viewport;
-    const p1 = this.p1!;
-    const s1 = vp.toScreen(p1);
-    const dx = e.clientX - s1.x, dy = e.clientY - s1.y;
-    const len = Math.hypot(dx, dy);
-    if (len < 12) return null;
-    const reach = vp.worldPerPixel(p1) * 100;
-    let best: { k: number; cos: number } | null = null;
-    for (let k = 0; k < 3; k++) {
-      const d = new THREE.Vector3().setComponent(k, reach);
-      const s2 = vp.toScreen(p1.clone().add(d));
-      const ax = s2.x - s1.x, ay = s2.y - s1.y, al = Math.hypot(ax, ay);
-      if (al < 25) continue; // axis points (nearly) at the camera
-      const cos = Math.abs(dx * ax + dy * ay) / (len * al);
-      if (cos > AXIS_LOCK_COS && (!best || cos > best.cos)) best = { k, cos };
-    }
-    if (!best) return null;
-    // Closest point on the axis line through p1 to the cursor ray.
-    const d = new THREE.Vector3().setComponent(best.k, 1);
-    const ray = vp.ray(e.clientX, e.clientY);
-    const w = p1.clone().sub(ray.origin);
-    const b = d.dot(ray.direction), denom = 1 - b * b;
-    if (denom < 1e-9) return null;
-    let t = (b * w.dot(ray.direction) - w.dot(d)) / denom;
-    const step = this.host.snapStep(e);
-    if (step > 0) t = Math.round(t / step) * step;
-    if (Math.abs(t) < 1e-9) return null;
-    this.axis = best.k;
-    return p1.clone().setComponent(best.k, p1.getComponent(best.k) + t);
+    const lock = axisLockPoint(this.host.viewport, this.p1!, e, this.host.snapStep(e));
+    if (!lock) return null;
+    this.axis = lock.k;
+    return lock.point;
   }
 
   /**

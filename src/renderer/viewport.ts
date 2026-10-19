@@ -11,7 +11,8 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
-import type { Body } from "./document";
+import type { Body, Dimension } from "./document";
+import { deg, num } from "./format";
 import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, type Shape, type TriMesh, type V3 } from "./kernel";
 
 export type SelMode = "body" | "face" | "edge";
@@ -84,6 +85,34 @@ interface Chunk {
 const CHUNK_SIZE = 256;
 const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xc0c4c8, selected: 0xf0d78c };
 
+/**
+ * An angle dimension's lines: an arc of radius r round `vertex` from the arm towards `a` to the arm
+ * towards `c`, arrowheads at both ends, the arms drawn out to the arc where it lies past them; the
+ * text ("90°") goes mid-arc. Null if an arm has no length or the arms are in line.
+ */
+function angleDimLines(a: THREE.Vector3, vertex: THREE.Vector3, c: THREE.Vector3, r: number): { pts: THREE.Vector3[]; text: string; at: THREE.Vector3 } | null {
+  const u = a.clone().sub(vertex), v = c.clone().sub(vertex);
+  const lu = u.length(), lv = v.length();
+  if (lu < 1e-9 || lv < 1e-9 || !(r > 1e-9)) return null;
+  u.divideScalar(lu);
+  v.divideScalar(lv);
+  const th = u.angleTo(v);
+  if (th < 1e-6 || Math.PI - th < 1e-6) return null;
+  const at = (t: number) => u.clone().multiplyScalar(Math.sin((1 - t) * th)).add(v.clone().multiplyScalar(Math.sin(t * th))).divideScalar(Math.sin(th));
+  const steps = Math.max(8, Math.ceil(th / 0.05)), pts: THREE.Vector3[] = [];
+  for (let k = 0; k < steps; k++) pts.push(at(k / steps).multiplyScalar(r).add(vertex), at((k + 1) / steps).multiplyScalar(r).add(vertex));
+  const over = Math.max(1, r * 0.08);
+  for (const [dir, l] of [[u, lu], [v, lv]] as const) if (r + over > l) pts.push(vertex.clone().addScaledVector(dir, l), vertex.clone().addScaledVector(dir, r + over));
+  // Arrowheads at both ends, barbs back along the arc.
+  const arrow = Math.min(r * th * 0.2, Math.max(1, r * 0.08));
+  const n = u.clone().cross(v).normalize();
+  for (const [dir, s] of [[u, 1], [v, -1]] as const) {
+    const p = vertex.clone().addScaledVector(dir, r), tan = n.clone().cross(dir).multiplyScalar(s);
+    for (const w of [1, -1]) pts.push(p, p.clone().addScaledVector(tan, arrow).addScaledVector(dir, w * arrow * 0.35));
+  }
+  return { pts, text: deg(THREE.MathUtils.radToDeg(th)), at: at(0.5).multiplyScalar(r).add(vertex) };
+}
+
 export class Viewport {
   readonly canvas: HTMLCanvasElement;
   readonly camera: THREE.PerspectiveCamera;
@@ -114,6 +143,12 @@ export class Viewport {
   private ghostRoot = new THREE.Group();
   private overlayRoot = new THREE.Group();
   private guideRoot = new THREE.Group();
+  private dimRoot = new THREE.Group();
+  /** Dimension text labels (HTML over the canvas) and the 3D point each one sits at. */
+  private dimLabels: { el: HTMLElement; at: THREE.Vector3 }[] = [];
+  private dimLabelBox: HTMLElement | null = null;
+  /** Clicking a dimension's text (index into the list given to setDimensions; -1 = the preview). */
+  onDimensionClick: ((i: number) => void) | null = null;
   /** Guide lines (snap targets); see setGuides. */
   private guides: { a: THREE.Vector3; b: THREE.Vector3 }[] = [];
   private hoverEdges: LineSegments2;
@@ -178,7 +213,7 @@ export class Viewport {
     fill.position.set(-2, -1, 0.5);
     this.camera.add(fill);
 
-    this.scene.add(this.makeGrid(), this.batchRoot, this.bodyRoot, this.ghostRoot, this.overlayRoot, this.guideRoot);
+    this.scene.add(this.makeGrid(), this.batchRoot, this.bodyRoot, this.ghostRoot, this.overlayRoot, this.guideRoot, this.dimRoot);
 
     this.hoverEdges = this.makeOverlayLines(this.mats.edgeHover);
     this.selEdges = this.makeOverlayLines(this.mats.edgeSelected);
@@ -329,6 +364,7 @@ export class Viewport {
     this.flushBatches();
     this.renderer.render(this.scene, this.camera);
     this.renderGlow();
+    this.placeDimLabels();
   }
 
   /** Soft glow just outside the silhouettes of the selected (blue) and hovered (silver) bodies. */
@@ -911,6 +947,100 @@ export class Viewport {
     }
     const s = best.view.snaps!;
     return { point: new THREE.Vector3().fromArray(s.pts, best.i * 3), kind: SNAP_KINDS[s.kinds[best.i]] };
+  }
+
+  /**
+   * Show the dimensions (and `preview`, one being placed): a line parallel to a–b shifted by o, with
+   * arrowheads, extension lines from a and b, and the length as text in the middle.
+   */
+  setDimensions(list: readonly Dimension[], selected = -1, preview: Dimension | null = null): void {
+    for (const c of [...this.dimRoot.children]) {
+      c.removeFromParent();
+      (c as THREE.LineSegments).geometry.dispose();
+      ((c as THREE.LineSegments).material as THREE.Material).dispose();
+    }
+    if (!this.dimLabelBox) {
+      this.dimLabelBox = document.createElement("div");
+      this.dimLabelBox.id = "dim-labels";
+      this.canvas.parentElement!.appendChild(this.dimLabelBox);
+      this.dimLabelBox.addEventListener("pointerdown", (e) => {
+        const el = (e.target as HTMLElement).closest<HTMLElement>(".dim-label");
+        if (!el || !this.onDimensionClick) return;
+        e.stopPropagation();
+        this.onDimensionClick(Number(el.dataset.i));
+      });
+    }
+    this.dimLabelBox.innerHTML = "";
+    this.dimLabels = [];
+    const all: [Dimension, number][] = list.map((d, i) => [d, i]);
+    if (preview) all.push([preview, -1]);
+    for (const [d, i] of all) {
+      const a = new THREE.Vector3(...d.a), b = new THREE.Vector3(...d.b), o = new THREE.Vector3(...d.o);
+      const len = a.distanceTo(b);
+      if (len < 1e-9) continue;
+      const u = b.clone().sub(a).normalize();
+      const color = i === selected ? 0xffd166 : i < 0 ? 0x8fd3ff : 0xe6e9ee;
+      const draw = (pts: THREE.Vector3[]) => {
+        const lines = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
+        lines.renderOrder = 16;
+        this.dimRoot.add(lines);
+      };
+      const label = (text: string, at: THREE.Vector3) => {
+        const el = document.createElement("div");
+        el.className = `dim-label${i === selected ? " sel" : ""}${i < 0 ? " preview" : ""}`;
+        el.dataset.i = String(i);
+        el.textContent = text;
+        this.dimLabelBox!.appendChild(el);
+        this.dimLabels.push({ el, at });
+      };
+      if (d.kind === "angle") {
+        const g = angleDimLines(a, b, new THREE.Vector3(...d.c!), d.r ?? 1);
+        if (g) {
+          draw(g.pts);
+          label(g.text, g.at);
+        }
+        continue;
+      }
+      if (d.kind === "radius") {
+        // Centre mark, a line out to the circle, an arrowhead on it pointing out; "R 10" halfway.
+        const n = new THREE.Vector3(...(d.n ?? [0, 0, 1])), side = n.clone().cross(u).normalize();
+        const arrow = Math.min(len * 0.25, Math.max(1, len * 0.08)), mark = arrow * 0.6;
+        const pts = [a, b, a.clone().addScaledVector(u, -mark), a.clone().addScaledVector(u, mark), a.clone().addScaledVector(side, -mark), a.clone().addScaledVector(side, mark)];
+        for (const w of [1, -1]) pts.push(b, b.clone().addScaledVector(u, -arrow).addScaledVector(side, w * arrow * 0.35));
+        draw(pts);
+        label(`R ${num(len)}`, a.clone().add(b).multiplyScalar(0.5));
+        continue;
+      }
+      const off = o.length(), on = off > 1e-9 ? o.clone().divideScalar(off) : new THREE.Vector3();
+      const a2 = a.clone().add(o), b2 = b.clone().add(o);
+      const arrow = Math.min(len * 0.2, Math.max(1, len * 0.05)), over = Math.max(1, off * 0.1);
+      const pts: THREE.Vector3[] = [a2, b2];
+      if (off > 1e-9) {
+        // Extension lines from just off the geometry to a little past the dimension line.
+        const gap = Math.min(off * 0.15, 2);
+        pts.push(a.clone().addScaledVector(on, gap), a2.clone().addScaledVector(on, over), b.clone().addScaledVector(on, gap), b2.clone().addScaledVector(on, over));
+      }
+      // Arrowheads at both ends, pointing outwards.
+      const side = off > 1e-9 ? on : new THREE.Vector3(0, 0, 1).cross(u).lengthSq() > 1e-9 ? new THREE.Vector3(0, 0, 1).cross(u).normalize() : new THREE.Vector3(1, 0, 0);
+      for (const [p, s] of [[a2, 1], [b2, -1]] as const) {
+        for (const w of [1, -1]) pts.push(p, p.clone().addScaledVector(u, s * arrow).addScaledVector(side, w * arrow * 0.35));
+      }
+      draw(pts);
+      label(num(len), a2.clone().add(b2).multiplyScalar(0.5));
+    }
+    this.requestRender();
+  }
+
+  /** Keep the dimension texts on their points (after every render: the camera may have moved). */
+  private placeDimLabels(): void {
+    if (!this.dimLabels.length) return;
+    const p = new THREE.Vector3();
+    for (const { el, at } of this.dimLabels) {
+      p.copy(at).project(this.camera);
+      const off = p.z < -1 || p.z > 1;
+      el.style.display = off ? "none" : "";
+      if (!off) el.style.transform = `translate(${((p.x + 1) / 2) * this.width}px, ${((1 - p.y) / 2) * this.height}px) translate(-50%, -50%)`;
+    }
   }
 
   /** Guide not offered as a snap target (the one being moved), -1 = none. */

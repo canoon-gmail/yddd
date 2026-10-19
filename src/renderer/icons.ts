@@ -29,6 +29,7 @@ export const ICONS: Record<string, string> = {
   scale: svg(`<rect x="3" y="11" width="10" height="10" ${FILL}/><path d="M3 11V3h18v18h-8" stroke-dasharray="2.5 2"/><path d="M11 13l9-9M15 4h5v5"/>`),
   rotate: svg(`<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>`),
   duplicate: svg(`<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>`),
+  measure: svg(`<path d="M3 16.5L16.5 3 21 7.5 7.5 21z" ${FILL}/><path d="M7 12.5l1.8 1.8M9.5 10l2.5 2.5M12 7.5l1.8 1.8M14.5 5l2.5 2.5"/>`),
   delete: svg(`<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/>`),
   undo: svg(`<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>`),
   redo: svg(`<path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/>`),
