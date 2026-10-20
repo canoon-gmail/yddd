@@ -20,6 +20,7 @@ import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
 import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type V3, type Wire } from "./kernel";
 import { num } from "./format";
+import { ICONS } from "./icons";
 
 /** A point in the sketch plane: [u, v] along the frame's x / y. */
 type P = [number, number];
@@ -31,7 +32,7 @@ type P = [number, number];
 type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P } | { kind: "spline"; a: P; b: P; pts: P[]; w: number[] };
 /** A closed outline; `g`: its join group (outlines joined with J become one face at Done). */
 type Loop = ({ kind: "path"; segs: Seg[] } | { kind: "circle"; c: P; r: number }) & { g?: number };
-type Mode = "select" | "line" | "arc" | "rect" | "circle";
+type Mode = "select" | "line" | "arc" | "rect" | "circle" | "picture";
 /** A selectable part of the sketch: a closed outline or an open path (by index). */
 type Item = { kind: "loop" | "open"; i: number };
 const sameItem = (a: Item | null, b: Item | null) => !!a && !!b && a.kind === b.kind && a.i === b.i;
@@ -69,6 +70,38 @@ const HANDLE_PX = 10, HANDLE_PAD_PX = 16;
 /** Ctrl while scaling: the nearest of these. */
 const SCALE_STEPS = [0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 10];
 const moveLoop = (l: Loop, d: P): Loop => (l.kind === "circle" ? { ...l, c: moveP(l.c, d) } : { ...l, segs: l.segs.map((g) => moveSeg(g, d)) });
+
+/**
+ * A picture to trace (shown only while sketching — never part of the model), remembered per sketch plane
+ * for the session: its texture, size (mm) and placement in world space (centre; `u`: along its width).
+ */
+interface StoredPicture {
+  tex: THREE.Texture;
+  opacity: number;
+  /** Its width when loaded (100%), and its turn since then (rad, + = counter-clockwise). */
+  w0: number;
+  turned: number;
+  w: number;
+  h: number;
+  center: THREE.Vector3;
+  u: THREE.Vector3;
+}
+const pictures = new Map<string, StoredPicture>();
+/** The same plane (the same face) gives the same key: its normal and distance from the origin. */
+const planeKey = (f: SketchFrame) => [...f.z.toArray().map((v) => v.toFixed(3)), f.origin.dot(f.z).toFixed(2)].join(",");
+const PICTURE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp" };
+
+/** A small square thumbnail of a picture (the whole picture, centred). */
+function thumbOf(tex: THREE.Texture): HTMLCanvasElement {
+  const img = tex.image as HTMLImageElement | HTMLCanvasElement, cv = document.createElement("canvas"), n = 44;
+  cv.width = cv.height = n;
+  const k = n / Math.max(img.width, img.height, 1), w = img.width * k, h = img.height * k;
+  const g = cv.getContext("2d")!;
+  g.fillStyle = "#fff";
+  g.fillRect((n - w) / 2, (n - h) / 2, w, h);
+  g.drawImage(img, (n - w) / 2, (n - h) / 2, w, h);
+  return cv;
+}
 
 export interface SketchFrame {
   origin: THREE.Vector3;
@@ -418,12 +451,29 @@ export class SketchTool implements Tool {
   private lastDown: { t: number; x: number; y: number } | null = null;
   private panel: HTMLElement;
   private panelHtml = "";
-  private insetLoops = -1;
+  /** The sketch `version` the 3D corner view was last framed for. */
+  private insetVersion = -1;
   /** Bumped on every change to the outlines (keeps the crossing points cached until then). */
   private version = 0;
   private crossCache: { version: number; pts: P[] } | null = null;
   private groupCache: { version: number; views: Map<number, { tris: THREE.BufferGeometry; lines: THREE.BufferGeometry } | null> } | null = null;
   private saved: { camera: ReturnType<ToolHost["viewport"]["cameraState"]>; xray: boolean } | null = null;
+  /** Bottom-left corner icons: turn the view, load a picture — and, with one loaded, its thumbnail (hover: its menu). */
+  private corner: HTMLElement;
+  /** The picture to trace: centre, angle (rad, from the plane's x), size (mm). */
+  private pic: { tex: THREE.Texture; mat: THREE.MeshBasicMaterial; c: P; ang: number; w: number; h: number; thumb: HTMLCanvasElement; w0: number; turned: number } | null = null;
+  /** The mode to go back to when Picture mode ends (a click off the picture). */
+  private prevMode: Mode = "select";
+  /**
+   * Picture mode: its handles at its bottom-right corner — a square on the corner (scale) and a ring a little
+   * past it (rotate), both about its centre; `drag`: the one being dragged (from `at`; the picture's size and
+   * turn then), `hover`: the one under the cursor.
+   */
+  private picGrip: { hover: "scale" | "rotate" | null; drag: { kind: "scale" | "rotate"; at: P; w: number; turned: number } | null } = { hover: null, drag: null };
+  /** Picture mode, Match: two points on the picture, then the two on the model they belong at. */
+  private picPts: P[] = [];
+  /** Picture mode: a press — dragging moves the picture, else a click (a Match point). */
+  private picDrag: { x: number; y: number; at: P; c0: P; moved: boolean } | null = null;
   private readonly mats = {
     line: new THREE.LineBasicMaterial({ color: 0xffd166, depthTest: false, transparent: true }),
     open: new THREE.LineBasicMaterial({ color: 0xff69b4, depthTest: false, transparent: true }),
@@ -458,6 +508,237 @@ export class SketchTool implements Tool {
       else if (b.dataset.act === "scale") this.scaling ? this.endScale(true) : this.startScale();
     });
     host.viewport.canvas.parentElement!.appendChild(this.panel);
+    this.corner = document.createElement("div");
+    this.corner.id = "sketch-corner";
+    this.corner.addEventListener("click", (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>("button");
+      if (!b) return;
+      b.blur();
+      const p = this.pic, act = b.dataset.act;
+      if (act === "turn") this.turnView();
+      else if (act === "picture") void this.loadPicture();
+      else if (!p) return;
+      else if (act === "pic") this.setMode(this.mode === "picture" ? this.prevMode : "picture"); // (on / off)
+      else if (act === "pic-remove") {
+        this.removePicture();
+        this.host.toast("Picture removed");
+        if (this.mode === "picture") this.setMode(this.prevMode);
+        else this.update();
+      }
+    });
+    // The menu's fields: Scale % (of its size when loaded), Rotate ° (since loaded), Transparent % — typed, or
+    // the mouse wheel over one (Shift: finer steps)
+    this.corner.addEventListener("input", (e) => this.picField(e.target as HTMLInputElement));
+    this.corner.addEventListener("wheel", (e) => {
+      const f = e.target as HTMLInputElement;
+      if (!f.dataset?.act?.startsWith("pic-")) return;
+      e.preventDefault();
+      const step = Number(f.dataset.step) / (e.shiftKey ? 5 : 1);
+      const v = Number(f.value) + (e.deltaY < 0 ? step : -step);
+      f.value = String(+(f.type === "range" ? Math.min(Number(f.max), Math.max(Number(f.min), v)) : f.dataset.act === "pic-scale" ? Math.max(step, v) : v).toFixed(2));
+      this.picField(f);
+    }, { passive: false });
+    this.corner.addEventListener("keydown", (e) => {
+      if ((e.key === "Enter" || e.key === "Escape") && e.target instanceof HTMLInputElement) e.target.blur();
+    });
+    host.viewport.canvas.parentElement!.appendChild(this.corner);
+    const st = pictures.get(planeKey(frame));
+    if (st) this.pic = { tex: st.tex, mat: this.picMat(st.tex, st.opacity), c: this.local(st.center), ang: Math.atan2(st.u.dot(frame.y), st.u.dot(frame.x)), w: st.w, h: st.h, thumb: thumbOf(st.tex), w0: st.w0, turned: st.turned };
+    this.renderCorner();
+  }
+
+  /** A menu field changed: the picture follows. */
+  private picField(f: HTMLInputElement): void {
+    const p = this.pic, v = Number(f.value);
+    if (!p || f.value === "" || !Number.isFinite(v)) return;
+    if (f.dataset.act === "pic-scale" && v > 0) this.placePicture((p.w0 * v) / 100 / p.w);
+    else if (f.dataset.act === "pic-rotate") this.placePicture(1, null, (v * Math.PI) / 180 - p.turned);
+    else if (f.dataset.act === "pic-clear") {
+      p.mat.opacity = 1 - v / 100;
+      this.storePicture();
+    } else return;
+    this.update();
+  }
+
+  /** The menu's fields show the picture as it is (e.g. after a Match) — the one being typed in stays as typed. */
+  private syncPicMenu(): void {
+    const p = this.pic;
+    if (!p) return;
+    const deg = (((p.turned * 180) / Math.PI + 540) % 360) - 180;
+    const vals: Record<string, string> = { "pic-scale": num((p.w / p.w0) * 100), "pic-rotate": num(Math.abs(deg) < 1e-9 ? 0 : deg), "pic-clear": String(Math.round((1 - p.mat.opacity) * 100)) };
+    for (const f of this.corner.querySelectorAll<HTMLInputElement>(".pic-menu input")) {
+      if (f !== document.activeElement && f.value !== vals[f.dataset.act!]) f.value = vals[f.dataset.act!];
+      if (f.dataset.act === "pic-clear") f.nextElementSibling!.textContent = `${f.value}%`;
+    }
+  }
+
+  /** The corner icons; with a picture: a gap, then its thumbnail, its menu shown on hover. */
+  private renderCorner(): void {
+    this.corner.innerHTML = `<button type="button" data-act="turn" title="Turn the view a quarter (the sketch stays as it is)">${ICONS.turnView}</button><button type="button" data-act="picture" title="Load a picture to trace (shown only while sketching, remembered for this face)">${ICONS.picture}</button>`;
+    const p = this.pic;
+    if (!p) return;
+    const clear = Math.round((1 - p.mat.opacity) * 100);
+    const wrap = document.createElement("div");
+    wrap.className = `pic-wrap${this.mode === "picture" ? " on" : ""}`;
+    wrap.innerHTML = `<button type="button" class="pic-thumb" data-act="pic" title="The picture — click: work on it (drag to move, scale, rotate, transparency, match) · click again: done"></button>
+      <div class="pic-menu"><div class="box">
+        <label class="row"><span>Scale</span><input type="number" data-act="pic-scale" data-step="5" min="0" step="any" title="Size, % of the size it was loaded at — mouse wheel: ±5 (Shift: ±1)"><em>%</em></label>
+        <label class="row"><span>Rotate</span><input type="number" data-act="pic-rotate" data-step="5" step="any" title="Turn, ° (+ = counter-clockwise) — mouse wheel: ±5 (Shift: ±1)"><em>°</em></label>
+        <label class="row"><span>Transparent</span><input type="range" data-act="pic-clear" data-step="5" min="0" max="95" step="1" value="${clear}"><output>${clear}%</output></label>
+        <div class="row"><button type="button" class="btn" data-act="pic-remove">Remove picture</button></div>
+      </div></div>`;
+    wrap.querySelector(".pic-thumb")!.appendChild(p.thumb);
+    this.corner.appendChild(wrap);
+    this.syncPicMenu();
+  }
+
+  // ------------------------------------------------------------ view, picture
+
+  /** Turn the view a quarter about the plane's normal (e.g. when the sketch opened sideways). */
+  private turnView(): void {
+    const vp = this.host.viewport, s = vp.cameraState();
+    s.up.applyAxisAngle(s.target.clone().sub(s.position).normalize(), -Math.PI / 2);
+    vp.restoreCamera(s);
+  }
+
+  private picMat(tex: THREE.Texture, opacity = 0.55): THREE.MeshBasicMaterial {
+    return new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity, side: THREE.DoubleSide, depthTest: false, depthWrite: false });
+  }
+
+  /** Load a picture to trace (replacing one): centred in the view, most of its height. */
+  private async loadPicture(): Promise<void> {
+    const file = await window.y3d.openFile({ title: "Picture to trace", filters: [{ name: "Pictures", extensions: Object.keys(PICTURE_TYPES) }], binary: true });
+    if (!file) return;
+    try {
+      await this.pictureFromBytes(file.data as Uint8Array<ArrayBuffer>, file.path.split(".").pop()!.toLowerCase());
+      this.host.toast("Picture loaded — drag it to move, type a % + Enter to scale, or click 2 points on it and then where they belong on the model");
+    } catch (e) {
+      this.host.toast(`Couldn't read the picture "${file.path}"${e instanceof Error && e.message ? ` (${e.message})` : ""}`, "error");
+    }
+  }
+
+  /** A picture file's bytes (`ext`: its type) as the picture. */
+  async pictureFromBytes(data: Uint8Array<ArrayBuffer>, ext: string): Promise<void> {
+    const url = URL.createObjectURL(new Blob([data], { type: PICTURE_TYPES[ext] ?? "image/png" }));
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      this.setPicture(img);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  /** Show `img` as the picture (replacing one): centred in the view, upright on screen, 70% of its height. */
+  setPicture(img: HTMLImageElement | HTMLCanvasElement): void {
+    const tex = new THREE.Texture(img);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    const vp = this.host.viewport, s = vp.cameraState();
+    const h = vp.worldPerPixel(s.target) * vp.canvas.clientHeight * 0.7, aspect = img.width / Math.max(1, img.height);
+    this.removePicture();
+    const up = this.local(s.target.clone().add(s.up)), c = this.local(s.target);
+    this.pic = { tex, mat: this.picMat(tex), c, ang: Math.atan2(up[1] - c[1], up[0] - c[0]) - Math.PI / 2, w: h * aspect, h, thumb: thumbOf(tex), w0: h * aspect, turned: 0 };
+    this.storePicture();
+    this.renderCorner();
+    this.setMode("picture");
+  }
+
+  private storePicture(): void {
+    const p = this.pic;
+    if (!p) return;
+    const u = this.frame.x.clone().multiplyScalar(Math.cos(p.ang)).addScaledVector(this.frame.y, Math.sin(p.ang));
+    pictures.set(planeKey(this.frame), { tex: p.tex, opacity: p.mat.opacity, w0: p.w0, turned: p.turned, w: p.w, h: p.h, center: this.world(p.c), u });
+  }
+
+  /** The picture's corners (in the plane). */
+  private picCorners(): P[] {
+    const p = this.pic!, cs = Math.cos(p.ang), sn = Math.sin(p.ang);
+    return ([[-1, -1], [1, -1], [1, 1], [-1, 1]] as P[]).map(([i, j]) => {
+      const x = (i * p.w) / 2, y = (j * p.h) / 2;
+      return add(p.c, [x * cs - y * sn, x * sn + y * cs]);
+    });
+  }
+
+  /** Where the picture's handles are: its bottom-right corner (scale), a little past it (rotate). */
+  private picGripPos(kind: "scale" | "rotate"): P {
+    const p = this.pic!, k = this.picCorners()[1];
+    if (kind === "scale") return k;
+    return add(k, mul(norm(sub(k, p.c)), 22 * this.host.viewport.worldPerPixel(this.world(k))));
+  }
+
+  /** The picture's handle under the cursor. */
+  private picGripAt(e: PointerEvent): "scale" | "rotate" | null {
+    if (!this.pic || this.picPts.length) return null;
+    const vp = this.host.viewport;
+    for (const kind of ["scale", "rotate"] as const) {
+      const s = vp.toScreen(this.world(this.picGripPos(kind)));
+      if (Math.hypot(s.x - e.clientX, s.y - e.clientY) <= HANDLE_PX) return kind;
+    }
+    return null;
+  }
+
+  /** Dragging a picture handle: scale (by the cursor's distance from the centre) or rotate (by its turn about it); Ctrl: 5% / 15° steps. */
+  private picGripTo(e: PointerEvent): void {
+    const p = this.pic!, g = this.picGrip.drag!, q = this.planeAt(e);
+    if (!q) return;
+    const ctrl = this.host.snapStep(e) > 0;
+    if (g.kind === "scale") {
+      let pct = ((g.w * dist(q, p.c)) / Math.max(dist(g.at, p.c), 1e-9) / p.w0) * 100;
+      if (ctrl) pct = Math.round(pct / 5) * 5;
+      if (pct > 0.5) this.placePicture((p.w0 * pct) / 100 / p.w);
+    } else {
+      let deg = ((g.turned + Math.atan2(q[1] - p.c[1], q[0] - p.c[0]) - Math.atan2(g.at[1] - p.c[1], g.at[0] - p.c[0])) * 180) / Math.PI;
+      if (ctrl) deg = Math.round(deg / 15) * 15;
+      this.placePicture(1, null, (deg * Math.PI) / 180 - p.turned);
+    }
+    this.update();
+  }
+
+  /** Is q on the picture? */
+  private onPicture(q: P): boolean {
+    const p = this.pic;
+    if (!p) return false;
+    const d = sub(q, p.c), cs = Math.cos(p.ang), sn = Math.sin(p.ang);
+    return Math.abs(d[0] * cs + d[1] * sn) <= p.w / 2 && Math.abs(-d[0] * sn + d[1] * cs) <= p.h / 2;
+  }
+
+  /** Drop the picture (and forget it for this plane). */
+  private removePicture(): void {
+    if (!this.pic) return;
+    this.pic.mat.dispose();
+    this.pic.tex.dispose();
+    this.pic = null;
+    this.picPts = [];
+    pictures.delete(planeKey(this.frame));
+    this.renderCorner();
+  }
+
+  /** Scale the picture by k about q (default: its centre), turn it by `rot` and move it so q lands on `to`. */
+  private placePicture(k: number, q: P | null = null, rot = 0, to: P | null = null): void {
+    const p = this.pic!, a = q ?? p.c, d = mul(sub(p.c, a), k), cs = Math.cos(rot), sn = Math.sin(rot);
+    p.c = add(to ?? a, [d[0] * cs - d[1] * sn, d[0] * sn + d[1] * cs]);
+    p.w *= k;
+    p.h *= k;
+    p.ang += rot;
+    p.turned += rot;
+    this.storePicture();
+  }
+
+  /** Picture mode: a click — the next Match point (2 on the picture, then 2 on the model: they're matched up). */
+  private picClick(e: PointerEvent): void {
+    const n = this.picPts.length, p = n < 2 ? this.planeAt(e) : this.pointAt(e);
+    if (!p) return;
+    if (n % 2 === 1 && same(p, this.picPts[n - 1])) return this.host.hint("Sketch: the two points must differ");
+    this.picPts.push(p);
+    if (this.picPts.length < 4) return this.update();
+    const [a1, a2, b1, b2] = this.picPts, da = sub(a2, a1), db = sub(b2, b1);
+    this.picPts = [];
+    this.placePicture(len(db) / len(da), a1, Math.atan2(db[1], db[0]) - Math.atan2(da[1], da[0]), b1);
+    this.host.viewport.showSnapMarker(null);
+    this.host.toast(`Picture matched — scaled ${num((len(db) / len(da)) * 100)}%`);
+    this.update();
   }
 
   start(): this {
@@ -482,6 +763,8 @@ export class SketchTool implements Tool {
     vp.setOverlay([]);
     this.host.hud(null);
     this.panel.remove();
+    this.corner.remove();
+    this.pic?.mat.dispose(); // (the texture stays, remembered for this plane)
     for (const m of [...Object.values(this.mats), ...this.gizmoMats.values()]) m.dispose();
   }
 
@@ -591,6 +874,28 @@ export class SketchTool implements Tool {
 
   move(e: PointerEvent): void {
     this.last = e;
+    if (this.mode === "picture") {
+      if (this.picGrip.drag) return this.picGripTo(e);
+      const grip = this.picGripAt(e);
+      if (grip !== this.picGrip.hover) this.picGrip.hover = grip;
+      if (grip) {
+        this.cursor = null;
+        this.host.viewport.showSnapMarker(null);
+        return this.update();
+      }
+      const dr = this.picDrag;
+      if (dr && this.pic && this.picPts.length < 2 && (dr.moved || Math.hypot(e.clientX - dr.x, e.clientY - dr.y) >= DRAG_PX)) {
+        const q = this.planeAt(e);
+        if (!q) return;
+        dr.moved = true;
+        this.pic.c = add(dr.c0, sub(q, dr.at));
+        this.cursor = null;
+        return this.update();
+      }
+      this.cursor = this.picPts.length < 2 ? this.planeAt(e) : this.pointAt(e);
+      if (this.picPts.length < 2) this.host.viewport.showSnapMarker(null);
+      return this.update();
+    }
     if (this.mode === "select") {
       const sc = this.scaling;
       if (sc) {
@@ -778,6 +1083,18 @@ export class SketchTool implements Tool {
   }
 
   up(e: PointerEvent): void {
+    if (this.picGrip.drag && e.button === 0) {
+      this.picGrip.drag = null;
+      this.host.hud(null);
+      return this.update();
+    }
+    if (this.picDrag && e.button === 0) {
+      const dr = this.picDrag;
+      this.picDrag = null;
+      if (dr.moved) this.storePicture();
+      else this.picClick(e);
+      return this.update();
+    }
     if (this.scaling?.handle) {
       // (one handle let go: the gizmo stays for more; Enter / a click elsewhere applies)
       this.scaling.handle = null;
@@ -842,6 +1159,18 @@ export class SketchTool implements Tool {
 
   down(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (this.mode === "picture") {
+      const at = this.planeAt(e), grip = this.picGripAt(e);
+      if (grip && at && this.pic) {
+        this.picGrip.drag = { kind: grip, at, w: this.pic.w, turned: this.pic.turned };
+        return this.update();
+      }
+      // A first click off the picture (no Match going on) only ends Picture mode — back to what it was.
+      if (at && !this.picPts.length && !this.onPicture(at)) return this.setMode(this.prevMode);
+      // (Match's last 2 points are on the model: those are clicks, not drags)
+      if (this.pic && at) this.picDrag = { x: e.clientX, y: e.clientY, at, c0: this.pic.c, moved: false };
+      return;
+    }
     if (this.mode === "select") {
       if (this.scaling) {
         const h = this.handleAt(e), q = this.planeAt(e);
@@ -1057,6 +1386,7 @@ export class SketchTool implements Tool {
     }
     if (k === "Escape") {
       if (this.typed) this.typed = "";
+      else if (this.picPts.length) this.picPts = [];
       else if (this.arcR) this.arcR = null;
       else if (this.first || this.arcEnd || this.anchor) {
         this.undoStack.push(JSON.stringify(this.state()));
@@ -1077,6 +1407,12 @@ export class SketchTool implements Tool {
     }
     if ((k === "j" || k === "J") && !e.shiftKey) {
       this.join();
+      return true;
+    }
+    if (k === "Delete" && this.mode === "picture" && this.pic) {
+      this.removePicture();
+      this.host.toast("Picture removed");
+      this.setMode("select");
       return true;
     }
     if ((k === "Delete" || k === "Backspace") && this.mode === "select" && this.selected.length) {
@@ -1118,13 +1454,22 @@ export class SketchTool implements Tool {
 
   private setMode(mode: Mode): void {
     if (this.scaling) this.endScale(false);
+    if (mode === "picture" && this.mode !== "picture") this.prevMode = this.mode;
     this.mode = mode;
     this.typed = "";
     this.arcEnd = null;
     this.arcR = null;
     if (mode !== "rect" && mode !== "circle") this.anchor = null;
     this.hoverItem = null;
-    if (mode === "select") {
+    this.picPts = [];
+    this.picDrag = null;
+    this.picGrip = { hover: null, drag: null };
+    if (mode === "picture") {
+      this.selected = [];
+      this.aligned = [];
+      this.host.viewport.showSnapMarker(null);
+      this.cursor = this.last && this.planeAt(this.last);
+    } else if (mode === "select") {
       // (a line being drawn ends here, as with Enter)
       if (this.first) this.endLines();
       this.cursor = null;
@@ -1146,6 +1491,11 @@ export class SketchTool implements Tool {
     const vals = this.typed.split(/[,x]/).filter((s) => s !== "").map(Number);
     this.typed = "";
     if (!vals.length || vals.some((v) => !Number.isFinite(v))) return this.update();
+    if (this.mode === "picture") {
+      // A % scales the picture about its centre.
+      if (this.pic && vals[0] > 0) this.placePicture(vals[0] / 100);
+      return this.update();
+    }
     if (this.mode === "select") {
       // Select: a % scales the selection about its centre (also without S); dx,dy moves it exactly.
       if (this.selected.length && vals.length === 1) {
@@ -1213,6 +1563,14 @@ export class SketchTool implements Tool {
       this.host.propsDialog(title, fields.map((f) => ({ ...f, value: r4(f.value) })), ok, "OK");
     const scaleFields = (x: number, y: number) => [{ label: "Scale (%)", value: 100, min: 0 }, { label: "X (%)", value: x, min: 0 }, { label: "Y (%)", value: y, min: 0 }];
     const factors = ([s, x, y]: number[]): P | null => (s > 0 && x > 0 && y > 0 ? [(s * x) / 1e4, (s * y) / 1e4] : (this.host.toast("Scale must be greater than 0", "error"), null));
+    if (this.mode === "picture") {
+      if (!this.pic) return;
+      return ask("Scale picture", [{ label: "Scale (%)", value: 100, min: 0 }], ([k]) => {
+        if (!(k > 0)) return this.host.toast("Scale must be greater than 0", "error");
+        this.placePicture(k / 100);
+        this.update();
+      });
+    }
     if (this.scaling) {
       // While scaling: the overall % times X % / Y % (from the size before S).
       const sc = this.scaling;
@@ -1383,6 +1741,22 @@ export class SketchTool implements Tool {
       objs.push(m);
     };
     // Joined outlines: their merged shape (one fill, one outline); geometry is cached, so draw clones.
+    const pic = this.pic;
+    if (pic) {
+      const f = this.frame, m = new THREE.Mesh(new THREE.PlaneGeometry(pic.w, pic.h), pic.mat);
+      m.position.copy(this.world(pic.c));
+      m.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(f.x, f.y, f.z)).multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), pic.ang));
+      m.userData.under = true; // (drawn below the sketch's lines)
+      objs.push(m);
+    }
+    // The picture's outline, while it's being worked on (Picture mode).
+    if (pic && this.mode === "picture") lines(this.picCorners(), this.mats.sel, true);
+    if (this.mode === "picture") {
+      const [a1, a2, b1] = this.picPts;
+      for (const p of this.picPts) dot(p);
+      if (a2) lines([a1, a2], this.mats.sel);
+      if (b1) lines([a1, b1], this.mats.rubber);
+    }
     const groupObj = (g: number, fill: THREE.Material | null, line: THREE.LineBasicMaterial) => {
       const v = this.groupView(g);
       if (!v) return false;
@@ -1516,12 +1890,32 @@ export class SketchTool implements Tool {
       }
       hud = Math.abs(sc.kx - sc.ky) < 1e-9 ? `Scale ${num(sc.kx * 100)}%` : `Scale X ${num(sc.kx * 100)}% · Y ${num(sc.ky * 100)}%`;
     }
+    // Picture mode: its handles (the one under the cursor / dragged bigger) — the scale square, the rotate ring.
+    let gripAt: P | null = null;
+    if (pic && this.mode === "picture" && !this.picPts.length) {
+      const pg = this.picGrip, k = this.picGripPos("scale"), w = vp.worldPerPixel(this.world(k));
+      const big = (kind: "scale" | "rotate") => pg.hover === kind || pg.drag?.kind === kind;
+      const cs = Math.cos(pic.ang), sn = Math.sin(pic.ang), r = (q: P): P => [q[0] * cs - q[1] * sn, q[0] * sn + q[1] * cs];
+      const sz = w * (big("scale") ? 7 : 5), sq = ([[-1, -1], [1, -1], [1, 1], [-1, 1]] as P[]).map(([i, j]) => add(k, r([i * sz, j * sz])));
+      const fill = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(sq.map(([u, v]) => new THREE.Vector2(u, v)))), this.gizmoMat(0x4fd1ff, "fill"));
+      fill.matrixAutoUpdate = false;
+      fill.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
+      objs.push(fill);
+      const ro = this.picGripPos("rotate"), rr = w * (big("rotate") ? 7 : 5);
+      lines(Array.from({ length: 24 }, (_, i) => [ro[0] + rr * Math.cos((i / 24) * TAU), ro[1] + rr * Math.sin((i / 24) * TAU)] as P), this.gizmoMat(0xffd84a, "line") as THREE.LineBasicMaterial, true);
+      lines([k, ro], this.gizmoMat(0xffd84a, "line") as THREE.LineBasicMaterial);
+      if (pg.drag || pg.hover) {
+        const deg = (((pic.turned * 180) / Math.PI + 540) % 360) - 180;
+        hud = (pg.drag?.kind ?? pg.hover) === "scale" ? `Scale ${num((pic.w / pic.w0) * 100)}%${pg.drag ? " · Ctrl: 5% steps" : ""}` : `Rotate ${num(Math.abs(deg) < 1e-9 ? 0 : deg)}°${pg.drag ? " · Ctrl: 15° steps" : ""}`;
+        gripAt = (pg.drag?.kind ?? pg.hover) === "rotate" ? ro : k;
+      }
+    }
     vp.setOverlay(objs);
-    this.host.hud(this.typed ? `⌨ ${this.typed}_` : hud, sc ? this.world(this.handlePos("xy")) : c ? this.world(c) : undefined);
-    // The 3D corner view frames the model and the closed outlines.
-    if (this.insetLoops !== this.loops.length) {
-      this.insetLoops = this.loops.length;
-      vp.setInset(true, this.loops.flatMap((l) => loopPolygon(l).map((p) => this.world(p))));
+    this.host.hud(this.typed ? `⌨ ${this.typed}_` : hud, sc ? this.world(this.handlePos("xy")) : gripAt ? this.world(gripAt) : c ? this.world(c) : undefined);
+    // The 3D corner view frames the model and the sketch — again after each change (moved / scaled: once let go).
+    if (this.insetVersion !== this.version && !this.drag?.moved && !this.scaling?.handle) {
+      this.insetVersion = this.version;
+      vp.setInset(true, [...this.loops.flatMap((l) => loopPolygon(l)), ...this.opens.flatMap((o) => o.flatMap((g) => [...segPoints(g), g.b]))].map((p) => this.world(p)));
     }
     this.renderPanel();
   }
@@ -1557,6 +1951,9 @@ export class SketchTool implements Tool {
         : this.path.length ? "Click the arc's end (it bends on from the last segment) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it · L: back to lines" : this.arcEnd ? "Click a point the arc passes through (near a half circle it snaps to one) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it" : "Click the arc's end point · type a radius + Enter to fix it",
       rect: this.anchor ? "Click the opposite corner · type width,height (or 23x30) + Enter" : "Click the first corner",
       circle: this.anchor ? "Click a point on the circle · type the radius + Enter" : "Click the centre",
+      picture: !this.pic ? "No picture — click the picture icon (bottom left) to load one"
+        : ["Drag the picture to move it · its corner: the square scales, the ring rotates · type a % + Enter to scale it · Match: click a point on the picture · click off the picture: back to drawing", "Match: click a 2nd point on the picture", "Match: click where the 1st point belongs (on the model / sketch)", "Match: click where the 2nd point belongs"][this.picPts.length]
+          + " · the menu by the thumbnail (bottom left): scale, rotate, transparency · thumbnail again: done · Del: remove it · L A R C: draw",
     };
     const btn = (m: Mode, label: string, key: string) => `<button type="button" class="btn${this.mode === m ? " primary" : ""}" data-mode="${m}" title="${label} (${key})">${label} <kbd>${key}</kbd></button>`;
     const closed = this.loops.length, open = this.opens.length;
@@ -1573,6 +1970,9 @@ export class SketchTool implements Tool {
     const out = pro ? proHtml : html;
     this.panel.classList.toggle("compact", pro);
     if (out !== this.panelHtml) this.panel.innerHTML = this.panelHtml = out;
+    this.corner.querySelector(".pic-wrap")?.classList.toggle("on", this.mode === "picture"); // (lit, its menu open)
+    this.syncPicMenu();
+    if (pro && this.mode === "picture") return this.host.hint(`Sketch — picture: ${tips.picture}`);
     if (pro) return this.host.hint(this.mode === "select" ? `Sketch — select${nSel ? `: ${nSel}, Del deletes` : ""} — L A R C: draw` : "Sketch — L line, A arc, R rect, C circle — Enter: done");
     this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · R rectangle · C circle · Done / Cancel in the panel`);
   }

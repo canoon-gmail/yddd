@@ -56,7 +56,7 @@ export interface MeshBody extends BodyBase {
   readonly shape: TriMesh;
 }
 
-/** An open path (lines / arcs end to end, from a sketch): moved, rotated, scaled, copied — a Pipe follows it. */
+/** An open path (lines / arcs end to end, from a sketch): moved, rotated, scaled, copied — Sweep runs a face along it. */
 export interface PathBody extends BodyBase {
   readonly kind: "path";
   readonly shape: Wire;

@@ -168,6 +168,7 @@ kbd {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 #op-panel h4 { margin: 0 0 8px; font-size: 13px; color: var(--accent-2); }
+#op-panel .op-note { font-size: 12px; line-height: 1.5; margin: -2px 0 6px; opacity: 0.85; }
 #op-panel label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
 #op-panel input {
   width: 110px; padding: 3px 6px; font: inherit; color: var(--text);
@@ -181,6 +182,8 @@ kbd {
 #op-panel select:focus { outline: none; border-color: var(--accent); }
 #op-panel label.check input { width: auto; accent-color: var(--accent); }
 #op-panel .op-error { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 4px; }
+#op-panel .op-error.waiting { color: #7cc47f; }
+#op-panel .op-error.waiting::before { content: "▸ "; }
 #op-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 #dim-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
 .dim-label {
@@ -217,6 +220,33 @@ kbd {
 #sketch-panel.compact .modes .spacer { width: 10px; }
 #sketch-panel.compact .modes kbd { display: none; }
 #sketch-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+#sketch-corner { position: absolute; left: 10px; bottom: 28px; z-index: 15; display: flex; gap: 4px; }
+#sketch-corner button {
+  width: 30px; height: 30px; padding: 3px; color: var(--text); cursor: pointer;
+  background: rgba(38, 40, 44, 0.9); border: 1px solid var(--border); border-radius: 6px;
+}
+#sketch-corner button svg { width: 22px; height: 22px; }
+#sketch-corner button:hover { filter: brightness(1.25); }
+#sketch-corner button.on { background: #6b4a26; border-color: var(--accent); }
+#sketch-corner .pic-wrap { position: relative; margin-left: 10px; }
+#sketch-corner .pic-wrap.on .pic-thumb { border-color: #4fd1ff; box-shadow: 0 0 0 1px #4fd1ff, 0 0 12px rgba(79, 209, 255, 0.8); }
+#sketch-corner .pic-wrap.on .pic-thumb { background: rgba(38, 40, 44, 0.9); }
+#sketch-corner .pic-thumb canvas { width: 22px; height: 22px; display: block; }
+#sketch-corner .pic-menu { display: none; position: absolute; left: 0; bottom: 100%; padding-bottom: 6px; }
+#sketch-corner .pic-wrap.on .pic-menu { display: block; }
+#sketch-corner .pic-menu .box {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; white-space: nowrap; font-size: 12px;
+  background: rgba(38, 40, 44, 0.97); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+#sketch-corner .pic-menu .row { display: flex; align-items: center; gap: 4px; }
+#sketch-corner .pic-menu .row > span { width: 72px; color: var(--muted); }
+#sketch-corner .pic-menu button.btn { width: auto; height: auto; padding: 2px 8px; font-size: 12px; border-radius: 5px; background: var(--panel-2); }
+#sketch-corner .pic-menu input[type=range] { width: 110px; }
+#sketch-corner .pic-menu input[type=number] {
+  width: 70px; padding: 2px 6px; font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+}
+#sketch-corner .pic-menu em { font-style: normal; color: var(--muted); }
+#sketch-corner .pic-menu output { width: 32px; text-align: right; }
 button.btn:disabled { opacity: 0.45; cursor: default; filter: none; }
 
 button.btn {

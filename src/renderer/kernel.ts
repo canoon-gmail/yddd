@@ -32,6 +32,8 @@ import {
   measureLength,
   measureVolume,
   basicFaceExtrusion,
+  revolution,
+  genericSweep,
   deserializeShape,
   exportSTEP,
   importSTEP,
@@ -1892,14 +1894,42 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
 
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */
 export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number): Solid {
+  // OpenCascade's shell offsets every wall surface. It fails on some walls (e.g. a stretched cylinder's
+  // B-splines) — and on others (a cylinder cut by a plane) it "succeeds" giving the solid back
+  // unchanged. A straight extrusion can be hollowed without it; otherwise its intersection mode, slower
+  // but it copes with more.
+  let first: unknown = null;
   try {
-    return shape.shell(thickness, (f) => f.when(({ element }) => faceIds.has(element.hashCode)));
-  } catch (e) {
-    // OpenCascade's shell offsets every wall surface, which fails on some B-spline walls (e.g. a
-    // stretched cylinder). A straight extrusion can be hollowed without that.
-    const r = prismShell(shape, faceIds, thickness);
+    const r = thickSolid(shape, faceIds, thickness, false);
     if (r) return r;
-    throw e;
+  } catch (e) {
+    first = e;
+  }
+  const r = prismShell(shape, faceIds, thickness) ?? thickSolid(shape, faceIds, thickness, true);
+  if (r) return r;
+  throw first ?? new Error("Shell: the geometry kernel could not hollow this solid (try a smaller thickness)");
+}
+
+/**
+ * OpenCascade's shell (walls offset inward by `thickness`, the given faces removed), or null when it
+ * doesn't hollow anything: not done, not a valid solid, or no new faces / no volume taken away.
+ */
+function thickSolid(shape: Solid, faceIds: Set<number>, thickness: number, intersection: boolean): Solid | null {
+  const faces = new oc.NCollection_List_TopoDS_Shape();
+  const builder = new oc.BRepOffsetAPI_MakeThickSolid();
+  try {
+    for (const f of shape.faces) if (faceIds.has(f.hashCode)) faces.Append(f.wrapped);
+    builder.MakeThickSolidByJoin(shape.wrapped, faces, -thickness, 1e-3, oc.BRepOffset_Mode.BRepOffset_Skin, intersection, false, oc.GeomAbs_JoinType.GeomAbs_Arc, false, new oc.Message_ProgressRange());
+    if (!builder.IsDone()) return null;
+    const solids = [...iterTopo(builder.Shape(), "solid")];
+    if (solids.length !== 1) return null;
+    const r = cast(solids[0]) as Solid;
+    if (!isValidShape(r) || r.faces.length <= shape.faces.length) return null;
+    const v = solidVolume(r);
+    return v > 1e-9 && v < solidVolume(shape) - 1e-9 ? r : null;
+  } finally {
+    faces.delete();
+    builder.delete();
   }
 }
 
@@ -2156,6 +2186,117 @@ export function offsetDragAxis(shape: Shape, faceId: number): { origin: V3; dir:
   return { origin: [c[0] + x[0] * reach, c[1] + x[1] * reach, c[2] + x[2] * reach], dir: x };
 }
 
+// ---------------------------------------------------------------- revolve / sweep
+
+/** A line in space (e.g. a revolve axis): through `origin` along `dir`. */
+export interface Axis {
+  origin: V3;
+  dir: V3;
+}
+
+/** Points along a face's outline (each edge sampled), for side tests. */
+function outlinePoints(face: Face): V3[] {
+  return face.edges.flatMap((e) => [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1].map((t) => e.pointAt(t).toTuple() as V3));
+}
+
+/** The straight edges of a flat face (their ends), e.g. as revolve axes. */
+export function faceLineEdges(shape: Shape, faceId: number): [V3, V3][] {
+  const face = findFace(shape, faceId);
+  return face ? face.edges.filter((e) => e.geomType === "LINE").map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]) : [];
+}
+
+/**
+ * Why a flat face cannot turn about `axis`, or null if it can: the axis must not be square to the
+ * face, and if it runs along the face's plane it must keep to one side of it (along an edge is fine).
+ */
+export function revolveRefusal(shape: Shape, faceId: number, axis: Axis): string | null {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") return "Revolve works on flat faces only";
+  const n = norm3(face.normalAt().toTuple() as V3), d = norm3(axis.dir);
+  if (Math.abs(dot3(n, d)) > 1 - 1e-6) return "Revolve: the axis is square to the face — pick one along it";
+  if (Math.abs(dot3(n, d)) < 1e-6) {
+    const pts = outlinePoints(face), side = norm3(cross3(n, d));
+    const s = pts.map((p) => dot3(sub3(p, axis.origin), side));
+    const tol = 1e-6 * Math.max(1, ...s.map(Math.abs));
+    if (Math.min(...s) < -tol && Math.max(...s) > tol) return "Revolve: the axis runs through the face — pick one beside it (or along an edge)";
+  }
+  return null;
+}
+
+/** A flat face turned `angleDeg` (360 = a full turn; negative = the other way) about `axis` into a new solid. */
+export function revolveFace(shape: Shape, faceId: number, axis: Axis, angleDeg: number): Solid {
+  const why = revolveRefusal(shape, faceId, axis);
+  if (why) throw new Error(why);
+  if (Math.abs(angleDeg) < 1e-6) throw new Error("angle must not be 0");
+  const solid = revolution(findFace(shape, faceId)!, axis.origin, norm3(axis.dir), Math.max(-360, Math.min(360, angleDeg)));
+  if (!isValidShape(solid) || solidVolume(solid) <= 1e-9) throw new Error("Revolve: the result is not a valid solid");
+  return solid;
+}
+
+/** The ends of an open path: each end point with the path's direction there, pointing into the path. Empty if closed. */
+export function pathEnds(path: Wire): { point: V3; dir: V3 }[] {
+  const ends = path.edges.flatMap((e) => [
+    { point: e.startPoint.toTuple() as V3, dir: norm3(e.tangentAt(0).toTuple() as V3) },
+    { point: e.endPoint.toTuple() as V3, dir: norm3(e.tangentAt(1).toTuple().map((v) => -v) as V3) },
+  ]);
+  const near = (p: V3, q: V3) => Math.hypot(...sub3(p, q)) < 1e-6;
+  return ends.filter((a) => ends.filter((b) => near(a.point, b.point)).length === 1);
+}
+
+/** The end of `path` nearest the centre of a flat face, or null for a closed path. */
+function nearestEnd(face: Face, path: Wire): { point: V3; dir: V3 } | null {
+  const c = face.center.toTuple() as V3;
+  const dist = (e: { point: V3 }) => Math.hypot(...sub3(e.point, c));
+  return pathEnds(path).sort((a, b) => dist(a) - dist(b))[0] ?? null;
+}
+
+/**
+ * Whether a flat face already sits at an end of the path, as a profile to sweep where it is: that
+ * end lies on the face's plane, within its outline's reach, and the path leaves the plane there.
+ */
+export function profileOnPath(shape: Shape, faceId: number, path: Wire): boolean {
+  const face = findFace(shape, faceId);
+  const end = face && nearestEnd(face, path);
+  if (!face || !end) return false;
+  const n = norm3(face.normalAt().toTuple() as V3), c = face.center.toTuple() as V3;
+  const reach = Math.max(...outlinePoints(face).map((p) => Math.hypot(...sub3(p, c))));
+  return Math.abs(dot3(n, sub3(end.point, c))) < 1e-4 && Math.hypot(...sub3(end.point, c)) <= reach + 1e-6 && Math.abs(dot3(n, end.dir)) > 0.2;
+}
+
+/** Sweep a closed outline with its holes along `path` (holes swept the same way and cut out). */
+function sweepLoops(outer: Wire, holes: Wire[], path: Wire, round: boolean): Solid {
+  const sweep = (w: Wire) => genericSweep(w, path, { transitionMode: round ? "round" : "right" });
+  let solid = sweep(outer);
+  if (holes.length) solid = boolean("cut", solid, holes.map(sweep));
+  if (!isValidShape(solid) || solidVolume(solid) <= 1e-9) throw new Error("Sweep: the result is not a valid solid — the profile may be too big for the path's bends");
+  return solid;
+}
+
+/**
+ * A flat face swept along an open path into a new solid. `toPath`: the face is first moved so its
+ * centre sits on the path's end nearest it, turned square to the path there and then `turnDeg` about
+ * the path; otherwise it is swept where it is. `round`: round corners where the path turns sharply (else mitred).
+ */
+export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0): Solid {
+  let face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") throw new Error("Sweep: the profile must be a flat face");
+  if (!pathEnds(path).length) throw new Error("Sweep: the path must be open (it has no ends)");
+  if (toPath) {
+    const end = nearestEnd(face, path)!, c = face.center.toTuple() as V3, n = norm3(face.normalAt().toTuple() as V3);
+    const ax = cross3(n, end.dir), s = Math.hypot(...ax);
+    if (s > 1e-9) face = rotateShape(face, (Math.atan2(s, dot3(n, end.dir)) * 180) / Math.PI, c, ax);
+    face = translateShape(face, sub3(end.point, c));
+    if (Math.abs(turnDeg) > 1e-9) face = rotateShape(face, turnDeg, end.point, end.dir);
+  }
+  // outerWire / innerWires delete the face they are called on.
+  return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round);
+}
+
+/** A straight path from `a` to `b` (e.g. a guide line to sweep along). */
+export function lineWire(a: V3, b: V3): Wire {
+  return assembleWire([makeLine(a, b)]);
+}
+
 /**
  * Normal of the cut plane for a guide line a–b. The plane holds the guide and runs straight
  * across a flat face (of `shapes`) that the guide lies on (touching it, not just in its plane), so a
@@ -2323,7 +2464,11 @@ export function splitByPlane(shape: Solid, point: V3, normal: V3): { above: Soli
   const z = norm3(normal);
   const x = norm3(cross3(Math.abs(z[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0], z));
   const half = makeBox({ origin: point, x, y: cross3(z, x), z }, point, 2 * R, 2 * R, R);
-  const part = (s: Shape3D) => ([...iterTopo(s.wrapped, "solid")].length ? s : null);
+  // (one solid: that solid, not the boolean's compound round it — some operations, e.g. shell, need a solid)
+  const part = (s: Shape3D) => {
+    const solids = [...iterTopo(s.wrapped, "solid")];
+    return solids.length === 1 ? (cast(solids[0]) as Solid) : solids.length ? s : null;
+  };
   return { above: part(boolean("common", shape, half)), below: part(boolean("cut", shape, half)) };
 }
 
@@ -2804,7 +2949,11 @@ export function serializeShape(shape: Shape | Wire): string {
 }
 
 export function deserialize(data: string): Shape {
-  return deserializeShape(data) as Shape;
+  const shape = deserializeShape(data) as Shape;
+  // A compound round one solid (older files: Cut by guide kept the boolean's compound) → the solid.
+  if (shape.wrapped.ShapeType() !== oc.TopAbs_ShapeEnum.TopAbs_COMPOUND) return shape;
+  const solids = [...iterTopo(shape.wrapped, "solid")];
+  return solids.length === 1 && [...iterTopo(shape.wrapped, "face")].length === (cast(solids[0]) as Solid).faces.length ? (cast(solids[0]) as Solid) : shape;
 }
 
 export function exportStep(items: { shape: Shape; name: string }[]): Promise<ArrayBuffer> {

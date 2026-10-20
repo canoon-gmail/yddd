@@ -1447,7 +1447,7 @@ export class Viewport {
       child.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
     }
     for (const o of objects) {
-      o.renderOrder = 20;
+      o.renderOrder = o.userData.under ? 19 : 20; // (e.g. a sketch's picture: below its lines)
       this.overlayRoot.add(o);
     }
     this.requestRender();

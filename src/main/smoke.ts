@@ -1,5 +1,6 @@
 /**
  * Opt-in end-to-end smoke test. Run with:  Y3D_SMOKE=/tmp/y3d-smoke npx electron .
+ * (npm run smoke; npm run smoke:half skips scenarios 1–3 — see Y3D_SMOKE_HALF.)
  * Drives the real UI with synthetic pointer events, captures screenshots and
  * prints a JSON report, then quits. Not loaded during normal use.
  */
@@ -786,6 +787,55 @@ const SCENARIO_3 = String.raw`
     expect("13h edge move Tab after drag threw", false, String(e && e.stack || e));
   }
 
+  // 13i) Move guide: Tab right after a drag shows it and replaces it (one undo back); Tab after a Tab adds (from 0)
+  try {
+    const g0 = app.doc.guides.length;
+    app.doc.setGuides([...app.doc.guides, { a: [-50, 2800, 0], b: [50, 2800, 0], n: [0, 1, 0] }], "guide for Tab");
+    const gi = app.doc.guides.length - 1;
+    app.run("mode.body"); app.setSelection([]);
+    app.selGuide = gi; app.run("xf.move");
+    const moving = !!(app.xf && app.xf.guide === gi);
+    app.applyGuideMove([7, 0, 0], true); // (what a drag of the gizmo along X ends with)
+    key("Tab", "Tab"); await sleep(20);
+    const d1 = document.getElementById("props-dlg"), title = d1 && d1.textContent, shown = d1 ? [...d1.querySelectorAll("input")].map((i) => Number(i.value)).join() : null;
+    dialog([0, 5, 0]); await sleep(20);
+    const g = app.doc.guides[gi], replaced = g && g.a.join() === "-50,2805,0" && g.b.join() === "50,2805,0";
+    key("Tab", "Tab"); await sleep(20);
+    const d2 = document.getElementById("props-dlg"), shown2 = d2 ? [...d2.querySelectorAll("input")].map((i) => Number(i.value)).join() : null;
+    d2?.querySelector("[data-act=cancel]")?.click();
+    key("Escape", "Escape"); await sleep(20);
+    app.run("edit.undo"); await sleep(20);
+    const back = app.doc.guides[gi] && app.doc.guides[gi].a.join() === "-50,2800,0";
+    expect("13i Move guide: Tab after a drag shows it (7, 0, 0 — 'last drag'), typed 0, 5, 0 replaces it, one undo → back; Tab after that starts from 0",
+      moving && /last drag/.test(title) && shown === "7,0,0" && replaced && shown2 === "0,0,0" && back, { moving, title: title && title.slice(0, 30), shown, guide: g && [g.a, g.b], shown2, back });
+    app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guide");
+  } catch (e) {
+    expect("13i guide move Tab after drag threw", false, String(e && e.stack || e));
+  }
+
+  // 13j) Shift+D on a closed loop that isn't flat (where a thin cylinder pierces a thick one): refused, nothing added
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const SIDE = { origin: [0, 0, 0], x: [0, 1, 0], y: [0, 0, 1], z: [1, 0, 0] }; // (along X)
+    const u = K.booleanOp("union", K.makeCylinder(G, [0, 3000, 0], 10, 40), [K.makeCylinder(SIDE, [-20, 3000, 20], 6, 40)]);
+    const cb = app.doc.makeBody(u, "Pierced");
+    app.doc.commit([...app.doc.bodies, cb], "pierced cylinder");
+    // The loop on the +X side: the curved edges (not lines / circles) there
+    const loop = app.doc.get(cb.id).shape.edges.filter((e) => e.geomType !== "LINE" && e.geomType !== "CIRCLE" && e.pointAt(0.5).x > 1 && e.pointAt(0.5).x < 10.5);
+    const flat = (() => { const z = loop.flatMap((e) => [0, 0.25, 0.5, 0.75].map((t) => e.pointAt(t).x)); return Math.max(...z) - Math.min(...z) < 1e-6; })();
+    document.querySelectorAll("#toasts .toast").forEach((t) => t.remove());
+    app.run("mode.edge"); app.setSelection(loop.map((e) => ({ kind: "edge", body: cb.id, id: e.hashCode })));
+    const n = app.doc.bodies.length;
+    key("D", "KeyD", { shiftKey: true }); await sleep(20);
+    const err = [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent).join(" | ");
+    key("Escape", "Escape");
+    expect("13j Shift+D on a closed loop that isn't flat: refused ('isn't flat'), nothing added", loop.length >= 1 && !flat && /isn't flat/.test(err) && app.doc.bodies.length === n && !app.tool,
+      { edges: loop.length, kinds: loop.map((e) => e.geomType), flat, err, added: app.doc.bodies.length - n, tool: app.tool && app.tool.name });
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: cb.id, id: 0 }]); app.run("edit.delete");
+  } catch (e) {
+    expect("13j Shift+D on a non-flat loop threw", false, String(e && e.stack || e));
+  }
+
   // 14) Divide face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
   try {
     const valid = window.y3dKernel.isValidShape;
@@ -861,6 +911,170 @@ const SCENARIO_3 = String.raw`
     app.run("mode.body");
   } catch (e) {
     expect("15 round offset threw", false, String(e && e.stack || e));
+  }
+
+  // 15b) Revolve (Pro: R E) and Sweep (Pro: S W) — the second key lands in the panel the first one opened
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const XZ = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 0, 1], z: [0, -1, 0] }; // a plane square to Y
+    const add = (shape, name, kind) => { const b = app.doc.makeBody(shape, name, kind); app.doc.commit([...app.doc.bodies, b], name); return b.id; };
+    const pick = (k, text) => { const sel = document.querySelector("#op-panel select[data-key=" + k + "]"); const o = [...sel.options].find((o) => o.text.startsWith(text)); sel.value = o.value; sel.dispatchEvent(new Event("change", { bubbles: true })); };
+    const wasPro = document.body.classList.contains("pro");
+    document.body.classList.add("pro");
+    const chord = async (k1, k2) => { key(k1, "Key" + k1.toUpperCase()); await sleep(20); (document.activeElement || window).dispatchEvent(new KeyboardEvent("keydown", { key: k2, code: "Key" + k2.toUpperCase(), bubbles: true, cancelable: true })); await sleep(20); };
+    const opErr = () => document.querySelector("#op-panel .op-error").textContent;
+    const near = (v, want) => Math.abs(v - want) < want * 0.002;
+    const g0 = app.doc.guides.length;
+    // Donut: a circle r 5 at x 30 standing up, about a guide along Z through x 0 (picked by default: the nearest axis that works)
+    app.doc.setGuides([...app.doc.guides, { a: [0, 4000, -10], b: [0, 4000, 10] }], "axis guide");
+    const circle = add(K.makeCircleFace(XZ, [30, 4000, 0], 5), "Circle", "face");
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: circle, id: 0 }]);
+    await chord("r", "e");
+    const axisName = document.querySelector("#op-panel select[data-key=axis]").selectedOptions[0].text;
+    pick("axis", "Y axis"); await sleep(150); const square = opErr();
+    pick("axis", "Guide line 1"); await sleep(150);
+    app.applyOp();
+    const donut = app.doc.get(circle) ? null : last();
+    const dv = donut && K.solidVolume(donut.shape), torus = donut && donut.shape.faces.map((f) => f.geomType).join();
+    expect("15b Revolve: circle beside a Z guide → donut (torus face, volume 2π²Rr²) replacing the face; Y axis refused (square to the face)",
+      /^Guide line 1/.test(axisName) && /square/.test(square) && donut && donut.kind === "solid" && torus === "TORUS" && near(dv, 2 * Math.PI ** 2 * 30 * 25) && K.isValidShape(donut.shape),
+      { axisName, square, torus, dv });
+    app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guide");
+    // Quarter turn of a 10 x 20 rectangle about one of its edges → a quarter cylinder (r 10 · 20 long or r 20 · 10 long)
+    const rect = add(K.makeRectFace(G, [100, 4000, 0], 10, 20), "Rect", "face");
+    app.setSelection([{ kind: "body", body: rect, id: 0 }]); app.run("op.revolve"); await sleep(20);
+    pick("axis", "Face edge 1"); opValue("angle", 90); await sleep(150); app.applyOp();
+    const quarter = last().id, qv = K.solidVolume(last().shape);
+    expect("15b Revolve 90° about a face edge → quarter cylinder", (near(qv, Math.PI * 100 * 20 / 4) || near(qv, Math.PI * 400 * 10 / 4)) && K.isValidShape(last().shape), qv);
+    {
+      // Clicks in the viewport pick the axis: a straight edge of the face, the Z axis line (10 x 10 square at x 50 → ring π(55² − 45²)·10)
+      const nb0 = app.doc.bodies.length;
+      const rq = add(K.makeRectFace(XZ, [50, 0, 0], 10, 10), "Square", "face");
+      app.setSelection([{ kind: "body", body: rq, id: 0 }]); app.run("op.revolve"); await sleep(20);
+      const cam = [vp.camera.position.clone(), vp.camera.up.clone(), vp.controls.target.clone()];
+      vp.camera.up.set(0, 0, 1); vp.camera.position.set(55, -120, 65); vp.controls.target.set(25, 0, 5); vp.camera.lookAt(25, 0, 5); vp.controls.update(); vp.requestRender(); await sleep(50);
+      opValue("angle", 360);
+      const clickAt = (p) => { ev("pointermove", p); ev("pointerdown", p); ev("pointerup", p); };
+      const axisNow = () => document.querySelector("#op-panel select[data-key=axis]").selectedOptions[0].text;
+      const se = app.doc.get(rq).shape.edges.find((e) => e.geomType === "LINE"), sa = se.startPoint.toTuple(), sb2 = se.endPoint.toTuple();
+      clickAt([0, 1, 2].map((i) => (sa[i] + sb2[i]) / 2)); await sleep(150); const byEdge = axisNow();
+      clickAt([0, 0, 25]); await sleep(150); const byZ = axisNow();
+      app.applyOp();
+      const ring = last(), rv = ring && K.solidVolume(ring.shape);
+      expect("15b Revolve: clicking the face's edge / the Z axis line picks it as the axis → ring", /^Face edge/.test(byEdge) && byZ === "Z axis" && !app.doc.get(rq) && near(rv, Math.PI * (55 ** 2 - 45 ** 2) * 10), { byEdge, byZ, rv });
+      app.run("edit.undo"); app.run("edit.undo");
+      expect("15b Revolve click test cleaned up", app.doc.bodies.length === nb0, app.doc.bodies.length);
+      vp.camera.position.copy(cam[0]); vp.camera.up.copy(cam[1]); vp.controls.target.copy(cam[2]); vp.camera.lookAt(cam[2]); vp.controls.update(); vp.requestRender(); await sleep(50);
+    }
+    // Sweep: a 10 x 10 square (on the ground, away from the path) along an L path, moved onto it: mitred corner → volume 100 × 90
+    const path = add(K.sketchPath([{ kind: "line", a: [0, 4100, 0], b: [0, 4100, 50] }, { kind: "line", a: [0, 4100, 50], b: [40, 4100, 50] }]), "Path", "path");
+    const sq = add(K.makeRectFace(G, [200, 4200, 0], 10, 10), "Square", "face");
+    app.setSelection([{ kind: "body", body: path, id: 0 }, { kind: "body", body: sq, id: 0 }]);
+    await chord("s", "w"); await sleep(150);
+    const toPath = !document.querySelector("#op-panel input[data-key=toPath]"); // (away from the path: always moved, no box)
+    app.applyOp();
+    const sw = last(), sv = K.solidVolume(sw.shape);
+    expect("15b Sweep: square moved to the path end, mitred corner → volume 9000; the face becomes the solid, the path stays",
+      toPath && !app.doc.get(sq) && app.doc.get(path) && sw.kind === "solid" && near(sv, 9000) && K.isValidShape(sw.shape), { toPath, sv });
+    // Tube: nothing selected, S W opens Sweep (no Scale complaint); click a flat ring (Offset → Make ring), then a Z guide → tube π(5² − 3²) × 30
+    const disc = add(K.makeCircleFace(G, [300, 4200, 0], 5), "Disc", "face");
+    app.setSelection([{ kind: "body", body: disc, id: 0 }]); app.run("op.offset"); opValue("d", -2);
+    { const cb = document.querySelector("#op-panel input[data-key=ring]"); cb.checked = true; cb.dispatchEvent(new Event("change", { bubbles: true })); }
+    await sleep(150); app.applyOp();
+    const ring = last().id;
+    const gz = app.doc.guides.length;
+    app.doc.setGuides([...app.doc.guides, { a: [300, 4210, 0], b: [300, 4210, 30] }], "Z guide");
+    const cam = vp.cameraState();
+    vp.setView("top"); vp.fit([disc]); await sleep(50);
+    const click = (p) => { ev("pointermove", p); ev("pointerdown", p); ev("pointerup", p); };
+    app.selGuide = -1; app.setSelection([]);
+    document.querySelectorAll("#toasts .toast").forEach((t) => t.remove());
+    await chord("s", "w");
+    const hoverAt = async (p) => { ev("pointermove", p); await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); return canvas.style.cursor; };
+    const hovers = [await hoverAt([304, 4200, 0]), await hoverAt([300, 4210, 15]), await hoverAt([308, 4192, 0])];
+    const waiting = { title: app.op && app.op.spec.title, err: opErr(), toasts: document.querySelectorAll("#toasts .toast.error").length,
+      green: document.querySelector("#op-panel .op-error").classList.contains("waiting") };
+    click([304, 4200, 0]); await sleep(150); // on the ring band (the disc lies under it: either is a flat face on the same plane — the ring is on top, made last)
+    const afterFace = { note: document.querySelector("#op-panel .op-note").textContent, err: opErr() };
+    click([300, 4210, 15]); await sleep(150);
+    const afterGuide = { note: document.querySelector("#op-panel .op-note").textContent, toPath: !document.querySelector("#op-panel input[data-key=toPath]") };
+    app.applyOp();
+    const tube = last(), tv = K.solidVolume(tube.shape), tb = tube.shape.boundingBox.bounds.map((p) => p.map(r));
+    expect("15b Sweep with nothing selected: panel waits (no Scale error), click a ring face then a guide → tube on the guide (π·16·30)",
+      waiting.title === "Sweep" && /flat face/.test(waiting.err) && waiting.green && waiting.toasts === 0 && /click a path or guide/.test(afterFace.err) && /Path: guide line/.test(afterGuide.note) && afterGuide.toPath
+        && near(tv, Math.PI * 16 * 30) && eq(tb, [[295, 4205, 0], [305, 4215, 30]]) && K.isValidShape(tube.shape)
+        && eq(hovers, ["pointer", "pointer", "crosshair"]), { waiting, afterFace, afterGuide, tv, tb, hovers });
+    // A guide selected first: the panel shows it and waits for the face
+    app.setSelection([]); app.selGuide = gz;
+    await chord("s", "w");
+    const g1 = { note: document.querySelector("#op-panel .op-note").textContent, err: opErr() };
+    click([300, 4200, 0]); await sleep(150);
+    const g2 = { ok: !!(app.op && app.op.result), err: opErr() };
+    key("Escape", "Escape");
+    expect("15b Sweep with a guide selected: waits for a face click, then previews", /Path: guide line/.test(g1.note) && /flat face/.test(g1.err) && g2.ok, { g1, g2 });
+    // Turn profile: a 10 x 4 bar moved onto the Z guide lies along X; turned 90° it lies along Y
+    const bar = add(K.makeRectFace(G, [400, 4300, 0], 10, 4), "Bar", "face");
+    app.setSelection([{ kind: "body", body: bar, id: 0 }]); app.selGuide = gz;
+    await chord("s", "w"); await sleep(150);
+    const span = () => { const b = app.op.result.ghost.get(bar).boundingBox.bounds; return [0, 1, 2].map((k) => r(b[1][k] - b[0][k])); };
+    const s0 = span(); opValue("turn", 90); await sleep(150); const s90 = span();
+    key("Escape", "Escape");
+    expect("15b Sweep Turn profile: 0° → 10 x 4 x 30, 90° → 4 x 10 x 30", eq(s0, [10, 4, 30]) && eq(s90, [4, 10, 30]), { s0, s90 });
+    app.selGuide = -1; // (else Delete takes the guide, not the bar)
+    app.setSelection([{ kind: "body", body: bar, id: 0 }]); app.run("edit.delete");
+    app.doc.setGuides(app.doc.guides.slice(0, gz), "remove guide");
+    app.selGuide = -1;
+    vp.restoreCamera(cam); await sleep(50);
+    // From a solid's face: joins the solid (no new object), or a separate solid with New solid
+    app.run("tool.box"); ev("pointermove", [0, 4300, 0]); key("Tab", "Tab"); dialog([20, 20, 20]);
+    const bx = last().id, n = app.doc.bodies.length, v0 = K.solidVolume(last().shape);
+    const side = app.doc.get(bx).shape.faces.find((f) => f.normalAt(f.center).toTuple()[0] > 0.99);
+    app.run("mode.face"); app.setSelection([{ kind: "face", body: bx, id: side.hashCode }]); app.run("op.revolve"); await sleep(20);
+    const edges = [...document.querySelector("#op-panel select[data-key=axis]").options].map((o) => o.text).filter((t) => t.startsWith("Face edge")).length;
+    for (let i = 1; i <= edges; i++) { pick("axis", "Face edge " + i); await sleep(150); if (!opErr()) break; }
+    for (const a of [90, -90]) { opValue("angle", a); await sleep(150); const g = app.op.result && app.op.result.ghost.get(bx); if (g && K.solidVolume(g) > v0 + 1) break; } // (the turn away from the box)
+    app.applyOp();
+    const jv = K.solidVolume(app.doc.get(bx).shape);
+    expect("15b Revolve a solid's face 90° about its edge: joined into the solid (quarter cylinder r 20 · 20 added)",
+      app.doc.bodies.length === n && near(jv, v0 + Math.PI * 400 * 20 / 4) && K.isValidShape(app.doc.get(bx).shape), { edges, v0, jv });
+    // S W / R E with a solid selected: Scale / Rotate closes; Sweep waits for a face click, Revolve says what to select
+    app.run("mode.body");
+    const refused = [];
+    for (const [k1, k2] of [["s", "w"], ["r", "e"]]) {
+      app.setSelection([{ kind: "body", body: bx, id: 0 }]);
+      document.querySelectorAll("#toasts .toast").forEach((t) => t.remove());
+      await chord(k1, k2);
+      refused.push({ op: app.op && app.op.spec.title, xf: !!app.xf, err: [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent).join(" | ") });
+      key("Escape", "Escape");
+    }
+    expect("15b S W / R E on a solid: no Scale panel or Rotate gizmo left; Sweep panel waiting, Revolve error",
+      refused[0].op === "Sweep" && !refused[0].err && !refused[1].op && !refused[1].xf && /^Revolve: select one flat face/.test(refused[1].err), refused);
+    // Not in Pro: S W is just Scale (W does nothing)
+    document.body.classList.remove("pro");
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: path, id: 0 }]); await chord("s", "w");
+    const plain = app.op && app.op.spec.title; key("Escape", "Escape");
+    expect("15b without Pro, S W stays Scale", /^Scale/.test(plain || ""), plain);
+    if (wasPro) document.body.classList.add("pro");
+    for (const id of [bx, tube.id, disc, sw.id, path, quarter, donut && donut.id].filter(Boolean)) { app.setSelection([{ kind: "body", body: id, id: 0 }]); app.run("edit.delete"); }
+  } catch (e) {
+    expect("15b revolve / sweep threw", false, String(e && e.stack || e));
+  }
+
+  // 15c) Shell a cylinder cut in half (OpenCascade's own shell gave it back unchanged): hollowed, exact walls
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const half = K.booleanOp("subtract", K.makeCylinder(G, [0, 4500, 0], 20, 50), [K.makeBox(G, [50, 4500, 0], 100, 100, 200)]);
+    const hb = app.doc.makeBody(half, "Half"); app.doc.commit([...app.doc.bodies, hb], "half cylinder");
+    const top = app.doc.get(hb.id).shape.faces.find((f) => f.geomType === "PLANE" && f.center.z > 49);
+    app.run("mode.face"); app.setSelection([{ kind: "face", body: hb.id, id: top.hashCode }]);
+    app.run("op.shell"); opValue("t", 2); await sleep(150); app.applyOp();
+    const sh = app.doc.get(hb.id).shape, v = K.solidVolume(sh);
+    // outer half cylinder − inside (r 18, flat side 2 in, floor 2 thick): 18² acos(2/18) − 2·√(18² − 2²), × 48
+    const want = Math.PI * 400 * 50 / 2 - (324 * Math.acos(2 / 18) - 2 * Math.sqrt(320)) * 48;
+    expect("15c Shell a half cylinder (top open, 2 mm): hollowed, volume exact", Math.abs(v - want) < 1 && K.isValidShape(sh), { v, want });
+    app.run("mode.body"); app.setSelection([{ kind: "body", body: hb.id, id: 0 }]); app.run("edit.delete");
+  } catch (e) {
+    expect("15c half cylinder shell threw", false, String(e && e.stack || e));
   }
 
   // 16) Push/pull of adjacent faces meets cleanly at the shared corner (no post / notch / missing block)
@@ -2306,6 +2520,17 @@ const SCENARIO_SKETCH = String.raw`
     { tool: app.tool && app.tool.name, made: made.length, areas, want });
   app.run("edit.undo");
   expect("sketch: one undo step removes the sketch faces", app.doc.bodies.length === n0, app.doc.bodies.length);
+  // On a side face (the front, y = 0): the view stays upright (world Z up), sketch X runs along world X, Y up
+  const front = box.shape.faces.find((f) => f.normalAt(f.center).toTuple()[1] < -0.99);
+  app.setSelection([{ kind: "face", body: box.id, id: front.hashCode }]);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", code: "KeyK", bubbles: true, cancelable: true })); await sleep(50);
+  const sdir = vp.camera.getWorldDirection(new V()), sup = vp.camera.up.clone();
+  await key("r"); await hover([5, 0, 5]); await click([5, 0, 5]); await hover([30, 0, 15]); await type("20x10");
+  document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+  const sf = app.doc.bodies[app.doc.bodies.length - 1], sb = sf.shape.boundingBox.bounds;
+  expect("sketch: K on a side face — looks straight at it, Z up; typed 20x10 → 20 wide (X), 10 high (Z)", sdir.y > 0.999 && sup.z > 0.999 && app.doc.bodies.length === n0 + 1 && Math.abs(sb[1][0] - sb[0][0] - 20) < 1e-6 && Math.abs(sb[1][2] - sb[0][2] - 10) < 1e-6 && Math.abs(sb[0][1] - front.center.y) < 1e-9,
+    { dir: sdir.toArray(), up: sup.toArray(), n: app.doc.bodies.length, sb });
+  app.run("edit.undo");
   // On the ground (nothing selected): R + typed size; Cancel drops it, Done keeps it
   app.setSelection([]);
   app.run("tool.sketch"); await sleep(30);
@@ -2635,6 +2860,112 @@ const SCENARIO_SKETCH = String.raw`
     const t0 = tips(); app.noteSaved(); const t19 = tips(); app.noteSaved(); const t20 = tips(); app.noteSaved(); const t21 = tips();
     expect("pro layout: a one-time tip with the 20th save", t19 === t0 && t20 === t0 + 1 && t21 === t20 && localStorage.getItem("y3d.proTip") === "1", { t0, t19, t20, t21 });
     for (const k of ["y3d.saves", "y3d.proTip", "y3d.pro"]) localStorage.removeItem(k);
+  }
+  // The 3D corner view follows a moved / scaled outline (re-framed to keep it in view)
+  {
+    app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+    await key("r"); await click([50, 50, 0]); await type("10,10");
+    await key("Escape"); await click([55, 50, 0]);
+    const inView = (p) => { const q = new V(...p).project(vp.inset.camera); return Math.abs(q.x) <= 1 && Math.abs(q.y) <= 1; };
+    await type("400,300"); await sleep(10);
+    const moved = inView([455, 355, 0]);
+    await type("300"); await sleep(10); // (scaled ×3 about its centre: corners at 440..470)
+    const scaled = inView([470, 370, 0]) && inView([440, 340, 0]);
+    expect("sketch: the 3D corner view follows a moved and a scaled outline", moved && scaled && app.tool.selected.length === 1, { moved, scaled });
+    // Deleted (Del): it frames what's left — zoomed back in
+    const camD = () => vp.inset.camera.position.distanceTo(new V(20, 15, 10));
+    const dFar = camD(); await key("Delete"); await sleep(10); const dFace = camD();
+    await key("l"); await click([-600, 0, 0]); await click([-590, 0, 0]); await key("Enter");
+    const dPath = camD(); await key("Escape"); await click([-595, 0, 0]); await key("Delete"); await sleep(10); const dGone = camD();
+    expect("sketch: the 3D corner view re-frames after deleting a face, and a path", dFace < dFar * 0.5 && dPath > dFace * 2 && dGone < dPath * 0.5 && !app.tool.loops.length && !app.tool.opens.length, { dFar, dFace, dPath, dGone });
+    document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(30);
+  }
+  // Picture to trace (on the ground): % scales it about its centre, Match moves / scales / turns it so two
+  // of its points land on two model points, a drag moves it; the turn icon turns the view a quarter; Done
+  // keeps no picture in the model, and the next sketch on the same plane shows it again where it was
+  {
+    app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+    const cv = document.createElement("canvas"); cv.width = 200; cv.height = 100;
+    app.tool.setPicture(cv); await sleep(10);
+    const p0 = { ...app.tool.pic };
+    expect("sketch picture: loaded 2:1, upright, into Picture mode", app.tool.mode === "picture" && Math.abs(p0.w / p0.h - 2) < 1e-9 && Math.abs(Math.sin(p0.ang)) < 1e-9, { w: p0.w, h: p0.h, ang: p0.ang });
+    await type("50");
+    const p1 = app.tool.pic;
+    expect("sketch picture: 50 + Enter halves it about its centre", Math.abs(p1.w - p0.w / 2) < 1e-9 && Math.abs(p1.c[0] - p0.c[0]) < 1e-9 && Math.abs(p1.c[1] - p0.c[1]) < 1e-9, { w: p1.w, c: p1.c });
+    // Two points on the picture 10 apart (along X), matched to the box's corners (0,0) → (0,30): ×3, a quarter turn
+    const a1 = [p1.c[0] - 5, p1.c[1]], a2 = [p1.c[0] + 5, p1.c[1]], w1 = p1.w, ang1 = p1.ang;
+    await click([...a1, 0]); await click([...a2, 0]); await click([0, 0, 0]); await click([0, 30, 0]);
+    const pm = app.tool.pic, cm = [pm.c[0], pm.c[1]];
+    expect("sketch picture: Match — scaled ×3, turned 90°, its centre lands at (0, 15)", Math.abs(pm.w - w1 * 3) < 1e-6 && Math.abs(pm.ang - ang1 - Math.PI / 2) < 1e-9 && Math.hypot(cm[0], cm[1] - 15) < 1e-6 && app.tool.picPts.length === 0, { w: pm.w, ang: pm.ang, c: cm });
+    // (dragged from on the picture — its centre)
+    const [cx, cy] = cm;
+    pe("pointermove", [cx, cy, 0]); pe("pointerdown", [cx, cy, 0]); pe("pointermove", [cx + 10, cy + 5, 0]); pe("pointermove", [cx + 20, cy + 10, 0]); pe("pointerup", [cx + 20, cy + 10, 0]); await sleep(10);
+    const pd = app.tool.pic;
+    expect("sketch picture: a drag moves it", Math.hypot(pd.c[0] - cm[0] - 20, pd.c[1] - cm[1] - 10) < 1e-6 && Math.abs(pd.w - pm.w) < 1e-9, { c: pd.c });
+    // Picture mode: the thumbnail glows and the picture's outline shows; a first click off the picture
+    // only ends Picture mode (back to Line, nothing drawn)
+    const outline = () => vp.overlayRoot.children.some((o) => o.type === "LineLoop" && o.material === app.tool.mats.sel);
+    const menuOpen = () => getComputedStyle(document.querySelector("#sketch-corner .pic-menu")).display !== "none";
+    const glowing = document.querySelector("#sketch-corner .pic-wrap").classList.contains("on") && menuOpen(), shown = outline();
+    await key("l"); app.tool.setMode("picture"); await sleep(10);
+    const far = app.tool.pic.c[0] + app.tool.pic.w * 2, nL = app.tool.loops.length, nO = app.tool.opens.length;
+    await click([far, 0, 0]);
+    expect("sketch picture: thumbnail lit, its menu open + outline in Picture mode; a click off the picture → back to Line (menu closed), nothing drawn", glowing && shown && app.tool.mode === "line" && !outline() && !menuOpen() && app.tool.first === null && app.tool.loops.length === nL && app.tool.opens.length === nO, { glowing, shown, mode: app.tool.mode, first: app.tool.first });
+    const thumbBtn = () => document.querySelector("#sketch-corner .pic-thumb");
+    thumbBtn().click(); const onA = app.tool.mode === "picture" && menuOpen(); thumbBtn().click();
+    expect("sketch picture: the thumbnail turns Picture mode (and its menu) on, again off — back to Line", onA && app.tool.mode === "line" && !menuOpen(), app.tool.mode);
+    const up0 = vp.camera.up.clone();
+    document.querySelector("#sketch-corner button[data-act=turn]").click(); await sleep(10);
+    const up1 = vp.camera.up.clone(), dir1 = vp.camera.getWorldDirection(new V());
+    expect("sketch picture: the turn icon turns the view a quarter (still looking straight down)", Math.abs(up0.dot(up1)) < 1e-9 && dir1.z < -0.999, { up0: up0.toArray(), up1: up1.toArray() });
+    await key("l"); await click([60, 60, 0]); await click([70, 60, 0]); await click([70, 70, 0]); await click([60, 60, 0]);
+    const n0 = app.doc.bodies.length;
+    document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(30);
+    expect("sketch picture: Done keeps the outline only (no picture in the model)", app.doc.bodies.length === n0 + 1 && !document.getElementById("sketch-corner") && !vp.overlayRoot.children.length, { n: app.doc.bodies.length });
+    app.setSelection([]); app.run("tool.sketch"); await sleep(30);
+    const pr = app.tool.pic;
+    expect("sketch picture: the next sketch on the ground shows it again, where it was", pr && Math.hypot(pr.c[0] - pd.c[0], pr.c[1] - pd.c[1]) < 1e-6 && Math.abs(pr.w - pd.w) < 1e-6 && Math.abs(Math.cos(pr.ang - pd.ang) - 1) < 1e-9, pr && { c: pr.c, w: pr.w });
+    app.tool.setMode("picture"); await key("Delete");
+    expect("sketch picture: Del removes it", !app.tool.pic, null);
+    // Loaded: a thumbnail beside the picture icon; its menu scales, turns and fades it
+    app.tool.setPicture(cv); await sleep(10);
+    const thumb = document.querySelector("#sketch-corner .pic-thumb canvas"), pw = app.tool.pic.w, pa = app.tool.pic.ang;
+    const fld = (a) => document.querySelector("#sketch-corner [data-act=" + a + "]");
+    const wheel = (a, up, shift = false) => fld(a).dispatchEvent(new WheelEvent("wheel", { deltaY: up ? -100 : 100, shiftKey: shift, bubbles: true, cancelable: true }));
+    const typed = (a, v) => { fld(a).value = v; fld(a).dispatchEvent(new Event("input", { bubbles: true })); };
+    const showsOk = fld("pic-scale").value === "100" && fld("pic-rotate").value === "0";
+    wheel("pic-scale", true); wheel("pic-scale", true); wheel("pic-scale", true, true); // 100 → 105 → 110 → 111
+    typed("pic-rotate", "90"); wheel("pic-rotate", false); // 90 → 85
+    typed("pic-clear", "80");
+    const pq = app.tool.pic;
+    expect("sketch picture: menu fields — Scale 100 → wheel ×2 + Shift-wheel = 111%, Rotate 90 then wheel down = 85°, 80% transparent", showsOk && fld("pic-scale").value === "111" && Math.abs(pq.w - pw * 1.11) < 1e-9 && Math.abs(pq.ang - pa - (85 * Math.PI) / 180) < 1e-9 && Math.abs(pq.mat.opacity - 0.2) < 1e-9 && !document.querySelector("#sketch-corner [data-act=pic-match]"), { scale: fld("pic-scale").value, w: pq.w / pw, ang: ((pq.ang - pa) * 180) / Math.PI, op: pq.mat.opacity });
+    // The handles at its bottom-right corner: the square scales about the centre (dragged out to twice as far: ×2),
+    // the ring rotates about it (dragged a quarter round: +90°) — the fields follow
+    {
+      const P0 = app.tool.pic, c0 = P0.c, w1 = P0.w, t1 = P0.turned;
+      const sq = app.tool.picGripPos("scale"), far2 = [c0[0] + (sq[0] - c0[0]) * 2, c0[1] + (sq[1] - c0[1]) * 2];
+      pe("pointermove", [...sq, 0]); pe("pointerdown", [...sq, 0]); pe("pointermove", [...far2, 0]); pe("pointerup", [...far2, 0]); await sleep(10);
+      const scaledOk = Math.abs(app.tool.pic.w - w1 * 2) < 1e-6 && Math.hypot(app.tool.pic.c[0] - c0[0], app.tool.pic.c[1] - c0[1]) < 1e-9;
+      const ro = app.tool.picGripPos("rotate"), d = [ro[0] - c0[0], ro[1] - c0[1]], ro90 = [c0[0] - d[1], c0[1] + d[0]];
+      pe("pointermove", [...ro, 0]); pe("pointerdown", [...ro, 0]); pe("pointermove", [...ro90, 0]); pe("pointerup", [...ro90, 0]); await sleep(10);
+      const turnedOk = Math.abs(app.tool.pic.turned - t1 - Math.PI / 2) < 1e-6 && Math.abs(app.tool.pic.w - w1 * 2) < 1e-6;
+      expect("sketch picture: corner handles — the square drags ×2 (about the centre), the ring +90°; the fields follow", scaledOk && turnedOk && app.tool.mode === "picture" && fld("pic-scale").value === "222" && fld("pic-rotate").value === "175", { w: app.tool.pic.w / w1, turned: ((app.tool.pic.turned - t1) * 180) / Math.PI, scale: fld("pic-scale").value, rot: fld("pic-rotate").value });
+      typed("pic-scale", "111"); typed("pic-rotate", "85");
+    }
+    await type("50"); await sleep(10);
+    expect("sketch picture: the Scale field follows a typed % in the view (111% × 50% = 55.5%)", fld("pic-scale").value === "55.5", fld("pic-scale").value);
+    document.querySelector("#sketch-corner [data-act=pic-remove]").click();
+    expect("sketch picture: menu Remove drops it and its thumbnail", !app.tool.pic && !document.querySelector("#sketch-corner .pic-thumb"), null);
+    // A real file's bytes (PNG, JPEG) load too (through a blob: URL — the page's CSP must allow it)
+    for (const [type, ext] of [["image/png", "png"], ["image/jpeg", "jpg"]]) {
+      const bytes = new Uint8Array(await (await new Promise((r) => cv.toBlob(r, type))).arrayBuffer());
+      let err = null;
+      try { await app.tool.pictureFromBytes(bytes, ext); } catch (e) { err = String(e); }
+      expect("sketch picture: a " + ext.toUpperCase() + " file loads", !err && app.tool.pic && Math.abs(app.tool.pic.w / app.tool.pic.h - 2) < 1e-9, err);
+    }
+    app.tool.setMode("picture"); await key("Delete");
+    document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(30);
+    app.run("edit.undo"); await sleep(10);
   }
   // Left open for the screenshot (cancelled afterwards), on a fresh model with just the box: a slot
   // drawn on the box top, a circle, a line on the way lined up with the slot's end (dashed guide)
@@ -2977,12 +3308,18 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
         return 0;
       })()`, true);
     }
-    report = report.concat(await win.webContents.executeJavaScript(SCENARIO, true));
-    await shot("1-fillet-preview.png");
-    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_2, true));
-    await shot("2-final.png");
-    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_3, true));
-    await shot("3-complex.png");
+    // Y3D_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
+    // later ones start from their own fresh model.
+    if (process.env.Y3D_SMOKE_HALF) {
+      await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.doc.reset([]); return 0; })()`, true);
+    } else {
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO, true));
+      await shot("1-fillet-preview.png");
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_2, true));
+      await shot("2-final.png");
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_3, true));
+      await shot("3-complex.png");
+    }
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_STL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_STEP, true));
     if (process.env.Y3D_SMOKE_STL) {

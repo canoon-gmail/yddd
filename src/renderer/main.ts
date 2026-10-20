@@ -60,9 +60,19 @@ import {
   offsetEdges,
   offsetEdgesAxis,
   edgeOffsetFaces,
+  faceLineEdges,
+  revolveFace,
+  revolveRefusal,
+  sweepFace,
+  profileOnPath,
+  lineWire,
+  type Axis,
   type V3,
   makeBox,
   makeCylinder,
+  makeCircleFace,
+  makeRectFace,
+  sketchPath,
   solidPieces,
   solidVolume,
   shapesTouch,
@@ -197,7 +207,21 @@ interface OpSpec {
    * can't help for these values); the real preview follows once the drag pauses.
    */
   fastDrag?(values: Record<string, number>): boolean;
+  /** Shown above the fields (HTML), e.g. what has been picked. */
+  note?: string;
+  /** Status bar hint instead of the usual one. */
+  hint?: string;
+  /** The op picks things in the viewport: a click there goes here (not to selection or Apply). */
+  pick?(e: PointerEvent): void;
+  /** With `pick`: the pointer moved over the viewport (e.g. light up what a click would pick). */
+  hover?(e: PointerEvent): void;
 }
+
+/** Thrown by an op's compute while it waits for a pick (not a mistake): shown as a prompt, not in red. */
+class OpWaiting extends Error {}
+
+/** What Sweep runs along: a path object or a guide line (its index). */
+type Spine = { path: number } | { guide: number };
 
 /** Op previews slower than this (ms) are not redone on every drag frame. */
 const SLOW_PREVIEW_MS = 60;
@@ -248,6 +272,8 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "H" },
       { cmd: "op.offset", icon: "offset", label: "Offset", key: "O" },
+      { cmd: "op.revolve", icon: "revolve", label: "Revolve", key: "Pro: R E" },
+      { cmd: "op.sweep", icon: "sweep", label: "Sweep", key: "Pro: S W" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide", key: "C" },
       { cmd: "op.splitFace", icon: "cut", label: "Split face by guide", key: "Shift+C" },
       { cmd: "tool.divideFace", icon: "pencil", label: "Divide face", key: "L" },
@@ -370,6 +396,11 @@ const CHORDS: Record<string, Record<string, string>> = {
   b: { b: "tool.box", c: "tool.cylinder", s: "tool.sphere" },
   a: { a: "tool.rectangle", r: "tool.rectangle", c: "tool.circle", p: "tool.polygon" },
 };
+/** Pro layout only: S W sweep (S starts Scale, W switches) · R E revolve (R starts Rotate, E switches). */
+const PRO_CHORDS: Record<string, Record<string, string>> = {
+  s: { w: "op.sweep" },
+  r: { e: "op.revolve" },
+};
 const CHORD_MS = 1500;
 
 /** Toolbar commands that go into the recent strip (mode switches and undo/redo are always visible). */
@@ -413,6 +444,11 @@ class App implements ToolHost {
   private tool: Tool | null = null;
   /** Pending two-key chord (see CHORDS): its second-key map and when the first key was pressed. */
   private chord: { keys: Record<string, string>; at: number } | null = null;
+  /** Toasts already shown when a chord's first key ran (its own, newer error toasts go if the chord goes on). */
+  private chordToasts = new Set<Element>();
+  /** An op's hover (see OpSpec.hover): one per frame, with the latest pointer position. */
+  private opHoverQueued = false;
+  private lastPointer: PointerEvent | null = null;
   private op: {
     spec: OpSpec;
     inputs: OpInput[];
@@ -446,7 +482,7 @@ class App implements ToolHost {
   private selEdgeCache: { sel: SelItem[]; edges: Map<number, Set<number>> } | null = null;
   private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -768,6 +804,8 @@ class App implements ToolHost {
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
       case "op.offset": return this.opOffset();
+      case "op.revolve": return this.opRevolve();
+      case "op.sweep": return this.opSweep();
       case "op.cut": return this.startCut();
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
@@ -1032,6 +1070,15 @@ class App implements ToolHost {
       }
       this.updateCoords(e);
       if (this.op) {
+        const op = this.op;
+        if (op.spec.hover && !this.opHoverQueued) {
+          this.opHoverQueued = true;
+          requestAnimationFrame(() => {
+            this.opHoverQueued = false;
+            if (this.op === op) op.spec.hover!(this.lastPointer ?? e);
+          });
+        }
+        this.lastPointer = e;
         return;
       }
       // Coalesce hover picking to one per frame.
@@ -1047,6 +1094,10 @@ class App implements ToolHost {
       if (e.button !== 0 || e.altKey) return; // Alt + drag orbits the view
       if (this.tool) {
         this.tool.down(e);
+        return;
+      }
+      if (this.op?.spec.pick) {
+        this.downAt = { x: e.clientX, y: e.clientY }; // a click picks (see pointerup)
         return;
       }
       if (this.op?.spec.drag && !e.shiftKey) {
@@ -1074,7 +1125,10 @@ class App implements ToolHost {
       if (e.button !== 0 || !this.downAt) return;
       const moved = Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y);
       this.downAt = null;
-      if (moved < 5) this.click(e);
+      if (moved < 5) {
+        if (this.op?.spec.pick) this.op.spec.pick(e);
+        else this.click(e);
+      }
     });
     c.addEventListener("pointerleave", () => {
       if (this.hover) {
@@ -1133,16 +1187,21 @@ class App implements ToolHost {
   private bindKeys(): void {
     window.addEventListener("keydown", (e) => {
       const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA") return;
-      if (!$("help").hidden) {
-        if (e.key === "Escape" || e.key === "?" || e.key === "F1") this.toggleHelp();
-        return;
-      }
-      const chordCmd = this.chord && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && performance.now() - this.chord.at < CHORD_MS ? this.chord.keys[e.key.toLowerCase()] : undefined;
+      const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
+      // A chord's second key also counts in the op panel its first key opened (S → Scale's field has focus).
+      const chordCmd = this.chord && (!typing || !!target.closest("#op-panel")) && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && performance.now() - this.chord.at < CHORD_MS ? this.chord.keys[e.key.toLowerCase()] : undefined;
       if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) this.chord = null;
       if (chordCmd) {
         e.preventDefault();
+        // The first key's tool / op / gizmo goes (and its complaint, e.g. Scale with nothing selected).
+        this.endInteractions();
+        for (const t of $("toasts").querySelectorAll(".toast.error")) if (!this.chordToasts.has(t)) t.remove();
         this.run(chordCmd);
+        return;
+      }
+      if (typing) return;
+      if (!$("help").hidden) {
+        if (e.key === "Escape" || e.key === "?" || e.key === "F1") this.toggleHelp();
         return;
       }
       if (this.tool && this.tool.key(e)) {
@@ -1195,8 +1254,10 @@ class App implements ToolHost {
       const cmd = KEYMAP[e.code] ?? KEYMAP[combo] ?? KEYMAP[e.key];
       if (cmd) {
         e.preventDefault();
+        this.chordToasts = new Set($("toasts").children);
         this.run(cmd);
-        if (CHORDS[combo]) this.chord = { keys: CHORDS[combo], at: performance.now() };
+        const chord = CHORDS[combo] ?? (isPro() ? PRO_CHORDS[combo] : undefined);
+        if (chord) this.chord = { keys: chord, at: performance.now() };
       }
     });
   }
@@ -1274,7 +1335,7 @@ class App implements ToolHost {
   private startOp(spec: OpSpec): void {
     this.endInteractions();
     const panel = this.opPanel;
-    panel.innerHTML = `<h4>${spec.title}</h4>`;
+    panel.innerHTML = `<h4>${spec.title}</h4>${spec.note ? `<div class="op-note">${spec.note}</div>` : ""}`;
     const inputs = spec.fields.map((f): OpInput => {
       const label = document.createElement("label");
       label.textContent = f.label;
@@ -1350,10 +1411,11 @@ class App implements ToolHost {
       });
     }
     this.hover = null;
+    if (spec.pick) this.viewport.canvas.style.cursor = "crosshair";
     const drags = dragsOf(spec);
-    this.hint(drags.length
+    this.hint(spec.hint ?? (drags.length
       ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (hold Ctrl to snap) · click or Enter apply · Esc cancel`
-      : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`);
+      : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`));
     this.renderToolbarState();
     this.previewOp();
     this.positionHandle();
@@ -1450,6 +1512,7 @@ class App implements ToolHost {
       op.result = result;
       op.key = key;
       err.textContent = "";
+      err.classList.remove("waiting");
       if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
       else this.viewport.showGhost(result.ghost);
       op.previewMs = performance.now() - t0;
@@ -1458,6 +1521,7 @@ class App implements ToolHost {
       op.result = null;
       op.key = "";
       err.textContent = errorMessage(e);
+      err.classList.toggle("waiting", e instanceof OpWaiting);
       this.viewport.clearGhost();
       return null;
     }
@@ -1502,6 +1566,8 @@ class App implements ToolHost {
     this.opPanel.hidden = true;
     this.opPanel.innerHTML = "";
     this.viewport.clearGhost();
+    this.showGuides(); // (Revolve / Sweep show their guide selected)
+    this.viewport.canvas.style.cursor = "default";
     this.renderToolbarState();
   }
 
@@ -1789,18 +1855,19 @@ class App implements ToolHost {
     });
   }
 
+  /** The one selected face, or the face of the one selected flat face object; null for any other selection. */
+  private oneFaceTarget(): { bodyId: number; faceId: number } | null {
+    if (this.selection.length !== 1) return null;
+    const s = this.selection[0];
+    if (s.kind === "face") return { bodyId: s.body, faceId: s.id };
+    const b = s.kind === "body" ? this.doc.get(s.body) : undefined;
+    return b?.kind === "face" ? { bodyId: b.id, faceId: b.shape.faces[0].hashCode } : null;
+  }
+
   /** Offset: a new flat face on the selected face's plane, its outline grown (or shrunk) by a distance. */
   private opOffset(): void {
     if (this.selection.length && this.selection.every((s) => s.kind === "edge")) return this.opOffsetEdges();
-    let target: { bodyId: number; faceId: number } | null = null;
-    if (this.selection.length === 1) {
-      const s = this.selection[0];
-      if (s.kind === "face") target = { bodyId: s.body, faceId: s.id };
-      else if (s.kind === "body") {
-        const b = this.doc.get(s.body);
-        if (b?.kind === "face") target = { bodyId: b.id, faceId: b.shape.faces[0].hashCode };
-      }
-    }
+    const target = this.oneFaceTarget();
     if (!target) {
       this.toast("Offset: select one flat face (Face mode, key 2) or one flat face object", "error");
       return;
@@ -1892,6 +1959,195 @@ class App implements ToolHost {
       drag: dragFor(faceIds[0]),
     };
     this.startOp(spec);
+  }
+
+  /**
+   * Outcome for a solid made from a profile face (Revolve, Sweep): a flat face object turns into it
+   * (like Push/Pull); made from a solid's face it joins that solid, or with `newBody` stays separate.
+   */
+  private profileOutcome(body: ShapeBody, solid: Solid, newBody: boolean, label: string): OpOutcome {
+    if (body.kind === "solid" && !newBody) {
+      return this.replaceOutcome(new Map([[body.id, booleanOp("union", this.solidOf(body.id, label), [solid])]]), label);
+    }
+    return {
+      ghost: new Map([[body.kind === "face" ? body.id : -1, solid]]),
+      commit: () => {
+        const nb = this.doc.makeBody(solid, label);
+        this.doc.commit(body.kind === "face" ? this.doc.bodies.map((b) => (b.id === body.id ? nb : b)) : [...this.doc.bodies, nb], label);
+        return { select: [nb.id], solidMode: true };
+      },
+    };
+  }
+
+  /** Revolve: turn a flat face about an axis (a guide line, one of its straight edges or a world axis) into a solid. */
+  private opRevolve(): void {
+    const target = this.oneFaceTarget();
+    if (!target) {
+      this.toast("Revolve: select one flat face (Face mode, key 2) or one flat face object", "error");
+      return;
+    }
+    const { bodyId, faceId } = target;
+    const body = this.shapeBody(bodyId, "Revolve");
+    if (!body) return;
+    if (findFace(body.shape, faceId)?.geomType !== "PLANE") {
+      this.toast("Revolve works on flat faces only", "error");
+      return;
+    }
+    // Axes to pick from: guide lines (nearest the face first), the face's straight edges, the world axes.
+    const c = new THREE.Vector3(...faceAxis(body.shape, faceId)!.center);
+    const along = (a: V3, b: V3): Axis => ({ origin: a, dir: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] });
+    const away = (g: Guide) => c.clone().sub(new THREE.Vector3(...g.a)).cross(new THREE.Vector3(...g.b).sub(new THREE.Vector3(...g.a)).normalize()).length();
+    const guides = this.doc.guides.map((g, i) => ({ i, d: away(g) })).sort((x, y) => x.d - y.d);
+    const axes: { name: string; axis: Axis; guide?: number }[] = [
+      ...guides.map(({ i, d }, k) => ({ name: `Guide line ${k + 1} (${fmt(d)} mm away)`, axis: along(this.doc.guides[i].a, this.doc.guides[i].b), guide: i })),
+      ...faceLineEdges(body.shape, faceId).map(([a, b], k) => ({ name: `Face edge ${k + 1}`, axis: along(a, b) })),
+      ...["X", "Y", "Z"].map((n, k) => ({ name: `${n} axis`, axis: { origin: [0, 0, 0] as V3, dir: [0, 1, 2].map((j) => (j === k ? 1 : 0)) as V3 } })),
+    ];
+    const fields: OpField[] = [
+      { key: "axis", label: "Axis", type: "select", options: axes.map((a) => a.name), value: Math.max(0, axes.findIndex((a) => !revolveRefusal(body.shape, faceId, a.axis))) },
+      { key: "angle", label: "Angle (°)", value: this.defaults.revolveAngle, step: 15 },
+    ];
+    if (body.kind === "solid") fields.push({ key: "newBody", label: "New solid", value: this.defaults.joinNew ? 1 : 0, type: "checkbox" });
+    // A click in the viewport picks the axis: a guide line, one of the face's straight edges or a world axis line.
+    const lineEdges = (findFace(body.shape, faceId)?.edges ?? []).filter((e) => e.geomType === "LINE").map((e) => e.hashCode);
+    const firstEdge = guides.length, firstWorld = guides.length + lineEdges.length;
+    const axisAt = (e: PointerEvent): { i: number; edge?: number; at?: THREE.Vector3 } | null => {
+      const g = this.viewport.guideAt(e.clientX, e.clientY);
+      if (g >= 0) return { i: guides.findIndex((x) => x.i === g) };
+      const hit = this.viewport.pick(e.clientX, e.clientY, "edge", body.id);
+      const k = hit ? lineEdges.indexOf(hit.id) : -1;
+      if (k >= 0) return { i: firstEdge + k, edge: hit!.id };
+      const w = this.viewport.axisUnder(e.clientX, e.clientY);
+      if (w < 0) return null;
+      // (the point on that axis line nearest the cursor ray, for its label)
+      const ray = this.viewport.ray(e.clientX, e.clientY), dir = new THREE.Vector3().setComponent(w, 1);
+      const b = ray.direction.dot(dir), d = ray.direction.dot(ray.origin), f = dir.dot(ray.origin);
+      return { i: firstWorld + w, at: dir.multiplyScalar((f - b * d) / (1 - b * b)) };
+    };
+    this.startOp({
+      title: "Revolve",
+      label: "Revolve",
+      fields,
+      hint: "Revolve: click a guide line, a straight edge of the face or the X / Y / Z axis line to turn about it · Enter apply · Esc cancel",
+      pick: (e) => {
+        const t = axisAt(e);
+        const select = this.op?.inputs.find((i) => i.dataset.key === "axis");
+        if (!t || !select || select.value === String(t.i)) return;
+        select.value = String(t.i);
+        this.previewOp();
+      },
+      hover: (e) => {
+        const t = axisAt(e);
+        this.viewport.setHighlight(this.selection, t?.edge !== undefined ? { kind: "edge", body: body.id, id: t.edge } : null);
+        const shown = Number(this.op?.inputs.find((i) => i.dataset.key === "axis")?.value ?? -1);
+        this.viewport.setGuides(this.doc.guides, axes[shown]?.guide ?? -1, t && t.i < firstEdge ? axes[t.i].guide! : -1);
+        this.hud(t?.at ? axes[t.i].name : null, t?.at);
+        this.viewport.canvas.style.cursor = t ? "pointer" : "crosshair";
+      },
+      compute: ({ axis, angle, newBody }) => {
+        const a = axes[axis];
+        this.viewport.setGuides(this.doc.guides, a?.guide ?? -1, -1); // the guide used as the axis shows selected
+        if (!a) throw new Error("pick an axis");
+        return this.profileOutcome(body, revolveFace(body.shape, faceId, a.axis, angle), !!newBody, "Revolve");
+      },
+      remember: ({ angle, newBody }) => {
+        this.defaults.revolveAngle = angle;
+        if (newBody !== undefined) this.defaults.joinNew = !!newBody;
+      },
+    });
+  }
+
+  /**
+   * Sweep: a flat face (the profile — a flat ring makes a tube) run along a path or guide line into a
+   * solid. Whatever is selected is used; the panel then waits for clicks on what is still missing.
+   */
+  private opSweep(): void {
+    let profile: { bodyId: number; faceId: number } | null = null;
+    let spine: Spine | null = this.selGuide >= 0 ? { guide: this.selGuide } : null;
+    for (const s of this.selection) {
+      const b = this.doc.get(s.body);
+      if (b?.kind === "path") spine = { path: b.id };
+      else if (s.kind === "face") profile = { bodyId: s.body, faceId: s.id };
+      else if (b?.kind === "face") profile = { bodyId: b.id, faceId: b.shape.faces[0].hashCode };
+    }
+    this.openSweep(profile, spine);
+  }
+
+  /** The Sweep panel for the profile / path picked so far; clicks in the viewport pick the others. */
+  private openSweep(profile: { bodyId: number; faceId: number } | null, spine: Spine | null): void {
+    const pb = profile && this.doc.get(profile.bodyId);
+    const body = pb && isBrep(pb) ? pb : null;
+    const guide = spine && "guide" in spine ? this.doc.guides[spine.guide] : undefined;
+    const pathBody = spine && "path" in spine ? this.doc.get(spine.path) : undefined;
+    const wire = guide ? lineWire(guide.a, guide.b) : pathBody?.kind === "path" ? pathBody.shape : null;
+    const fields: OpField[] = [{ key: "round", label: "Corners", type: "select", options: ["Sharp", "Round"], value: this.defaults.sweepRound }];
+    // A profile away from the path always moves onto it (sweeping it where it is would give a solid off to
+    // the side); one already at the path's end stays put unless "Centre" is ticked.
+    let onPath = false;
+    if (body && wire) {
+      try {
+        onPath = profileOnPath(body.shape, profile!.faceId, wire);
+      } catch {
+        // compute reports what is wrong
+      }
+      if (onPath) fields.push({ key: "toPath", label: "Centre profile on the path", value: 0, type: "checkbox" });
+      fields.push({ key: "turn", label: "Turn profile (°)", value: this.defaults.sweepTurn, step: 5 });
+    }
+    if (body?.kind === "solid") fields.push({ key: "newBody", label: "New solid", value: this.defaults.joinNew ? 1 : 0, type: "checkbox" });
+    const todo = !body ? "click a flat face for the profile (a flat ring makes a tube)" : !wire ? "click a path or guide line to sweep along" : "";
+    // What a click at the cursor picks: a guide line, a path, a flat face — or something that can't be used.
+    type Target = { spine: Spine } | { profile: { bodyId: number; faceId: number } } | "bad" | null;
+    const targetAt = (e: PointerEvent): Target => {
+      const g = this.viewport.guideAt(e.clientX, e.clientY);
+      if (g >= 0) return { spine: { guide: g } };
+      const hit = this.viewport.pick(e.clientX, e.clientY, "face");
+      const b = hit && this.doc.get(hit.body);
+      if (!hit || !b) return null;
+      if (b.kind === "path") return { spine: { path: b.id } };
+      if (hit.kind === "face" && isBrep(b) && findFace(b.shape, hit.id)?.geomType === "PLANE") return { profile: { bodyId: b.id, faceId: hit.id } };
+      return "bad";
+    };
+    const picked: SelItem[] = [];
+    if (body) picked.push(body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: profile!.faceId });
+    if (pathBody) picked.push({ kind: "body", body: pathBody.id, id: 0 });
+    const pickedGuide = guide ? (spine as { guide: number }).guide : -1;
+    const spec: OpSpec = {
+      title: "Sweep",
+      label: "Sweep",
+      fields,
+      note: `Profile: ${body ? (body.kind === "face" ? body.name : `a face of ${body.name}`) : "—"}<br>Path: ${guide ? "guide line" : pathBody ? pathBody.name : "—"}`,
+      hint: `Sweep: ${todo ? `${todo} · ` : "click another face / path / guide line to change it · Enter apply · "}Esc cancel`,
+      compute: ({ round, toPath, turn, newBody }) => {
+        if (!body || !wire) throw new OpWaiting(todo);
+        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn), !!newBody, "Sweep");
+      },
+      remember: ({ round, turn, newBody }) => {
+        this.defaults.sweepRound = round;
+        if (turn !== undefined) this.defaults.sweepTurn = turn;
+        if (newBody !== undefined) this.defaults.joinNew = !!newBody;
+      },
+      pick: (e) => {
+        const t = targetAt(e);
+        if (!t) return;
+        if (t === "bad") return this.toast("Sweep: the profile must be a flat face — or click a path or guide line to sweep along", "error");
+        spec.remember!(this.opValues().values); // (the panel opens again with them)
+        if ("spine" in t) this.openSweep(profile, t.spine);
+        else this.openSweep(t.profile, spine);
+      },
+      hover: (e) => {
+        // Light up what a click would pick; "not allowed" over what it can't use.
+        const t = targetAt(e);
+        const item: SelItem | null = t && t !== "bad" && "profile" in t ? { kind: "face", body: t.profile.bodyId, id: t.profile.faceId }
+          : t && t !== "bad" && "path" in t.spine ? { kind: "body", body: t.spine.path, id: 0 } : null;
+        this.viewport.setHighlight(picked, item);
+        this.viewport.setGuides(this.doc.guides, pickedGuide, t && t !== "bad" && "spine" in t && "guide" in t.spine ? t.spine.guide : -1);
+        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t ? "pointer" : "crosshair";
+      },
+    };
+    this.startOp(spec);
+    // Show what is picked: the profile face, the path, the guide.
+    this.viewport.setHighlight(picked, null);
+    this.viewport.setGuides(this.doc.guides, pickedGuide, -1);
   }
 
   /** Scale the selected objects about the bottom centre of their bounding box (they stay on the ground). */
@@ -2478,6 +2734,8 @@ class App implements ToolHost {
       if (!f || !isBrep(b)) return this.toast("Sketch: select a flat face — or nothing, to sketch on the ground", "error");
       const v = (t: V3) => new THREE.Vector3(...t);
       frame = { origin: v(f.origin), x: v(f.x), y: v(f.y), z: v(f.z) };
+      // A side face's frame has x up the wall: turn it a quarter so y is up (the view stays upright, width runs along)
+      if (Math.abs(frame.z.z) <= 0.9) frame = { ...frame, x: frame.y.clone().negate(), y: frame.x };
       center = v(faceAxis(b.shape, faceId)?.center ?? f.origin);
       what = b.kind === "face" ? `"${b.name}"` : `a face of "${b.name}"`;
     }
@@ -2977,7 +3235,7 @@ class App implements ToolHost {
     if (this.tool) active.add(`tool.${this.tool.name.toLowerCase()}`);
     if (this.xf) active.add(this.xf.mode === "translate" ? "xf.move" : "xf.rotate");
     if (this.op) {
-      const map: Record<string, string> = { "Push/Pull": "op.pushpull", Fillet: "op.fillet", Chamfer: "op.chamfer", Shell: "op.shell" };
+      const map: Record<string, string> = { "Push/Pull": "op.pushpull", Fillet: "op.fillet", Chamfer: "op.chamfer", Shell: "op.shell", Revolve: "op.revolve", Sweep: "op.sweep" };
       active.add(map[this.op.spec.label]);
     }
     for (const b of document.querySelectorAll<HTMLButtonElement>(".tb-btn")) {
@@ -3258,7 +3516,7 @@ class App implements ToolHost {
       ["Click / Shift+click", "Select / add to selection"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
-      ["K", "Sketch on the selected flat face (or the ground): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), Ctrl: round steps, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch"],
+      ["K", "Sketch on the selected flat face (or the ground): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), Ctrl: round steps, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it"],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
@@ -3273,6 +3531,8 @@ class App implements ToolHost {
       ["H", "Shell / hollow (opens the selected faces)"],
       ["C", "Cut by guide: select solid(s), press C, click a guide line — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
+      ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+L for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
+      ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns"],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Shift+L", "Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · Ctrl snaps to guides"],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
@@ -3684,7 +3944,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, splitFaceByLine }; // used by the smoke test
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, splitFaceByLine, makeCircleFace, makeRectFace, sketchPath }; // used by the smoke test
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

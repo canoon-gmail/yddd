@@ -12,6 +12,7 @@ npm install
 npm start        # type-check, build and launch
 npm run dev      # Vite dev server with hot reload + Electron
 npm run smoke    # automated end-to-end test, screenshots in /tmp/y3d-smoke
+npm run smoke:half  # the same without scenarios 1–3 (about half the time)
 npm run start:stress          # launch with 2000 test solids (N=5000 npm run start:stress for more)
 ```
 
@@ -24,6 +25,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Sketch | **K**: draw lines, tangent arcs, rectangles and circles on a flat face or the ground in a flat view (3D preview in the corner); Done turns the closed outlines into flat faces (with holes) and open lines (ended with Enter / double-click) into **paths** |
 | Select | Solid / Face / Edge modes with hover highlight, Shift+click multi-select |
 | Modify | Push/Pull face (flat face → new solid; solid face → modify, or tick *New solid*), Fillet & Chamfer (selected edges or whole solid), Shell (open selected faces) — all with live preview |
+| Revolve / Sweep | **Revolve** (Modify menu; Pro: **R E**) a flat face about a guide line, one of its edges or X / Y / Z (any angle; a circle beside the axis → a donut) · **Sweep** (Pro: **S W**) a flat face along a path or guide line — a flat ring makes a tube; pick the face and path in the viewport while the panel is open |
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
 | Transform | Move / Rotate gizmo (snaps to grid / 15°), Duplicate, Delete |
 | History | Unlimited-ish undo / redo (200 steps) |
