@@ -107,6 +107,13 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-name input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 3px; }
 .ol-eye { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; }
 .ol-eye svg { width: 16px; height: 16px; }
+.ol-row.in-group { padding-left: 24px; }
+.ol-group { display: flex; align-items: center; gap: 4px; padding: 3px 6px 3px 2px; border-radius: 5px; cursor: pointer; font-weight: 600; }
+.ol-group:hover { background: var(--panel-2); }
+.ol-group.selected { background: #3d342a; color: var(--accent-2); }
+.ol-group.hidden .ol-name { opacity: 0.45; }
+.ol-caret { width: 16px; background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; font-size: 11px; }
+.ol-count { color: var(--muted); font-weight: normal; font-size: 11px; }
 .ol-empty, .muted { color: var(--muted); }
 
 #props table { width: 100%; border-collapse: collapse; }
@@ -220,6 +227,16 @@ kbd {
 #sketch-panel.compact .modes .spacer { width: 10px; }
 #sketch-panel.compact .modes kbd { display: none; }
 #sketch-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+/* Rarely used tools as small buttons in the viewport's bottom-left corner, above the view name (Revolve, Sweep, Array copy). */
+#corner-tools { position: absolute; left: 10px; bottom: 28px; z-index: 15; display: flex; gap: 4px; }
+#viewport:has(#sketch-corner) #corner-tools { display: none; } /* (the sketch's own buttons go there) */
+#corner-tools button {
+  width: 30px; height: 30px; padding: 3px; color: var(--text); cursor: pointer;
+  background: rgba(38, 40, 44, 0.9); border: 1px solid var(--border); border-radius: 6px;
+}
+#corner-tools button svg { width: 22px; height: 22px; }
+#corner-tools button:hover { filter: brightness(1.25); }
+#corner-tools button.active { background: #3d342a; border-color: var(--accent); color: var(--accent-2); }
 #sketch-corner { position: absolute; left: 10px; bottom: 28px; z-index: 15; display: flex; gap: 4px; }
 #sketch-corner button {
   width: 30px; height: 30px; padding: 3px; color: var(--text); cursor: pointer;

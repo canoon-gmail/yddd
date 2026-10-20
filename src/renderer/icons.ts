@@ -33,6 +33,7 @@ export const ICONS: Record<string, string> = {
   move: svg(`<path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/>`),
   scale: svg(`<rect x="3" y="11" width="10" height="10" ${FILL}/><path d="M3 11V3h18v18h-8" stroke-dasharray="2.5 2"/><path d="M11 13l9-9M15 4h5v5"/>`),
   rotate: svg(`<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>`),
+  array: svg(`<rect x="2" y="9" width="5" height="6" rx="1" ${FILL}/><rect x="9.5" y="9" width="5" height="6" rx="1"/><rect x="17" y="9" width="5" height="6" rx="1"/><path d="M2 19h20M19 17l3 2-3 2"/>`),
   duplicate: svg(`<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>`),
   measure: svg(`<path d="M3 16.5L16.5 3 21 7.5 7.5 21z" ${FILL}/><path d="M7 12.5l1.8 1.8M9.5 10l2.5 2.5M12 7.5l1.8 1.8M14.5 5l2.5 2.5"/>`),
   delete: svg(`<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/>`),

@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld("y3d", {
     ipcRenderer.invoke("write-file", filePath, data) as Promise<string>,
   openFile: (req: { title: string; filters: FileFilter[]; binary: boolean }) =>
     ipcRenderer.invoke("open-file", req) as Promise<{ path: string; data: string | Uint8Array } | null>,
+  readFile: (filePath: string) => ipcRenderer.invoke("read-file", filePath) as Promise<string | null>,
+  addRecent: (filePath: string) => ipcRenderer.invoke("recent-add", filePath) as Promise<void>,
+  removeRecent: (filePath: string) => ipcRenderer.invoke("recent-remove", filePath) as Promise<void>,
+  recentFiles: () => ipcRenderer.invoke("recent-list") as Promise<string[]>,
   confirm: (message: string) => ipcRenderer.invoke("confirm", message) as Promise<boolean>,
   ask: (req: { message: string; detail?: string; buttons: string[] }) => ipcRenderer.invoke("ask", req) as Promise<number>,
   writeRecovery: (rec: { savedAt: number; filePath: string | null; data: string }) => ipcRenderer.invoke("recovery-write", rec) as Promise<void>,

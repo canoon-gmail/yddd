@@ -5,7 +5,7 @@
  * prints a JSON report, then quits. Not loaded during normal use.
  */
 import type { BrowserWindow } from "electron";
-import { app } from "electron";
+import { app, Menu } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
@@ -2467,6 +2467,285 @@ const SCENARIO_MEASURE = String.raw`
 })()
 `;
 
+/** Array copy (Shift+D on objects): a circle face on a box (like ~/untitled.y3d) → a row of copies, gap edge to edge. */
+const SCENARIO_ARRAY = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const key = (k, code, o = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true, ...o }));
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event(i.tagName === "SELECT" ? "change" : "input", { bubbles: true })); } };
+  const r = (n) => +n.toFixed(3);
+  const arrayBtn = () => document.querySelector("#corner-tools button[data-cmd='edit.array']");
+  document.getElementById("tutorial").hidden = true; document.body.classList.remove("tutorial-open");
+  app.doc.reset([]);
+  const box = app.doc.makeBody(K.makeBox(G, [60, 20, 0], 120, 40, 8.5), "Solid");
+  const circle = app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 8.5] }, [20, 20, 8.5], 10), "Circle", "face");
+  app.doc.commit([box, circle], "shapes");
+  app.run("mode.body"); vp.setView("iso"); vp.fit(); await sleep(50);
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  const n0 = app.doc.bodies.length;
+  const corner = [...document.querySelectorAll("#corner-tools button")].map((b) => b.dataset.cmd);
+  const vr = document.getElementById("viewport").getBoundingClientRect(), cr = document.getElementById("corner-tools").getBoundingClientRect();
+  expect("array: corner buttons Revolve, Sweep, Array copy, bottom left", corner.join() === "op.revolve,op.sweep,edit.array" && cr.left - vr.left < 30 && vr.bottom - cr.bottom < 60, { corner, left: cr.left - vr.left, bottom: vr.bottom - cr.bottom });
+  key("D", "KeyD", { shiftKey: true }); await sleep(20);
+  const plain = { added: app.doc.bodies.length - n0, gizmo: !!app.xf, panel: !document.getElementById("op-panel").hidden };
+  expect("array: Shift+D is still the plain duplicate on the move gizmo", plain.added === 1 && plain.gizmo && !plain.panel, plain);
+  key("Escape", "Escape"); app.run("edit.undo");
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  arrayBtn().click(); await sleep(20);
+  const panel = document.getElementById("op-panel");
+  const title = panel.hidden ? null : panel.querySelector("h4")?.textContent;
+  const fields = [...panel.querySelectorAll("[data-key]")].map((i) => i.dataset.key);
+  expect("array: the corner button on a circle opens Array copy (copies, gap, direction)", title === "Array copy" && fields.join() === "n,gap,total,dir,centre" && app.doc.bodies.length === n0, { title, fields });
+  opValue("n", 5); opValue("gap", 5); await sleep(200);
+  const ghosts = app.op && app.op.result ? app.op.result.ghost.size : 0;
+  expect("array: Copies 5 (the original counts) → live preview of 4 new, nothing added yet", ghosts === 4 && app.doc.bodies.length === n0, { ghosts, bodies: app.doc.bodies.length });
+  app.applyOp();
+  const made = app.doc.bodies.slice(n0);
+  const xs = made.map((b) => { const [lo, hi] = b.shape.boundingBox.bounds; return r((lo[0] + hi[0]) / 2); });
+  expect("array: 4 faces, centres 25 apart (Ø20 + gap 5) along +X", made.length === 4 && made.every((b) => b.kind === "face") && xs.join() === "45,70,95,120", xs);
+  // The whole row (original + copies) stays selected → Array copy again along +Y: a 5 × 3 grid
+  const sel = app.selection.map((x) => x.body).sort((p, q) => p - q).join();
+  const rowIds = [circle.id, ...made.map((b) => b.id)].sort((p, q) => p - q).join();
+  arrayBtn().click(); await sleep(20);
+  opValue("n", 3); opValue("gap", 5); opValue("total", 0); opValue("dir", 2); app.applyOp();
+  const grid = app.doc.bodies.slice(n0 + 4).map((b) => { const [lo, hi] = b.shape.boundingBox.bounds; return r((lo[1] + hi[1]) / 2); });
+  const ys2 = [...new Set(grid)].sort((p, q) => p - q);
+  expect("array: after Apply the whole row is selected; Array copy again along Y → a grid", sel === rowIds && grid.length === 10 && ys2.join() === "45,70" && app.selection.length === 15,
+    { sel, rowIds, newRows: grid.length, ys: ys2, selected: app.selection.length });
+  const groups = [...new Set(app.doc.bodies.slice(n0 - 1).map((b) => b.group))];
+  expect("array: the row and then the grid are one group (Array 1)", groups.join() === "Array 1" && app.doc.bodies.slice(n0 - 1).length === 15, groups);
+  app.run("edit.undo"); app.run("edit.undo");
+  expect("array: one undo step for each array", app.doc.bodies.length === n0, app.doc.bodies.length);
+  // Direction −Y, gap remembered (5)
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  arrayBtn().click(); await sleep(20);
+  const gapKept = panel.querySelector("[data-key=gap]")?.value;
+  opValue("n", 3); opValue("dir", 3); app.applyOp();
+  const ys = app.doc.bodies.slice(n0).map((b) => { const [lo, hi] = b.shape.boundingBox.bounds; return r((lo[1] + hi[1]) / 2); });
+  expect("array: −Y direction, gap remembered", gapKept === "5" && ys.join() === "-5,-30", { gapKept, ys });
+  app.run("edit.undo");
+  // Align centre: a click on an edge (the box's front top edge, X 0..120) or a path (longest along Y, -140..-40):
+  // the original and its copies fill it, centred, equal gaps between them and at both ends; typing a gap turns that off
+  const path = app.doc.makeBody(K.sketchPath([{ kind: "line", a: [0, -40, 0], b: [30, -40, 0] }, { kind: "line", a: [30, -40, 0], b: [30, -140, 0] }]), "Path", "path");
+  app.doc.commit([...app.doc.bodies, path], "path"); vp.fit(); await sleep(50);
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  arrayBtn().click(); await sleep(20);
+  const centreOff = !panel.querySelector("[data-key=centre]").checked;
+  const opCheck = (k, on) => { const i = panel.querySelector("[data-key=" + k + "]"); i.checked = on; i.dispatchEvent(new Event("change", { bubbles: true })); };
+  opCheck("centre", true);
+  opValue("dir", 3); opValue("n", 5);
+  const V = vp.camera.position.constructor;
+  const val = (k) => panel.querySelector("[data-key=" + k + "]").value;
+  const clickAt = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); const e = new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }); app.op.spec.hover(e); app.op.spec.pick(e); await sleep(150); return [val("total"), r(+val("gap")), val("dir")]; };
+  const mid = (g, k) => { const [lo, hi] = g.boundingBox.bounds; return r((lo[k] + hi[k]) / 2); };
+  const byEdge = await clickAt([70, 0, 8.5]);
+  const ghostXs = app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 0)) : [];
+  opValue("n", 3);
+  const byPath = await clickAt([30, -90, 0]);
+  const ghostYs = app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 1)) : [];
+  opValue("gap", 3); await sleep(150);
+  const typed = [val("total"), val("gap")];
+  expect("array: an edge / a path — the original + copies fill it, centred, equal gaps at the ends too; typing a gap turns it off",
+    centreOff && byEdge.join() === "120,3.33,0" && ghostXs.join() === "13.333,36.667,60,83.333,106.667" &&
+      byPath.join() === "100,10,3" && ghostYs.join() === "-60,-90,-120" && typed.join() === "0,3" && app.doc.bodies.length === n0 + 1,
+    { centreOff, byEdge, ghostXs, byPath, ghostYs, typed });
+  // Apply along the edge: the original moved into the first place, one undo step puts it back
+  opValue("n", 5); await clickAt([70, 0, 8.5]); app.applyOp();
+  const row = [circle.id, ...app.doc.bodies.slice(n0 + 1).map((b) => b.id)].map((id) => mid(app.doc.get(id).shape, 0));
+  app.run("edit.undo");
+  const back = mid(app.doc.get(circle.id).shape, 0);
+  expect("array: applied along the edge (original moved first), undo puts the original back", row.join() === "13.333,36.667,60,83.333,106.667" && back === 20 && app.doc.bodies.length === n0 + 1, { row, back });
+  app.setSelection([{ kind: "body", body: path.id, id: 0 }]); app.run("edit.delete");
+  // Align centre off (the default): the original stays put, the copies spread toward the far end, the last one as
+  // far from it as the original is from the near end (circle at 20 on 0..120, 5 → 20, 40, 60, 80, 100)
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  arrayBtn().click(); await sleep(20);
+  const remembered = panel.querySelector("[data-key=centre]").checked;
+  opCheck("centre", false); opValue("dir", 1); opValue("n", 5);
+  const offEdge = await clickAt([70, 0, 8.5]);
+  const offGhost = app.op.result ? [...app.op.result.ghost.keys()].includes(circle.id) : null;
+  // Changing the gap after the edge click (mouse wheel, or typing) leaves the edge: the copies follow the gap
+  const ghostX = () => (app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 0)) : []);
+  const gapIn = panel.querySelector("[data-key=gap]");
+  gapIn.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true })); await sleep(200);
+  const wheeled = { total: val("total"), gap: val("gap"), xs: ghostX() };
+  await clickAt([70, 0, 8.5]);
+  gapIn.focus(); gapIn.value = "5"; gapIn.dispatchEvent(new Event("input", { bubbles: true })); await sleep(200);
+  const typedGap = { total: val("total"), gap: val("gap"), xs: ghostX() };
+  expect("array: after an edge click, changing the gap (wheel / typing) takes effect", wheeled.total === "0" && wheeled.gap === "0.5" && wheeled.xs.join() === "40.5,61,81.5,102" &&
+    typedGap.total === "0" && typedGap.xs.join() === "45,70,95,120", { wheeled, typedGap });
+  await clickAt([70, 0, 8.5]);
+  app.applyOp();
+  const offRow = [circle.id, ...app.doc.bodies.slice(n0).map((b) => b.id)].map((id) => mid(app.doc.get(id).shape, 0));
+  expect("array: Align centre off — the original stays, copies to the far end (direction turned toward it), balanced",
+    remembered && offEdge.join() === "120,0,0" && offGhost === false && offRow.join() === "20,40,60,80,100", { remembered, offEdge, offGhost, offRow });
+  app.run("edit.undo");
+  // An edge whose length isn't a round number (the field shows it rounded): still exactly centred, equal end gaps
+  {
+    const box2 = app.doc.makeBody(K.makeBox(G, [61.065, 300, 0], 83.714, 40, 8.5), "Solid");
+    const c2 = app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 8.5] }, [28.73, 310, 8.5], 5.219), "Circle", "face");
+    app.doc.commit([...app.doc.bodies, box2, c2], "odd box"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: c2.id, id: 0 }]);
+    arrayBtn().click(); await sleep(20);
+    opValue("n", 4); opCheck("centre", true);
+    await clickAt([61.065, 280, 8.5]);
+    app.applyOp();
+    const cs = [c2.id, ...app.doc.bodies.slice(-3).map((x) => x.id)].map((id) => app.doc.get(id).shape.boundingBox.bounds);
+    const left = cs[0][0][0] - 19.208, right = 102.922 - cs[3][1][0];
+    const gaps = cs.slice(1).map((bb, k) => bb[0][0] - cs[k][1][0]);
+    expect("array: a non-round edge (83.714), Align centre — end gaps = gaps between, centred", Math.abs(left - right) < 1e-3 && gaps.every((g) => Math.abs(g - left) < 1e-3),
+      { left: r(left), right: r(right), gaps: gaps.map(r) });
+    app.run("edit.undo");
+    // ... and Align centre off: the original (9.522 from the left end) stays, the last copy 9.522 from the right end
+    app.setSelection([{ kind: "body", body: c2.id, id: 0 }]);
+    arrayBtn().click(); await sleep(20);
+    opValue("n", 4); opCheck("centre", false);
+    await clickAt([61.065, 280, 8.5]);
+    app.applyOp();
+    const ms = [c2.id, ...app.doc.bodies.slice(-3).map((x) => x.id)].map((id) => mid(app.doc.get(id).shape, 0));
+    const pitches = ms.slice(1).map((x, k) => r(x - ms[k]));
+    expect("array: a non-round edge, Align centre off — original stays, last copy mirrors it, equal pitch",
+      Math.abs(ms[0] - 28.73) < 1e-3 && Math.abs((102.922 - ms[3]) - (ms[0] - 19.208)) < 1e-3 && pitches.every((p) => Math.abs(p - pitches[0]) < 1e-3), { ms, pitches });
+    app.run("edit.undo");
+    app.setSelection([box2.id, c2.id].map((id) => ({ kind: "body", body: id, id: 0 }))); app.run("edit.delete");
+  }
+  // Copies 2 → 2 circles (the original + 1 new); 1 is refused (nothing to copy)
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  arrayBtn().click(); await sleep(20);
+  const startN = val("n");
+  opValue("n", 1); await sleep(150);
+  const refused = panel.querySelector(".op-error")?.textContent;
+  opValue("n", 2); opValue("total", 0); opValue("gap", 5); opValue("dir", 0); app.applyOp();
+  const two = app.doc.bodies.slice(n0).map((b) => mid(b.shape, 0));
+  expect("array: starts at 2; Copies 2 = the original + 1 copy; 1 refused", startN === "2" && /2 or more/.test(refused || "") && two.join() === "45", { startN, refused, two });
+  app.run("edit.undo");
+  // Esc on the panel: nothing added
+  const n1 = app.doc.bodies.length;
+  app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
+  arrayBtn().click(); await sleep(20);
+  panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  expect("array: Esc cancels, nothing added", app.doc.bodies.length === n1 && panel.hidden, { bodies: app.doc.bodies.length, hidden: panel.hidden });
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("array scenario failed: " + JSON.stringify(failed));
+  return [{ label: "array copy", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Groups: Ctrl+G / Ctrl+Shift+G, and in the Bodies panel — select, rename, hide, fold; saved in the file. */
+const SCENARIO_GROUPS = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const ol = document.getElementById("outliner");
+  app.doc.reset([]);
+  const [a, b, c] = [0, 30, 60].map((x) => app.doc.makeBody(K.makeBox(G, [x, 0, 0], 10, 10, 10), "Leg"));
+  app.doc.commit([a, b, c], "legs");
+  app.run("mode.body");
+  app.setSelection([a, b].map((x) => ({ kind: "body", body: x.id, id: 0 })));
+  app.run("edit.group"); await sleep(20);
+  const head = () => ol.querySelector(".ol-group");
+  expect("groups: Ctrl+G groups the selection — a header (name, count) with the members under it",
+    app.doc.get(a.id).group === "Group 1" && app.doc.get(b.id).group === "Group 1" && !app.doc.get(c.id).group &&
+      head()?.querySelector(".ol-name")?.textContent === "Group 1" && head()?.querySelector(".ol-count")?.textContent === "2" && ol.querySelectorAll(".ol-row.in-group").length === 2,
+    { groups: [a, b, c].map((x) => app.doc.get(x.id).group), rows: [...ol.children].map((r) => r.textContent) });
+  app.setSelection([]);
+  head().querySelector(".ol-name").click(); await sleep(20);
+  expect("groups: clicking the header selects the whole group", app.selection.map((s) => s.body).sort().join() === [a.id, b.id].sort().join() && head().classList.contains("selected"), app.selection);
+  head().querySelector(".ol-name").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const input = head().querySelector("input");
+  input.value = "Legs"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); await sleep(20);
+  expect("groups: double-click renames the group (one undo step)", app.doc.get(a.id).group === "Legs" && app.doc.get(b.id).group === "Legs" && head().querySelector(".ol-name").textContent === "Legs",
+    { groups: [a, b].map((x) => app.doc.get(x.id).group) });
+  head().querySelector(".ol-eye").click(); await sleep(20);
+  const hid = app.hidden.has(a.id) && app.hidden.has(b.id) && !app.hidden.has(c.id);
+  head().querySelector(".ol-eye").click(); await sleep(20);
+  head().querySelector(".ol-caret").click(); await sleep(20);
+  const folded = ol.querySelectorAll(".ol-row.in-group").length;
+  head().querySelector(".ol-caret").click(); await sleep(20);
+  expect("groups: the eye hides / shows the group, ▸ folds it", hid && !app.hidden.has(a.id) && folded === 0 && ol.querySelectorAll(".ol-row.in-group").length === 2, { hid, folded });
+  const back = (() => { app.loadModel(app.modelText(), null); return app.doc.bodies.map((x) => x.group || "").join(); })();
+  expect("groups: saved in the file and read back", back === "Legs,Legs,", back);
+  const [a2, b2] = app.doc.bodies;
+  app.setSelection([{ kind: "body", body: a2.id, id: 0 }]);
+  app.run("edit.ungroup"); await sleep(20);
+  const apart = app.doc.bodies.every((x) => !x.group) && !ol.querySelector(".ol-group");
+  app.run("edit.undo"); await sleep(20);
+  expect("groups: Ctrl+Shift+G takes the group apart (all its members), undo puts it back", apart && app.doc.get(b2.id).group === "Legs" && !!head(), { apart });
+  // A group of flat circles (like an Array copy): select the group, Push/Pull, Enter → the solids are still the group
+  {
+    const opValue = (k, v) => { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); } };
+    const circles = [0, 30, 60].map((x, k) => ({ ...app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 0] }, [x, 100, 0], 8), k === 2 ? "Circle" : "Hole", "face"), group: "Holes" }));
+    app.doc.commit([...app.doc.bodies, ...circles], "holes"); await sleep(20);
+    [...ol.querySelectorAll(".ol-group")].find((h) => h.dataset.group === "Holes").querySelector(".ol-name").click(); await sleep(20);
+    app.run("op.pushpull"); opValue("d", 12); await sleep(200);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true })); await sleep(100);
+    const holes = app.doc.bodies.filter((x) => x.group === "Holes");
+    const names = holes.map((x) => x.name);
+    expect("groups: Push/Pull on a selected group of flat faces → the solids stay in the group, given names kept (automatic ones → Solid N)",
+      holes.length === 3 && holes.every((x) => x.kind === "solid") && !app.doc.bodies.some((x) => x.kind === "face") &&
+        names[0] === "Hole 1" && names[1] === "Hole 2" && /^Solid \d+$/.test(names[2]), app.doc.bodies.map((x) => [x.name, x.kind, x.group]));
+    // Select a plate, "−", then click the group in the Bodies panel: the whole group is subtracted (one step)
+    const plate = app.doc.makeBody(K.makeBox(G, [30, 100, 2], 100, 30, 6), "Plate");
+    app.doc.commit([...app.doc.bodies, plate], "plate"); await sleep(20);
+    app.setSelection([{ kind: "body", body: plate.id, id: 0 }]);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "-", code: "Minus", bubbles: true, cancelable: true })); await sleep(20);
+    const toolOn = app.tool && app.tool.name;
+    [...ol.querySelectorAll(".ol-group")].find((h) => h.dataset.group === "Holes").querySelector(".ol-name").click(); await sleep(50);
+    const after = { holesLeft: app.doc.bodies.filter((x) => x.group === "Holes").length, plateFaces: app.doc.get(plate.id)?.shape.faces.length, tool: app.tool && app.tool.name };
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    expect("groups: plate selected, − then click the group in the Bodies panel → all its solids subtracted",
+      toolOn === "Subtract" && after.holesLeft === 0 && after.plateFaces === 6 + 3 && after.tool === "Subtract", { toolOn, after });
+    app.run("edit.undo"); await sleep(20);
+    app.run("edit.undo"); await sleep(20);
+    app.run("edit.undo"); await sleep(20);
+  }
+  head().querySelector(".ol-name").click(); window.y3dApp.viewport.fit(); await sleep(50); // (selected, for the screenshot)
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("groups scenario failed: " + JSON.stringify(failed));
+  return [{ label: "groups", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** File → Open Recent: open / save put a model on the list, opening it again loads it, a missing file is taken off. */
+const SCENARIO_RECENT = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const dir = window.__smokeDir, a = dir + "/recent-a.y3d", b = dir + "/recent-b.y3d", gone = dir + "/recent-gone.y3d";
+  app.doc.reset([app.doc.makeBody(K.makeBox(G, [0, 0, 0], 10, 20, 30), "Box A")]);
+  await window.y3d.writeFile(a, app.modelText());
+  app.doc.reset([app.doc.makeBody(K.makeBox(G, [0, 0, 0], 5, 5, 5), "Box B")]);
+  await window.y3d.writeFile(b, app.modelText());
+  for (const f of [gone, b, a]) await window.y3d.addRecent(f);
+  await window.y3d.addRecent(b); // (again: moves to the top, no duplicate)
+  const list = await window.y3d.recentFiles();
+  expect("recent: newest first, no duplicates", list.slice(0, 3).join() === [b, a, gone].join(), list);
+  app.doc.reset([]); app.doc.dirty = false;
+  await app.openRecent(a);
+  const opened = app.doc.bodies.map((x) => x.name).join();
+  const top = (await window.y3d.recentFiles())[0];
+  expect("recent: opening one loads it (and puts it first)", /^Box A/.test(opened) && app.doc.filePath === a && top === a, { opened, filePath: app.doc.filePath, top });
+  app.doc.dirty = false;
+  await app.openRecent(gone);
+  const after = await window.y3d.recentFiles();
+  expect("recent: a missing file is taken off the list, the model stays", !after.includes(gone) && /^Box A/.test(app.doc.bodies.map((x) => x.name).join()), after);
+  app.doc.reset([]); app.doc.dirty = false;
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("recent scenario failed: " + JSON.stringify(failed));
+  return [{ label: "open recent", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Sketch (K): on a face and on the ground — lines, tangent arcs, a hole, typed sizes, undo, Done / Cancel. */
 const SCENARIO_SKETCH = String.raw`
 (async () => {
@@ -3338,6 +3617,21 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("6-cablebox.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));
     await shot("7-measure.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ARRAY, true));
+    await win.webContents.executeJavaScript(`window.__smokeDir = ${JSON.stringify(outDir)}; 0`, true);
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GROUPS, true));
+    await shot("7c-groups.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
+    {
+      // The File menu shows the list (built in the main process).
+      const sub = Menu.getApplicationMenu()?.items.find((i) => i.label === "&File")?.submenu?.items.find((i) => i.label === "Open Recent")?.submenu?.items ?? [];
+      const labels = sub.map((i) => i.label);
+      const ok = labels[0]?.startsWith("recent-a.y3d") && labels[1]?.startsWith("recent-b.y3d") && labels.includes("Clear Recent") && !labels.some((l) => l.startsWith("recent-gone"));
+      if (!ok) console.error("recent menu failed: " + JSON.stringify(labels));
+      report.push({ label: "open recent menu", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Open Recent lists the files, newest first, + Clear Recent", ok, got: labels }] });
+      if (!ok) errors.push("recent menu failed");
+    }
+    await shot("7b-array.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);

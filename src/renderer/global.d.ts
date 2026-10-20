@@ -5,6 +5,12 @@ interface Y3DApi {
   saveFile(req: { title: string; defaultPath: string; filters: FileFilter[]; data: string | Uint8Array }): Promise<string | null>;
   writeFile(filePath: string, data: string | Uint8Array): Promise<string>;
   openFile(req: { title: string; filters: FileFilter[]; binary: boolean }): Promise<{ path: string; data: string | Uint8Array } | null>;
+  /** A text file's contents; null if it can't be read (moved, deleted...). */
+  readFile(filePath: string): Promise<string | null>;
+  /** File → Open Recent: put a model first in the list / take it out / the list (newest first). */
+  addRecent(filePath: string): Promise<void>;
+  removeRecent(filePath: string): Promise<void>;
+  recentFiles(): Promise<string[]>;
   confirm(message: string): Promise<boolean>;
   /** Message box with the given buttons; the clicked button's index (the last one on Esc). */
   ask(req: { message: string; detail?: string; buttons: string[] }): Promise<number>;

@@ -42,6 +42,8 @@ export interface Dimension {
 interface BodyBase {
   readonly id: number;
   readonly name: string;
+  /** Group it belongs to (by name; one level, shown together in the Bodies panel). */
+  readonly group?: string;
 }
 
 /** "solid" = closed 3D body, "face" = flat planar face (extrude it with Push/Pull). */
@@ -229,7 +231,7 @@ export class Doc {
    * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
    * is an index into `bodies` (as saved in a file), turned into that body's new id.
    */
-  reset(bodies: (BodyGeom & { name: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = []): void {
+  reset(bodies: (BodyGeom & { name: string; group?: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = []): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;

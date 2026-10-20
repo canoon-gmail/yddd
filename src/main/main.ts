@@ -1,5 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, type MenuItemConstructorOptions } from "electron";
+import { readFileSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const RENDERER_DIR = path.join(__dirname, "..", "renderer");
@@ -44,6 +46,39 @@ function send(cmd: string): void {
   win?.webContents.send("menu", cmd);
 }
 
+// ---------------------------------------------------------------- File → Open Recent
+
+const RECENT_MAX = 10;
+/** Recently opened / saved models, newest first (a smoke run uses its own list, so it never touches the user's). */
+let recent: string[] = [];
+
+function recentFile(): string {
+  return process.env.Y3D_SMOKE ? path.join(process.env.Y3D_SMOKE, "recent.json") : path.join(app.getPath("userData"), "recent.json");
+}
+
+function loadRecent(): void {
+  try {
+    const list = JSON.parse(readFileSync(recentFile(), "utf8")) as unknown;
+    recent = Array.isArray(list) ? list.filter((p): p is string => typeof p === "string").slice(0, RECENT_MAX) : [];
+  } catch {
+    recent = [];
+  }
+}
+
+function setRecent(list: string[]): void {
+  recent = list.slice(0, RECENT_MAX);
+  void writeFile(recentFile(), JSON.stringify(recent)).catch(() => {});
+  buildMenu();
+}
+
+/** "name.y3d   ~/folder" for the menu ("&" doubled: it marks a mnemonic). */
+function recentLabel(file: string): string {
+  const home = os.homedir();
+  const dir = path.dirname(file);
+  const shown = dir === home ? "~" : dir.startsWith(home + path.sep) ? "~" + dir.slice(home.length) : dir;
+  return `${path.basename(file)}   ${shown}`.replace(/&/g, "&&");
+}
+
 function buildMenu(): void {
   const item = (label: string, cmd: string, accelerator?: string): MenuItemConstructorOptions => ({
     label,
@@ -56,6 +91,20 @@ function buildMenu(): void {
       submenu: [
         item("New", "file.new", "CmdOrCtrl+N"),
         item("Open…", "file.open", "CmdOrCtrl+O"),
+        {
+          label: "Open Recent",
+          submenu: recent.length
+            ? [
+                ...recent.map((file, i): MenuItemConstructorOptions => ({
+                  label: recentLabel(file),
+                  accelerator: i < 9 ? `CmdOrCtrl+Shift+${i + 1}` : undefined,
+                  click: () => send(`file.openRecent:${file}`),
+                })),
+                { type: "separator" },
+                { label: "Clear Recent", click: () => setRecent([]) },
+              ]
+            : [{ label: "No recent files", enabled: false }],
+        },
         item("Save", "file.save", "CmdOrCtrl+S"),
         item("Save As…", "file.saveAs", "CmdOrCtrl+Shift+S"),
         { type: "separator" },
@@ -75,6 +124,9 @@ function buildMenu(): void {
         { type: "separator" },
         item("Duplicate", "edit.duplicate", "CmdOrCtrl+D"),
         item("Select All", "edit.selectAll", "CmdOrCtrl+A"),
+        { type: "separator" },
+        item("Group", "edit.group", "CmdOrCtrl+G"),
+        item("Ungroup", "edit.ungroup", "CmdOrCtrl+Shift+G"),
       ],
     },
     {
@@ -143,6 +195,18 @@ function registerIpc(): void {
     const buf = await readFile(filePath);
     return { path: filePath, data: req.binary ? new Uint8Array(buf) : buf.toString("utf8") };
   });
+
+  ipcMain.handle("read-file", async (_e, filePath: string) => {
+    try {
+      return await readFile(filePath, "utf8");
+    } catch {
+      return null;
+    }
+  });
+
+  ipcMain.handle("recent-add", (_e, filePath: string) => setRecent([filePath, ...recent.filter((p) => p !== filePath)]));
+  ipcMain.handle("recent-remove", (_e, filePath: string) => setRecent(recent.filter((p) => p !== filePath)));
+  ipcMain.handle("recent-list", () => recent);
 
   ipcMain.handle("confirm", async (_e, message: string) => {
     if (!win) return false;
@@ -293,6 +357,7 @@ app.whenReady().then(async () => {
   if (process.env.Y3D_SMOKE) await clearRecovery();
   registerAppProtocol();
   registerIpc();
+  loadRecent();
   buildMenu();
   await createWindow();
   app.on("activate", () => {

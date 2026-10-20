@@ -6,6 +6,7 @@ import "./style.css";
 import * as THREE from "three";
 import {
   initKernel,
+  curveBounds,
   isValidShape,
   faceEdgeIds,
   moveEdges,
@@ -165,8 +166,8 @@ interface OpOutcome {
    * the exact result is then only built by `commit`, which may throw.
    */
   xform?: { ids: number[]; matrix: THREE.Matrix4 };
-  /** Apply to the document. Returns the body ids to select afterwards. */
-  commit(): { select: number[]; solidMode?: boolean };
+  /** Apply to the document. Returns the body ids to select afterwards (`then`: run once the panel has closed). */
+  commit(): { select: number[]; solidMode?: boolean; then?: () => void };
 }
 
 /**
@@ -216,6 +217,23 @@ interface OpSpec {
   /** With `pick`: the pointer moved over the viewport (e.g. light up what a click would pick). */
   hover?(e: PointerEvent): void;
 }
+
+/** A new body made from `from` (extruded, cut off, split off...) goes in the same group. */
+function inGroupOf<T extends Body>(made: T, from: Body): T {
+  return from.group ? { ...made, group: from.group } : made;
+}
+
+/** Names flat faces get automatically ("Circle 3", "Face 1"...): a solid pushed from one is called "Solid N" instead. */
+const AUTO_FACE_NAME = /^(Rectangle|Circle|Polygon|Face|Sketch|Ring)( \d+)?$/;
+
+/** The solid a flat face object was pushed / pulled into: its group, and the name the user gave it. */
+function extrudedFrom<T extends Body>(made: T, face: Body): T {
+  const named = AUTO_FACE_NAME.test(face.name) ? made : { ...made, name: face.name };
+  return inGroupOf(named, face);
+}
+
+/** Menu command prefix for File → Open Recent (the file's path follows). */
+const OPEN_RECENT = "file.openRecent:";
 
 /** Thrown by an op's compute while it waits for a pick (not a mistake): shown as a prompt, not in red. */
 class OpWaiting extends Error {}
@@ -498,6 +516,7 @@ class App implements ToolHost {
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.doc.relinkDims = (dims, prev, next) => relinkDimensions(dims, prev, next);
     this.buildToolbar();
+    this.buildCornerTools();
     this.renderRecent();
     this.bindViewportEvents();
     this.bindKeys();
@@ -505,7 +524,7 @@ class App implements ToolHost {
 
     this.doc.onChange(() => this.onDocChange());
     this.doc.onChange(() => this.scheduleAutosave());
-    window.y3d?.onMenu((cmd) => this.run(cmd));
+    window.y3d?.onMenu((cmd) => (cmd.startsWith(OPEN_RECENT) ? void this.openRecent(cmd.slice(OPEN_RECENT.length)) : this.run(cmd)));
     // Unsaved-changes prompt on close is handled by the main process (see setDirty);
     // a beforeunload handler would silently block closing in Electron.
 
@@ -758,6 +777,27 @@ class App implements ToolHost {
     }
   }
 
+  /** Rarely used tools (Revolve / Sweep / Array copy) as small buttons in the viewport's bottom-left corner. */
+  private buildCornerTools(): void {
+    const box = $("corner-tools");
+    const items: [string, string, string][] = [
+      ["op.revolve", "revolve", "Revolve a flat face about a line or axis (Pro: R E)"],
+      ["op.sweep", "sweep", "Sweep a flat face along a path or guide line (Pro: S W)"],
+      ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction"],
+    ];
+    for (const [cmd, icon, title] of items) {
+      const b = document.createElement("button");
+      b.dataset.cmd = cmd;
+      b.title = title;
+      b.innerHTML = ICONS[icon];
+      b.addEventListener("click", () => {
+        b.blur();
+        this.run(cmd);
+      });
+      box.appendChild(b);
+    }
+  }
+
   /** Recent-commands strip (left border): newest at the bottom, oldest drops off the top. */
   private pushRecent(cmd: string): void {
     if (!RECENT_ITEMS.has(cmd)) return;
@@ -832,6 +872,9 @@ class App implements ToolHost {
       case "edit.redo": return this.undoRedo("redo");
       case "edit.delete": return this.deleteSelected();
       case "edit.duplicate": return this.duplicate();
+      case "edit.array": return this.arrayCopy();
+      case "edit.group": return this.groupSelected();
+      case "edit.ungroup": return this.ungroupSelected();
       case "edit.selectAll":
         this.setMode("body");
         return this.setSelection(this.doc.bodies.filter((b) => !this.hidden.has(b.id)).map((b) => ({ kind: "body", body: b.id, id: 0 })));
@@ -1407,7 +1450,7 @@ class App implements ToolHost {
         e.preventDefault();
         const step = Number(input.step || input.dataset.step) * (e.shiftKey ? 10 : 1);
         input.value = fmt((this.opNum(input) || 0) + (e.deltaY < 0 ? step : -step));
-        this.scheduleOpPreview();
+        input.dispatchEvent(new Event("input", { bubbles: true })); // (as if typed: previews, and ops listening see it)
       });
     }
     this.hover = null;
@@ -1534,7 +1577,7 @@ class App implements ToolHost {
     const result = this.previewOp();
     if (!result) return;
     op.spec.remember?.(this.opValues().values);
-    let done: { select: number[]; solidMode?: boolean };
+    let done: { select: number[]; solidMode?: boolean; then?: () => void };
     try {
       done = result.commit(); // a transform preview builds the exact result only now
     } catch (e) {
@@ -1544,9 +1587,10 @@ class App implements ToolHost {
       return;
     }
     this.closeOpPanel();
-    const { select, solidMode } = done;
+    const { select, solidMode, then } = done;
     if (solidMode) this.setMode("body");
     this.setSelection(this.mode === "body" ? select.map((id) => ({ kind: "body", body: id, id: 0 })) : []);
+    if (then) return then();
     this.toast(`${op.spec.label} applied`);
   }
 
@@ -1641,7 +1685,7 @@ class App implements ToolHost {
           return {
             ghost: new Map([[bodyId, solid]]),
             commit: () => {
-              const nb = this.doc.makeBody(solid, "Solid");
+              const nb = extrudedFrom(this.doc.makeBody(solid, "Solid"), body);
               this.doc.commit(this.doc.bodies.map((b) => (b.id === bodyId ? nb : b)), "Extrude face");
               return { select: [nb.id], solidMode: true };
             },
@@ -1667,7 +1711,7 @@ class App implements ToolHost {
           return {
             ghost: new Map([[-1, solid]]),
             commit: () => {
-              const nb = this.doc.makeBody(solid, "Solid");
+              const nb = inGroupOf(this.doc.makeBody(solid, "Solid"), body);
               this.doc.commit([...this.doc.bodies, nb], "Extrude face");
               return { select: [nb.id], solidMode: true };
             },
@@ -1723,7 +1767,7 @@ class App implements ToolHost {
           ghost: new Map([...preview, ...extruded]),
           commit: () => {
             const solids = pushed();
-            const made = new Map(flats.map((b) => [b.id, this.doc.makeBody(extruded.get(b.id)!, "Solid")]));
+            const made = new Map(flats.map((b) => [b.id, extrudedFrom(this.doc.makeBody(extruded.get(b.id)!, "Solid"), b)]));
             this.doc.commit(
               this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? withShape(b, solids.get(b.id)!) : b)),
               "Push/Pull",
@@ -2372,7 +2416,7 @@ class App implements ToolHost {
         if (body.kind === "face") {
           const [first, ...rest] = cutFaceByPlane(body.shape as Parameters<typeof cutFaceByPlane>[0], point, normal);
           kept.set(id, first);
-          const made = rest.map((f) => this.doc.makeBody(f, "Face", "face"));
+          const made = rest.map((f) => inGroupOf(this.doc.makeBody(f, "Face", "face"), body));
           cutOff.push(...made);
           facePieces.push(id, ...made.map((b) => b.id));
           continue;
@@ -2380,7 +2424,7 @@ class App implements ToolHost {
         const { above, below } = splitByPlane(this.solidOf(id, "Cut"), point, normal);
         if (!above || !below) throw new Error(`Cut: the guide's cut plane does not pass through "${body.name}"`);
         kept.set(id, below);
-        cutOff.push(this.doc.makeBody(above, "Solid"));
+        cutOff.push(inGroupOf(this.doc.makeBody(above, "Solid"), body));
       }
     } catch (e) {
       this.toast(errorMessage(e), "error");
@@ -2447,7 +2491,7 @@ class App implements ToolHost {
     const name = op !== "subtract" && !/^Solid \d+$/.test(target.name) ? this.doc.nextName("Solid") : target.name;
     // One body per piece, largest first (it keeps the target's id and name).
     const parts = pieces.length > 1 ? pieces.map((p) => ({ p, v: solidVolume(p) })).sort((a, b) => b.v - a.v).map(({ p }) => p) : [result];
-    const extra = parts.slice(1).map((p) => this.doc.makeBody(p, name));
+    const extra = parts.slice(1).map((p) => inGroupOf(this.doc.makeBody(p, name), target));
     const next = this.doc.bodies
       .filter((b) => !removed.has(b.id))
       .flatMap((b) => (b.id === targetId ? [{ ...withShape(b, parts[0]), name }, ...extra] : [b]));
@@ -2463,7 +2507,7 @@ class App implements ToolHost {
     const verb = op === "subtract" ? "subtract from" : op === "union" ? "join with" : "intersect with";
     let count = 0;
     const msg = () =>
-      `${label}: click a solid to ${verb} "${target.name}"` + (count ? ` (${count} done) · keep clicking for more` : "") +
+      `${label}: click a solid to ${verb} "${target.name}" (or a group / object in the Bodies panel)` + (count ? ` (${count} done) · keep clicking for more` : "") +
       " · Esc / Enter / empty click to finish";
     const pickAt = (e: PointerEvent) => {
       const p = this.viewport.pick(e.clientX, e.clientY, "body");
@@ -2475,24 +2519,30 @@ class App implements ToolHost {
       this.endTool();
       this.setSelection([{ kind: "body", body: targetId, id: 0 }]);
     };
+    /** Apply with these solids (a click in the viewport: one; in the Bodies panel: one, or a whole group). */
+    const apply = (ids: number[]) => {
+      ids = ids.filter((id) => id !== targetId);
+      if (!ids.length) return;
+      const face = ids.map((id) => this.doc.get(id)).find((b) => b?.kind === "face");
+      if (face) {
+        this.toast(`Booleans work on solids — "${face.name}" is a flat face. Push/Pull it first.`, "error");
+        return;
+      }
+      try {
+        if (this.applyBoolean(op, targetId, ids, label)) count += ids.length;
+      } catch (err) {
+        this.fail(err);
+      }
+      show(null);
+      this.hint(msg());
+    };
     const tool: Tool = {
       name: label,
       move: (e) => show(pickAt(e)),
       down: (e) => {
         const id = pickAt(e);
         if (id === null) return finish();
-        const b = this.doc.get(id);
-        if (b?.kind === "face") {
-          this.toast(`Booleans work on solids — "${b.name}" is a flat face. Push/Pull it first.`, "error");
-          return;
-        }
-        try {
-          if (this.applyBoolean(op, targetId, [id], label)) count++;
-        } catch (err) {
-          this.fail(err);
-        }
-        show(null);
-        this.hint(msg());
+        apply([id]);
       },
       key: (e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -2501,14 +2551,17 @@ class App implements ToolHost {
         }
         return false;
       },
-      dispose: () => {},
+      dispose: () => {
+        if (this.outlinerPick === apply) this.outlinerPick = null;
+      },
     };
     this.setMode("body");
     this.startTool(tool);
+    this.outlinerPick = apply;
     this.viewport.canvas.style.cursor = "pointer";
     show(null);
     this.hint(msg());
-    this.toast(`${label} tool: click solids to ${verb} "${target.name}" · Esc to finish`);
+    this.toast(`${label} tool: click solids to ${verb} "${target.name}" — or a group in the Bodies panel · Esc to finish`);
   }
 
   // ================================================================ transforms
@@ -3132,6 +3185,188 @@ class App implements ToolHost {
     this.repeatCopyIds = copies.map((b) => b.id).join();
   }
 
+  /** Array copy (corner button): a row of copies of the selected objects. */
+  private arrayCopy(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) return this.toast("Array copy: select objects first (Solid mode, key 1)", "error");
+    this.opArrayCopy(ids);
+  }
+
+  /** Last Array copy gap, direction and "Align centre" (the count starts at 2 each time). */
+  private arrayPrefs = { gap: 0, dir: 0, centre: 0 };
+
+  /**
+   * Array copy: a row of `n` objects — the original counts, so n − 1 copies — along ±X / ±Y / ±Z,
+   * `gap` mm apart (edge to edge), in one undo step.
+   * With a total length (typed, or a clicked edge / path) the copies are spread instead:
+   * - the original stays put (as engineers expect): the last copy the total away from it — on a clicked
+   *   edge, as far from the far end as the original is from the near end (a balanced row);
+   * - "Align centre": the original and its copies fill the total, equal gaps between them and at both
+   *   ends — centred on the edge; the original moves to the first place.
+   */
+  private opArrayCopy(ids: number[]): void {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const [a, b] = this.doc.get(id)!.shape.boundingBox.bounds;
+      for (let i = 0; i < 3; i++) {
+        lo[i] = Math.min(lo[i], a[i]);
+        hi[i] = Math.max(hi[i], b[i]);
+      }
+    }
+    const DIRS = ["+X", "−X", "+Y", "−Y", "+Z", "−Z"];
+    const along = (axis: number, d: number): V3 => {
+      const v: V3 = [0, 0, 0];
+      v[axis] = d;
+      return v;
+    };
+    const copyName = (b: Body) => b.name.replace(/\s+\d+$/, "");
+    /** The clicked edge / path: where it runs along `axis` (from `a` to `b`). */
+    let span: { axis: number; a: number; b: number } | null = null;
+    /** The path or edge under the cursor: its extent along its longest axis. */
+    const spanAt = (e: PointerEvent): { axis: number; a: number; b: number; what: string; item: SelItem; at: THREE.Vector3 } | null => {
+      let hit: { bounds: [V3, V3] | null; what: string; item: SelItem; at: THREE.Vector3 } | null = null;
+      const p = this.viewport.pick(e.clientX, e.clientY, "body");
+      const pb = p && this.doc.get(p.body);
+      if (p && pb?.kind === "path") hit = { bounds: curveBounds(pb.shape), what: "Path", item: { kind: "body", body: pb.id, id: 0 }, at: p.point };
+      else {
+        const h = this.viewport.pick(e.clientX, e.clientY, "edge");
+        const hb = h && this.doc.get(h.body);
+        if (h && hb && isBrep(hb)) hit = { bounds: curveBounds(hb.shape, h.id), what: "Edge", item: { kind: "edge", body: h.body, id: h.id }, at: h.point };
+      }
+      if (!hit?.bounds) return null;
+      const [l, u] = hit.bounds;
+      const ext = [0, 1, 2].map((k) => u[k] - l[k]);
+      const axis = ext.indexOf(Math.max(...ext));
+      if (ext[axis] < 1e-6) return null;
+      return { axis, a: l[axis], b: u[axis], what: hit.what, item: hit.item, at: hit.at };
+    };
+    const input = (key: string) => this.op?.inputs.find((i) => i.dataset.key === key);
+    this.startOp({
+      title: "Array copy",
+      label: "Array copy",
+      fields: [
+        { key: "n", label: "Copies (the original counts)", value: 2, step: 1, min: 2 },
+        { key: "gap", label: "Gap between copies (mm)", value: this.arrayPrefs.gap, step: 0.5 },
+        { key: "total", label: "Total length (mm, 0: use the gap)", value: 0, step: 1, min: 0 },
+        { key: "dir", label: "Direction", value: this.arrayPrefs.dir, type: "select", options: DIRS },
+        { key: "centre", label: "Align centre (the original moves too)", value: this.arrayPrefs.centre, type: "checkbox" },
+      ],
+      hint: "Array copy: copies, gap (edge to edge) and direction — or click an edge or a path: the copies spread to its far end (Align centre: the whole row centred on it) · Enter apply · Esc cancel",
+      pick: (e) => {
+        const t = spanAt(e);
+        const total = input("total"), dir = input("dir");
+        if (!t || !total || !dir) return;
+        span = { axis: t.axis, a: t.a, b: t.b };
+        total.value = fmt(t.b - t.a);
+        // Along the edge, toward its far end (from the original).
+        const c = (lo[t.axis] + hi[t.axis]) / 2;
+        dir.value = String(t.axis * 2 + (t.b - c < c - t.a ? 1 : 0));
+        this.previewOp();
+        this.toast(`${t.what} (${fmt(t.b - t.a)} mm): the copies spread along it`);
+      },
+      hover: (e) => {
+        const t = spanAt(e);
+        this.viewport.setHighlight(this.selection, t?.item ?? null);
+        this.hud(t ? `${t.what}: ${fmt(t.b - t.a)} mm along ${"XYZ"[t.axis]}` : null, t?.at);
+        this.viewport.canvas.style.cursor = t ? "pointer" : "crosshair";
+      },
+      compute: ({ n: count, gap, dir, total, centre: alignCentre }) => {
+        if (!(count >= 2) || count !== Math.round(count)) throw new Error("Copies must be a whole number, 2 or more (the original counts)");
+        if (count > 500) throw new Error("At most 500 copies");
+        const n = count - 1; // (new copies)
+        const axis = dir >> 1, sign = dir & 1 ? -1 : 1, size = hi[axis] - lo[axis];
+        /** Move of the original (k = 0) and of each copy (k = 1..n) along `axis`. */
+        let offsets: number[];
+        if (total > 0) {
+          // Original + copies fill the total: equal gaps between them and at both ends.
+          // (the clicked edge's exact length, while the field still shows it — the field rounds to 0.01)
+          const s = span && span.axis === axis && fmt(span.b - span.a) === fmt(total) ? span : null;
+          if (s) total = s.b - s.a;
+          const centre = (lo[axis] + hi[axis]) / 2;
+          const gapIn = input("gap");
+          let g: number;
+          if (alignCentre) {
+            const m = count;
+            g = (total - m * size) / (m + 1);
+            if (g < -1e-9) throw new Error(`${m} × ${fmt(size)} mm don't fit in ${fmt(total)} mm — fewer copies or a longer total`);
+            // (no edge picked: from where the original starts, in the direction)
+            const [A, B] = s ? [s.a, s.b] : sign > 0 ? [lo[axis], lo[axis] + total] : [hi[axis] - total, hi[axis]];
+            offsets = Array.from({ length: m }, (_, k) => (sign > 0 ? A + g + size / 2 + k * (size + g) : B - g - size / 2 - k * (size + g)) - centre);
+          } else {
+            // The original stays; the last copy `extent` from it: on a clicked edge, as far from the far
+            // end as the original is from the near end; typed, the total itself.
+            let extent = total;
+            if (s) {
+              const near = sign > 0 ? centre - s.a : s.b - centre;
+              extent = (s.b - s.a) - 2 * near;
+              if (extent <= 1e-6) throw new Error("The original is past the middle of the edge: flip the direction");
+            }
+            const pitch = extent / n;
+            g = pitch - size;
+            if (g < -1e-9) throw new Error(`${count} × ${fmt(size)} mm don't fit in ${fmt(extent)} mm — fewer copies, or move the original nearer the end`);
+            offsets = Array.from({ length: count }, (_, k) => sign * pitch * k);
+          }
+          if (gapIn && gapIn !== document.activeElement) gapIn.value = fmt(g);
+        } else {
+          const step = size + gap;
+          if (!(step > 1e-6)) throw new Error("Gap too small: the copies would be on top of each other");
+          offsets = Array.from({ length: n + 1 }, (_, k) => sign * step * k);
+        }
+        const moveOrig = Math.abs(offsets[0]) > 1e-9;
+        const ghost = new Map<number, Shape>();
+        offsets.forEach((d, k) => {
+          if (k === 0 && !moveOrig) return;
+          ids.forEach((id, j) => {
+            const b = this.doc.get(id)!;
+            // (the original's preview replaces it; copies are new: negative keys)
+            if (b.kind === "solid" || b.kind === "face") ghost.set(k === 0 ? id : -(k * ids.length + j), translateShape(b.shape, along(axis, d)) as Shape);
+          });
+        });
+        return {
+          ghost,
+          commit: () => {
+            const copies: Body[] = [];
+            let lastRow: Body[] = [];
+            for (let k = 1; k <= n; k++) {
+              lastRow = ids.map((id) => {
+                const b = this.doc.get(id)!;
+                return this.doc.makeBody(translateShape(cloneShape(b.shape), along(axis, offsets[k])), copyName(b), b.kind);
+              });
+              copies.push(...lastRow);
+            }
+            // The row is a group: the originals' own group if they share one (a second array → a grid), else a new "Array N".
+            const idSet = new Set(ids);
+            const groups = new Set(ids.map((id) => this.doc.get(id)!.group));
+            const group = groups.size === 1 && [...groups][0] ? [...groups][0]! : this.newGroupName("Array");
+            const bodies = this.doc.bodies.map((b) => (idSet.has(b.id) ? { ...(moveOrig ? withShape(b, translateShape(b.shape, along(axis, offsets[0]))) : b), group } : b));
+            this.doc.commit([...bodies, ...copies.map((b) => ({ ...b, group }))], `Array copy ×${count}`);
+            // The whole row stays selected: Array copy again (e.g. along Y) makes a grid.
+            return {
+              select: [...ids, ...copies.map((b) => b.id)],
+              solidMode: true,
+              then: () => {
+                // (Shift+R would move the whole selected row — not repeat this array)
+                this.repeatOps = [];
+                this.repeatCopyIds = "";
+                this.toast(`${count} in a row (${n} new) — all selected: Array copy again for a grid`);
+              },
+            };
+          },
+        };
+      },
+      remember: ({ gap, dir, centre }) => {
+        this.arrayPrefs = { gap, dir, centre };
+      },
+    });
+    // Typing a gap switches the total length off (back to "use the gap"); typing a total forgets the picked edge.
+    const total = input("total");
+    input("gap")?.addEventListener("input", () => {
+      span = null;
+      if (total && total.value !== "0") total.value = "0";
+    });
+    total?.addEventListener("input", () => (span = null));
+  }
+
   // ================================================================ document changes
 
   private onDocChange(): void {
@@ -3235,9 +3470,10 @@ class App implements ToolHost {
     if (this.tool) active.add(`tool.${this.tool.name.toLowerCase()}`);
     if (this.xf) active.add(this.xf.mode === "translate" ? "xf.move" : "xf.rotate");
     if (this.op) {
-      const map: Record<string, string> = { "Push/Pull": "op.pushpull", Fillet: "op.fillet", Chamfer: "op.chamfer", Shell: "op.shell", Revolve: "op.revolve", Sweep: "op.sweep" };
+      const map: Record<string, string> = { "Push/Pull": "op.pushpull", Fillet: "op.fillet", Chamfer: "op.chamfer", Shell: "op.shell", Revolve: "op.revolve", Sweep: "op.sweep", "Array copy": "edit.array" };
       active.add(map[this.op.spec.label]);
     }
+    for (const b of document.querySelectorAll<HTMLButtonElement>("#corner-tools button")) b.classList.toggle("active", active.has(b.dataset.cmd!));
     for (const b of document.querySelectorAll<HTMLButtonElement>(".tb-btn")) {
       const cmd = b.dataset.cmd!;
       b.classList.toggle("active", active.has(cmd));
@@ -3257,7 +3493,40 @@ class App implements ToolHost {
     }
   }
 
+  // ---------------------------------------------------------------- groups
+
+  /** "Group 1", "Group 2"... — the first not in use. */
+  private newGroupName(base = "Group"): string {
+    const used = new Set(this.doc.bodies.map((b) => b.group));
+    let n = 1;
+    while (used.has(`${base} ${n}`)) n++;
+    return `${base} ${n}`;
+  }
+
+  /** Ctrl+G: the selected objects become one group (leaving any group they were in). */
+  private groupSelected(): void {
+    const ids = new Set(this.selectedBodyIds());
+    if (ids.size < 2) return this.toast("Group: select two or more objects (Shift+click, or in the Bodies panel)", "error");
+    const name = this.newGroupName();
+    this.doc.commit(this.doc.bodies.map((b) => (ids.has(b.id) ? { ...b, group: name } : b)), "Group");
+    this.olCollapsed.delete(name);
+    this.toast(`${name}: ${ids.size} objects — double-click its name in the Bodies panel to rename`);
+  }
+
+  /** Ctrl+Shift+G: the groups of the selected objects are taken apart (the objects stay). */
+  private ungroupSelected(): void {
+    const groups = new Set(this.selectedBodyIds().map((id) => this.doc.get(id)?.group).filter((g): g is string => !!g));
+    if (!groups.size) return this.toast("Ungroup: select a group (click its name in the Bodies panel)", "error");
+    this.doc.commit(this.doc.bodies.map((b) => (b.group && groups.has(b.group) ? (({ group: _g, ...rest }) => rest as Body)(b) : b)), "Ungroup");
+    this.toast(groups.size > 1 ? `${groups.size} groups taken apart` : `${[...groups][0]} taken apart`);
+  }
+
+  /** Set while Union / Subtract / Intersect waits for solids: a click in the Bodies panel (a row, or a group) goes here. */
+  private outlinerPick: ((ids: number[]) => void) | null = null;
   private olRows = new Map<number, { row: HTMLElement; body: Body; hidden: boolean }>();
+  /** Group header rows by group name, and the groups folded shut. */
+  private olGroups = new Map<string, HTMLElement>();
+  private olCollapsed = new Set<string>();
   private olBound = false;
 
   private renderOutliner(): void {
@@ -3269,10 +3538,40 @@ class App implements ToolHost {
         const row = (e.target as HTMLElement).closest<HTMLElement>(".ol-row");
         return row ? this.doc.get(Number(row.dataset.id)) ?? null : null;
       };
+      const groupOf = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>(".ol-group")?.dataset.group ?? null;
+      const members = (g: string) => this.doc.bodies.filter((b) => b.group === g);
       el.addEventListener("click", (e) => {
+        const t = e.target as HTMLElement;
+        if (t.closest("input")) return;
+        const g = groupOf(e);
+        if (g !== null) {
+          const ms = members(g);
+          if (t.closest(".ol-caret")) {
+            if (this.olCollapsed.has(g)) this.olCollapsed.delete(g);
+            else this.olCollapsed.add(g);
+            return this.renderOutliner();
+          }
+          if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick(ms.map((b) => b.id)); // (Union / Subtract... waiting for solids)
+          if (t.closest(".ol-eye")) {
+            // Any shown → hide them all; all hidden → show them all.
+            const hide = ms.some((b) => !this.hidden.has(b.id));
+            for (const b of ms) hide ? this.hidden.add(b.id) : this.hidden.delete(b.id);
+            this.viewport.setHidden(this.hidden);
+            return this.renderOutliner();
+          }
+          // The whole group (Shift / Ctrl: added to the selection, or taken out if it's all in).
+          this.setMode("body");
+          const items: SelItem[] = ms.map((b) => ({ kind: "body", body: b.id, id: 0 }));
+          if (e.shiftKey || e.ctrlKey) {
+            const all = items.every((it) => this.selection.some((s) => sameItem(s, it)));
+            const rest = this.selection.filter((s) => !items.some((it) => sameItem(s, it)));
+            this.setSelection(all ? rest : [...rest, ...items]);
+          } else this.setSelection(items);
+          return;
+        }
         const b = bodyOf(e);
         if (!b) return;
-        const t = e.target as HTMLElement;
+        if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick([b.id]);
         if (t.closest(".ol-eye")) {
           if (this.hidden.has(b.id)) this.hidden.delete(b.id);
           else this.hidden.add(b.id);
@@ -3280,7 +3579,6 @@ class App implements ToolHost {
           this.renderOutliner();
           return;
         }
-        if (t.closest("input")) return;
         this.setMode("body");
         const item: SelItem = { kind: "body", body: b.id, id: 0 };
         if (e.shiftKey || e.ctrlKey) {
@@ -3289,21 +3587,26 @@ class App implements ToolHost {
         } else this.setSelection([item]);
       });
       el.addEventListener("dblclick", (e) => {
-        const b = bodyOf(e);
         const cell = (e.target as HTMLElement).closest(".ol-name");
-        if (b && cell) this.rename(b, cell);
+        if (!cell) return;
+        const g = groupOf(e);
+        if (g !== null) return this.renameGroup(g, cell);
+        const b = bodyOf(e);
+        if (b) this.rename(b, cell);
       });
     }
     const selected = new Set(this.selection.map((s) => s.body));
     if (!this.doc.bodies.length) {
       this.olRows.clear();
+      this.olGroups.clear();
       el.innerHTML = `<div class="ol-empty">No bodies yet.<br>Press <kbd>B</kbd> to draw a box.</div>`;
       return;
     }
     el.querySelector(".ol-empty")?.remove();
-    const live = new Set<number>();
-    let prev: Element | null = null;
-    for (const b of this.doc.bodies) {
+    // Rows in document order; a group's header where its first member is, its members right under it.
+    const order: HTMLElement[] = [];
+    const live = new Set<number>(), liveGroups = new Set<string>();
+    const bodyRow = (b: Body): HTMLElement => {
       live.add(b.id);
       const hidden = this.hidden.has(b.id);
       let entry = this.olRows.get(b.id);
@@ -3318,17 +3621,78 @@ class App implements ToolHost {
       const row = entry.row;
       row.classList.toggle("selected", selected.has(b.id));
       row.classList.toggle("hidden", hidden);
-      // Keep DOM order in sync with document order (no-op when already correct).
+      row.classList.toggle("in-group", !!b.group);
+      return row;
+    };
+    for (const b of this.doc.bodies) {
+      if (!b.group) {
+        order.push(bodyRow(b));
+        continue;
+      }
+      if (liveGroups.has(b.group)) continue; // (listed with its group)
+      const g = b.group;
+      liveGroups.add(g);
+      const ms = this.doc.bodies.filter((x) => x.group === g);
+      const open = !this.olCollapsed.has(g);
+      const allHidden = ms.every((x) => this.hidden.has(x.id));
+      let head = this.olGroups.get(g);
+      if (!head) {
+        head = document.createElement("div");
+        head.className = "ol-group";
+        head.dataset.group = g;
+        this.olGroups.set(g, head);
+      }
+      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+      if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
+      head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
+      head.classList.toggle("hidden", allHidden);
+      order.push(head);
+      if (open) for (const m of ms) order.push(bodyRow(m));
+      else for (const m of ms) live.add(m.id); // (kept, just not shown)
+    }
+    // Keep DOM order in sync (no-op when already correct); folded members leave the DOM.
+    let prev: Element | null = null;
+    for (const row of order) {
       const want: Element | null = prev ? prev.nextElementSibling : el.firstElementChild;
       if (want !== row) el.insertBefore(row, want);
       prev = row;
     }
-    for (const [id, entry] of this.olRows) {
-      if (!live.has(id)) {
-        entry.row.remove();
-        this.olRows.delete(id);
+    const shown = new Set<Element>(order);
+    for (const child of [...el.children]) if (!shown.has(child)) child.remove();
+    for (const id of [...this.olRows.keys()]) if (!live.has(id)) this.olRows.delete(id);
+    for (const g of [...this.olGroups.keys()]) if (!liveGroups.has(g)) this.olGroups.delete(g);
+    for (const g of [...this.olCollapsed]) if (!liveGroups.has(g)) this.olCollapsed.delete(g);
+  }
+
+  /** Double-click a group's name: rename it (all its members move to the new name; one undo step). */
+  private renameGroup(group: string, cell: Element): void {
+    const input = document.createElement("input");
+    input.value = group;
+    cell.replaceChildren(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (save: boolean) => {
+      if (done) return;
+      done = true;
+      const name = input.value.trim();
+      const taken = name !== group && this.doc.bodies.some((b) => b.group === name);
+      if (save && taken) this.toast(`There is already a group called "${name}"`, "error");
+      if (save && name && name !== group && !taken) {
+        if (this.olCollapsed.delete(group)) this.olCollapsed.add(name);
+        this.olGroups.delete(group);
+        this.doc.commit(this.doc.bodies.map((b) => (b.group === group ? { ...b, group: name } : b)), "Rename group");
+      } else {
+        this.olGroups.get(group)?.replaceChildren(); // (redrawn below)
+        this.renderOutliner();
       }
-    }
+    };
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") commit(true);
+      if (e.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
   }
 
   private rename(body: Body, cell: Element): void {
@@ -3543,6 +3907,7 @@ class App implements ToolHost {
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
       ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
+      ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+L)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
@@ -3584,6 +3949,26 @@ class App implements ToolHost {
       this.loadModel(file.data as string, file.path);
       this.toast(`Opened ${file.path.split(/[\\/]/).pop()}`);
       this.dropRecovery();
+      void window.y3d.addRecent(file.path);
+    } catch (e) {
+      this.fail(e);
+    }
+  }
+
+  /** File → Open Recent: open that model again (a file no longer there is taken off the list). */
+  async openRecent(filePath: string): Promise<void> {
+    if (!(await this.confirmDiscard())) return;
+    const name = filePath.split(/[\\/]/).pop();
+    const text = await window.y3d.readFile(filePath);
+    if (text === null) {
+      void window.y3d.removeRecent(filePath);
+      return this.toast(`${name} is no longer there (moved or deleted) — taken off the recent list`, "error");
+    }
+    try {
+      this.loadModel(text, filePath);
+      this.toast(`Opened ${name}`);
+      this.dropRecovery();
+      void window.y3d.addRecent(filePath);
     } catch (e) {
       this.fail(e);
     }
@@ -3595,7 +3980,10 @@ class App implements ToolHost {
       format: "y3d",
       version: 1,
       units: "mm",
-      bodies: this.doc.bodies.map((b) => (b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: b.shape.toBase64() } : { name: b.name, kind: b.kind, brep: serializeShape(b.shape) })),
+      bodies: this.doc.bodies.map((b) => ({
+        ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: b.shape.toBase64() } : { name: b.name, kind: b.kind, brep: serializeShape(b.shape) }),
+        ...(b.group ? { group: b.group } : {}),
+      })),
       guides: this.doc.guides,
       // A linked dimension's body as its index in `bodies` (ids are renumbered on open).
       dimensions: this.doc.dimensions.map(({ body, ...d }) => {
@@ -3607,13 +3995,14 @@ class App implements ToolHost {
 
   /** Replace the document with a .y3d file's contents (throws if it isn't one). */
   private loadModel(text: string, filePath: string | null): void {
-    const json = JSON.parse(text) as { format: string; bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string }[]; guides?: Guide[]; dimensions?: Dimension[] };
+    const json = JSON.parse(text) as { format: string; bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string }[]; guides?: Guide[]; dimensions?: Dimension[] };
     if (json.format !== "y3d") throw new Error("not a Y3D file");
-    const bodies = json.bodies.map((b): BodyGeom & { name: string } => {
-      if (b.kind === "mesh") return { name: b.name, kind: "mesh", shape: TriMesh.fromBase64(b.mesh!) };
+    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string } => {
+      const group = typeof b.group === "string" && b.group ? { group: b.group } : {};
+      if (b.kind === "mesh") return { name: b.name, kind: "mesh", shape: TriMesh.fromBase64(b.mesh!), ...group };
       const shape = deserialize(b.brep!);
-      if (b.kind === "path") return { name: b.name, kind: "path", shape: shape as unknown as Wire };
-      return { name: b.name, kind: b.kind === "face" || b.kind === "solid" ? b.kind : kindOf(shape), shape };
+      if (b.kind === "path") return { name: b.name, kind: "path", shape: shape as unknown as Wire, ...group };
+      return { name: b.name, kind: b.kind === "face" || b.kind === "solid" ? b.kind : kindOf(shape), shape, ...group };
     });
     this.endInteractions();
     this.selection = [];
@@ -3636,6 +4025,7 @@ class App implements ToolHost {
     this.updateTitle();
     this.toast(`Saved ${path.split(/[\\/]/).pop()}`);
     this.dropRecovery();
+    void window.y3d.addRecent(path);
     this.noteSaved();
   }
 

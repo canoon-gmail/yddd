@@ -1054,6 +1054,12 @@ export interface EdgeInfo {
   angle?: number;
 }
 
+/** Bounding box [lo, hi] of one edge, or with no `edgeId` of the whole shape (e.g. a path). */
+export function curveBounds(shape: Shape | Wire, edgeId?: number): [V3, V3] | null {
+  const e = edgeId === undefined ? shape : shape.edges.find((x) => x.hashCode === edgeId);
+  return e ? (e.boundingBox.bounds as [V3, V3]) : null;
+}
+
 export function edgeInfo(shape: Shape, edgeId: number): EdgeInfo | null {
   const e = shape.edges.find((x) => x.hashCode === edgeId);
   if (!e) return null;

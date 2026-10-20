@@ -29,7 +29,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
 | Transform | Move / Rotate gizmo (snaps to grid / 15°), Duplicate, Delete |
 | History | Unlimited-ish undo / redo (200 steps) |
-| Files | Save/Open native `.y3d` (exact BREP), Import STEP, Export STEP / STL |
+| Files | Save/Open native `.y3d` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL |
 
 Press **F1** in the app for all shortcuts.
 
