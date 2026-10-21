@@ -263,6 +263,9 @@ function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], 
     // Faces / edges this close count as touching: e.g. a face pushed up to another's height
     // through a display-mesh (float32) point is off by ~1e-6 mm, which would leave a hairline step.
     builder.SetFuzzyValue(BOOLEAN_FUZZ);
+    // Oriented bounding boxes to rule out face pairs that can't touch: axis-aligned ones of solids
+    // turned off X / Y / Z (e.g. a circular copy's sweeps round a cylinder) all overlap — 7 s → 1 s.
+    builder.SetUseOBB(true);
     if (glue) builder.SetGlue(oc.BOPAlgo_GlueEnum.BOPAlgo_GlueShift);
     builder.Build();
     if (builder.HasErrors()) throw new Error(`boolean ${kind} failed`);
@@ -1266,7 +1269,7 @@ export function matchStraightEdge(shape: Shape, old: Shape, a: V3, b: V3): [V3, 
   };
   const exact = between(a, b);
   if (exact) return exact;
-  // Moved as a whole (G / Shift+G / Tab move): same size, shifted bounding box.
+  // Moved as a whole (G / G G / Tab move): same size, shifted bounding box.
   const size = (l: number[], h: number[]) => [0, 1, 2].map((k) => h[k] - l[k]);
   if (size(lo, hi).every((v, k) => Math.abs(v - size(olo, ohi)[k]) < tol)) {
     const v: V3 = [lo[0] - olo[0], lo[1] - olo[1], lo[2] - olo[2]];
@@ -2631,6 +2634,10 @@ export function splitFacesByPlane(shape: Solid, faceIds: number[], point: V3, no
 }
 
 export function splitByPlane(shape: Solid, point: V3, normal: V3): { above: Solid | null; below: Solid | null } {
+  // One split by the plane, its pieces sorted by side (half the work of the two booleans below:
+  // 17 sweeps cut at once took ~2 s); the booleans if the split fails.
+  const fast = splitByPlaneOnce(shape, point, normal);
+  if (fast) return fast;
   const [lo, hi] = shape.boundingBox.bounds;
   const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const R = 2 * (Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + Math.hypot(...sub3(c, point))) + 10;
@@ -2643,6 +2650,55 @@ export function splitByPlane(shape: Solid, point: V3, normal: V3): { above: Soli
     return solids.length === 1 ? (cast(solids[0]) as Solid) : solids.length ? s : null;
   };
   return { above: part(boolean("common", shape, half)), below: part(boolean("cut", shape, half)) };
+}
+
+/** splitByPlane in one Splitter pass; null if the kernel fails (or a piece straddles the plane). */
+function splitByPlaneOnce(shape: Solid, point: V3, normal: V3): { above: Solid | null; below: Solid | null } | null {
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const [lo, hi] = shape.boundingBox.bounds;
+    const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    const R = 2 * (Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + Math.hypot(...sub3(c, point))) + 10;
+    const n = norm3(normal);
+    const pln = keep(new oc.gp_Pln(keep(new oc.gp_Pnt(...point)), keep(new oc.gp_Dir(...n))));
+    const sheet = keep(new oc.BRepBuilderAPI_MakeFace(pln, -R, R, -R, R)).Face();
+    const split = keep(new oc.BRepAlgoAPI_Splitter());
+    const args = keep(new oc.NCollection_List_TopoDS_Shape()), tools = keep(new oc.NCollection_List_TopoDS_Shape());
+    args.Append(shape.wrapped);
+    tools.Append(sheet);
+    split.SetArguments(args);
+    split.SetTools(tools);
+    split.SetNonDestructive(true);
+    split.SetFuzzyValue(BOOLEAN_FUZZ);
+    split.Build(keep(new oc.Message_ProgressRange()));
+    if (split.HasErrors()) return null;
+    // Which side a piece is on: its edge point farthest from the plane (each piece lies on one side;
+    // edge middles too — a half cylinder's corners all lie on the plane).
+    const tol = 1e-7 * R;
+    const above: Solid[] = [], below: Solid[] = [];
+    for (const x of iterTopo(split.Shape(), "solid")) {
+      const p = cast(x) as Solid;
+      const ds = p.edges.flatMap((e) => [0, 0.5, 1].map((t) => dot3(sub3(e.pointAt(t).toTuple() as V3, point), n)));
+      const top = Math.max(...ds), bottom = Math.min(...ds);
+      if (top > tol && bottom < -tol) return null;
+      if (top > tol) above.push(p);
+      else if (bottom < -tol) below.push(p);
+      else return null;
+    }
+    const one = (ps: Solid[]) => (ps.length === 1 ? ps[0] : ps.length ? (makeCompound(ps) as unknown as Solid) : null);
+    return { above: one(above), below: one(below) };
+  } catch {
+    return null;
+  } finally {
+    for (const o of tmp) {
+      try {
+        o.delete();
+      } catch {
+        // already owned by OpenCascade
+      }
+    }
+  }
 }
 
 /** The separate solids a shape is made of (a union of solids that don't touch has more than one). */
@@ -2722,6 +2778,31 @@ export function movedIds(from: Geom, to: Geom): { faces: Map<number, number>; ed
   const pair = (a: { hashCode: number }[], b: { hashCode: number }[]) => (a.length === b.length ? new Map(a.map((x, i) => [x.hashCode, b[i].hashCode])) : null);
   const faces = pair(from.faces, to.faces), edges = pair(from.edges, to.edges);
   return faces && edges ? { faces, edges } : null;
+}
+
+/**
+ * Up to `max` corner points of a shape: its first vertices, in its own order — a moved / turned copy
+ * lists the same ones, moved (a mesh: its first triangle corners). Cheap, unlike `boundingBox` on a
+ * curved shape (tens of ms the first time); e.g. to check copies are still where an array put them.
+ */
+export function probePoints(shape: Geom, max = 8): V3[] {
+  const out: V3[] = [];
+  if (isMesh(shape)) {
+    const P = shape.positions;
+    for (let i = 0; i + 2 < P.length && out.length < max; i += 3) out.push([P[i], P[i + 1], P[i + 2]]);
+    return out;
+  }
+  const ex = new oc.TopExp_Explorer(shape.wrapped as never, oc.TopAbs_ShapeEnum.TopAbs_VERTEX, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  try {
+    for (; ex.More() && out.length < max; ex.Next()) {
+      const p = oc.BRep_Tool.Pnt(oc.TopoDS.Vertex(ex.Current()));
+      out.push([p.X(), p.Y(), p.Z()]);
+      p.delete();
+    }
+  } finally {
+    ex.delete();
+  }
+  return out;
 }
 
 export function rotateShape<T extends Geom>(shape: T, angleDeg: number, center: V3, axis: V3): T {

@@ -5,6 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const RENDERER_DIR = path.join(__dirname, "..", "renderer");
+// Smoke runs keep their own settings / storage: they can run next to the user's open Y3D and leave its settings alone.
+if (process.env.Y3D_SMOKE) app.setPath("userData", path.join(process.env.Y3D_SMOKE, "user-data"));
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
 
 // A privileged custom scheme lets the renderer fetch() the OpenCascade .wasm

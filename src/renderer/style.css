@@ -113,6 +113,9 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-array { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; display: flex; }
 .ol-array svg { width: 16px; height: 16px; }
 .ol-array.off { color: var(--muted); opacity: 0.45; }
+.ol-dup { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; }
+.ol-dup:hover { color: var(--accent); }
+.ol-dup svg { width: 14px; height: 14px; }
 .ol-row.in-group { padding-left: 24px; }
 .ol-group { display: flex; align-items: center; gap: 4px; padding: 3px 6px 3px 2px; border-radius: 5px; cursor: pointer; font-weight: 600; }
 .ol-group:hover { background: var(--panel-2); }
@@ -211,10 +214,10 @@ kbd {
 #dim-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
 .dim-label {
   position: absolute; left: 0; top: 0; padding: 0 5px; border-radius: 3px; pointer-events: auto; cursor: pointer;
-  background: rgba(20, 21, 24, 0.8); color: #e6e9ee; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  background: #fff; color: #000; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap;
 }
-.dim-label.sel { color: #1d1f23; background: #ffd166; }
-.dim-label.preview { color: #8fd3ff; pointer-events: none; }
+.dim-label.sel { background: #ffd166; }
+.dim-label.preview { pointer-events: none; }
 
 #measure-panel {
   position: absolute; top: 12px; left: 12px; width: 250px; padding: 10px 12px; z-index: 15;
@@ -343,6 +346,16 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 #loading.error { color: var(--danger); }
 .spinner { width: 34px; height: 34px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Busy dialog (a slow step, e.g. subtracting a whole group): fades in after a moment, so a quick one doesn't flash */
+#busy { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; cursor: progress; }
+#busy .busy-box {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 18px 26px; border-radius: 8px;
+  background: rgba(38, 40, 44, 0.97); border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  animation: busy-in 0.15s ease-out 0.25s both;
+}
+#busy .busy-tip { color: var(--muted); font-size: 12px; }
+@keyframes busy-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
 
 /* ---------------------------------------------------------------- view menu (Shift+V) */
 #view-menu {

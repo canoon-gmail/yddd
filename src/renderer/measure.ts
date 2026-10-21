@@ -393,7 +393,7 @@ export class MeasureTool implements Tool {
     this.host.hint(`Measure: ${tip} · hover anything to see its sizes · Tab: dimension (${n >= 3 ? "of this angle" : n === 2 ? "of this length" : "of the edge, or radius of the circle / arc, under the cursor"})`);
     this.panel.innerHTML = `<h4>Measure</h4>${rows || '<div class="muted">Hover a point, edge or face for its sizes. Click points to measure a length (2 clicks) or an angle (3 clicks).</div>'}
       <div class="tip">${tip}</div>
-      <div class="op-buttons"><button type="button" class="btn" data-act="clear-dims" ${this.dims.count() ? "" : "disabled"} title="Remove every dimension (Ctrl+Z brings them back)">Delete all dimensions</button><button type="button" class="btn" data-act="cancel">Cancel</button></div>`;
+      <div class="op-buttons"><button type="button" class="btn" data-act="clear-dims" ${this.dims.count() ? "" : "disabled"} title="Remove every dimension (Ctrl+Z brings them back)">Delete all dimensions</button><button type="button" class="btn" data-act="cancel">Done</button></div>`;
   }
 
   dispose(): void {

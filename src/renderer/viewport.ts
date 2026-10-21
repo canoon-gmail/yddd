@@ -13,7 +13,7 @@ import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension } from "./document";
 import { deg, num } from "./format";
-import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
+import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 
 export type SelMode = "body" | "face" | "edge";
 
@@ -270,7 +270,17 @@ export class Viewport {
 
     this.tc = new TransformControls(this.camera, this.canvas);
     this.tc.setSpace("world");
-    this.tc.setSize(0.9);
+    this.tc.setSize(0.75);
+    // A little see-through, so the model shows behind it (the handle under the cursor still turns solid).
+    const gizmoMats = new Set<THREE.Material>();
+    this.tc.getHelper().traverse((o) => {
+      const m = (o as THREE.Mesh).material;
+      if (m) for (const x of Array.isArray(m) ? m : [m]) gizmoMats.add(x);
+    });
+    for (const m of gizmoMats) {
+      m.transparent = true;
+      m.opacity *= 0.7;
+    }
     this.scene.add(this.pivot, this.tc.getHelper());
     this.tc.addEventListener("change", () => this.requestRender());
     this.tc.addEventListener("dragging-changed", (e) => {
@@ -282,6 +292,7 @@ export class Viewport {
       }
     });
     this.tc.addEventListener("objectChange", () => {
+      this.gridSteps();
       this.snapPivot();
       this.applyPivotToBodies();
       if (this.xfChange && this.xfMode === "translate") {
@@ -351,7 +362,7 @@ export class Viewport {
     this.renderer.setSize(this.width, this.height);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
-    for (const m of [this.mats.edge, this.mats.pathEdge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker]) m.resolution.set(this.width, this.height);
+    for (const m of [this.mats.edge, this.mats.pathEdge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker, ...this.glowMats.values()]) m.resolution.set(this.width, this.height);
     this.stamp++;
     this.render();
   }
@@ -527,8 +538,27 @@ export class Viewport {
     };
   }
 
+  /** How long each shape took to mesh for display (ms), to tell ahead if drawing some again will take a while. */
+  private meshMs = new WeakMap<Geom, number>();
+
+  /**
+   * About how long (ms) drawing `shapes` would take: those on screen (or moved copies of them) cost
+   * nothing; ones meshed before, what they took; others a guess from their faces.
+   */
+  drawCost(shapes: readonly Geom[]): number {
+    const shown = new Set<Geom>([...this.views.values()].map((v) => v.body.shape));
+    let ms = 0;
+    for (const s of shapes) {
+      if (shown.has(s) || rigidSource(s, (x) => shown.has(x))) continue;
+      ms += this.meshMs.get(s) ?? (isMesh(s) ? s.triangleCount / 2e4 : s.faces.length * 2);
+    }
+    return ms;
+  }
+
   private buildView(body: Body, preview = false, given?: Tessellation): BodyView {
+    const t0 = performance.now();
     const { faces, edges } = given ?? (body.kind === "mesh" ? meshTessellation(body.shape) : tessellate(body.shape, preview));
+    if (!given && !preview) this.meshMs.set(body.shape, performance.now() - t0);
     const geom = new THREE.BufferGeometry();
     geom.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(faces.vertices), 3));
     geom.setAttribute("normal", new THREE.BufferAttribute(Float32Array.from(faces.normals), 3));
@@ -611,10 +641,20 @@ export class Viewport {
     /** What's on screen, by shape: a body moved / copied from one of them reuses its triangles. */
     const shown = new Map<Geom, BodyView>();
     for (const v of this.views.values()) shown.set(v.body.shape, v);
+    // Copies of a shape also (re)built here (e.g. linked copies following a filleted one) wait for it,
+    // then reuse its triangles instead of meshing again.
+    const pending: Body[] = [];
     for (const body of bodies) {
       live.add(body.id);
       const existing = this.views.get(body.id);
-      if (existing && existing.body === body) continue;
+      if (!(existing && existing.body === body)) pending.push(body);
+    }
+    const building = new Set(pending.map((b) => b.shape));
+    const waits = (b: Body) => b.kind !== "mesh" && !rigidSource(b.shape, (s) => shown.has(s)) && !!rigidSource(b.shape, (s) => building.has(s));
+    const later = pending.filter(waits);
+    const first = later.length ? pending.filter((b) => !later.includes(b)) : pending;
+    for (const body of [...first, ...later]) {
+      const existing = this.views.get(body.id);
       const chunk = existing?.chunk ?? this.chunkWithRoom();
       const moved = this.movedTessellation(body, shown);
       if (existing) this.disposeView(existing);
@@ -624,6 +664,7 @@ export class Viewport {
       chunk.ids.add(body.id);
       chunk.dirty = true;
       this.placeView(view);
+      shown.set(body.shape, view);
     }
     for (const [id, v] of this.views) {
       if (!live.has(id)) {
@@ -1038,14 +1079,61 @@ export class Viewport {
     return v.snaps;
   }
 
-  /** Nearest visible object snap point within SNAP_PX of the cursor (vertex > centre > midpoint). */
-  snapPoint(cx: number, cy: number, exclude?: Set<number>): { point: THREE.Vector3; kind: SnapKind } | null {
+  /** Where guide lines cross each other or a world X / Y / Z axis line (snap points, like corners). */
+  private guideCrossings(): THREE.Vector3[] {
+    const lines = this.guides
+      .filter((_, i) => i !== this.snapSkipGuide)
+      .map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) }));
+    const axes = [0, 1, 2].map((k) => ({ o: new THREE.Vector3(), dir: new THREE.Vector3().setComponent(k, 1), len: Infinity, axis: true }));
+    const out: THREE.Vector3[] = [];
+    const all = [...lines, ...axes];
+    for (let i = 0; i < lines.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        const A = all[i], B = all[j];
+        // Closest points of the two lines: o_A + s·dir_A and o_B + t·dir_B.
+        const b = A.dir.dot(B.dir), den = 1 - b * b;
+        if (den < 1e-9) continue; // parallel
+        const w = A.o.clone().sub(B.o), d = A.dir.dot(w), e = B.dir.dot(w);
+        const sA = (b * e - d) / den, tB = (e - b * d) / den;
+        const tol = 1e-6 * Math.max(1, A.len === Infinity ? 0 : A.len, B.len === Infinity ? 0 : B.len);
+        const within = (t: number, len: number) => len === Infinity || (t >= -tol && t <= len + tol);
+        if (!within(sA, A.len) || !within(tB, B.len)) continue;
+        const pA = A.o.clone().addScaledVector(A.dir, sA), pB = B.o.clone().addScaledVector(B.dir, tB);
+        if (pA.distanceTo(pB) <= tol) out.push(pA);
+      }
+    }
+    return out;
+  }
+
+  /** Is `point` behind a visible solid (not counting `skip`), seen from the eye? Points on a face are not; in X-ray none are. */
+  private hiddenFrom(point: THREE.Vector3, skip?: Set<number>): boolean {
+    if (this.xray) return false;
+    const meshes: THREE.Object3D[] = [];
+    for (const v of this.views.values()) if (v.group.visible && !skip?.has(v.body.id)) meshes.push(v.mesh);
+    if (!meshes.length) return false;
+    const eye = this.camera.position;
+    const dir = point.clone().sub(eye);
+    const dist = dir.length();
+    const tol = Math.max(0.05, eye.distanceTo(this.controls.target) * 2e-3);
+    if (dist <= tol) return false;
+    this.raycaster.set(eye, dir.divideScalar(dist));
+    this.raycaster.far = dist - tol;
+    const hit = this.raycaster.intersectObjects(meshes, false).length > 0;
+    this.raycaster.far = Infinity;
+    return hit;
+  }
+
+  /**
+   * Nearest visible object snap point within SNAP_PX of the cursor (vertex > centre > midpoint).
+   * `axes: false` leaves out the world X / Y / Z lines (guide lines and the origin still snap).
+   */
+  snapPoint(cx: number, cy: number, exclude?: Set<number>, opts?: { axes?: boolean }): { point: THREE.Vector3; kind: SnapKind } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left, py = cy - r.top;
     // (what's in front, leaving out the excluded bodies — e.g. the one being moved — so points hidden
-    // behind the rest still don't count)
-    const faceHit = this.raycastFaces(cx, cy, undefined, exclude);
-    let best: { score: number; view: BodyView; i: number } | null = null;
+    // behind the rest still don't count; in X-ray nothing is hidden: points behind show, so they snap)
+    const faceHit = this.xray ? null : this.raycastFaces(cx, cy, undefined, exclude);
+    const cands: { score: number; view: BodyView; i: number }[] = [];
     const p = new THREE.Vector3();
     for (const [id, v] of this.views) {
       if (!v.group.visible || exclude?.has(id)) continue;
@@ -1067,26 +1155,49 @@ export class Viewport {
         const d = Math.hypot(s.proj[i * 3] - px, s.proj[i * 3 + 1] - py);
         if (d > SNAP_PX) continue;
         const score = d + s.kinds[i] * 4; // prefer vertices, then centres, then midpoints
-        if (best && score >= best.score) continue;
         if (faceHit && !(s.inner[i] && faceHit.view === v)) {
           // Hidden behind a face? (allow points on the hit face itself, and the hovered body's inner centres)
           p.fromArray(s.pts, i * 3);
           if (this.camera.position.distanceTo(p) > faceHit.distance * 1.01 + 0.05) continue;
         }
-        best = { score, view: v, i };
+        cands.push({ score, view: v, i });
       }
     }
+    // The best one the eye can see: also behind a solid that isn't under the cursor (the cursor just off
+    // its outline) — the hovered body's inner centres excepted, as above.
+    cands.sort((a, b) => a.score - b.score);
+    const best = cands.find((c) => {
+      if (faceHit && c.view.snaps!.inner[c.i] && faceHit.view === c.view) return true;
+      return !this.hiddenFrom(p.fromArray(c.view.snaps!.pts, c.i * 3), exclude);
+    }) ?? null;
+    // Where guides cross (each other or an axis): like a corner.
+    let cross: { d: number; p: THREE.Vector3 } | null = null;
+    for (const c of this.guideCrossings()) {
+      p.copy(c).project(this.camera);
+      if (p.z < -1 || p.z > 1) continue;
+      const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
+      if (d > SNAP_PX || (cross && d >= cross.d) || (best && d >= best.score)) continue;
+      if (faceHit && this.camera.position.distanceTo(c) > faceHit.distance * 1.01 + 0.05) continue;
+      if (this.hiddenFrom(c, exclude)) continue;
+      cross = { d, p: c };
+    }
+    if (cross) return { point: cross.p.clone(), kind: "vertex" };
     // World origin (0,0,0) is always a vertex-type snap point.
     p.set(0, 0, 0).project(this.camera);
     if (p.z >= -1 && p.z <= 1) {
       const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
-      const hidden = faceHit && this.camera.position.length() > faceHit.distance * 1.01 + 0.05;
-      if (d <= SNAP_PX && !hidden && (!best || d < best.score)) return { point: new THREE.Vector3(), kind: "vertex" };
+      if (d <= SNAP_PX && (!best || d < best.score)) {
+        const hidden = (faceHit && this.camera.position.length() > faceHit.distance * 1.01 + 0.05) || this.hiddenFrom(p.set(0, 0, 0), exclude);
+        if (!hidden) return { point: new THREE.Vector3(), kind: "vertex" };
+      }
     }
     if (!best) {
       // No point nearby: the closer of an axis / guide line and anywhere along a visible edge.
-      const ax = this.axisSnap(px, py, cx, cy, faceHit?.distance);
-      const ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_PX * 0.75, exclude?.size ? (b) => !exclude.has(b) : undefined);
+      let ax = this.axisSnap(px, py, cx, cy, faceHit?.distance, opts?.axes ?? true);
+      let ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_PX * 0.75, exclude?.size ? (b) => !exclude.has(b) : undefined);
+      // (not one behind a solid the cursor is just off)
+      if (ax && this.hiddenFrom(ax.point, exclude)) ax = null;
+      if (ed && this.hiddenFrom(ed.point, exclude)) ed = null;
       if (ed && (!ax || ed.d < ax.d)) {
         // Redo the point on the exact B-rep edge (the display mesh is float32: a push/pull snapped to
         // a circle's mesh would end ~1e-6 mm off — e.g. not level with another cylinder's top).
@@ -1204,11 +1315,12 @@ export class Viewport {
   /** Guide not offered as a snap target (the one being moved), -1 = none. */
   snapSkipGuide = -1;
 
-  /** Show guide lines (dashed); `selected` is drawn highlighted. */
+  /** Show guide lines (dashed); `selected` is drawn highlighted, with a glow round it. */
   setGuides(list: readonly { a: V3; b: V3 }[], selected = -1, hover = -1): void {
     for (const c of [...this.guideRoot.children]) {
       c.removeFromParent();
-      (c as THREE.Line).geometry.dispose();
+      c.traverse((o) => (o as THREE.Line).geometry?.dispose());
+      if (c instanceof THREE.Line) (c.material as THREE.Material).dispose();
     }
     this.guides = list.map((g) => ({ a: new THREE.Vector3(...g.a), b: new THREE.Vector3(...g.b) }));
     this.guides.forEach((g, i) => {
@@ -1216,6 +1328,12 @@ export class Viewport {
       const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([g.a, g.b]), mat);
       l.computeLineDistances();
       l.renderOrder = 15;
+      if (i === selected) {
+        // Soft halos under the dashed line (no solid core, so it still reads as a guide).
+        const glow = this.glowLine(g.a, g.b, 0xffd166, 2);
+        glow.renderOrder = 14;
+        this.guideRoot.add(glow);
+      }
       this.guideRoot.add(l);
     });
     this.requestRender();
@@ -1258,12 +1376,12 @@ export class Viewport {
   }
 
   /** Nearest point on the world X / Y / Z axis lines under the cursor (rounded to axisSnapStep). */
-  private axisSnap(px: number, py: number, cx: number, cy: number, hitDist?: number): { point: THREE.Vector3; kind: SnapKind; d: number } | null {
+  private axisSnap(px: number, py: number, cx: number, cy: number, hitDist?: number, axes = true): { point: THREE.Vector3; kind: SnapKind; d: number } | null {
     const ray = this.ray(cx, cy);
     let best: { d: number; p: THREE.Vector3 } | null = null;
     const q = new THREE.Vector3();
     const lines: { o: THREE.Vector3; dir: THREE.Vector3; len: number }[] = [
-      ...[new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)].map((dir) => ({ o: new THREE.Vector3(), dir, len: Infinity })),
+      ...(axes ? [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)] : []).map((dir) => ({ o: new THREE.Vector3(), dir, len: Infinity })),
       ...this.guides.filter((_, i) => i !== this.snapSkipGuide).map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) })),
     ];
     for (const { o, dir, len } of lines) {
@@ -1508,6 +1626,33 @@ export class Viewport {
   }
 
   // ------------------------------------------------------------ tool overlays & ghosts
+
+  /** Glow line materials, one per colour and width (made once). */
+  private glowMats = new Map<string, LineMaterial>();
+
+  /**
+   * A glowing line a–b (for setOverlay), e.g. the edge / axis under the cursor: wide faint halos under a thick core, on top of everything.
+   * `layers` = 2 gives just the halos (e.g. round a dashed guide line).
+   */
+  glowLine(a: THREE.Vector3, b: THREE.Vector3, color: number, layers = 3): THREE.Object3D {
+    const group = new THREE.Group();
+    ([[14, 0.18], [8, 0.35], [3.5, 1]] as const).slice(0, layers).forEach(([width, opacity], i) => {
+      const key = `${color}:${width}`;
+      let m = this.glowMats.get(key);
+      if (!m) {
+        m = new LineMaterial({ color, linewidth: width, transparent: true, opacity, depthTest: false, depthWrite: false });
+        m.resolution.set(this.width, this.height);
+        this.glowMats.set(key, m);
+      }
+      const g = new LineSegmentsGeometry();
+      g.setPositions([a.x, a.y, a.z, b.x, b.y, b.z]);
+      const line = new LineSegments2(g, m);
+      line.renderOrder = i; // (halos first, the core over them)
+      line.frustumCulled = false;
+      group.add(line);
+    });
+    return group;
+  }
 
   /** Replace tool overlay objects (previous overlay geometries are disposed). */
   setOverlay(objects: THREE.Object3D[]): void {
@@ -1759,17 +1904,19 @@ export class Viewport {
     const box = new THREE.Box3();
     for (const id of ids) {
       const v = this.views.get(id);
-      if (v) box.expandByObject(v.mesh);
+      if (!v) continue;
+      // (a path has no surface — an empty mesh: its own bounds instead)
+      const one = new THREE.Box3().setFromObject(v.mesh);
+      if (one.isEmpty() && v.body.kind === "path") {
+        const [lo, hi] = v.body.shape.boundingBox.bounds;
+        one.set(new THREE.Vector3(...lo), new THREE.Vector3(...hi));
+      }
+      box.union(one);
     }
     if (box.isEmpty() && !pivotAt) return;
     const c = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+    // (the pivot at the true centre, grid or not: grid snapping moves in whole steps from there — see gridSteps)
     if (pivotAt) c.set(...pivotAt);
-    else if (snapStep > 0) {
-      // Round the pivot to the grid — except across a flat selection (a face), where it stays in its plane.
-      const size = box.getSize(new THREE.Vector3());
-      const round = (v: number, s: number) => (s < 1e-4 ? v : Math.round(v / snapStep) * snapStep);
-      c.set(round(c.x, size.x), round(c.y, size.y), round(c.z, size.z));
-    }
     this.pivot.position.copy(c);
     this.pivot.quaternion.identity();
     this.pivot.updateMatrixWorld();
@@ -1819,11 +1966,22 @@ export class Viewport {
   private xfPointer: { x: number; y: number; ctrl: boolean } | null = null;
   private xfSnapStep = 0;
 
-  /** Gizmo snapping (grid / 15° / object points) is active only while Ctrl is held. */
+  /** Gizmo snapping (grid / 5° / object points) is active only while Ctrl is held. */
   private updateXfSnap(ctrl: boolean): void {
     const on = ctrl !== this.autoSnap && this.xfSnapStep > 0;
     this.tc.setTranslationSnap(on ? this.xfSnapStep : null);
-    this.tc.setRotationSnap(on ? THREE.MathUtils.degToRad(15) : null);
+    this.tc.setRotationSnap(on ? THREE.MathUtils.degToRad(5) : null);
+  }
+
+  /**
+   * The gizmo's grid snapping rounds the pivot to grid lines; a pivot that started off the grid (a
+   * face drawn at a guide crossing) would jump onto them: moved in whole grid steps from its start instead.
+   */
+  private gridSteps(): void {
+    const step = this.tc.translationSnap;
+    if (this.xfMode !== "translate" || !this.tc.dragging || !step) return;
+    const p = this.pivot.position, s = this.xfStart;
+    p.set(s.x + Math.round((p.x - s.x) / step) * step, s.y + Math.round((p.y - s.y) / step) * step, s.z + Math.round((p.z - s.z) / step) * step);
   }
 
   /** During a move drag, pull the pivot onto a nearby object snap point (only along the dragged axes). */

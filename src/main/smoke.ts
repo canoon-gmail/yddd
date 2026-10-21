@@ -440,12 +440,12 @@ const SCENARIO_3 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
   expect("9 Ctrl+Shift+Z redoes too", app.doc.bodies.length === 3, app.doc.bodies.length);
 
-  // 10) Shift+G: click a mark → move gizmo appears at that mark; dragging keeps the pivot on the body
+  // 10) G G (Move from point): click a mark → move gizmo appears at that mark; dragging keeps the pivot on the body
   {
     const id = app.doc.bodies[0].id;
     app.setSelection([{ kind: "body", body: id, id: 0 }]);
     vp.fit(); await sleep(50);
-    key("G", "KeyG", { shiftKey: true });
+    key("g", "KeyG"); key("g", "KeyG");
     const vis = vp.visiblePoints(vp.pivotCandidates([id]));
     const mark = vis.find((c) => c.kind === "vertex") || vis[0];
     const mp = mark.point.toArray().map(r);
@@ -1785,7 +1785,7 @@ const SCENARIO_3 = String.raw`
     expect("38 autosave threw", false, String(e && e.stack || e));
   }
 
-  // 40) Guide parallel to a world axis: Shift+L, click the X axis (top view), move 25 to +Y,
+  // 40) Guide parallel to a world axis: Shift+G, click the X axis (top view), move 25 to +Y,
   //     click → a guide along X at y = 25; again on the other side (either side allowed)
   try {
     // Nothing in the way of the axis: hide every body for this test.
@@ -1829,8 +1829,8 @@ const SCENARIO_3 = String.raw`
     const hudY = app.hudEl.textContent;
     plain("pointerdown", [0, 15, 20]);
     const zg = app.doc.guides[app.doc.guides.length - 1];
-    const zOk = /^[XY] = -?[\d.]+$/.test(hudFirst) && hudX === "X = 15" && hudY === "Y = 15" && !!zg && r(zg.a[0]) === 0 && r(zg.a[1]) === 15 && r(zg.b[1]) === 15 && zg.a[2] < -100 && zg.b[2] > 100;
-    expect("40c guide from Z: the label names its direction; X key → X = 15, Y key → Y = 15", zOk, { hudFirst, hudX, hudY, guide: zg && { a: zg.a.map(r), b: zg.b.map(r) } });
+    const zOk = /^[XY] = -?[\d.]+ mm$/.test(hudFirst) && hudX === "X = 15 mm" && hudY === "Y = 15 mm" && !!zg && r(zg.a[0]) === 0 && r(zg.a[1]) === 15 && r(zg.b[1]) === 15 && zg.a[2] < -100 && zg.b[2] > 100;
+    expect("40c guide from Z: the label names its direction; X key → X = 15 mm, Y key → Y = 15 mm", zOk, { hudFirst, hudX, hudY, guide: zg && { a: zg.a.map(r), b: zg.b.map(r) } });
     expect("40b iso view: X-axis guide on the ground (z = 0); G moves it up 10", isoOk && !!moved && r(moved.a[2]) === 10 && r(moved.b[2]) === 10 && r(moved.a[1]) === 25,
       { iso: iso && { a: iso.a.map(r), b: iso.b.map(r) }, moved: moved && { a: moved.a.map(r), b: moved.b.map(r) } });
     app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guides");
@@ -2060,7 +2060,7 @@ const SCENARIO_HOUSE = String.raw`
   const before = toasts().length, vols = {};
   for (let i = 0; i < total; i++) {
     if (titles[i] === "Push the wing back") {
-      // By hand, as the step says: Shift+G on the wing, press the top of its back gable, drag (then Ctrl + Shift) onto the main ridge
+      // By hand, as the step says: G G on the wing, press the top of its back gable, drag (then Ctrl + Shift) onto the main ridge
       const vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
       const pe = (type, p, mods = {}) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(type, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true, ...mods })); };
       const wing = app.doc.bodies.find((b) => b.name === "Wing 1");
@@ -2072,7 +2072,7 @@ const SCENARIO_HOUSE = String.raw`
       for (const y of [-25, -12, -3]) pe("pointermove", [-43, y, 65], mods);
       pe("pointermove", [-42, 0, 65], mods); pe("pointerup", [-42, 0, 65], mods); await sleep(30);
       const wb = app.doc.get(wing.id).shape.boundingBox.bounds, r = (v) => Math.round(v * 1e6) / 1e6;
-      expect("house: Shift+G from the wing's back gable top, Ctrl + Shift onto the main ridge → exactly 35 back", tool === "Move from point" && [wb[0].map(r), wb[1].map(r)].join() === "-80,-95,0,-10,0,65", { tool, lo: wb[0].map(r), hi: wb[1].map(r) });
+      expect("house: G G from the wing's back gable top, Ctrl + Shift onto the main ridge → exactly 35 back", tool === "Move from point" && [wb[0].map(r), wb[1].map(r)].join() === "-80,-95,0,-10,0,65", { tool, lo: wb[0].map(r), hi: wb[1].map(r) });
       app.run("edit.undo"); await sleep(30);
       app.setSelection([]);
     }
@@ -2341,8 +2341,9 @@ const SCENARIO_MEASURE = String.raw`
   await esc();
   expect("measure: Esc after only the 1st click exits the tool", !app.tool && !document.getElementById("measure-panel"), app.tool && app.tool.name);
   app.run("tool.measure"); await sleep(20);
-  document.querySelector("#measure-panel button[data-act=cancel]").click(); await sleep(20);
-  expect("measure: Cancel exits the tool", !app.tool && !document.getElementById("measure-panel"), app.tool && app.tool.name);
+  const doneBtn = document.querySelector("#measure-panel button[data-act=cancel]"), doneText = doneBtn.textContent;
+  doneBtn.click(); await sleep(20);
+  expect("measure: Done exits the tool", doneText === "Done" && !app.tool && !document.getElementById("measure-panel"), { doneText, tool: app.tool && app.tool.name });
   app.run("tool.measure"); await sleep(20);
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
   await sleep(20);
@@ -2371,6 +2372,8 @@ const SCENARIO_MEASURE = String.raw`
   app.run("tool.measure"); await sleep(20);
   await hover([5, -15, 20]); await key("Tab", "Tab"); await hover([5, -15, 32]);
   const preview = document.querySelector("#dim-labels .dim-label.preview")?.textContent;
+  const pl = document.querySelector("#dim-labels .dim-label.preview"), pcs = pl && getComputedStyle(pl);
+  expect("dimension: the label being placed is black on yellow", pcs && pcs.color === "rgb(0, 0, 0)" && pcs.backgroundColor === "rgb(255, 209, 102)", pcs && [pcs.color, pcs.backgroundColor]);
   await key("Escape", "Escape");
   expect("dimension: Tab on an edge previews it, Esc cancels and stays in Measure", preview === "40" && app.doc.dimensions.length === 0 && app.tool && app.tool.name === "Measure", { preview, dims: app.doc.dimensions.length, tool: app.tool && app.tool.name });
   await hover([5, -15, 20]); await key("Tab", "Tab"); await hover([5, -15, 32]);
@@ -2386,6 +2389,8 @@ const SCENARIO_MEASURE = String.raw`
   expect("dimension: undo / redo", undone && app.doc.dimensions.length === 1 && labels().join() === "40", { undone, dims: app.doc.dimensions.length });
   await key("Escape", "Escape"); await key("Escape", "Escape");
   const lab = document.querySelector("#dim-labels .dim-label");
+  const lcs = lab && getComputedStyle(lab);
+  expect("dimension: a placed label is black on white", lcs && lcs.color === "rgb(0, 0, 0)" && lcs.backgroundColor === "rgb(255, 255, 255)", lcs && [lcs.color, lcs.backgroundColor]);
   if (!lab) expect("dimension: label present before selecting", false, { html: document.getElementById("dim-labels")?.outerHTML, dims: app.doc.dimensions.length, tool: app.tool && app.tool.name });
   lab?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 })); await sleep(20);
   const selected = document.querySelector("#dim-labels .dim-label.sel") !== null;
@@ -2518,12 +2523,52 @@ const SCENARIO_ARRAY = String.raw`
   app.setSelection([{ kind: "face", body: offGrid.id, id: 0 }]); app.run("xf.move");
   const gz = r(vp.pivot.position.z);
   expect("G on a face at z 7.63: the gizmo is in its plane", app.xf && gz === 7.63, gz);
+  const gizmoOp = [];
+  vp.tc.getHelper().traverse((o) => { if (o.isMesh && o.material.visible) gizmoOp.push(+o.material.opacity.toFixed(2)); });
+  const tcSize = vp.tc.size, maxOp = Math.max(...gizmoOp);
+  expect("move gizmo: smaller (size 0.75), a little see-through (no handle fully opaque)", tcSize === 0.75 && gizmoOp.length > 0 && maxOp < 1, { tcSize, maxOp, n: gizmoOp.length });
   key("Escape", "Escape"); app.run("edit.undo");
+  // Face mode, a face picked: each gizmo drag moves it by that drag only (the moved face stays
+  // selected, so the gizmo restarts from where it is — not the 2nd drag counting the 1st again)
+  {
+    app.run("mode.face");
+    app.setSelection([{ kind: "face", body: circle.id, id: app.doc.get(circle.id).shape.faces[0].hashCode }]); app.run("xf.move");
+    const cx = () => { const b = app.doc.get(circle.id).shape.boundingBox.bounds; return r((b[0][0] + b[1][0]) / 2); };
+    const xs = [cx()];
+    for (const d of [10, 7, 5]) { vp.pivot.position.x += d; vp.finishTransformDrag(); xs.push(cx()); }
+    const piv = r(vp.pivot.position.x), sel = app.selection.map((s) => s.kind + ":" + s.body);
+    expect("face mode: 3 gizmo drags (10, 7, 5) on a picked face move it 10, 7, 5; face stays picked, gizmo on it", xs.join() === "20,30,37,42" && piv === 42 && sel.join() === "face:" + circle.id, { xs, piv, sel });
+    key("Escape", "Escape"); for (let k = 0; k < 3; k++) app.run("edit.undo");
+    app.run("mode.body");
+  }
+  // A face off the grid (drawn at a guide crossing): G puts the gizmo at its exact centre; a grid-snapped
+  // drag moves it in whole steps from there (not onto grid lines)
+  {
+    const off = app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 8.5] }, [39.3, 24.5, 8.5], 6), "Circle", "face");
+    app.doc.commit([...app.doc.bodies, off], "off-grid circle");
+    app.setSelection([{ kind: "body", body: off.id, id: 0 }]); app.run("xf.move");
+    const piv = vp.pivot.position.toArray().map(r);
+    vp.tc.translationSnap = 1; vp.tc.axis = "X"; vp.tc.dragging = true;
+    vp.pivot.position.x = 45; // (what the gizmo's own grid snapping leaves for a drag of about 5.7)
+    vp.tc.dispatchEvent({ type: "objectChange" });
+    vp.tc.dragging = false; vp.tc.axis = null;
+    const b = app.doc.get(off.id).shape.boundingBox.bounds, cx = r((b[0][0] + b[1][0]) / 2);
+    expect("off-grid face (39.3, 24.5): gizmo at its centre; a grid-snapped drag moves it 6 (→ 45.3), not onto the grid", piv.join() === "39.3,24.5,8.5" && cx === 45.3, { piv, cx });
+    key("Escape", "Escape"); app.run("edit.undo"); app.run("edit.undo");
+  }
+  // Edge mode: the pointer is the arrow with an "E" (back to the plain one in Solid mode; a tool's crosshair wins)
+  {
+    const cur = () => vp.canvas.style.cursor;
+    app.run("mode.edge"); const edge = cur();
+    app.run("tool.box"); const tool = cur(); key("Escape", "Escape"); const after = cur();
+    app.run("mode.body"); const body = cur();
+    expect("edge mode: arrow + E cursor; Solid mode: default; a tool: crosshair", /^url\("data:image\/svg\+xml,.*%3EE%3C/.test(edge) && tool === "crosshair" && after === edge && body === "default", { edge: edge.slice(0, 40), tool, after: after.slice(0, 40), body });
+  }
   app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
   const n0 = app.doc.bodies.length;
   const corner = [...document.querySelectorAll("#corner-tools button")].map((b) => b.dataset.cmd);
   const vr = document.getElementById("viewport").getBoundingClientRect(), cr = document.getElementById("corner-tools").getBoundingClientRect();
-  expect("array: corner buttons Revolve, Sweep, Array copy, bottom left", corner.join() === "op.revolve,op.sweep,edit.array" && cr.left - vr.left < 30 && vr.bottom - cr.bottom < 60, { corner, left: cr.left - vr.left, bottom: vr.bottom - cr.bottom });
+  expect("array: corner buttons Revolve, Circular copy, Sweep, Array copy, bottom left", corner.join() === "op.revolve,edit.circular,op.sweep,edit.array" && cr.left - vr.left < 30 && vr.bottom - cr.bottom < 60, { corner, left: cr.left - vr.left, bottom: vr.bottom - cr.bottom });
   key("D", "KeyD", { shiftKey: true }); await sleep(20);
   const plain = { added: app.doc.bodies.length - n0, gizmo: !!app.xf, panel: !document.getElementById("op-panel").hidden };
   expect("array: Shift+D is still the plain duplicate on the move gizmo", plain.added === 1 && plain.gizmo && !plain.panel, plain);
@@ -2867,11 +2912,26 @@ const SCENARIO_ARRAY = String.raw`
     const head = document.querySelector(".ol-group[data-group='Holes T'] .ol-name");
     const t0 = performance.now();
     head?.click();
-    const ms = performance.now() - t0;
+    // (36 solids at once: a busy dialog is put up first, the cut runs after the next paint)
+    const busy = !!document.getElementById("busy"), stillThere = app.doc.bodies.length === nb;
+    const typed = (key("Escape", "Escape"), !!app.tool); // (keys wait while it's up)
+    for (let i = 0; i < 100 && document.getElementById("busy"); i++) await sleep(20);
+    const ms = performance.now() - t0, gone = !document.getElementById("busy");
     const cut = app.doc.get(plate.id);
     const vol = cut ? r(K.solidVolume(cut.shape)) : null, expected = r(120 * 80 * 8.5 - 36 * 5 * 5 * 4.5);
-    expect("array: box, −, click a 36-box group → all cut at once", !!head && app.doc.bodies.length === nb - 36 && vol === expected && K.isValidShape(cut.shape),
-      { head: !!head, bodies: app.doc.bodies.length - nb, vol, expected, ms: Math.round(ms) });
+    expect("array: box, −, click a 36-box group → a busy dialog (keys wait), then all cut at once and it closes",
+      !!head && busy && stillThere && typed && gone && app.doc.bodies.length === nb - 36 && vol === expected && K.isValidShape(cut.shape),
+      { head: !!head, busy, stillThere, typed, gone, bodies: app.doc.bodies.length - nb, vol, expected, ms: Math.round(ms) });
+    // Tick "Keep the clicked solid": the 36 come back (plain boxes: quick to draw, no busy dialog)
+    {
+      const box = document.querySelector("#tool-panel input[data-act=keep], .tool-panel input[data-act=keep], input[data-act=keep]");
+      if (box) { box.checked = true; box.dispatchEvent(new Event("change", { bubbles: true })); }
+      const kBusy = !!document.getElementById("busy");
+      for (let i = 0; i < 100 && document.getElementById("busy"); i++) await sleep(20);
+      const back = app.doc.bodies.length - nb, kGone = !document.getElementById("busy");
+      expect("array: then tick 'Keep the clicked solid' → the 36 come back at once (quick to draw: no busy dialog)", !!box && !kBusy && kGone && back === 0, { box: !!box, kBusy, kGone, back });
+      app.run("edit.undo"); await sleep(20); // (the keep: back to the cut)
+    }
     key("Escape", "Escape"); app.run("edit.undo");
     expect("array: the group cut is one undo step", app.doc.bodies.length === nb, app.doc.bodies.length - nb);
     app.setSelection([plate, ...holes].map((b) => ({ kind: "body", body: b.id, id: 0 }))); app.run("edit.delete");
@@ -2887,6 +2947,188 @@ const SCENARIO_ARRAY = String.raw`
     const busy = segs(plate), simple = segs(K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 20, 20, 8.5), [K.makeCylinder(G, [0, 0, -1], 2.5, 10)]));
     expect("array: a busy shape (36 round holes) is drawn with fewer segments per hole; a simple one keeps full quality",
       plate.faces.length > 30 && ring.faces.length <= 30 && busy < simple * 0.8, { faces: plate.faces.length, busy, simple });
+  }
+  // Circular copy (corner button next to Revolve): round the Z axis, a guide line, a circle edge; Done / Cancel
+  try {
+    app.doc.reset([]);
+    const blk = app.doc.makeBody(K.makeBox(G, [50, 0, 0], 20, 10, 5), "Block"); // (centre 50, 0: 50 mm from Z)
+    app.doc.commit([blk], "block");
+    app.run("mode.body"); vp.setView("iso"); vp.fit(); await sleep(50);
+    const corner = [...document.querySelectorAll("#corner-tools button")].map((b) => b.dataset.cmd);
+    expect("circular copy: its corner button is right after Revolve", corner.indexOf("edit.circular") === corner.indexOf("op.revolve") + 1, corner);
+    const centres = () => app.doc.bodies.map((b) => { const [p, q] = b.shape.boundingBox.bounds; return [0, 1, 2].map((k) => (p[k] + q[k]) / 2); });
+    const sizes = () => app.doc.bodies.map((b) => { const [p, q] = b.shape.boundingBox.bounds; return [0, 1, 2].map((k) => r(q[k] - p[k])); });
+    const angles = () => centres().map((c) => r(((Math.atan2(c[1], c[0]) * 180) / Math.PI + 360) % 360)).sort((a, b) => a - b);
+    app.setSelection([{ kind: "body", body: blk.id, id: 0 }]);
+    document.querySelector("#corner-tools button[data-cmd='edit.circular']").click(); await sleep(50);
+    const caps = [...document.querySelectorAll("#op-panel .op-buttons button")].map((b) => b.textContent);
+    const ghosts = vp.ghostRoot.children.length;
+    expect("circular copy: a dialog with Cancel / Done, previews the copies", app.op && app.op.spec.label === "Circular copy" && caps.join() === "Cancel,Done" && ghosts > 0, { caps, ghosts });
+    document.querySelector("#op-panel [data-a=apply]").click(); await sleep(50);
+    const a6 = angles(), rad = centres().map((c) => r(Math.hypot(c[0], c[1]))), grp = new Set(app.doc.bodies.map((b) => b.group));
+    expect("circular copy: Done → 6 round Z, 60° apart, all 50 mm out, one group",
+      !app.op && a6.join() === "0,60,120,180,240,300" && rad.every((x) => x === 50) && grp.size === 1 && /^Circular/.test([...grp][0]), { a6, rad, grp: [...grp] });
+    // Change it later: the group's circular icon in the Bodies panel reopens it with its settings; 6 → 8
+    {
+      const g = [...grp][0], gsel = '.ol-group[data-group="' + g + '"] .ol-array';
+      app.setSelection([]); await sleep(20);
+      const ic = ol().querySelector(gsel), on = !!ic && !ic.classList.contains("off") && /Circular copy \(6 round\)/.test(ic.title);
+      ic?.click(); await sleep(20);
+      const val = (k) => document.querySelector("#op-panel [data-key=" + k + "]")?.value;
+      const opened = { on, title: app.op && app.op.spec.title, n: val("n"), angle: val("angle"), axis: document.querySelector("#op-panel [data-key=axis]")?.selectedOptions[0]?.textContent };
+      opValue("n", 8); await sleep(150);
+      const hidden = app.op && app.op.result ? app.op.result.hide.length : -1;
+      app.applyOp(); await sleep(50);
+      const a8 = angles(), label = app.doc.undoLabel, n8 = app.doc.bodies.filter((b) => b.group === g).length;
+      expect("circular copy: its icon in the Bodies panel opens Change (6, 360°, as before: Z axis); 6 → 8 replaces the copies, 45° apart, same group",
+        opened.on && opened.title === "Change " + g && opened.n === "6" && opened.angle === "360" && opened.axis === "As before: Z axis" && hidden === 5 &&
+          a8.join() === "0,45,90,135,180,225,270,315" && n8 === 8 && /^Change /.test(label), { opened, hidden, a8, n8, label });
+      // Saved and opened again: still changeable
+      const saved = app.modelText(); app.doc.dirty = false; app.loadModel(saved, null); await sleep(50);
+      const ic2 = ol().querySelector(gsel), still = !!ic2 && !ic2.classList.contains("off");
+      // The whole ring moved together: still changeable, round the moved axis
+      const all = app.doc.bodies.filter((b) => b.group === g);
+      app.doc.replaceShapes(new Map(all.map((b) => [b.id, K.translateShape(b.shape, [0, 0, 7])])), "Move"); await sleep(20);
+      const ic3 = ol().querySelector(gsel), movedOk = !!ic3 && !ic3.classList.contains("off");
+      app.run("edit.undo"); await sleep(20);
+      // One copy moved on its own: the icon dims and says why
+      const one = app.doc.bodies.filter((b) => b.group === g)[3];
+      app.doc.replaceShapes(new Map([[one.id, K.translateShape(one.shape, [0, 3, 0])]]), "Move"); await sleep(20);
+      const ic4 = ol().querySelector(gsel), dimmed = !!ic4 && ic4.classList.contains("off") && /can't be changed/.test(ic4.title);
+      app.run("edit.undo"); await sleep(20);
+      expect("circular copy: saved and reopened still changeable; the whole ring moved: still; one copy moved: the icon dims", still && movedOk && dimmed, { still, movedOk, dimmed });
+      app.run("edit.undo"); app.run("edit.undo"); await sleep(20); // (the change, then the copy)
+    }
+    expect("circular copy: undo goes back a step at a time (change, then the copy) to the original", app.doc.bodies.length === 1, app.doc.bodies.length);
+    // Linked copies: fillet / scale / rotate one object of the ring → every copy changes the same way; still changeable
+    {
+      app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+      app.applyOp(); await sleep(50);
+      const g = app.doc.bodies[0].group, ring = () => app.doc.bodies.filter((b) => b.group === g);
+      const on = () => { const ic = ol().querySelector('.ol-group[data-group="' + g + '"] .ol-array'); return !!ic && !ic.classList.contains("off"); };
+      const third = ring()[2]; // (a copy, 120° round)
+      app.doc.replaceShapes(new Map([[third.id, K.filletEdges(third.shape, null, 1)]]), "Fillet"); await sleep(30);
+      const faces = ring().map((b) => b.shape.faces.length), vols = ring().map((b) => r(K.solidVolume(b.shape)));
+      const fa = angles(), fr = centres().map((c) => r(Math.hypot(c[0], c[1])));
+      const fOn = on(), fLabel = app.doc.undoLabel;
+      app.run("edit.undo"); await sleep(20);
+      const undone = ring().every((b) => b.shape.faces.length === 6);
+      expect("linked copies: fillet one copy → all 6 filleted the same, still round Z at 50 mm, still changeable; one undo puts all back",
+        faces.every((f) => f === faces[0] && f > 6) && vols.every((v) => v === vols[0]) && fa.join() === "0,60,120,180,240,300" && fr.every((x) => x === 50) && fOn && fLabel === "Fillet" && undone,
+        { faces, vols, fa, fr, fOn, fLabel, undone });
+      // Scale the original 2× about its centre → every copy 2× (the one opposite: 40 × 20 × 10 too)
+      const src = ring()[0], [p0, q0] = src.shape.boundingBox.bounds, sc = [0, 1, 2].map((k) => (p0[k] + q0[k]) / 2);
+      app.doc.replaceShapes(new Map([[src.id, K.scaleShape(src.shape, [2, 2, 2], sc)]]), "Scale"); await sleep(30);
+      const ss = sizes(), sr = centres().map((c) => r(Math.hypot(c[0], c[1])));
+      app.run("edit.undo"); await sleep(20);
+      expect("linked copies: scale the original 2× → the copy opposite it is 40 × 20 × 10 too, all still 50 mm out", ss[0].join() === "40,20,10" && ss[3].join() === "40,20,10" && sr.every((x) => x === 50), { ss, sr });
+      // Rotate the copy opposite (180°) a quarter turn about its own centre → the original turns too (10 × 20)
+      const opp = ring()[3], [p1, q1] = opp.shape.boundingBox.bounds, oc = [0, 1, 2].map((k) => (p1[k] + q1[k]) / 2);
+      app.doc.replaceShapes(new Map([[opp.id, K.rotateShape(opp.shape, 90, oc, [0, 0, 1])]]), "Rotate"); await sleep(30);
+      const rs = sizes(), rOn = on();
+      app.run("edit.undo"); await sleep(20);
+      expect("linked copies: rotate one copy about its centre → the original turns the same (10 × 20), still changeable", rs[0].join() === "10,20,5" && rs[3].join() === "10,20,5" && rOn, { rs, rOn });
+      app.run("edit.undo"); await sleep(20); // (the ring)
+    }
+    // Subtract the ring from a plate (click its group), tick Keep: the ring comes back still a circular copy (its icon
+    // changes it); Undo that will take a while to draw puts up the busy dialog first
+    {
+      app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+      app.applyOp(); await sleep(50);
+      const g = app.doc.bodies[0].group, ring = () => app.doc.bodies.filter((b) => b.group === g);
+      const plate = app.doc.makeBody(K.makeBox(G, [0, 0, 2], 140, 140, 1), "Plate");
+      app.doc.commit([...app.doc.bodies, plate], "plate"); app.renderOutliner(); await sleep(20);
+      const waitBusy = async () => { for (let i = 0; i < 150 && document.getElementById("busy"); i++) await sleep(20); };
+      app.setSelection([{ kind: "body", body: plate.id, id: 0 }]); key("-", "Minus"); await sleep(20);
+      ol().querySelector('.ol-group[data-group="' + g + '"] .ol-name')?.click(); await waitBusy();
+      const usedUp = ring().length === 0 && !app.doc.arrays.some((r) => r.group === g);
+      const box = document.querySelector("input[data-act=keep]");
+      if (box) { box.checked = true; box.dispatchEvent(new Event("change", { bubbles: true })); }
+      await waitBusy();
+      const ic = ol().querySelector('.ol-group[data-group="' + g + '"] .ol-array');
+      const kept = { n: ring().length, rec: app.doc.arrays.some((r) => r.group === g && r.circular), icon: !!ic && !ic.classList.contains("off") };
+      expect("subtract a circular group, tick Keep → the 6 come back still a circular copy (record and icon back)", usedUp && kept.n === 6 && kept.rec && kept.icon, { usedUp, kept });
+      key("Escape", "Escape"); await sleep(20);
+      // Undo with a slow draw ahead (as 17 sweeps would be): the busy dialog first, then the step
+      const real = vp.drawCost; vp.drawCost = () => 1000;
+      app.run("edit.undo");
+      const uBusy = !!document.getElementById("busy"), notYet = app.doc.undoLabel === "Keep clicked solid";
+      await waitBusy(); vp.drawCost = real;
+      const undone = app.doc.undoLabel === "Subtract" && ring().length === 0;
+      app.run("edit.undo"); const quick = !document.getElementById("busy"); // (a real, quick one: no dialog)
+      expect("undo that will take a while to draw → a busy dialog first, then it undoes; a quick undo: none", uBusy && notYet && undone && quick && ring().length === 6, { uBusy, notYet, undone, quick, n: ring().length });
+      app.run("edit.undo"); app.run("edit.undo"); await sleep(20); // (the plate, the ring)
+    }
+    // The group's copy icon (Bodies panel): its copies are a new group "Circular 2", still a circular copy (its icon changes it)
+    {
+      app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+      app.applyOp(); await sleep(50);
+      const g1 = app.doc.bodies[0].group; app.setSelection([]); await sleep(20);
+      const dup = ol().querySelector('.ol-group[data-group="' + g1 + '"] .ol-dup');
+      dup?.click(); await sleep(50);
+      const g2 = [...new Set(app.doc.bodies.map((b) => b.group))].filter((g) => g !== g1);
+      const n2 = app.doc.bodies.filter((b) => b.group === g2[0]).length, gizmo = !!app.xf;
+      key("Escape", "Escape"); await sleep(20);
+      const ic = ol().querySelector('.ol-group[data-group="' + g2[0] + '"] .ol-array'), changeable = !!ic && !ic.classList.contains("off") && /Circular copy \(6 round\)/.test(ic.title);
+      expect("circular copy: the group's copy icon → a new group (Circular 2) of 6 copies, moved with the gizmo, still changeable from its icon",
+        !!dup && g2.length === 1 && g2[0] === "Circular 2" && n2 === 6 && gizmo && changeable, { dup: !!dup, g2, n2, gizmo, changeable });
+      app.run("edit.undo"); app.run("edit.undo"); await sleep(20);
+    }
+    // 4 over 90°, copies not turned: 30° apart, each still 20 × 10
+    app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+    opValue("n", 4); opValue("angle", 90); const tb = document.querySelector("#op-panel [data-key=turn]"); tb.checked = false; tb.dispatchEvent(new Event("change", { bubbles: true }));
+    app.applyOp(); await sleep(50);
+    const a4 = angles(), sz = sizes();
+    expect("circular copy: 4 over 90° (Turn off) → 0 / 30 / 60 / 90°, none turned", a4.join() === "0,30,60,90" && sz.every((x) => x.join() === "20,10,5"), { a4, sz });
+    app.run("edit.undo"); await sleep(20);
+    // Cancel: nothing made
+    app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+    document.querySelector("#op-panel [data-a=cancel]").click(); await sleep(20);
+    expect("circular copy: Cancel makes nothing", !app.op && app.doc.bodies.length === 1, app.doc.bodies.length);
+    // Cut the whole ring by a level guide (C): behind the busy dialog; every copy cut like the original (z 2: 400 + 600 mm³)
+    {
+      app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+      app.applyOp(); await sleep(50);
+      const g = app.doc.bodies[0].group, ids = app.doc.bodies.map((b) => b.id);
+      app.doc.setGuides([{ a: [-200, -80, 2], b: [200, -80, 2], n: [0, 0, 1] }], "guide");
+      const pl = app.cutPlane(0, ids);
+      app.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
+      app.opCut(ids, 0);
+      const busy = document.getElementById("busy")?.textContent || "";
+      for (let i = 0; i < 150 && document.getElementById("busy"); i++) await sleep(20);
+      const vols = app.doc.bodies.map((b) => r(K.solidVolume(b.shape))), valid = app.doc.bodies.every((b) => K.isValidShape(b.shape));
+      const out = centres().map((c) => r(Math.hypot(c[0], c[1]))), lows = ids.map((id) => r(app.doc.get(id).shape.boundingBox.bounds[1][2]));
+      const sel = app.selection.map((x) => x.body).filter((id) => !ids.includes(id)).length, same = app.doc.bodies.every((b) => b.group === g);
+      expect("cut a whole circular copy by a level guide: busy dialog, 12 valid pieces (6 × 400 below, 6 × 600 above), all 50 mm out, the upper 6 selected",
+        Math.abs(pl.normal[2]) > 0.999 && /Cutting 6 objects/.test(busy) && app.doc.bodies.length === 12 && valid && vols.slice(0, 6).every((v) => v === 400) &&
+          vols.slice(6).every((v) => v === 600) && out.every((x) => x === 50) && lows.every((z) => z === 2) && sel === 6 && same,
+        { normal: pl.normal, busy, vols, valid, out, lows, sel, same });
+      app.run("edit.undo"); await sleep(20);
+      const back = app.doc.bodies.length === 6 && app.doc.bodies.every((b) => r(K.solidVolume(b.shape)) === 1000);
+      expect("cut a circular copy: one undo puts the 6 back whole", back, app.doc.bodies.length);
+      app.run("edit.undo"); app.run("edit.undo"); await sleep(20); // (the guide, the ring)
+    }
+    // Round a vertical guide line at x = 50, y = 30 (3 copies → 120° about it)
+    app.doc.setGuides([{ a: [50, 30, -10], b: [50, 30, 10] }], "guide");
+    app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+    opValue("n", 3); opValue("axis", 3); app.applyOp(); await sleep(50);
+    const gr = centres().map((c) => r(Math.hypot(c[0] - 50, c[1] - 30)));
+    expect("circular copy: round a guide line → 3, each 30 mm from it", app.doc.bodies.length === 3 && gr.every((x) => x === 30), gr);
+    app.run("edit.undo"); app.doc.setGuides([], "no guide"); await sleep(20);
+    // Round a circle edge: a cylinder (r 20) at x = -80; click its top rim
+    const cyl = app.doc.makeBody(K.makeCylinder(G, [-80, 0, 0], 20, 10), "Cylinder");
+    app.doc.commit([...app.doc.bodies, cyl], "cylinder"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]); app.run("edit.circular"); await sleep(20);
+    opValue("n", 4);
+    const rim = vp.toScreen(new (vp.camera.position.constructor)(-80, -20, 10));
+    app.op.spec.pick(new PointerEvent("pointerdown", { clientX: rim.x, clientY: rim.y, button: 0 }));
+    const picked = document.querySelector("#op-panel [data-key=axis]").value;
+    app.applyOp(); await sleep(50);
+    const blocks = app.doc.bodies.filter((b) => b.id !== cyl.id), cr = blocks.map((b) => { const [p, q] = b.shape.boundingBox.bounds; return r(Math.hypot((p[0] + q[0]) / 2 + 80, (p[1] + q[1]) / 2)); });
+    expect("circular copy: click a circle edge → round its centre (4 blocks, 130 mm from it)", blocks.length === 4 && cr.every((x) => x === 130), { picked, cr });
+    app.doc.reset([]);
+  } catch (e) {
+    expect("circular copy threw", false, String(e && e.stack || e));
   }
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("array scenario failed: " + JSON.stringify(failed));
@@ -3210,6 +3452,19 @@ const SCENARIO_CUTAXIS = String.raw`
   expect("cut by axis: the X axis in Front view → cut level at Z = 0",
     front.boxes.length === 2 && front.boxes.every((b) => b[1][2] - b[0][2] === 10 && b[1][1] - b[0][1] === 20), front);
   app.doc.reset([]);
+  // A selected guide line glows (halos under its dashed line); the others don't
+  try {
+    const g0 = app.doc.guides.length;
+    app.doc.setGuides([...app.doc.guides, { a: [0, 5000, 0], b: [50, 5000, 0] }, { a: [0, 5010, 0], b: [50, 5010, 0] }], "two guides");
+    vp.setGuides(app.doc.guides, g0, g0 + 1);
+    const kids = vp.guideRoot.children, glows = kids.filter((c) => c.type === "Group");
+    expect("selected guide glows, hovered / others don't", glows.length === 1 && kids.length === app.doc.guides.length + 1, { kids: kids.length, glows: glows.length });
+    vp.setGuides(app.doc.guides, -1, -1);
+    expect("no glow with nothing selected", !vp.guideRoot.children.some((c) => c.type === "Group"), vp.guideRoot.children.length);
+    app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guides");
+  } catch (e) {
+    expect("guide glow threw", false, String(e && e.stack || e));
+  }
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("cut by axis scenario failed: " + JSON.stringify(failed));
   return [{ label: "cut by axis", passed: checks.length - failed.length, total: checks.length, checks }];
@@ -3293,22 +3548,122 @@ const SCENARIO_AUTOSNAP = String.raw`
   const gizmoSnap = vp.tc.translationSnap, hint = document.getElementById("status-hint").textContent;
   window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: true, bubbles: true }));
   const gizmoFree = vp.tc.translationSnap;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  app.run("xf.rotate"); await sleep(30);
+  window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: false, bubbles: true }));
+  const rotDeg = vp.tc.rotationSnap === null ? null : +(vp.tc.rotationSnap * 180 / Math.PI).toFixed(6);
+  expect("auto snap: on — the rotate gizmo snaps in 5° steps", rotDeg === 5, rotDeg);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  app.run("xf.move"); await sleep(30);
+  window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: false, bubbles: true }));
   expect("auto snap: on — the move gizmo snaps without Ctrl, not with it; the hint says Ctrl is free", gizmoSnap === app.snap && gizmoFree === null && /Ctrl: free/.test(hint), { gizmoSnap, gizmoFree, hint });
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  // G G: Move from point (G alone: the move gizmo; a second G switches; Shift+G does nothing now)
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  const gk = (o = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: o.shiftKey ? "G" : "g", code: "KeyG", bubbles: true, cancelable: true, ...o }));
+  gk(); await sleep(20);
+  const oneG = { xf: !!app.xf, tool: app.tool?.name ?? null };
+  gk(); await sleep(20);
+  const twoG = { xf: !!app.xf, tool: app.tool?.name ?? null };
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  gk({ shiftKey: true }); await sleep(20);
+  const shiftG = { xf: !!app.xf, tool: app.tool?.name ?? null };
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  expect("G = move gizmo, G G = Move from point, Shift+G = Guide line", oneG.xf && !oneG.tool && twoG.tool === "Move from point" && !twoG.xf && !shiftG.xf && shiftG.tool === "Guide line", { oneG, twoG, shiftG });
+  // D: Divide face (L no longer)
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", bubbles: true, cancelable: true })); await sleep(20);
+  const dTool = app.tool?.name ?? null;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", code: "KeyL", bubbles: true, cancelable: true })); await sleep(20);
+  const lTool = app.tool?.name ?? null;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  expect("D = Divide face (L does nothing now)", dTool === "Divide face" && lTool === null, { dTool, lTool });
   // Guide line: a click on an edge / the X axis still picks it as the reference (an edge snap doesn't start a 2-point guide)
   app.setSelection([]);
   const guideRef = async (p) => {
     app.run("tool.guide"); await sleep(20);
     window.__see(new V(...p)); vp.camera.updateMatrixWorld(); vp.stamp++; await sleep(30);
     const s = vp.toScreen(new V(...p));
-    for (const type of ["pointermove", "pointerdown"]) canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
+    canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
     await sleep(20);
-    const t = app.tool, got = { ref: !!t?.ref, onAxis: !!t?.onAxis, p1: !!t?.p1 };
+    // Hovered: it glows (a group of thick lines over everything) — a picture of it for a look
+    const glow = vp.overlayRoot.children.some((o) => o.isGroup && o.children.length === 3 && o.children.every((l) => l.isLineSegments2));
+    vp.render(); // (now, so the canvas holds this frame)
+    const png = vp.canvas.toDataURL("image/png");
+    await window.y3d.writeFile((window.__smokeDir || "/tmp/y3d-smoke") + "/guide-glow-" + (p[2] === 0 ? "axis" : "edge") + ".png", Uint8Array.from(atob(png.split(",")[1]), (c) => c.charCodeAt(0)));
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
+    await sleep(20);
+    const t = app.tool, got = { glow, ref: !!t?.ref, onAxis: !!t?.onAxis, p1: !!t?.p1 };
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
     return got;
   };
   const onEdge = await guideRef([5, -10, 20]), onAxis = await guideRef([40, 0, 0]);
-  expect("auto snap: on — Guide line: clicking an edge or the X axis picks it as the reference", onEdge.ref && !onEdge.p1 && onAxis.ref && onAxis.onAxis && !onAxis.p1, { onEdge, onAxis });
+  expect("auto snap: on — Guide line: an edge or the X axis glows under the cursor, a click picks it as the reference", onEdge.glow && onEdge.ref && !onEdge.p1 && onAxis.glow && onAxis.ref && onAxis.onAxis && !onAxis.p1, { onEdge, onAxis });
+  // Snapping leaves out what the eye can't see: a corner of a small box behind the cube, with the cursor just
+  // off the cube's outline (nothing under the cursor) — and push/pull drags leave out the world X / Y / Z lines.
+  vp.setView("iso"); vp.fit(); await sleep(30); vp.camera.updateMatrixWorld(); vp.stamp++;
+  const eye = vp.camera.position.clone(), E = new V(5, 10, 20); // on the cube's top back edge (an outline in iso)
+  const P = E.clone().addScaledVector(E.clone().sub(eye).normalize(), 40); P.z -= 0.1;
+  const behind = app.doc.makeBody(K.makeBox(G, [P.x + 1, P.y + 1, P.z - 2], 2, 2, 2), "Behind");
+  app.doc.commit([...app.doc.bodies, behind], "box behind"); await sleep(30); vp.stamp++;
+  const sP = vp.toScreen(P);
+  let off = -1;
+  for (let k = 1; k <= 10 && off < 0; k++) if (!vp.faceUnder(sP.x, sP.y - k)) off = k;
+  const hidSnap = off > 0 ? vp.snapPoint(sP.x, sP.y - off) : undefined;
+  const hidOk = off > 0 && (!hidSnap || hidSnap.point.distanceTo(P) > 1e-6);
+  expect("snap: a corner hidden behind the cube doesn't snap (cursor just off the cube's outline)", hidOk, { off, snap: hidSnap && { kind: hidSnap.kind, p: hidSnap.point.toArray().map((n) => +n.toFixed(3)) } });
+  vp.setXray(true);
+  const xrSnap = off > 0 ? vp.snapPoint(sP.x, sP.y - off) : undefined;
+  vp.setXray(false);
+  expect("snap: in X-ray the corner behind the cube does snap (it shows through)", xrSnap && xrSnap.point.distanceTo(P) < 1e-6, xrSnap && { kind: xrSnap.kind, p: xrSnap.point.toArray().map((n) => +n.toFixed(3)) });
+  const visSnap = vp.snapPoint(vp.toScreen(new V(10, -10, 20)).x + 2, vp.toScreen(new V(10, -10, 20)).y + 1);
+  expect("snap: a visible corner still snaps", visSnap && visSnap.kind === "vertex" && visSnap.point.distanceTo(new V(10, -10, 20)) < 1e-6, visSnap && visSnap.point.toArray());
+  app.run("edit.undo"); await sleep(30); vp.stamp++;
+  const sx = vp.toScreen(new V(40, 0, 0));
+  const withAxes = vp.snapPoint(sx.x, sx.y), noAxes = vp.snapPoint(sx.x, sx.y, undefined, { axes: false });
+  expect("snap: on the X axis — snaps to it, but not with axes off (push/pull drags without Ctrl)", withAxes?.kind === "axis" && noAxes?.kind !== "axis", { withAxes: withAxes?.kind, noAxes: noAxes?.kind ?? null });
+  // Moving the guide shows its length and percent: from an edge "10 mm · 50%" (of the face), from an axis "Y = … mm · …% across Cube"
+  const guideHud = async (pick, to) => {
+    app.run("tool.guide"); await sleep(20);
+    const at = (p) => { window.__see(new V(...p)); vp.camera.updateMatrixWorld(); vp.stamp++; return vp.toScreen(new V(...p)); };
+    let s = at(pick);
+    for (const type of ["pointermove", "pointerdown"]) canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
+    await sleep(20);
+    s = at(to);
+    canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); await sleep(20);
+    const text = app.hudEl.hidden ? null : app.hudEl.textContent;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    return text;
+  };
+  const edgeHud = await guideHud([5, -10, 20], [0, 0, 20]), axisHud = await guideHud([40, 0, 0], [0, 5, 20]);
+  expect("guide line: moving it shows length and percent — edge: mm · % of the face; axis: mm · % across the solid under the cursor",
+    /^[\d.]+ mm · [\d.]+%$/.test(edgeHud ?? "") && axisHud === "Y = 5 mm · 75% across Cube 1", { edgeHud, axisHud });
+  // Where two guides cross (like ~/untitled.y3d: 69.5 along one of them, so its 1 mm steps miss it): a snap point — a circle started a few pixels off it is centred on it
+  {
+    vp.setView("iso"); vp.fit(); await sleep(30);
+    const g0 = app.doc.guides.length;
+    app.doc.setGuides([...app.doc.guides, { a: [-15.3, -4.5, 20], b: [15, -4.5, 20], n: [0, 1, 0] }, { a: [3, 15.2, 20], b: [3, -15, 20], n: [1, 0, 0] }], "two guides");
+    await sleep(20); vp.stamp++;
+    const X = new V(3, -4.5, 20);
+    app.run("tool.circle"); await sleep(20);
+    window.__see(X); vp.camera.updateMatrixWorld(); vp.stamp++; await sleep(20);
+    const sx = vp.toScreen(X), n0 = app.doc.bodies.length;
+    const pe = (type, x, y) => canvas.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+    pe("pointermove", sx.x + 4, sx.y + 3); await sleep(20);
+    const marker = Object.values(vp.snapMarker ?? {}).some((m) => m.visible);
+    pe("pointerdown", sx.x + 4, sx.y + 3); pe("pointerup", sx.x + 4, sx.y + 3); await sleep(20);
+    const r5 = vp.toScreen(new V(8, -4.5, 20));
+    pe("pointermove", r5.x, r5.y); await sleep(20); pe("pointerdown", r5.x, r5.y); pe("pointerup", r5.x, r5.y); await sleep(50);
+    const made = app.doc.bodies.length > n0 ? app.doc.bodies[app.doc.bodies.length - 1] : null;
+    const c = made && (() => { const [lo, hi] = made.shape.boundingBox.bounds; return [0, 1, 2].map((k) => +((lo[k] + hi[k]) / 2).toFixed(4)); })();
+    expect("snap: where two guides cross — a circle started 5 px off it is centred exactly on the crossing", marker && made && made.kind === "face" && c.join() === "3,-4.5,20", { marker, kind: made?.kind, c });
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    if (made) { app.setSelection([{ kind: "body", body: made.id, id: 0 }]); app.run("edit.delete"); }
+    app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guides");
+  }
   vp.setView("iso"); vp.fit(); await sleep(30);
   app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
   app.run("xf.move"); await sleep(30);
@@ -3644,11 +3999,16 @@ const SCENARIO_SKETCH = String.raw`
   const picked = app.selection.length === 1 && app.selection[0].body === pb.id;
   app.run("op.pushpull"); await sleep(20);
   const ppRefused = !document.querySelector("#op-panel h4");
-  app.doc.replaceShapes(new Map([[pb.id, K.translateShape(pb.shape, [0, 0, 5])]]), "Move"); await sleep(20);
-  const moved = Math.abs(app.doc.get(pb.id).shape.boundingBox.bounds[0][2] - 5) < 1e-6;
+  // Clicked, then G: the gizmo moves it (+5 up)
+  const z0 = app.doc.get(pb.id).shape.boundingBox.bounds[0][2];
+  app.setSelection([{ kind: "body", body: pb.id, id: 0 }]); app.run("xf.move"); await sleep(20);
+  const gOn = !!app.xf;
+  if (gOn) { vp.pivot.position.z += 5; vp.finishTransformDrag(); await sleep(20); }
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  const moved = gOn && Math.abs(app.doc.get(pb.id).shape.boundingBox.bounds[0][2] - z0 - 5) < 1e-6;
   app.loadModel(app.modelText(), null); await sleep(20);
   const reread = app.doc.bodies.find((b) => b.kind === "path" && b.shape.edges.length === 2);
-  expect("sketch: open lines → a path object (line + arc): picked by its line, Push/Pull refuses it, moves, saved as a path", pb && pb.kind === "path" && kinds === "LINE,CIRCLE" && picked && ppRefused && moved && !!reread, { kind: pb && pb.kind, kinds, picked, ppRefused, moved, reloaded: !!reread });
+  expect("sketch: open lines → a path object (line + arc): picked by its line, Push/Pull refuses it, G moves it, saved as a path", pb && pb.kind === "path" && kinds === "LINE,CIRCLE" && picked && ppRefused && moved && !!reread, { kind: pb && pb.kind, kinds, picked, ppRefused, moved, gOn, z0, z1: app.doc.get(pb.id)?.shape.boundingBox.bounds[0][2], reloaded: !!reread });
   // Scale (Select): typed 200 doubles about the centre, Ctrl+Z undoes; S: the gizmo (X / Y / XY handles), Tab, Esc
   {
     app.doc.reset([]); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(30);

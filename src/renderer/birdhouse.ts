@@ -62,14 +62,14 @@ export const BIRD_HOUSE: Tutorial = {
     },
     {
       title: "House block",
-      how: "<kbd>B</kbd> <kbd>B</kbd> on the base's top face, <kbd>Tab</kbd>: <b>110</b> × <b>110</b> × <b>130</b> → Create. Centre it: <kbd>Shift</kbd>+<kbd>G</kbd> and drag its bottom-centre mark onto the base's top-centre mark.",
+      how: "<kbd>B</kbd> <kbd>B</kbd> on the base's top face, <kbd>Tab</kbd>: <b>110</b> × <b>110</b> × <b>130</b> → Create. Centre it: <kbd>G</kbd> <kbd>G</kbd> and drag its bottom-centre mark onto the base's top-centre mark.",
       run(doc, ctx, label) {
         addSolid(doc, ctx, "house", makeBox(GROUND, [0, 0, BASE_H], HOUSE, HOUSE, WALL_H), "House", label);
       },
     },
     {
       title: "Ridge line",
-      how: "<kbd>L</kbd> (Divide face): click the <b>midpoint</b> of the front top edge, then of the back top edge (midpoints snap). The new edge is selected.",
+      how: "<kbd>D</kbd> (Divide face): click the <b>midpoint</b> of the front top edge, then of the back top edge (midpoints snap). The new edge is selected.",
       run(doc, ctx, label) {
         const h = body(doc, ctx, "house");
         replace(doc, h.id, splitFaceByLine(h.shape as Solid, [0, FRONT_Y, EAVE_Z], [0, -FRONT_Y, EAVE_Z]), label);

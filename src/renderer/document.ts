@@ -88,6 +88,20 @@ export interface ArrayRecord {
   readonly centre: number;
   readonly offsets: readonly number[];
   readonly span?: { readonly axis: number; readonly a: number; readonly b: number };
+  /**
+   * Made by Circular copy instead (gap / total / dir / centre / offsets unused): round `axis`
+   * (`name` as it was picked), `angle` in all, copies turned or not; `boxes` = each source's as it
+   * was made (to tell how far the group moved since; older files: each copy's too, after them).
+   */
+  readonly circular?: {
+    readonly axis: { readonly origin: V3; readonly dir: V3 };
+    readonly name: string;
+    readonly angle: number;
+    readonly turn: number;
+    readonly boxes: readonly (readonly [V3, V3])[];
+    /** The sources' centre it went round from (copies not turned move by where it went); older files: from `boxes`. */
+    readonly centre?: V3;
+  };
 }
 
 type Snapshot = readonly Body[];
@@ -184,7 +198,16 @@ export class Doc {
     return this.relinkDims && next !== this.snapshot && dims.some((d) => d.body !== undefined) ? this.relinkDims(dims, this.snapshot, next) : dims;
   }
 
+  /**
+   * Linked copies (set by the app; it needs the kernel): one object of an array / circular copy
+   * changed (fillet, push/pull, scale...) → every copy in its group changes the same way. Applied in
+   * the same step as the change; null = nothing to follow.
+   */
+  linkCopies: ((prev: Snapshot, next: Snapshot, arrays: readonly ArrayRecord[], label: string) => { bodies: Snapshot; arrays: readonly ArrayRecord[] } | null) | null = null;
+
   commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList, arrays: readonly ArrayRecord[] = this.arrayList): void {
+    const linked = this.linkCopies && next !== this.snapshot && arrays.length ? this.linkCopies(this.snapshot, next, arrays, label) : null;
+    if (linked) ({ bodies: next, arrays } = linked);
     dims = this.relinked(dims, next);
     this.undoStack.push(this.entry(label));
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
@@ -238,6 +261,11 @@ export class Doc {
     this.guideList = e.guides;
     this.dimList = e.dims;
     this.arrayList = e.arrays;
+  }
+
+  /** The step Undo / Redo would go to (its bodies and label), without going. */
+  peek(which: "undo" | "redo"): HistoryEntry | null {
+    return (which === "undo" ? this.undoStack : this.redoStack).at(-1) ?? null;
   }
 
   undo(): string | null {

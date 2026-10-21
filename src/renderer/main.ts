@@ -6,6 +6,7 @@ import "./style.css";
 import * as THREE from "three";
 import {
   initKernel,
+  circleOf,
   curveBounds,
   isValidShape,
   faceEdgeIds,
@@ -90,6 +91,8 @@ import {
   type Wire,
   TriMesh,
   isMesh,
+  probePoints,
+  movedIds,
   parseStl,
 } from "./kernel";
 import { Doc, isBrep, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type Guide, type HistoryEntry, type ShapeBody } from "./document";
@@ -224,6 +227,8 @@ interface OpSpec {
   hover?(e: PointerEvent): void;
   /** Labelled marks in the view to click (e.g. Array copy's ±X / ±Y / ±Z): see OpChoice. */
   choices?: OpChoice[];
+  /** Caption of the apply button (default "Apply ⏎"). */
+  applyLabel?: string;
 }
 
 /** A labelled mark at `at` (a faint line to it from `from`): a click sets field `key` to `value`; lit while it has it. */
@@ -290,6 +295,9 @@ type CutLine = number | { axis: number };
 /** What Sweep runs along: a path object or a guide line (its index). */
 type Spine = { path: number } | { guide: number };
 
+/** Undo / Redo that will take longer than this (ms) to draw shows the busy dialog. */
+const BUSY_DRAW_MS = 300;
+
 /** Op previews slower than this (ms) are not redone on every drag frame. */
 const SLOW_PREVIEW_MS = 60;
 
@@ -340,11 +348,12 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.shell", icon: "shell", label: "Shell", key: "H" },
       { cmd: "op.offset", icon: "offset", label: "Offset", key: "O" },
       { cmd: "op.revolve", icon: "revolve", label: "Revolve", key: "Pro: R E" },
+      { cmd: "edit.circular", icon: "circular", label: "Circular copy", key: "" },
       { cmd: "op.sweep", icon: "sweep", label: "Sweep", key: "Pro: S W" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis", key: "C" },
       { cmd: "op.splitFace", icon: "cut", label: "Split face by guide", key: "Shift+C" },
-      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face", key: "L" },
-      { cmd: "tool.guide", icon: "guide", label: "Guide line", key: "Shift+L" },
+      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face", key: "D" },
+      { cmd: "tool.guide", icon: "guide", label: "Guide line", key: "Shift+G" },
       { cmd: "edit.clearGuides", icon: "delete", label: "Clear guides", key: "" },
     ],
   },
@@ -362,7 +371,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     drawer: true,
     items: [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
-      { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "Shift+G" },
+      { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "G G" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
       { cmd: "xf.scale", icon: "scale", label: "Scale", key: "S" },
       { cmd: "xf.repeat", icon: "duplicate", label: "Repeat last", key: "Shift+R" },
@@ -412,6 +421,12 @@ const SIDEBAR_KEY = "y3d.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
 const PRO_TIP_SAVES = 20;
 /** localStorage: Auto snap off ("0"); on by default. */
 const AUTO_SNAP_KEY = "y3d.autoSnap";
+
+/** Edge mode's pointer: the arrow with a small "E" by it. */
+const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28"><path d="M2 2 L2 19 L6.5 15 L9.5 22 L12.5 20.7 L9.6 14 L15.5 14 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/>` +
+    `<text x="16" y="26" font-family="sans-serif" font-size="12" font-weight="bold" fill="#ffe066" stroke="#000" stroke-width="2.5" paint-order="stroke">E</text></svg>`,
+)}") 2 2, default`;
 const isPro = () => document.body.classList.contains("pro");
 
 const KEYMAP: Record<string, string> = {
@@ -429,9 +444,8 @@ const KEYMAP: Record<string, string> = {
   o: "op.offset",
   c: "op.cut",
   g: "xf.move",
-  "Shift+G": "xf.moveFrom",
-  l: "tool.divideFace",
-  "Shift+L": "tool.guide",
+  d: "tool.divideFace",
+  "Shift+G": "tool.guide",
   "Shift+C": "op.splitFace",
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
@@ -462,11 +476,12 @@ const KEYMAP: Record<string, string> = {
 
 /**
  * Two-key chords: the first key starts its tool at once; a second key within CHORD_MS switches tool.
- * B B box · B C cylinder · B S sphere — A rectangle · A C circle · A P polygon.
+ * B B box · B C cylinder · B S sphere — A rectangle · A C circle · A P polygon — G G move from point.
  */
 const CHORDS: Record<string, Record<string, string>> = {
   b: { b: "tool.box", c: "tool.cylinder", s: "tool.sphere" },
   a: { a: "tool.rectangle", r: "tool.rectangle", c: "tool.circle", p: "tool.polygon" },
+  g: { g: "xf.moveFrom" },
 };
 /** Pro layout only: S W sweep (S starts Scale, W switches) · R E revolve (R starts Rotate, E switches). */
 const PRO_CHORDS: Record<string, Record<string, string>> = {
@@ -584,6 +599,7 @@ class App implements ToolHost {
     this.viewport = new Viewport(container);
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.doc.relinkDims = (dims, prev, next) => relinkDimensions(dims, prev, next);
+    this.doc.linkCopies = (prev, next, arrays, label) => this.linkCopies(prev, next, arrays, label);
     this.buildToolbar();
     this.buildCornerTools();
     this.renderRecent();
@@ -888,11 +904,12 @@ class App implements ToolHost {
     }
   }
 
-  /** Rarely used tools (Revolve / Sweep / Array copy) as small buttons in the viewport's bottom-left corner. */
+  /** Rarely used tools (Revolve / Circular copy / Sweep / Array copy) as small buttons in the viewport's bottom-left corner. */
   private buildCornerTools(): void {
     const box = $("corner-tools");
     const items: [string, string, string][] = [
       ["op.revolve", "revolve", "Revolve a flat face about a line or axis (Pro: R E)"],
+      ["edit.circular", "circular", "Circular copy: copies round an axis — the X / Y / Z axis, a guide line or a circle edge"],
       ["op.sweep", "sweep", "Sweep a flat face along a path or guide line (Pro: S W)"],
       ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction (to change an array later: its icon in the Bodies panel)"],
     ];
@@ -1044,6 +1061,7 @@ class App implements ToolHost {
       case "edit.delete": return this.deleteSelected();
       case "edit.duplicate": return this.duplicate();
       case "edit.array": return this.arrayCopy();
+      case "edit.circular": return this.circularCopy();
       case "edit.arrayChange": return this.arrayCopy(true);
       case "edit.group": return this.groupSelected();
       case "edit.ungroup": return this.ungroupSelected();
@@ -1098,6 +1116,11 @@ class App implements ToolHost {
 
   // ================================================================ selection
 
+  /** The canvas cursor when no tool is picking: in Edge mode, the arrow with an "E". */
+  private selCursor(): string {
+    return this.mode === "edge" ? EDGE_CURSOR : "default";
+  }
+
   private setMode(mode: SelMode): void {
     if (mode !== this.mode) {
       if (this.xf?.edges) this.stopTransform();
@@ -1109,6 +1132,7 @@ class App implements ToolHost {
       }
       this.mode = mode;
       this.hover = null;
+      if (!this.tool && !this.op) this.viewport.canvas.style.cursor = this.selCursor();
     }
     this.refreshSelection();
   }
@@ -1373,7 +1397,7 @@ class App implements ToolHost {
     }
     const g = this.viewport.guideAt(e.clientX, e.clientY);
     if (g !== this.hoverGuide) {
-      if (g < 0) this.viewport.canvas.style.cursor = "default";
+      if (g < 0) this.viewport.canvas.style.cursor = this.selCursor();
       this.hoverGuide = g;
       this.showGuides();
     }
@@ -1389,7 +1413,7 @@ class App implements ToolHost {
     if (!sameItem(item, this.hover) && !(item === null && this.hover === null)) {
       this.hover = item;
       this.viewport.setHighlight(this.selection, this.hover);
-      this.viewport.canvas.style.cursor = item ? "pointer" : "default";
+      this.viewport.canvas.style.cursor = item && this.mode !== "edge" ? "pointer" : this.selCursor();
     }
   }
 
@@ -1403,6 +1427,7 @@ class App implements ToolHost {
 
   private bindKeys(): void {
     window.addEventListener("keydown", (e) => {
+      if (this.busyNow) return e.preventDefault(); // (a slow step is about to run: see runBusy)
       const target = e.target as HTMLElement;
       const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
       // A chord's second key also counts in the op panel its first key opened (S → Scale's field has focus).
@@ -1543,7 +1568,7 @@ class App implements ToolHost {
     if (!this.tool) return;
     this.tool.dispose();
     this.tool = null;
-    this.viewport.canvas.style.cursor = "default";
+    this.viewport.canvas.style.cursor = this.selCursor();
     this.refreshSelection();
   }
 
@@ -1612,7 +1637,7 @@ class App implements ToolHost {
     panel.appendChild(err);
     const buttons = document.createElement("div");
     buttons.className = "op-buttons";
-    buttons.innerHTML = `<button class="btn" data-a="cancel">Cancel</button><button class="btn primary" data-a="apply">Apply ⏎</button>`;
+    buttons.innerHTML = `<button class="btn" data-a="cancel">Cancel</button><button class="btn primary" data-a="apply">${spec.applyLabel ?? "Apply ⏎"}</button>`;
     panel.appendChild(buttons);
     panel.hidden = false;
 
@@ -1683,8 +1708,9 @@ class App implements ToolHost {
     const unit = this.dragUnit(drag);
     const t = (((e.clientX - op.anchor.x) * ax + (e.clientY - op.anchor.y) * ay) / pxPer10) * (10 / pxPer10);
     let v = op.anchor.v + t / unit;
-    // Snapping (see Viewport.snapping): level with the object point under the cursor (corner, midpoint, centre, edge, guide, axis), else grid.
-    const sp = this.viewport.snapping(e) ? this.viewport.snapPoint(e.clientX, e.clientY) : null;
+    // Snapping (see Viewport.snapping): level with the object point under the cursor (corner, midpoint, centre, edge, guide), else grid.
+    // The world X / Y / Z lines cross the whole view, so a drag would keep catching them: only with Ctrl.
+    const sp = this.viewport.snapping(e) ? this.viewport.snapPoint(e.clientX, e.clientY, undefined, { axes: e.ctrlKey }) : null;
     this.viewport.showSnapMarker(sp);
     if (sp) v = sp.point.clone().sub(O).dot(D) / unit;
     else {
@@ -1800,7 +1826,7 @@ class App implements ToolHost {
     this.viewport.clearGhost();
     this.hoverGuide = -1; // (Array copy lights up the guide under the cursor)
     this.showGuides(); // (Revolve / Sweep show their guide selected)
-    this.viewport.canvas.style.cursor = "default";
+    this.viewport.canvas.style.cursor = this.selCursor();
     this.renderToolbarState();
   }
 
@@ -2518,7 +2544,7 @@ class App implements ToolHost {
       return;
     }
     if (!this.doc.guides.length) {
-      this.toast("Split face: draw a guide line first (Shift+L — two points or parallel to an edge)", "error");
+      this.toast("Split face: draw a guide line first (Shift+G — two points or parallel to an edge)", "error");
       return;
     }
     const ids = [...perBody.keys()];
@@ -2590,6 +2616,37 @@ class App implements ToolHost {
     return { point: a, normal: guidePlaneNormal(ids.map((id) => this.doc.get(id)!.shape).filter(notMesh), a, b, this.viewDir(), n), along: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] };
   }
 
+  /**
+   * Cut: the copies among `ids` of an array / circular copy (all of it being cut, still as made)
+   * that the plane crosses just as it does their source — it maps onto itself (same side up) when
+   * moved like the copy: copy id → its source and how to put the source's pieces in its place.
+   */
+  private cutLikeSource(ids: number[], point: V3, normal: V3): Map<number, { from: number; place: (s: Geom) => Geom }> {
+    const out = new Map<number, { from: number; place: (s: Geom) => Geom }>();
+    const set = new Set(ids);
+    const n = new THREE.Vector3(...normal).normalize(), p = new THREE.Vector3(...point);
+    const u = new THREE.Vector3(1, 0, 0).cross(n);
+    if (u.lengthSq() < 1e-6) u.set(0, 1, 0).cross(n);
+    u.normalize();
+    const v = n.clone().cross(u), L = 100;
+    const probes = [p, p.clone().addScaledVector(u, L), p.clone().addScaledVector(v, L)].map((q) => q.toArray() as V3);
+    const up = p.clone().addScaledVector(n, L).toArray() as V3;
+    const off = (q: V3) => new THREE.Vector3(...q).sub(p).dot(n);
+    for (const rec of this.doc.arrays) {
+      const S = rec.sources.length, members = [...rec.sources, ...rec.copies];
+      if (!members.every((id) => set.has(id)) || members.some((id) => this.doc.get(id)?.kind !== "solid")) continue;
+      if (this.arrayToChange(members) !== rec) continue;
+      const { place, point: at } = this.arrayPlacement(rec, rec.circular ? this.circularShift(rec) ?? [0, 0, 0] : [0, 0, 0]);
+      rec.copies.forEach((id, i) => {
+        const k = Math.floor(i / S) + 1;
+        const tol = 1e-7 * (1 + p.length() + L);
+        if (!probes.every((q) => Math.abs(off(at(q, k))) < tol) || off(at(up, k)) < L / 2) return;
+        out.set(id, { from: rec.sources[i % S], place: (s) => place(s, k) });
+      });
+    }
+    return out;
+  }
+
   /** Translucent square of the cut plane across the solids being cut (null hides it). */
   private showCutPlane(plane: { point: V3; normal: V3; along?: V3 } | null, ids: number[]): void {
     if (!plane) return this.viewport.setOverlay([]);
@@ -2620,11 +2677,35 @@ class App implements ToolHost {
    * Flat faces (a drawn rectangle, circle...) are cut into separate faces the same way.
    */
   private opCut(ids: number[], line: CutLine): void {
+    const bodies = ids.map((id) => this.doc.get(id)!);
+    const many = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+    // (many or heavy solids, e.g. a circular copy's 17 sweeps: ~3 s, behind the busy dialog counting them)
+    this.runBusy(this.heavy(bodies.filter((b) => b.kind !== "face")), `Cutting ${many(ids.length, "object")}…`, (say) => this.cutBodies(ids, line, say));
+  }
+
+  private async cutBodies(ids: number[], line: CutLine, say: ((text: string) => Promise<void>) | null): Promise<void> {
     const kept = new Map<number, Shape>();
     const cutOff: Body[] = [];
     const facePieces: number[] = [];
     try {
       const { point, normal } = this.cutPlane(line, ids);
+      // Copies the plane cuts just like their source (a ring round Z cut level, a row cut along it):
+      // its pieces turned / moved into place — one cut, and the display reuses their triangles.
+      const like = this.cutLikeSource(ids, point, normal);
+      const halves = new Map<number, { above: Solid | null; below: Solid | null }>();
+      const order = [...ids.filter((id) => !like.has(id)), ...ids.filter((id) => like.has(id))];
+      for (const [i, id] of order.entries()) {
+        const body = this.doc.get(id)!;
+        if (body.kind === "face") continue;
+        const same = like.get(id);
+        if (!same) {
+          if (say && i) await say(`Cutting ${i + 1} of ${ids.length}…`);
+          halves.set(id, splitByPlane(this.solidOf(id, "Cut"), point, normal));
+          continue;
+        }
+        const src = halves.get(same.from)!;
+        halves.set(id, { above: src.above && (same.place(src.above) as Solid), below: src.below && (same.place(src.below) as Solid) });
+      }
       for (const id of ids) {
         const body = this.doc.get(id)!;
         if (body.kind === "face") {
@@ -2635,7 +2716,7 @@ class App implements ToolHost {
           facePieces.push(id, ...made.map((b) => b.id));
           continue;
         }
-        const { above, below } = splitByPlane(this.solidOf(id, "Cut"), point, normal);
+        const { above, below } = halves.get(id)!;
         if (!above || !below) throw new Error(`Cut: the ${typeof line === "number" ? "guide's" : "axis'"} cut plane does not pass through "${body.name}"`);
         kept.set(id, below);
         cutOff.push(inGroupOf(this.doc.makeBody(above, "Solid"), body));
@@ -2644,6 +2725,7 @@ class App implements ToolHost {
       this.toast(errorMessage(e), "error");
       return;
     }
+    if (say) await say(`Drawing ${ids.length + cutOff.length} pieces…`);
     this.doc.commit([...this.doc.bodies.map((bd) => (kept.has(bd.id) ? withShape(bd, kept.get(bd.id)!) : bd)), ...cutOff], "Cut");
     const solidPieces = cutOff.filter((b) => b.kind !== "face");
     if (!solidPieces.length) {
@@ -2674,10 +2756,65 @@ class App implements ToolHost {
       return;
     }
     const [targetId, ...toolIds] = ids;
-    const made = this.applyBoolean(op, targetId, toolIds, label);
-    if (!made) return;
-    this.setMode("body");
-    this.setSelection(made.map((id) => ({ kind: "body", body: id, id: 0 })));
+    this.runBusy(this.heavyBoolean(ids), `${label} of ${ids.length} solids…`, () => {
+      let made: number[] | null;
+      try {
+        made = this.applyBoolean(op, targetId, toolIds, label);
+      } catch (err) {
+        return this.fail(err);
+      }
+      if (!made) return;
+      this.setMode("body");
+      this.setSelection(made.map((id) => ({ kind: "body", body: id, id: 0 })));
+    });
+  }
+
+  /** A slow step is about to run behind the busy dialog (keys and clicks wait: see runBusy). */
+  private busyNow = false;
+
+  /**
+   * Run `work` — `heavy`: behind a busy dialog painted first, so the app is seen working rather than
+   * hung (it fades in after a moment, so a quicker one doesn't flash; its spinner turns on the
+   * compositor even while the kernel holds the page). Light: right away. The kernel can't be stopped
+   * part-way, so no Cancel — Ctrl+Z undoes it afterwards. `say` (heavy only, else null): new text
+   * for the dialog (e.g. "Cutting 3 of 17…"), painted before the returned promise resolves — work
+   * done in steps awaits it between them.
+   */
+  private runBusy(heavy: boolean, text: string, work: (say: ((text: string) => Promise<void>) | null) => void | Promise<void>): void {
+    if (!heavy) return void work(null);
+    if (this.busyNow) return;
+    this.busyNow = true;
+    const el = document.createElement("div");
+    el.id = "busy";
+    el.innerHTML = `<div class="busy-box"><div class="spinner"></div><div class="busy-text">${escapeHtml(text)}</div><div class="busy-tip">It can't be stopped part-way — Ctrl+Z undoes it afterwards</div></div>`;
+    document.body.appendChild(el);
+    const painted = () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)));
+    const say = (t: string) => {
+      el.querySelector(".busy-text")!.textContent = t;
+      return painted();
+    };
+    // (after the next paint: the dialog is on screen before the kernel takes over)
+    void painted().then(async () => {
+      try {
+        await work(say);
+      } finally {
+        el.remove();
+        this.busyNow = false;
+      }
+    });
+  }
+
+  /** A boolean likely to take a while (it shows the busy dialog): see heavy. */
+  private heavyBoolean(ids: number[]): boolean {
+    return this.heavy(ids.map((id) => this.doc.get(id)).filter((b): b is Body => !!b));
+  }
+
+  /** Solids likely to take a while to combine or draw (the busy dialog): 6 or more at once, or 400+ faces. */
+  private heavy(bodies: Body[]): boolean {
+    if (bodies.length >= 6) return true;
+    let faces = 0;
+    for (const b of bodies) faces += isBrep(b) ? b.shape.faces.length : 400; // (a mesh: heavy)
+    return faces >= 400;
   }
 
   /**
@@ -2730,6 +2867,8 @@ class App implements ToolHost {
     };
     /** Subtract: the solids clicked so far (used up, unless "Keep the clicked solid" brought them back). */
     const used: Body[] = [];
+    /** Array / circular copy records of the used-up solids (dropped with them; Keep brings them back too). */
+    const usedRecords: ArrayRecord[] = [];
     let keep = false;
     const panel = this.toolPanel(label, { label: "Done ⏎", primary: true }, () => finish());
     const showPanel = () =>
@@ -2745,10 +2884,14 @@ class App implements ToolHost {
     const setKeep = (on: boolean) => {
       keep = on;
       const ids = new Set(used.map((b) => b.id));
-      const others = this.doc.bodies.filter((b) => !ids.has(b.id));
-      this.doc.commit(on ? [...others, ...used] : others, on ? "Keep clicked solid" : "Use up clicked solid");
-      show(null);
-      showPanel();
+      // (bringing solids back means drawing them all again: the busy dialog if that will take a while)
+      this.runBusy(on && this.viewport.drawCost(used.map((b) => b.shape)) > BUSY_DRAW_MS, `Bringing back ${used.length} solid${used.length > 1 ? "s" : ""}…`, () => {
+        const others = this.doc.bodies.filter((b) => !ids.has(b.id));
+        const arrays = on ? [...this.doc.arrays, ...usedRecords.filter((r) => !this.doc.arrays.includes(r))] : this.doc.arrays;
+        this.doc.commit(on ? [...others, ...used] : others, on ? "Keep clicked solid" : "Use up clicked solid", this.doc.guides, this.doc.dimensions, arrays);
+        show(null);
+        showPanel();
+      });
     };
     panel.body.addEventListener("change", (e) => {
       const box = e.target as HTMLInputElement;
@@ -2769,18 +2912,22 @@ class App implements ToolHost {
         this.toast(`Booleans work on solids — "${face.name}" is a flat face. Push/Pull it first.`, "error");
         return;
       }
-      try {
-        const tools = ids.map((id) => this.doc.get(id)!);
-        if (this.applyBoolean(op, targetId, ids, label, op === "subtract" && keep)) {
-          count += ids.length;
-          if (op === "subtract") used.push(...tools);
+      this.runBusy(this.heavyBoolean([targetId, ...ids]), `${label === "Subtract" ? "Subtracting" : label === "Union" ? "Joining" : "Intersecting"} ${ids.length} solid${ids.length > 1 ? "s" : ""}…`, () => {
+        try {
+          const tools = ids.map((id) => this.doc.get(id)!);
+          const records = this.doc.arrays.filter((r) => [...r.sources, ...r.copies].some((id) => ids.includes(id)));
+          if (this.applyBoolean(op, targetId, ids, label, op === "subtract" && keep)) {
+            if (op === "subtract") usedRecords.push(...records.filter((r) => !usedRecords.includes(r)));
+            count += ids.length;
+            if (op === "subtract") used.push(...tools);
+          }
+        } catch (err) {
+          this.fail(err);
         }
-      } catch (err) {
-        this.fail(err);
-      }
-      show(null);
-      this.hint(msg());
-      showPanel();
+        show(null);
+        this.hint(msg());
+        showPanel();
+      });
     };
     const tool: Tool = {
       name: label,
@@ -2823,7 +2970,9 @@ class App implements ToolHost {
       this.repeatOps = [];
       this.placing = null; // a new move session is its own undo step (Duplicate sets it again after this)
     }
-    const ids = this.selectedBodyIds();
+    // (keeping the gizmo: on the bodies it was on, should the selection have gone)
+    let ids = this.selectedBodyIds();
+    if (!ids.length && keep && this.xf) ids = this.xf.ids.filter((id) => this.doc.get(id));
     if (!ids.length) {
       this.toast(`${mode === "translate" ? "Move" : "Rotate"}: select one or more solids first`, "error");
       return;
@@ -2831,7 +2980,7 @@ class App implements ToolHost {
     this.xf = { mode, ids, pivot };
     this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r), pivot);
     this.renderToolbarState();
-    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 15° / points")}) · Tab: type exact values · Enter/Esc: done`);
+    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")}) · Tab: type exact values · Enter/Esc: done`);
   }
 
   /** G with edges selected: drag them with the gizmo, reshaping their (flat-faced) solids. */
@@ -2966,7 +3115,7 @@ class App implements ToolHost {
     return null;
   }
 
-  /** Divide face (L): split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
+  /** Divide face (D): split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
   private divideFace(bodyId: number, a: V3, b: V3): void {
     const why = this.divideRefusal(bodyId);
     if (why) return this.toast(why, "error");
@@ -3154,6 +3303,7 @@ class App implements ToolHost {
 
   /** Commit gizmo / Tab moves of the transformed bodies (folded into Duplicate while placing a copy). */
   private commitTransform(shapes: Map<number, Geom>, label: string): void {
+    this.carrySelection(shapes);
     const p = this.placing;
     if (p && this.xf && p.ids === this.xf.ids.join() && p.version === this.doc.version) {
       this.doc.amend(this.doc.bodies.map((b) => (shapes.has(b.id) ? withShape(b, shapes.get(b.id)!) : b)));
@@ -3161,6 +3311,20 @@ class App implements ToolHost {
     } else {
       this.doc.replaceShapes(shapes, label);
     }
+  }
+
+  /**
+   * Selected faces / edges of bodies about to be moved: their ids in the moved shapes (new shapes
+   * have new ids — otherwise the selection, and with it the gizmo's next start, would be dropped).
+   */
+  private carrySelection(shapes: Map<number, Geom>): void {
+    this.selection = this.selection.map((s) => {
+      const b = this.doc.get(s.body), to = shapes.get(s.body);
+      if (s.kind === "body" || !b || !to) return s;
+      const ids = movedIds(b.shape, to);
+      const id = ids && (s.kind === "face" ? ids.faces : ids.edges).get(s.id);
+      return id === undefined || id === null ? s : { ...s, id };
+    });
   }
 
   /** Last gizmo drag, so Tab can prefill (and correct) it. */
@@ -3182,7 +3346,7 @@ class App implements ToolHost {
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
   }
 
-  /** Keep an explicit gizmo pivot (from Shift+G) on the moved bodies. */
+  /** Keep an explicit gizmo pivot (from G G) on the moved bodies. */
   private shiftPivot(rs: TransformResult[]): void {
     const p = this.xf?.pivot;
     if (!p) return;
@@ -3226,6 +3390,7 @@ class App implements ToolHost {
         const b = this.doc.get(id);
         if (b) shapes.set(id, xform(b.shape));
       }
+      this.carrySelection(shapes);
       this.doc.replaceShapes(shapes, "Repeat");
       this.toast("Repeated move/rotate");
     }
@@ -3361,8 +3526,14 @@ class App implements ToolHost {
 
   private undoRedo(which: "undo" | "redo"): void {
     this.endInteractions();
-    const label = which === "undo" ? this.doc.undo() : this.doc.redo();
-    if (label) this.toast(`${which === "undo" ? "Undo" : "Redo"}: ${label}`);
+    // Going back to solids no longer on screen means drawing them again (e.g. 17 sweeps a Subtract
+    // used up: ~1.5 s): behind the busy dialog when that will take a while.
+    const step = this.doc.peek(which);
+    const slow = !!step && this.viewport.drawCost(step.bodies.map((b) => b.shape)) > BUSY_DRAW_MS;
+    this.runBusy(slow, `${which === "undo" ? "Undoing" : "Redoing"} ${step?.label ?? ""}…`, () => {
+      const label = which === "undo" ? this.doc.undo() : this.doc.redo();
+      if (label) this.toast(`${which === "undo" ? "Undo" : "Redo"}: ${label}`);
+    });
   }
 
   private deleteSelected(): void {
@@ -3435,12 +3606,181 @@ class App implements ToolHost {
       const b = this.doc.get(id)!;
       return this.doc.makeBody(cloneShape(b.shape), b.name.replace(/\s+\d+$/, ""), b.kind);
     });
-    this.doc.commit([...this.doc.bodies, ...copies], "Duplicate");
+    // A whole group selected: its copies are a new group of their own ("Circular 1" → "Circular 2"), and
+    // an array / circular copy's record goes with them (the copy can be changed from its icon too).
+    const idSet = new Set(ids), copyOf = new Map(ids.map((id, i) => [id, copies[i].id]));
+    const whole = [...new Set(ids.map((id) => this.doc.get(id)!.group))].filter(
+      (g): g is string => !!g && this.doc.bodies.every((b) => b.group !== g || idSet.has(b.id)));
+    const newGroup = new Map<string, string>();
+    const taken = new Set(this.doc.bodies.map((b) => b.group));
+    for (const g of whole) {
+      const base = g.replace(/\s+\d+$/, "") || "Group";
+      let n = 1;
+      while (taken.has(`${base} ${n}`)) n++;
+      taken.add(`${base} ${n}`);
+      newGroup.set(g, `${base} ${n}`);
+    }
+    const grouped = copies.map((c, i) => {
+      const g = newGroup.get(this.doc.get(ids[i])!.group ?? "");
+      return g ? { ...c, group: g } : c;
+    });
+    const records = this.doc.arrays.flatMap((r) => {
+      const g = newGroup.get(r.group);
+      if (!g || ![...r.sources, ...r.copies].every((id) => copyOf.has(id))) return [];
+      return [{ ...r, group: g, sources: r.sources.map((id) => copyOf.get(id)!), copies: r.copies.map((id) => copyOf.get(id)!) }];
+    });
+    this.doc.commit([...this.doc.bodies, ...grouped], whole.length ? `Duplicate ${whole.join(", ")}` : "Duplicate", this.doc.guides, this.doc.dimensions, [...this.doc.arrays, ...records]);
+    if (whole.length) this.toast(`Copied as ${[...newGroup.values()].join(", ")} — move it into place`);
     this.setMode("body");
     this.setSelection(copies.map((b) => ({ kind: "body", body: b.id, id: 0 })));
     this.startTransform("translate");
     this.placing = this.xf ? { ids: this.xf.ids.join(), version: this.doc.version } : null;
     this.repeatCopyIds = copies.map((b) => b.id).join();
+  }
+
+  /**
+   * Circular copy (corner button by Revolve): `n` objects round an axis — the original counts — in one
+   * undo step. The axis: the X / Y / Z axis line (through the origin), a guide line, or a circle /
+   * arc edge (its centre axis), picked from the list or clicked in the view. A total angle of 360°
+   * spreads them evenly all round; less puts the first and last at its two ends. "Turn copies" off:
+   * the copies only move round (they keep facing the same way).
+   */
+  private circularCopy(rec: ArrayRecord | null = null): void {
+    const edit = rec?.circular ? rec : null;
+    const ids = edit ? [...edit.sources] : this.selectedBodyIds();
+    if (!ids.length) return this.toast("Circular copy: select objects first (Solid mode, key 1)", "error");
+    const along = (a: V3, b: V3): Axis => ({ origin: a, dir: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] });
+    const axes: { name: string; axis: Axis | null; guide?: number }[] = [
+      ...["X", "Y", "Z"].map((n, k) => ({ name: `${n} axis`, axis: { origin: [0, 0, 0] as V3, dir: [0, 1, 2].map((j) => (j === k ? 1 : 0)) as V3 } })),
+      ...this.doc.guides.map((g, i) => ({ name: `Guide line ${i + 1}`, axis: along(g.a, g.b), guide: i })),
+      { name: "Circle edge (click one)", axis: null },
+    ];
+    const CIRCLE = axes.length - 1;
+    // Changing a circular copy: its own axis first choice (moved with the group if it was moved).
+    if (edit) {
+      const c = edit.circular!, d = this.circularShift(edit) ?? [0, 0, 0];
+      axes.push({ name: `As before: ${c.name}`, axis: { origin: [0, 1, 2].map((k) => c.axis.origin[k] + d[k]) as V3, dir: [...c.axis.dir] as V3 } });
+    }
+    /** The clicked circle edge: its centre axis. */
+    let circle: { axis: Axis; body: number; edge: number } | null = null;
+    /** What a click at `e` picks: a circle / arc edge, a guide line or a world axis line. */
+    const axisAt = (e: PointerEvent): { i: number; circle?: { axis: Axis; body: number; edge: number }; at?: THREE.Vector3 } | null => {
+      const h = this.viewport.pick(e.clientX, e.clientY, "edge");
+      const hb = h && this.doc.get(h.body);
+      const c = h && hb && isBrep(hb) ? circleOf(hb.shape, h.id) : null;
+      if (c) return { i: CIRCLE, circle: { axis: { origin: c.center, dir: c.normal }, body: h!.body, edge: h!.id }, at: h!.point };
+      const g = this.viewport.guideAt(e.clientX, e.clientY);
+      if (g >= 0) return { i: 3 + g };
+      const w = this.viewport.axisUnder(e.clientX, e.clientY);
+      if (w < 0) return null;
+      // (the point on that axis line nearest the cursor ray, for its label)
+      const ray = this.viewport.ray(e.clientX, e.clientY), dir = new THREE.Vector3().setComponent(w, 1);
+      const b = ray.direction.dot(dir), d = ray.direction.dot(ray.origin), f = dir.dot(ray.origin);
+      return { i: w, at: dir.multiplyScalar((f - b * d) / (1 - b * b)) };
+    };
+    const select = () => this.op?.inputs.find((i) => i.dataset.key === "axis");
+    const copyName = (b: Body) => b.name.replace(/\s+\d+$/, "");
+    this.startOp({
+      title: edit ? `Change ${edit.group}` : "Circular copy",
+      label: "Circular copy",
+      applyLabel: "Done",
+      fields: [
+        { key: "n", label: "Copies (the original counts)", value: edit?.n ?? 6, step: 1, min: 2 },
+        { key: "angle", label: "Total angle (°, 360: all round)", value: edit?.circular!.angle ?? 360, step: 15 },
+        { key: "axis", label: "Axis", type: "select", options: axes.map((a) => a.name), value: edit ? axes.length - 1 : 2 },
+        { key: "turn", label: "Turn copies (off: they only move round)", value: edit?.circular!.turn ?? 1, type: "checkbox" },
+      ],
+      hint: "Circular copy: click the X / Y / Z axis line, a guide line or a circle edge to copy round it · copies, total angle · Enter or Done apply · Esc cancel",
+      pick: (e) => {
+        const t = axisAt(e), sel = select();
+        if (!t || !sel) return;
+        if (t.circle) circle = t.circle;
+        sel.value = String(t.i);
+        this.previewOp();
+      },
+      hover: (e) => {
+        const t = axisAt(e);
+        this.viewport.setHighlight(this.selection, t?.circle ? { kind: "edge", body: t.circle.body, id: t.circle.edge } : null);
+        const shown = axes[Number(select()?.value ?? -1)];
+        this.viewport.setGuides(this.doc.guides, shown?.guide ?? -1, t && axes[t.i].guide !== undefined ? axes[t.i].guide! : -1);
+        this.hud(t?.at ? (t.circle ? "Circle edge: its centre axis" : axes[t.i].name) : null, t?.at);
+        this.viewport.canvas.style.cursor = t ? "pointer" : "crosshair";
+      },
+      compute: ({ n: count, angle, axis: ai, turn }) => {
+        const a = axes[ai];
+        this.viewport.setGuides(this.doc.guides, a?.guide ?? -1, -1); // (the guide used as the axis shows selected)
+        const ax = ai === CIRCLE ? circle?.axis : a?.axis;
+        if (!ax) throw new OpWaiting("Click a circle edge: the copies go round its centre");
+        if (!(count >= 2) || count !== Math.round(count)) throw new Error("Copies must be a whole number, 2 or more (the original counts)");
+        if (count > 500) throw new Error("At most 500 copies");
+        if (!(Math.abs(angle) > 1e-9) || Math.abs(angle) > 360 + 1e-9) throw new Error("Total angle: between −360° and 360°, not 0");
+        const len = Math.hypot(...ax.dir);
+        if (len < 1e-9) throw new Error("That axis has no direction");
+        const u = new THREE.Vector3(...ax.dir).divideScalar(len), o = new THREE.Vector3(...ax.origin);
+        const step = Math.abs(Math.abs(angle) - 360) < 1e-9 ? angle / count : angle / (count - 1);
+        // The selection's centre: how far round it goes (and, with Turn off, where each copy moves to).
+        const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+        for (const id of ids) {
+          const [p, q] = this.doc.get(id)!.shape.boundingBox.bounds;
+          for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], q[k]); }
+        }
+        const c = new THREE.Vector3((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
+        const rel = c.clone().sub(o), off = rel.clone().sub(u.clone().multiplyScalar(rel.dot(u))).length();
+        if (off < 1e-6 && !turn) throw new Error("The objects sit on the axis: the copies would be on top of each other");
+        const place = (shape: Geom, k: number): Geom => {
+          const deg = step * k;
+          if (turn) return rotateShape(shape, deg, ax.origin, ax.dir);
+          const to = rel.clone().applyAxisAngle(u, THREE.MathUtils.degToRad(deg)).add(o).sub(c);
+          return translateShape(shape, to.toArray() as V3);
+        };
+        const ghost = new Map<number, Shape>();
+        for (let k = 1; k < count; k++) {
+          ids.forEach((id, j) => {
+            const b = this.doc.get(id)!;
+            if (b.kind === "solid" || b.kind === "face") ghost.set(-(k * ids.length + j), place(b.shape, k) as Shape);
+          });
+        }
+        return {
+          ghost,
+          // Changing a circular copy: its old copies make way for the new ones.
+          hide: edit ? [...edit.copies] : [],
+          commit: () => {
+            const copies: Body[] = [];
+            for (let k = 1; k < count; k++) {
+              copies.push(...ids.map((id) => {
+                const b = this.doc.get(id)!;
+                return this.doc.makeBody(place(cloneShape(b.shape), k), copyName(b), b.kind);
+              }));
+            }
+            // The ring is a group: the originals' own group if they share one, else a new "Circular N".
+            const idSet = new Set(ids), groups = new Set(ids.map((id) => this.doc.get(id)!.group));
+            const group = edit ? edit.group : groups.size === 1 && [...groups][0] ? [...groups][0]! : this.newGroupName("Circular");
+            const gone = new Set(edit ? edit.copies : []);
+            const bodies = this.doc.bodies.filter((b) => !gone.has(b.id)).map((b) => (idSet.has(b.id) ? { ...b, group } : b));
+            const made: ArrayRecord = {
+              group, sources: ids, copies: copies.map((b) => b.id), n: count, gap: 0, total: 0, dir: 0, centre: 0, offsets: [],
+              circular: {
+                axis: { origin: [...ax.origin] as V3, dir: [...ax.dir] as V3 },
+                name: ai === CIRCLE ? "Circle edge" : axes[ai].name.replace(/^As before: /, ""),
+                angle, turn: turn ? 1 : 0, centre: c.toArray() as V3,
+                boxes: ids.map((id) => this.doc.get(id)!.shape.boundingBox.bounds),
+              },
+            };
+            const arrays = [...this.doc.arrays.filter((r) => r !== edit), made];
+            this.doc.commit([...bodies, ...copies.map((b) => ({ ...b, group }))], edit ? `Change ${group} ×${count}` : `Circular copy ×${count}`, this.doc.guides, this.doc.dimensions, arrays);
+            return {
+              select: [...ids, ...copies.map((b) => b.id)],
+              solidMode: true,
+              then: () => {
+                this.repeatOps = [];
+                this.repeatCopyIds = "";
+                this.toast(edit ? `${group}: now ${count} round` : `${count} round the ${ai === CIRCLE ? "circle's centre" : axes[ai].name} (${count - 1} new) — to change it later: its icon in the Bodies panel`);
+              },
+            };
+          },
+        };
+      },
+    });
   }
 
   /** Array copy (corner button): a row of copies of the selected objects. */
@@ -3454,6 +3794,7 @@ class App implements ToolHost {
     const rec = this.arrayToChange(ids);
     if (change && typeof rec === "string") return this.toast(rec, "error");
     if (change && !rec) return this.toast("Change the array: select an array's whole group (click its name in the Bodies panel)", "error");
+    if (change && rec && typeof rec !== "string" && rec.circular) return this.circularCopy(rec);
     this.opArrayCopy(ids, typeof rec === "string" ? null : rec, change);
   }
 
@@ -3485,24 +3826,153 @@ class App implements ToolHost {
     if (!rec) return null;
     const members = this.doc.bodies.filter((b) => b.group === group).map((b) => b.id);
     if (members.length !== ids.length) return null; // (part of a group)
-    const why = (what: string) => `${group} can't be changed any more (${what}) — Array copy still makes new copies`;
+    const why = (what: string) => `${group} can't be changed any more (${what}) — ${rec.circular ? "Circular" : "Array"} copy still makes new copies`;
     const made = new Set([...rec.sources, ...rec.copies]);
     if (rec.copies.length !== (rec.n - 1) * rec.sources.length || members.length !== made.size || members.some((id) => !made.has(id))) {
       return why("objects were added to it or taken out");
     }
-    const axis = rec.dir >> 1;
-    const box = (id: number) => this.doc.get(id)!.shape.boundingBox.bounds;
-    for (let k = 1; k < rec.n; k++) {
-      for (let j = 0; j < rec.sources.length; j++) {
-        const src = this.doc.get(rec.sources[j])!, copy = this.doc.get(rec.copies[(k - 1) * rec.sources.length + j])!;
-        const [a0, a1] = box(src.id), [b0, b1] = box(copy.id);
-        const d = rec.offsets[k] - rec.offsets[0], tol = 1e-6 * (1 + Math.abs(d) + Math.hypot(...a1.map((x, i) => x - a0[i])));
-        const moved = [0, 1, 2].some((i) => Math.abs(b0[i] - a0[i] - (i === axis ? d : 0)) > tol || Math.abs(b1[i] - a1[i] - (i === axis ? d : 0)) > tol);
-        const edited = copy.kind !== src.kind || (isBrep(copy) && isBrep(src) && copy.shape.faces.length !== src.shape.faces.length);
-        if (moved || edited) return why(`"${copy.name}" was moved or edited on its own`);
-      }
+    if (rec.circular) return this.circularShift(rec) ? rec : why("an object in it was moved or edited on its own");
+    if (!this.copiesInPlace(rec)) {
+      const S = rec.sources.length, { point } = this.arrayPlacement(rec);
+      // (which one, to say so)
+      const off = rec.copies.find((id, i) => {
+        const p = probePoints(this.doc.get(rec.sources[i % S])!.shape, 1)[0], q = probePoints(this.doc.get(id)!.shape, 1)[0];
+        return !p || !q || Math.hypot(...point(p, Math.floor(i / S) + 1).map((x, a) => x - q[a])) > 1e-6;
+      });
+      return why(`"${this.doc.get(off ?? rec.copies[0])!.name}" was moved or edited on its own`);
     }
     return rec;
+  }
+
+  /**
+   * Each copy of `rec` still where it puts it (a few corner points of each, against its source's
+   * placed there — not bounding boxes, slow on curved shapes), with the same kind and faces.
+   */
+  private copiesInPlace(rec: ArrayRecord, shift: V3 = [0, 0, 0]): boolean {
+    const S = rec.sources.length, { point } = this.arrayPlacement(rec, shift);
+    const faces = (b: Body) => (isBrep(b) ? b.shape.faces.length : -1);
+    const probes = new Map(rec.sources.map((id) => [id, probePoints(this.doc.get(id)!.shape)]));
+    return rec.copies.every((id, i) => {
+      const k = Math.floor(i / S) + 1, src = this.doc.get(rec.sources[i % S])!, copy = this.doc.get(id);
+      if (!copy || copy.kind !== src.kind || faces(copy) !== faces(src)) return false;
+      const ps = probes.get(src.id)!, qs = probePoints(copy.shape);
+      if (ps.length !== qs.length) return false;
+      return ps.every((p, m) => {
+        const want = point(p, k), tol = 1e-6 * (1 + Math.hypot(...want));
+        return [0, 1, 2].every((a) => Math.abs(qs[m][a] - want[a]) <= tol);
+      });
+    });
+  }
+
+  /**
+   * How far a circular copy's group has moved since it was made (all of it together: its sources'
+   * boxes all moved the same, its copies still round the moved axis), or null if one of its objects
+   * was moved or edited on its own.
+   */
+  private circularShift(rec: ArrayRecord): V3 | null {
+    const boxes = rec.circular!.boxes;
+    if (boxes.length < rec.sources.length) return null;
+    const now = rec.sources.map((id) => this.doc.get(id)?.shape.boundingBox.bounds);
+    if (now.some((b) => !b)) return null;
+    const shift = [0, 1, 2].map((k) => now[0]![0][k] - boxes[0][0][k]) as V3;
+    const tol = 1e-6 * (1 + Math.hypot(...boxes[0][1]) + Math.hypot(...shift) + Math.hypot(...rec.circular!.axis.origin));
+    const moved = now.some((b, i) => [0, 1].some((e) => [0, 1, 2].some((k) => Math.abs(b![e][k] - boxes[i][e][k] - shift[k]) > tol)));
+    return moved || !this.copiesInPlace(rec, shift) ? null : shift;
+  }
+
+  /**
+   * Where row k (0 = the sources) of an array / circular copy sits relative to the sources: `place`
+   * puts a source-shaped object there, `unplace` brings one from there back. `shift`: how far the
+   * whole group has moved since it was made (circular: see circularShift).
+   */
+  private arrayPlacement(rec: ArrayRecord, shift: V3 = [0, 0, 0]): { place: (s: Geom, k: number) => Geom; unplace: (s: Geom, k: number) => Geom; point: (p: V3, k: number) => V3 } {
+    const c = rec.circular;
+    const plus = (p: V3, d: V3): V3 => [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+    if (!c) {
+      const axis = rec.dir >> 1;
+      const at = (k: number, sign: number): V3 => [0, 1, 2].map((i) => (i === axis ? sign * (rec.offsets[k] - rec.offsets[0]) : 0)) as V3;
+      return { place: (s, k) => (k ? translateShape(s, at(k, 1)) : s), unplace: (s, k) => (k ? translateShape(s, at(k, -1)) : s), point: (p, k) => plus(p, at(k, 1)) };
+    }
+    const step = Math.abs(Math.abs(c.angle) - 360) < 1e-9 ? c.angle / rec.n : c.angle / (rec.n - 1);
+    const origin = [0, 1, 2].map((i) => c.axis.origin[i] + shift[i]) as V3;
+    const u = new THREE.Vector3(...c.axis.dir).normalize(), o = new THREE.Vector3(...origin);
+    if (c.turn) {
+      return {
+        place: (s, k) => (k ? rotateShape(s, step * k, origin, c.axis.dir) : s),
+        unplace: (s, k) => (k ? rotateShape(s, -step * k, origin, c.axis.dir) : s),
+        point: (p, k) => new THREE.Vector3(...p).sub(o).applyAxisAngle(u, THREE.MathUtils.degToRad(step * k)).add(o).toArray() as V3,
+      };
+    }
+    // Not turned: each copy only moved to where the sources' centre went round to.
+    const centre = this.circularCentre(rec);
+    const rel = new THREE.Vector3(...centre).add(new THREE.Vector3(...shift)).sub(o);
+    const to = (k: number, sign: number) => rel.clone().applyAxisAngle(u, THREE.MathUtils.degToRad(step * k)).sub(rel).multiplyScalar(sign).toArray() as V3;
+    return { place: (s, k) => (k ? translateShape(s, to(k, 1)) : s), unplace: (s, k) => (k ? translateShape(s, to(k, -1)) : s), point: (p, k) => plus(p, to(k, 1)) };
+  }
+
+  /** The sources' centre a circular copy went round from, as it was made (older records: from their boxes). */
+  private circularCentre(rec: ArrayRecord): V3 {
+    const c = rec.circular!;
+    if (c.centre) return c.centre;
+    const src = c.boxes.slice(0, rec.sources.length);
+    return [0, 1, 2].map((i) => (Math.min(...src.map((b) => b[0][i])) + Math.max(...src.map((b) => b[1][i]))) / 2) as V3;
+  }
+
+  /**
+   * Linked copies (Doc.linkCopies): in an array / circular copy that can still be changed, one object
+   * (a source or any copy) changed shape — filleted, pushed / pulled, scaled, rotated... — and the rest
+   * of its column didn't: it becomes the new source, and every copy is made again from it, where it
+   * was. A plain Move of one copy only moves that one (it then can't be changed, as before); so does
+   * anything once the group is taken apart (Ctrl+Shift+G).
+   */
+  private linkCopies(prev: readonly Body[], next: readonly Body[], arrays: readonly ArrayRecord[], label: string): { bodies: readonly Body[]; arrays: readonly ArrayRecord[] } | null {
+    if (label === "Move") return null;
+    const before = new Map(prev.map((b) => [b.id, b])), after = new Map(next.map((b) => [b.id, b]));
+    const replaced = new Map<number, Body>();
+    const records = arrays.map((rec) => {
+      const S = rec.sources.length, members = [...rec.sources, ...rec.copies];
+      if (rec.copies.length !== (rec.n - 1) * S) return rec;
+      if (members.some((id) => !before.has(id) || after.get(id)?.group !== rec.group || replaced.has(id))) return rec;
+      const changed = members.filter((id) => after.get(id)!.shape !== before.get(id)!.shape);
+      if (!changed.length || changed.length === members.length) return rec;
+      // (only an array that was still as it was made: its copies are where the record says)
+      if (this.arrayToChange(members) !== rec) return rec;
+      const shift = rec.circular ? this.circularShift(rec) ?? [0, 0, 0] : ([0, 0, 0] as V3);
+      const { place, unplace } = this.arrayPlacement(rec, shift);
+      const at = (k: number, j: number) => (k ? rec.copies[(k - 1) * S + j] : rec.sources[j]);
+      let did = false;
+      for (let j = 0; j < S; j++) {
+        const column = Array.from({ length: rec.n }, (_, k) => at(k, j));
+        const edited = column.findIndex((id) => after.get(id)!.shape !== before.get(id)!.shape);
+        if (edited < 0 || column.every((id) => after.get(id)!.shape !== before.get(id)!.shape)) continue;
+        const e = after.get(column[edited])!;
+        if (isMesh(e.shape)) continue;
+        const source = unplace(e.shape, edited);
+        column.forEach((id, k) => {
+          if (k === edited) return;
+          const b = after.get(id)!;
+          replaced.set(id, { ...b, kind: e.kind, shape: place(k ? cloneShape(source) : source, k) } as Body);
+        });
+        did = true;
+      }
+      if (!did || !rec.circular) return rec;
+      // Circular: its boxes as they are now (and its axis / centre moved with the group), so it can still be changed.
+      const now = (id: number) => (replaced.get(id) ?? after.get(id)!).shape.boundingBox.bounds;
+      const c = rec.circular, centre = this.circularCentre(rec);
+      return {
+        ...rec,
+        circular: {
+          ...c,
+          axis: { origin: [0, 1, 2].map((i) => c.axis.origin[i] + shift[i]) as V3, dir: c.axis.dir },
+          centre: [0, 1, 2].map((i) => centre[i] + shift[i]) as V3,
+          boxes: rec.sources.map(now),
+        },
+      };
+    });
+    if (!replaced.size) return null;
+    const groups = [...new Set([...replaced.values()].map((b) => b.group))];
+    setTimeout(() => this.toast(`Every copy in ${groups.join(", ")} changed too (Ctrl+Shift+G takes the group apart to change one alone)`));
+    return { bodies: next.map((b) => replaced.get(b.id) ?? b), arrays: records };
   }
 
   /** Last Array copy gap, direction and "Align centre" (the count starts at 2 each time). */
@@ -3844,7 +4314,7 @@ class App implements ToolHost {
     if (this.tool) active.add(`tool.${this.tool.name.toLowerCase()}`);
     if (this.xf) active.add(this.xf.mode === "translate" ? "xf.move" : "xf.rotate");
     if (this.op) {
-      const map: Record<string, string> = { "Push/Pull": "op.pushpull", Fillet: "op.fillet", Chamfer: "op.chamfer", Shell: "op.shell", Revolve: "op.revolve", Sweep: "op.sweep", "Array copy": "edit.array" };
+      const map: Record<string, string> = { "Push/Pull": "op.pushpull", Fillet: "op.fillet", Chamfer: "op.chamfer", Shell: "op.shell", Revolve: "op.revolve", Sweep: "op.sweep", "Array copy": "edit.array", "Circular copy": "edit.circular" };
       active.add(map[this.op.spec.label]);
     }
     for (const b of document.querySelectorAll<HTMLButtonElement>("#corner-tools button")) b.classList.toggle("active", active.has(b.dataset.cmd!));
@@ -3928,6 +4398,12 @@ class App implements ToolHost {
             return this.renderOutliner();
           }
           if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick(ms.map((b) => b.id)); // (Union / Subtract... waiting for solids)
+          if (t.closest(".ol-dup")) {
+            // The copy icon: select the whole group and duplicate it (a new group, moved with the gizmo)
+            this.setMode("body");
+            this.setSelection(ms.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+            return this.run("edit.duplicate");
+          }
           if (t.closest(".ol-array")) {
             // The array icon: select the group and change the array (or say why it can't be)
             const why = this.arrayOfGroup(g);
@@ -4037,10 +4513,11 @@ class App implements ToolHost {
       }
       // Made by Array copy: an icon to change it (dimmed, saying why, once it can't be)
       const arr = this.arrayOfGroup(g);
+      const round = arr !== null && !![...this.doc.arrays].reverse().find((r) => r.group === g)?.circular, arrIcon = round ? ICONS.circular : ICONS.array;
       const arrBtn = arr === null ? "" : typeof arr === "string"
-        ? `<button class="ol-array off" title="${escapeHtml(arr)}">${ICONS.array}</button>`
-        : `<button class="ol-array" title="Array copy (${arr.n} in a row): click to change it">${ICONS.array}</button>`;
-      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${arrBtn}<button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+        ? `<button class="ol-array off" title="${escapeHtml(arr)}">${arrIcon}</button>`
+        : `<button class="ol-array" title="${round ? `Circular copy (${arr.n} round)` : `Array copy (${arr.n} in a row)`}: click to change it">${arrIcon}</button>`;
+      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
       if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
       head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
       head.classList.toggle("hidden", allHidden);
@@ -4152,7 +4629,9 @@ class App implements ToolHost {
         hints = `<kbd>+</kbd> union · <kbd>−</kbd> subtract · <kbd>Shift+I</kbd> intersect<br>(first selected = target)`;
         // A whole array group (changed with its icon in the Bodies panel): what it is, or why it can't be changed now.
         const rec = this.arrayToChange(sel.map((s) => s.body));
-        if (rec) rows.unshift(["Array", typeof rec === "string" ? escapeHtml(rec) : `${escapeHtml(rec.group)} · ${rec.n} in a row`]);
+        if (rec) rows.unshift(typeof rec !== "string" && rec.circular
+          ? ["Circular copy", `${escapeHtml(rec.group)} · ${rec.n} round the ${escapeHtml(rec.circular.name)}${Math.abs(Math.abs(rec.circular.angle) - 360) < 1e-9 ? "" : ` over ${fmt(rec.circular.angle)}°`}`]
+          : ["Array", typeof rec === "string" ? escapeHtml(rec) : `${escapeHtml(rec.group)} · ${rec.n} in a row`]);
       }
     } else if (kind === "face") {
       rows.push(["Faces", String(sel.length)]);
@@ -4305,22 +4784,22 @@ class App implements ToolHost {
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
-      ["L", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap); the new edge is selected"],
+      ["D", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap); the new edge is selected"],
       ["G with a guide line selected", `Move the guide with the gizmo (${this.viewport.snapTip("points / other guides")}) · Tab: exact ΔX,ΔY,ΔZ · Enter done`],
       ["G with edges selected", "Move edge: drag the edge, reshaping its flat-faced solid (bent faces split into triangles)"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       this.viewport.autoSnap
-        ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 15° while rotating). The Auto box by Snap in the status bar turns it off: then hold Ctrl to snap"]
-        : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 15° while rotating (tick Auto by Snap in the status bar to snap without Ctrl)"],
+        ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). The Auto box by Snap in the status bar turns it off: then hold Ctrl to snap"]
+        : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (tick Auto by Snap in the status bar to snap without Ctrl)"],
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list)"],
       ["H", "Shell / hollow (opens the selected faces)"],
       ["C", "Cut by guide or axis: select solid(s), press C, click a guide line or a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
-      ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+L for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
+      ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns"],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
-      ["Shift+L", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
+      ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo"],
@@ -4328,9 +4807,9 @@ class App implements ToolHost {
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
-      ["Shift+G", "Show marks: click one → move gizmo there; or drag a mark to the target"],
+      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
-      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+L)"],
+      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
       ["Del / X", "Delete selected objects"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
@@ -4851,7 +5330,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, revolveFace, extrudeFace, makeSphereAt, sketchPath }; // used by the smoke test
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

@@ -1092,6 +1092,8 @@ export class GuideTool implements Tool {
   private axis = -1;
   /** World axis under the cursor (highlighted: click it for a guide parallel to it), or -1. */
   private hoverAxis = -1;
+  /** Guide from an axis: the solid under the cursor and its extent along the slide axis (for "· 50% across Box 1"). */
+  private across: { name: string; lo: number; hi: number } | null = null;
   /** The reference is a world axis (not an edge): no face, so the guide may go either side. */
   private onAxis = false;
   /** Axis reference: where along the axis it was clicked (the offset line is drawn there), the last pointer event. */
@@ -1145,11 +1147,12 @@ export class GuideTool implements Tool {
     if (this.p1) {
       if (this.p2) objs.push(line(this.p1, this.p2, this.axis >= 0 ? AXIS_COLORS[this.axis] : 0xff6fb5));
     } else if (!this.ref) {
+      // The edge / axis under the cursor glows (thick, with a halo): clicking picks it as the reference.
       const r = this.hoverSides?.faces[0].ref;
-      if (r) objs.push(line(this.v(r.a), this.v(r.b), 0xffd166));
+      if (r) objs.push(this.host.viewport.glowLine(this.v(r.a), this.v(r.b), 0xffd166));
       else if (this.hoverAxis >= 0) {
         const r2 = this.axisRef(this.hoverAxis);
-        objs.push(line(this.v(r2.a), this.v(r2.b), AXIS_COLORS[this.hoverAxis]));
+        objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), AXIS_COLORS[this.hoverAxis]));
       }
     } else {
       const r = this.ref;
@@ -1260,16 +1263,18 @@ export class GuideTool implements Tool {
   private showHud(): void {
     const r = this.ref!;
     if (this.onAxis) {
-      // Which way the guide moved from the axis, signed: "X = 25", "Y = -10".
+      // Which way the guide moved from the axis, signed: "X = 25 mm", "Y = -10 mm" — and over a solid,
+      // how far across it the guide is ("· 50% across Box 1").
       const { k, slide } = this.axisOf(r);
       const signed = this.dist * r.inward[slide];
       const at = new THREE.Vector3().setComponent(k, this.axisAt).addScaledVector(this.v(r.inward), this.dist);
-      this.host.hud(`${"XYZ"[slide]} = ${fmt(signed)}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
+      const across = this.across ? ` · ${fmt(((signed - this.across.lo) / (this.across.hi - this.across.lo)) * 100)}% across ${this.across.name}` : "";
+      this.host.hud(`${"XYZ"[slide]} = ${fmt(signed)} mm${across}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
       return;
     }
     const at = this.v(r.b).add(this.v(r.inward).multiplyScalar(this.dist));
-    const pct = r.width > 0 && Number.isFinite(r.width) ? ` (${fmt((this.dist / r.width) * 100)}%)` : "";
-    this.host.hud(`${fmt(this.dist)}${pct}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
+    const pct = r.width > 0 && Number.isFinite(r.width) ? ` · ${fmt((this.dist / r.width) * 100)}%` : "";
+    this.host.hud(`${fmt(this.dist)} mm${pct}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
   }
 
   move(e: PointerEvent): void {
@@ -1305,15 +1310,23 @@ export class GuideTool implements Tool {
       const vp = this.host.viewport;
       const sp = vp.snapping(e) ? vp.snapPoint(e.clientX, e.clientY) : null;
       vp.showSnapMarker(sp);
+      // Over a solid: through the point under the cursor (not where the ray meets the axis plane, far
+      // behind it in a slanted view); and how far across that solid the guide is.
+      const hit = vp.faceUnder(e.clientX, e.clientY);
       let d: number;
       if (sp) d = sp.point.getComponent(slide);
       else {
-        const p = vp.ray(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3());
+        const p = hit ? hit.point : vp.ray(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3());
         if (!p) return;
         d = snapValue(p.getComponent(slide), this.host.snapStep(e));
       }
       const inward: V3 = [0, 0, 0];
       inward[slide] = d < 0 ? -1 : 1;
+      this.across = null;
+      if (hit && hit.body.kind !== "mesh") {
+        const [lo, hi] = hit.body.shape.boundingBox.bounds;
+        if (hi[slide] - lo[slide] > 1e-6) this.across = { name: hit.body.name, lo: lo[slide], hi: hi[slide] };
+      }
       this.ref = { ...r, inward };
       this.dist = Math.abs(d);
       this.draw();
@@ -1454,7 +1467,7 @@ export class GuideTool implements Tool {
 // ------------------------------------------------------------------ pencil
 
 /**
- * Divide face (L): click two points on the edges of a flat face to split it with a line
+ * Divide face (D): click two points on the edges of a flat face to split it with a line
  * (e.g. the two top midpoints of a box → a ridge edge that Move can lift into a gable).
  * Corners and midpoints snap automatically; anywhere along an edge works too.
  */

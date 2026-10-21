@@ -27,7 +27,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Modify | Push/Pull face (flat face → new solid; solid face → modify, or tick *New solid*), Fillet & Chamfer (selected edges or whole solid), Shell (open selected faces) — all with live preview |
 | Revolve / Sweep | **Revolve** (Modify menu; Pro: **R E**) a flat face about a guide line, one of its edges or X / Y / Z (any angle; a circle beside the axis → a donut) · **Sweep** (Pro: **S W**) a flat face along a path or guide line — a flat ring makes a tube; pick the face and path in the viewport while the panel is open |
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
-| Transform | Move / Rotate gizmo (snaps to grid / 15°), Duplicate, Delete |
+| Transform | Move / Rotate gizmo (snaps to grid / 5°), Duplicate, Delete |
 | History | Unlimited-ish undo / redo (200 steps) |
 | Files | Save/Open native `.y3d` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL |
 

@@ -64,7 +64,7 @@ export const HOUSE: Tutorial = {
     },
     {
       title: "Main ridge line",
-      how: "<kbd>L</kbd> (Divide face): click the <b>midpoint</b> of the top's left edge, then of its right edge (midpoints snap). The new edge is selected.",
+      how: "<kbd>D</kbd> (Divide face): click the <b>midpoint</b> of the top's left edge, then of its right edge (midpoints snap). The new edge is selected.",
       run: (doc, ctx, label) => ridgeLine(doc, ctx, "house", [-MAIN_L / 2, 0, WALL_H], [MAIN_L / 2, 0, WALL_H], label),
     },
     {
@@ -81,7 +81,7 @@ export const HOUSE: Tutorial = {
     },
     {
       title: "Wing ridge line",
-      how: "<kbd>L</kbd>: click the <b>midpoint</b> of the wing's front top edge, then of its back top edge (where it meets the main block).",
+      how: "<kbd>D</kbd>: click the <b>midpoint</b> of the wing's front top edge, then of its back top edge (where it meets the main block).",
       run: (doc, ctx, label) => ridgeLine(doc, ctx, "wing", wingFront, wingBack, label),
     },
     {
@@ -91,7 +91,7 @@ export const HOUSE: Tutorial = {
     },
     {
       title: "Push the wing back",
-      how: `<kbd>1</kbd> (Solid mode), click the wing, <kbd>Shift</kbd>+<kbd>G</kbd> (Move from point): blue marks show on its corners. Press the mark at the <b>top of its back gable</b> (the back end of its ridge) and start dragging back, then hold <kbd>Ctrl</kbd> (snap) + <kbd>Shift</kbd> (straight along Y) and let go on the <b>main roof's ridge</b>. The wing moves back ${WING_BACK} into the main block (it still sticks out ${WING_OUT} in front), and its roof now runs into the main roof. (Or <kbd>G</kbd>, <kbd>Tab</kbd>: ΔY <b>${WING_BACK}</b>.)`,
+      how: `<kbd>1</kbd> (Solid mode), click the wing, <kbd>G</kbd> <kbd>G</kbd> (Move from point): blue marks show on its corners. Press the mark at the <b>top of its back gable</b> (the back end of its ridge) and start dragging back, then hold <kbd>Ctrl</kbd> (snap) + <kbd>Shift</kbd> (straight along Y) and let go on the <b>main roof's ridge</b>. The wing moves back ${WING_BACK} into the main block (it still sticks out ${WING_OUT} in front), and its roof now runs into the main roof. (Or <kbd>G</kbd>, <kbd>Tab</kbd>: ΔY <b>${WING_BACK}</b>.)`,
       run(doc, ctx, label) {
         const w = body(doc, ctx, "wing");
         replace(doc, w.id, translateShape(w.shape, [0, WING_BACK, 0]), label);
