@@ -386,7 +386,7 @@ export class MeasureTool implements Tool {
     vp.setOverlay(objs);
     const tip = [
       "Click a point to start (corners, midpoints and centres snap)",
-      "Click a second point for the length (along X / Y / Z it locks on — red / green / blue; Ctrl: grid steps) · Esc: exit",
+      `Click a second point for the length (along X / Y / Z it locks on — red / green / blue; ${this.host.viewport.stepTip("grid steps")}) · Esc: exit`,
       "Click a third point for the angle at the second · Esc: new measurement",
       "Click to start a new measurement · Esc: clear",
     ][n];

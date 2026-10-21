@@ -29,7 +29,7 @@ import {
 
 export interface ToolHost {
   viewport: Viewport;
-  /** Grid step for snapping; 0 unless Ctrl is held (or when snapping is off). */
+  /** Grid step for snapping; 0 when not snapping (see Viewport.snapping) or when the step is Off. */
   snapStep(e: { ctrlKey: boolean } | null): number;
   hint(text: string): void;
   toast(msg: string, kind?: "info" | "error"): void;
@@ -173,7 +173,7 @@ abstract class DrawTool implements Tool {
   /** The planar face frame under the cursor, or the ground plane. */
   protected frameUnder(e: PointerEvent): PlaneFrame {
     const frame = this.faceFrameUnder(e);
-    const sp = e.ctrlKey ? this.host.viewport.snapPoint(e.clientX, e.clientY) : null;
+    const sp = this.host.viewport.snapping(e) ? this.host.viewport.snapPoint(e.clientX, e.clientY) : null;
     // Vertices / edge midpoints sit on several faces at once, so the face under the cursor
     // is ambiguous: draw on the view's work plane through the point. Centres keep their face.
     if (sp && (sp.kind !== "center" || Math.abs(sp.point.clone().sub(frame.origin).dot(frame.z)) > 1e-4)) {
@@ -200,9 +200,9 @@ abstract class DrawTool implements Tool {
   /** True when the last hit()/height() locked onto an object snap point. */
   protected objSnapped = false;
 
-  /** Object snap under the cursor (only while Ctrl is held); updates the marker. */
+  /** Object snap under the cursor (when snapping, see Viewport.snapping); updates the marker. */
   private objectSnap(e: PointerEvent): THREE.Vector3 | null {
-    const snap = e.ctrlKey ? this.host.viewport.snapPoint(e.clientX, e.clientY) : null;
+    const snap = this.host.viewport.snapping(e) ? this.host.viewport.snapPoint(e.clientX, e.clientY) : null;
     this.host.viewport.showSnapMarker(snap);
     return snap ? snap.point : null;
   }
@@ -924,14 +924,14 @@ export class PointMoveTool implements Tool {
 
   private updateHint(): void {
     const base = this.base
-      ? "Move: drag/click to the target point (Shift = axis lock, Ctrl = snap) — or type dx,dy,dz + Enter · Esc cancel"
+      ? `Move: drag/click to the target point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
       : "Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target";
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
   private pointAt(e: PointerEvent, planeZ: number, exclude?: Set<number>): THREE.Vector3 | null {
     const vp = this.host.viewport;
-    const sp = e.ctrlKey ? vp.snapPoint(e.clientX, e.clientY, exclude) : null;
+    const sp = vp.snapping(e) ? vp.snapPoint(e.clientX, e.clientY, exclude) : null;
     vp.showSnapMarker(sp);
     if (sp) return sp.point;
     const p = vp.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ), new THREE.Vector3());
@@ -1174,7 +1174,7 @@ export class GuideTool implements Tool {
       : this.ref && this.onAxis
         ? this.axisHint()
         : this.ref
-        ? "Guide line: move across the face under the cursor (Ctrl snaps to points / grid) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel"
+        ? `Guide line: move across the face under the cursor (${this.host.viewport.snapTip("points / grid")}) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel`
         : "Guide line: click a reference edge or an X / Y / Z axis (parallel guide), or click a point — corner / midpoint / centre, Ctrl: any snap — to draw a guide through two points";
     this.host.hint(this.typed ? `${t}   ⌨ ${this.typed}_` : t);
   }
@@ -1183,10 +1183,13 @@ export class GuideTool implements Tool {
     const { k, slide } = this.axisOf(this.ref!);
     const name = (i: number) => `${"XYZ"[i]} (${["red", "green", "blue"][i]})`;
     const other = k === 2 ? ` — press ${"XY"[1 - slide]} to move along ${"XY"[1 - slide]} instead` : "";
-    return `Guide parallel to the ${"XYZ"[k]} axis, moving along ${name(slide)}${other} · either side (Ctrl snaps to points / grid) · type a distance or Tab for distance / count · Enter / click add · Esc cancel`;
+    return `Guide parallel to the ${"XYZ"[k]} axis, moving along ${name(slide)}${other} · either side (${this.host.viewport.snapTip("points / grid")}) · type a distance or Tab for distance / count · Enter / click add · Esc cancel`;
   }
 
-  /** Point snap for 2-point guides: corners / midpoints / centres always, any snap (edges, guides, axes) with Ctrl. */
+  /**
+   * Point snap for 2-point guides: corners / midpoints / centres always, any snap (edges, guides, axes)
+   * only with Ctrl, whatever Auto snap says — a plain click on an edge / axis picks it as the reference.
+   */
   private pointSnap(e: PointerEvent): { point: THREE.Vector3; kind: SnapKind } | null {
     const sp = this.host.viewport.snapPoint(e.clientX, e.clientY);
     return sp && (e.ctrlKey || sp.kind === "vertex" || sp.kind === "midpoint" || sp.kind === "center") ? sp : null;
@@ -1300,7 +1303,7 @@ export class GuideTool implements Tool {
       const nk = [0, 1, 2].find((j) => j !== k && j !== slide)!;
       const plane = new THREE.Plane(new THREE.Vector3().setComponent(nk, 1), 0);
       const vp = this.host.viewport;
-      const sp = e.ctrlKey ? vp.snapPoint(e.clientX, e.clientY) : null;
+      const sp = vp.snapping(e) ? vp.snapPoint(e.clientX, e.clientY) : null;
       vp.showSnapMarker(sp);
       let d: number;
       if (sp) d = sp.point.getComponent(slide);
@@ -1324,9 +1327,9 @@ export class GuideTool implements Tool {
     const r = this.ref;
     const n = this.v(r.inward).cross(this.v(r.b).sub(this.v(r.a))).normalize();
     const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, this.v(r.a));
-    // Ctrl: snap to object points (corners, midpoints, centres, other guides / axes), else to the grid step.
+    // Snapping: to object points (corners, midpoints, centres, other guides / axes), else to the grid step.
     const vp = this.host.viewport;
-    const sp = e.ctrlKey ? vp.snapPoint(e.clientX, e.clientY) : null;
+    const sp = vp.snapping(e) ? vp.snapPoint(e.clientX, e.clientY) : null;
     vp.showSnapMarker(sp);
     let d: number;
     if (sp) {

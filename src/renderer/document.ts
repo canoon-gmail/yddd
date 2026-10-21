@@ -72,11 +72,30 @@ export const isBrep = (b: Body): b is ShapeBody => b.kind === "solid" || b.kind 
 /** A body's content without its id / name (what makeBody and reset take). */
 export type BodyGeom = { kind: "solid" | "face"; shape: Shape } | { kind: "mesh"; shape: TriMesh } | { kind: "path"; shape: Wire };
 
+/**
+ * How an Array copy was made, so it can be changed later (select the group, Array copy): `copies`
+ * row by row (row k = 1..n, one per source), `offsets` along the direction's axis for the sources
+ * (k = 0) and each row, `span` the edge / path it was spread along (if any).
+ */
+export interface ArrayRecord {
+  readonly group: string;
+  readonly sources: readonly number[];
+  readonly copies: readonly number[];
+  readonly n: number;
+  readonly gap: number;
+  readonly total: number;
+  readonly dir: number;
+  readonly centre: number;
+  readonly offsets: readonly number[];
+  readonly span?: { readonly axis: number; readonly a: number; readonly b: number };
+}
+
 type Snapshot = readonly Body[];
-interface HistoryEntry {
+export interface HistoryEntry {
   bodies: Snapshot;
   guides: readonly Guide[];
   dims: readonly Dimension[];
+  arrays: readonly ArrayRecord[];
   label: string;
 }
 
@@ -86,6 +105,7 @@ export class Doc {
   private snapshot: Snapshot = [];
   private guideList: readonly Guide[] = [];
   private dimList: readonly Dimension[] = [];
+  private arrayList: readonly ArrayRecord[] = [];
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
   private nextId = 1;
@@ -117,6 +137,11 @@ export class Doc {
   /** Replace the dimensions in one undoable step. */
   setDimensions(next: readonly Dimension[], label: string): void {
     this.commit(this.snapshot, label, this.guideList, next);
+  }
+
+  /** Array copies that can still be changed (see ArrayRecord); records whose sources are gone are dropped. */
+  get arrays(): readonly ArrayRecord[] {
+    return this.arrayList;
   }
 
   get(id: number): Body | undefined {
@@ -159,14 +184,15 @@ export class Doc {
     return this.relinkDims && next !== this.snapshot && dims.some((d) => d.body !== undefined) ? this.relinkDims(dims, this.snapshot, next) : dims;
   }
 
-  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList): void {
+  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList, arrays: readonly ArrayRecord[] = this.arrayList): void {
     dims = this.relinked(dims, next);
-    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, dims: this.dimList, label });
+    this.undoStack.push(this.entry(label));
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
     this.redoStack = [];
     this.snapshot = next;
     this.guideList = guides;
     this.dimList = dims;
+    this.arrayList = liveArrays(arrays, next);
     this.dirty = true;
     this.version++;
     this.emit();
@@ -177,6 +203,7 @@ export class Doc {
     if (!this.undoStack.length) return this.commit(next, "Edit");
     this.redoStack = [];
     this.dimList = this.relinked(this.dimList, next);
+    this.arrayList = liveArrays(this.arrayList, next);
     this.snapshot = next;
     this.dirty = true;
     this.version++;
@@ -201,13 +228,23 @@ export class Doc {
     return this.undoStack.at(-1)?.label ?? null;
   }
 
+  /** The current state as a history entry. */
+  private entry(label: string): HistoryEntry {
+    return { bodies: this.snapshot, guides: this.guideList, dims: this.dimList, arrays: this.arrayList, label };
+  }
+
+  private restoreEntry(e: HistoryEntry): void {
+    this.snapshot = e.bodies;
+    this.guideList = e.guides;
+    this.dimList = e.dims;
+    this.arrayList = e.arrays;
+  }
+
   undo(): string | null {
     const entry = this.undoStack.pop();
     if (!entry) return null;
-    this.redoStack.push({ bodies: this.snapshot, guides: this.guideList, dims: this.dimList, label: entry.label });
-    this.snapshot = entry.bodies;
-    this.guideList = entry.guides;
-    this.dimList = entry.dims;
+    this.redoStack.push(this.entry(entry.label));
+    this.restoreEntry(entry);
     this.dirty = true;
     this.version++;
     this.emit();
@@ -217,10 +254,8 @@ export class Doc {
   redo(): string | null {
     const entry = this.redoStack.pop();
     if (!entry) return null;
-    this.undoStack.push({ bodies: this.snapshot, guides: this.guideList, dims: this.dimList, label: entry.label });
-    this.snapshot = entry.bodies;
-    this.guideList = entry.guides;
-    this.dimList = entry.dims;
+    this.undoStack.push(this.entry(entry.label));
+    this.restoreEntry(entry);
     this.dirty = true;
     this.version++;
     this.emit();
@@ -231,12 +266,14 @@ export class Doc {
    * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
    * is an index into `bodies` (as saved in a file), turned into that body's new id.
    */
-  reset(bodies: (BodyGeom & { name: string; group?: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = []): void {
+  reset(bodies: (BodyGeom & { name: string; group?: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = []): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;
     this.snapshot = bodies.map((b) => ({ ...b, id: this.nextId++ }));
+    const idOf = (i: number) => this.snapshot[i]?.id ?? -1;
     this.dimList = dims.map(({ body, ...d }) => (body !== undefined && this.snapshot[body] ? { ...d, body: this.snapshot[body].id } : d));
+    this.arrayList = liveArrays(arrays.map((r) => ({ ...r, sources: r.sources.map(idOf), copies: r.copies.map(idOf) })), this.snapshot);
     this.undoStack = [];
     this.redoStack = [];
     this.filePath = filePath;
@@ -244,6 +281,36 @@ export class Doc {
     this.version++;
     this.emit();
   }
+
+  /** Undo / redo history (oldest first), the naming counters and the next id: what a file saves to keep undo working. */
+  history(): { undo: readonly HistoryEntry[]; redo: readonly HistoryEntry[]; counters: [string, number][]; nextId: number } {
+    return { undo: this.undoStack, redo: this.redoStack, counters: [...this.counters], nextId: this.nextId };
+  }
+
+  /**
+   * Open a saved state with its history (ids as saved, so the steps fit together). Like `reset`, it
+   * counts as unchanged.
+   */
+  restore(current: HistoryEntry, h: { undo: HistoryEntry[]; redo: HistoryEntry[]; counters: [string, number][]; nextId: number }, filePath: string | null): void {
+    this.restoreEntry(current);
+    this.undoStack = h.undo;
+    this.redoStack = h.redo;
+    this.counters = new Map(h.counters);
+    const ids = [current, ...h.undo, ...h.redo].flatMap((e) => e.bodies.map((b) => b.id));
+    this.nextId = Math.max(h.nextId, ...ids.map((id) => id + 1), 1);
+    this.filePath = filePath;
+    this.dirty = false;
+    this.version++;
+    this.emit();
+  }
+}
+
+/** Array records whose sources are all still there (the copies may be gone: then it can't be changed, see main). */
+function liveArrays(arrays: readonly ArrayRecord[], bodies: Snapshot): readonly ArrayRecord[] {
+  if (!arrays.length) return arrays;
+  const ids = new Set(bodies.map((b) => b.id));
+  const live = arrays.filter((r) => r.sources.every((id) => ids.has(id)));
+  return live.length === arrays.length ? arrays : live;
 }
 
 /** `b` with new geometry (same id / name). A face body may become a solid (push/pull); a mesh stays a mesh. */

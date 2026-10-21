@@ -33545,6 +33545,7 @@ export declare class ReplicadMeshExtractor {
   constructor();
   static mesh(shape: TopoDS_Shape, tolerance: number, angularTolerance: number): void;
   static extract(shape: TopoDS_Shape, tolerance: number, angularTolerance: number, skipNormals: boolean): ReplicadMeshData;
+  static extractWith(shape: TopoDS_Shape, tolerance: number, angularTolerance: number, interiorTolerance: number, interiorAngle: number, minSize: number, flags: number, skipNormals: boolean): ReplicadMeshData;
   /** Releases the C++ object. The caller must ensure no further access. */
   delete(): void;
   [Symbol.dispose](): void;

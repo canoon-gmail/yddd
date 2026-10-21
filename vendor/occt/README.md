@@ -8,3 +8,8 @@ replicad's `build-config/custom_build_single.yml` with the additions marked `# y
 Added: `Y3DFaceOffset` (per-face offset, wrappers/y3d-face-offset.cpp), `BRepFeat_MakePrism`,
 `BRepAlgoAPI_Defeaturing`, `BRepTools_ReShape`, `ShapeBuild_ReShape`, `ShapeAnalysis_Surface`,
 `Geom_RectangularTrimmedSurface`, `ShapeFix_Shape`, `BRepCheck_Result`, `LocOpe_SplitShape`.
+
+`ReplicadMeshExtractor.extractWith` (wrappers/mesh-extractor.cpp): mesh with BRepMesh's own
+parameters (interior deflection / angle, MinSize, flags for ControlSurfaceDeflection,
+InternalVerticesMode, ...) — y3d's display meshes turn surface control off (see `meshFaces` in
+kernel.ts). The original wasm is kept in `~/occt-build/backup-2026-10-20/`.

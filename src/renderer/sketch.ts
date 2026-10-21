@@ -679,7 +679,7 @@ export class SketchTool implements Tool {
     return null;
   }
 
-  /** Dragging a picture handle: scale (by the cursor's distance from the centre) or rotate (by its turn about it); Ctrl: 5% / 15° steps. */
+  /** Dragging a picture handle: scale (by the cursor's distance from the centre) or rotate (by its turn about it); when snapping: 5% / 15° steps. */
   private picGripTo(e: PointerEvent): void {
     const p = this.pic!, g = this.picGrip.drag!, q = this.planeAt(e);
     if (!q) return;
@@ -818,13 +818,14 @@ export class SketchTool implements Tool {
 
   // ------------------------------------------------------------ pointer
 
-  /** Cursor point in the plane: the sketch's own points, then the model's points, else the plane (Ctrl: grid). */
+  /** Cursor point in the plane: the sketch's own points, then the model's points, else the plane (grid when snapping). Auto snap + Ctrl: free, no points. */
   private pointAt(e: PointerEvent): P | null {
     const vp = this.host.viewport;
     this.lock = -1;
     this.aligned = [];
+    const free = vp.autoSnap && e.ctrlKey;
     let best: { p: P; kind: "vertex" | "midpoint" | "center"; score: number } | null = null;
-    for (const { p, kind } of this.ownPoints()) {
+    for (const { p, kind } of free ? [] : this.ownPoints()) {
       const s = vp.toScreen(this.world(p));
       const d = Math.hypot(s.x - e.clientX, s.y - e.clientY);
       const score = d + (kind === "vertex" ? 0 : 4); // ends before middles / centres
@@ -834,7 +835,7 @@ export class SketchTool implements Tool {
       vp.showSnapMarker({ point: this.world(best.p), kind: best.kind });
       return best.p;
     }
-    const sp = vp.snapPoint(e.clientX, e.clientY);
+    const sp = free ? null : vp.snapPoint(e.clientX, e.clientY);
     if (sp && sp.kind !== "axis") {
       const p = this.local(sp.point);
       vp.showSnapMarker({ point: this.world(p), kind: sp.kind });
@@ -938,7 +939,7 @@ export class SketchTool implements Tool {
     return w && this.local(w);
   }
 
-  /** Dragging the selection: everything selected follows the cursor (Ctrl: in grid steps). */
+  /** Dragging the selection: everything selected follows the cursor (in grid steps when snapping). */
   private dragTo(e: PointerEvent): void {
     const dr = this.drag!;
     if (!dr.moved && Math.hypot(e.clientX - dr.x, e.clientY - dr.y) < DRAG_PX) return;
@@ -1906,7 +1907,7 @@ export class SketchTool implements Tool {
       lines([k, ro], this.gizmoMat(0xffd84a, "line") as THREE.LineBasicMaterial);
       if (pg.drag || pg.hover) {
         const deg = (((pic.turned * 180) / Math.PI + 540) % 360) - 180;
-        hud = (pg.drag?.kind ?? pg.hover) === "scale" ? `Scale ${num((pic.w / pic.w0) * 100)}%${pg.drag ? " · Ctrl: 5% steps" : ""}` : `Rotate ${num(Math.abs(deg) < 1e-9 ? 0 : deg)}°${pg.drag ? " · Ctrl: 15° steps" : ""}`;
+        hud = (pg.drag?.kind ?? pg.hover) === "scale" ? `Scale ${num((pic.w / pic.w0) * 100)}%${pg.drag ? ` · ${this.host.viewport.stepTip("5% steps")}` : ""}` : `Rotate ${num(Math.abs(deg) < 1e-9 ? 0 : deg)}°${pg.drag ? ` · ${this.host.viewport.stepTip("15° steps")}` : ""}`;
         gripAt = (pg.drag?.kind ?? pg.hover) === "rotate" ? ro : k;
       }
     }
@@ -1943,8 +1944,8 @@ export class SketchTool implements Tool {
   private renderPanel(): void {
     const nSel = this.selected.length;
     const tips: Record<Mode, string> = {
-      select: this.scaling ? `Scale: drag the red square (X), green (Y) or the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} — Ctrl: round steps · Tab: exact % · Enter / click elsewhere: apply · Esc / right click: cancel`
-        : nSel ? `${nSel} selected · drag to move (Ctrl: grid steps) or type dx,dy + Enter · S: scale (or type a % + Enter) · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
+      select: this.scaling ? `Scale: drag the red square (X), green (Y) or the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} — ${this.host.viewport.stepTip("round steps")} · Tab: exact % · Enter / click elsewhere: apply · Esc / right click: cancel`
+        : nSel ? `${nSel} selected · drag to move (${this.host.viewport.stepTip("grid steps")}) or type dx,dy + Enter · S: scale (or type a % + Enter) · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
       line: this.first ? "Click the next point · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`

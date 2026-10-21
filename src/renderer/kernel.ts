@@ -41,6 +41,7 @@ import {
   makePolygon,
   iterTopo,
   cast,
+  Shape as OcShape,
   Face,
   Wire,
   Edge,
@@ -156,6 +157,43 @@ let oc: any;
 export async function initKernel(): Promise<void> {
   oc = await opencascade({ locateFile: () => wasmUrl });
   setOC(oc);
+  fastSubShapes();
+}
+
+/**
+ * replicad's `shape.edges` / `shape.faces` skip repeats by comparing each one found with every one
+ * before it: n² calls into the kernel (~40 ms for the ~450 edges of a plate with 36 holes, on every
+ * Properties refresh and tessellation). Bucketed by hash code, only same-hash ones are compared —
+ * same items, same order.
+ */
+function fastSubShapes(): void {
+  type Topo = { IsSame(o: unknown): boolean; delete(): void };
+  const unique = <T>(shape: unknown, kind: "TopAbs_EDGE" | "TopAbs_FACE", wrap: (s: Topo) => T): T[] => {
+    const ex = new oc.TopExp_Explorer(shape as never, oc.TopAbs_ShapeEnum[kind], oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+    const seen = new Map<number, Topo[]>();
+    const out: T[] = [];
+    try {
+      for (; ex.More(); ex.Next()) {
+        const item = ex.Current() as unknown as Topo;
+        const h = oc.ReplicadShapeHasher.HashCode(item as never, 2147483647); // (replicad's bound: same codes as .hashCode)
+        const bucket = seen.get(h);
+        if (bucket?.some((s) => s.IsSame(item))) {
+          item.delete();
+          continue;
+        }
+        if (bucket) bucket.push(item);
+        else seen.set(h, [item]);
+        out.push(wrap(item));
+      }
+    } finally {
+      ex.delete();
+    }
+    return out;
+  };
+  Object.defineProperties(OcShape.prototype, {
+    edges: { configurable: true, get(this: OcShape<never>) { return unique(this.wrapped, "TopAbs_EDGE", (e) => new Edge(oc.TopoDS.Edge(e as never))); } },
+    faces: { configurable: true, get(this: OcShape<never>) { return unique(this.wrapped, "TopAbs_FACE", (f) => new Face(oc.TopoDS.Face(f as never))); } },
+  });
 }
 
 /**
@@ -259,6 +297,9 @@ export interface Tessellation {
   edges: ShapeEdgeMesh;
 }
 
+/** Above this many faces a shape is drawn with coarser round edges (see `tessellate`). */
+export const BUSY_FACES = 30;
+
 export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   // Size from points along the edges (a bounding box of B-spline faces is slow to compute — tens
   // of ms); midpoints too, for a whole circle whose one edge starts and ends at the same point.
@@ -267,10 +308,102 @@ export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   const diag = (ends.length ? Math.hypot(span(0), span(1), span(2)) : 0) || 1;
   const tolerance = Math.min(0.1, Math.max(0.001, diag * 2e-4));
   // A live preview is redrawn on every change: 4x coarser (about a quarter of the triangles,
-  // several times faster to mesh), still smooth on screen. Bodies get the full quality.
-  const opts = preview ? { tolerance: tolerance * 4, angularTolerance: 0.3 } : { tolerance, angularTolerance: 0.15 };
+  // several times faster to mesh), still smooth on screen. Bodies get the full quality — except
+  // busy ones (e.g. a plate with 36 round holes): a coarser angle, so small round edges (radius
+  // under ~10 mm) get about a third fewer segments; larger curves are set by `tolerance` anyway.
+  // (~2.5× faster to mesh)
+  const angle = !(shape instanceof Wire) && shape.faces.length > BUSY_FACES ? 0.3 : 0.15;
+  const opts = preview ? { tolerance: tolerance * 4, angularTolerance: 0.3 } : { tolerance, angularTolerance: angle };
   if (shape instanceof Wire) return { faces: shape.mesh(opts), edges: shape.meshEdges(opts) }; // a path: lines only
-  return { faces: shape.mesh(opts), edges: withoutSeams(shape.meshEdges(opts), seamEdgeIds(shape)) };
+  const { mesh, whole } = meshFaces(shape, opts);
+  // Edge lines come from the shape's triangulation; meshed in parts it has none as a whole
+  // (OpenCascade would mesh it all again, stand-ins' faces too): from the edges alone then.
+  const edgeLines = whole ? shape.meshEdges(opts) : (makeCompound(shape.edges) as unknown as Shape).meshEdges(opts);
+  return { faces: mesh, edges: withoutSeams(edgeLines, seamEdgeIds(shape)) };
+}
+
+/**
+ * Triangles of a shape's faces. A linear-extrusion face (the side of a pushed free-form or
+ * stretched outline) is meshed as its exact B-spline instead: OpenCascade meshes the extrusion
+ * form ~60× finer than it needs (24,600 triangles for the side of a pushed stretched circle,
+ * against 400 — 170 ms, against 10), just as close. Display only: the face keeps its id. A
+ * trimmed one (e.g. with a hole) is meshed as it is. `whole` false: meshed in parts.
+ */
+function meshFaces(shape: Shape, opts: { tolerance: number; angularTolerance: number }): { mesh: ShapeMesh; whole: boolean } {
+  const faces = shape.faces;
+  const stand = faces.map((f) => (f.geomType === "EXTRUSION_SURFACE" ? extrusionStandIn(f) : null));
+  if (!stand.some(Boolean)) return { mesh: extractMesh(shape.wrapped, opts), whole: true };
+  const rest = faces.filter((_, i) => !stand[i]);
+  const parts: { mesh: ShapeMesh; id?: number }[] = rest.length ? [{ mesh: extractMesh((makeCompound(rest) as unknown as Shape).wrapped, opts) }] : [];
+  stand.forEach((f, i) => f && parts.push({ mesh: extractMesh(f.wrapped, opts), id: faces[i].hashCode }));
+  const out: ShapeMesh = { vertices: [], normals: [], triangles: [], faceGroups: [] };
+  for (const { mesh, id } of parts) {
+    const v0 = out.vertices.length / 3, t0 = out.triangles.length;
+    for (const x of mesh.vertices) out.vertices.push(x);
+    for (const x of mesh.normals) out.normals.push(x);
+    for (const x of mesh.triangles) out.triangles.push(x + v0);
+    for (const g of mesh.faceGroups) out.faceGroups.push({ start: g.start + t0, count: g.count, faceId: id ?? g.faceId });
+  }
+  return { mesh: out, whole: false };
+}
+
+/**
+ * The exact B-spline stand-in of a linear-extrusion face, facing the same way — only for a face
+ * that is the whole of its parameter rectangle (same area: not trimmed or holed); null otherwise.
+ */
+function extrusionStandIn(face: Face): Face | null {
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const bs = extrudedSurface(face, keep);
+    if (!bs) return null;
+    const ad = keep(new oc.BRepAdaptor_Surface(face.wrapped, true));
+    const mk = keep(new oc.BRepBuilderAPI_MakeFace(bs as never, ad.FirstUParameter(), ad.LastUParameter(), ad.FirstVParameter(), ad.LastVParameter(), 1e-7));
+    if (!mk.IsDone()) return null;
+    const made = mk.Face();
+    const out = new Face(face.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? oc.TopoDS.Face(made.Reversed()) : made);
+    const a = measureArea(face);
+    return Math.abs(measureArea(out) - a) <= 1e-6 * Math.max(1, a) ? out : null;
+  } catch {
+    return null;
+  } finally {
+    for (const o of tmp) {
+      try {
+        o.delete();
+      } catch {
+        // already owned by OpenCascade
+      }
+    }
+  }
+}
+
+/**
+ * BRepMesh options for display meshes (flags of y3d's ReplicadMeshExtractor.extractWith): its
+ * defaults — surface control on (refine inside curved faces until within the tolerance), internal
+ * vertices on. (Surface control off looks cheap but isn't close: 2.5 mm off on a pushed oval's
+ * side, 6 mm on a stretched dome.)
+ */
+const MESH_FLAGS = 5;
+
+/** Mesh `shape` (MESH_FLAGS) and read the triangles out. */
+function extractMesh(shape: unknown, opts: { tolerance: number; angularTolerance: number }): ShapeMesh {
+  const raw = oc.ReplicadMeshExtractor.extractWith(shape, opts.tolerance, opts.angularTolerance, -1, -1, 0, MESH_FLAGS, false);
+  try {
+    // (read after meshing: the wasm memory may have grown)
+    const buf = oc.wasmMemory.buffer;
+    const read = <A extends Float32Array | Uint32Array | Int32Array>(Kind: new (b: ArrayBuffer, o: number, n: number) => A, ptr: number, n: number) => Array.from(new Kind(buf, ptr >>> 0, n));
+    const groups = read(Int32Array, raw.getFaceGroupsPtr(), raw.getFaceGroupsSize());
+    const faceGroups: ShapeMesh["faceGroups"] = [];
+    for (let i = 0; i < groups.length; i += 3) faceGroups.push({ start: groups[i], count: groups[i + 1], faceId: groups[i + 2] });
+    return {
+      vertices: read(Float32Array, raw.getVerticesPtr(), raw.getVerticesSize()),
+      normals: read(Float32Array, raw.getNormalsPtr(), raw.getNormalsSize()),
+      triangles: read(Uint32Array, raw.getTrianglesPtr(), raw.getTrianglesSize()),
+      faceGroups,
+    };
+  } finally {
+    raw.delete();
+  }
 }
 
 /**
@@ -478,8 +611,23 @@ export function faceEdgeIds(shape: Shape, faceId: number): Set<number> {
 export function planarFaceFrame(shape: Shape, faceId: number): Frame | null {
   const face = findFace(shape, faceId);
   if (!face || face.geomType !== "PLANE") return null;
-  const c = face.center.toTuple();
-  const z = face.normalAt(face.center).normalized().toTuple();
+  return frameOnPlane(face.center.toTuple() as V3, face.normalAt(face.center).normalized().toTuple() as V3);
+}
+
+/**
+ * A sketch frame on the plane touching a curved face — at `near` (a point on the face, e.g. under
+ * the cursor) or else its middle — facing out. Anything drawn on it is flat: it touches the face
+ * there, it doesn't follow the curve.
+ */
+export function tangentFaceFrame(shape: Shape, faceId: number, near?: V3): { frame: Frame; at: V3 } | null {
+  const face = findFace(shape, faceId);
+  if (!face) return null;
+  const at = near ?? (pointOnFace(face).toTuple() as V3);
+  return { frame: frameOnPlane(at, near ? normalNear(face, near) : normalAtUV(face, 0.5, 0.5)), at };
+}
+
+/** A frame on the plane through `c` with normal `z`: x level (world X on top / bottom faces), origin the world origin's projection. */
+function frameOnPlane(c: V3, z: V3): Frame {
   const ref: V3 = Math.abs(z[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
   // x = normalize(ref - (ref·z) z)  (for top/bottom faces this is world X)
   const rd = ref[0] * z[0] + ref[1] * z[1] + ref[2] * z[2];
@@ -543,6 +691,25 @@ export function nearestOnEdge(shape: Shape | Wire, edgeId: number, p: V3): V3 | 
     d.delete();
     v.delete();
   }
+}
+
+/**
+ * The cone of a CONE face, placed where the face is. Not `BRepAdaptor_Surface.Cone()`: gp_Cone isn't
+ * in this wasm build — the face's Geom_ConicalSurface (under any trimming) has the same Position /
+ * RefRadius / SemiAngle.
+ */
+function coneOf(face: Face): { Position(): any; RefRadius(): number; SemiAngle(): number; delete(): void } {
+  let s = oc.BRep_Tool.Surface(face.wrapped); // (with the face's location applied)
+  while (typeof s.SemiAngle !== "function" && typeof s.BasisSurface === "function") {
+    const basis = s.BasisSurface();
+    s.delete();
+    s = basis;
+  }
+  if (typeof s.SemiAngle !== "function") {
+    s.delete();
+    throw new Error("not a cone");
+  }
+  return s;
 }
 
 /**
@@ -1225,7 +1392,7 @@ export function faceInfo(shape: Shape, faceId: number): FaceInfo | null {
       case "CYLINDRE":
         return { type: "cylinder", area, radius: keep(ad.Cylinder()).Radius(), height: ad.LastVParameter() - ad.FirstVParameter(), angle };
       case "CONE": {
-        const cone = keep(ad.Cone());
+        const cone = keep(coneOf(f));
         return { type: "cone", area, radius: cone.RefRadius(), halfAngle: (Math.abs(cone.SemiAngle()) * 180) / Math.PI, angle };
       }
       case "SPHERE":
@@ -2496,6 +2663,16 @@ export function shapesTouch(a: Shape, b: Shape): boolean {
 export type BooleanOp = "union" | "subtract" | "intersect";
 
 export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
+  // Cut / fuse with all the tools at once: one pass instead of one per tool on an ever more complex
+  // result (36 array copies: ~5× faster). Common with several tools would mean "∩ their union", so it
+  // stays one at a time, as does anything the single pass fails on.
+  if (op !== "intersect" && tools.length > 1) {
+    try {
+      return boolean(op === "union" ? "fuse" : "cut", target, tools).simplify() as Solid;
+    } catch {
+      // one tool at a time below
+    }
+  }
   let result = target;
   for (const tool of tools) {
     result = boolean(op === "union" ? "fuse" : op === "subtract" ? "cut" : "common", result, tool);
@@ -2505,7 +2682,46 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
 
 export function translateShape<T extends Geom>(shape: T, v: V3): T {
   if (isMesh(shape)) return shape.transformed([1, 0, 0, 0, 1, 0, 0, 0, 1], v) as T;
-  return shape.clone().translate(v) as T;
+  return noteRigid(shape.clone().translate(v) as T, shape, [1, 0, 0, 0, 1, 0, 0, 0, 1], v);
+}
+
+/**
+ * Shapes that are another one moved / turned / copied — p ↦ R·p + t (R row-major 3×3): the
+ * display reuses that one's triangles instead of meshing again (moving 25 heavy solids would
+ * otherwise mesh each one again, seconds per step).
+ */
+const rigid = new WeakMap<object, { from: Geom; R: number[]; t: V3 }>();
+
+function noteRigid<T extends Geom>(out: T, from: Geom, R: number[], t: V3): T {
+  rigid.set(out, { from, R, t });
+  return out;
+}
+
+/**
+ * The shape `shape` is a rigid move of, back along copies / moves to the first one `shown` accepts
+ * (one on screen), with the whole move from it to `shape`; null if none.
+ */
+export function rigidSource(shape: Geom, shown: (s: Geom) => boolean): { from: Geom; R: number[]; t: V3 } | null {
+  let R = [1, 0, 0, 0, 1, 0, 0, 0, 1], t: V3 = [0, 0, 0];
+  for (let s = shape, k = 0; k < 50; k++) {
+    const r = rigid.get(s);
+    if (!r) return null;
+    // whole = (this step's whole so far) ∘ r: p ↦ R·(r.R·p + r.t) + t
+    const M = [0, 1, 2].flatMap((i) => [0, 1, 2].map((j) => R[i * 3] * r.R[j] + R[i * 3 + 1] * r.R[3 + j] + R[i * 3 + 2] * r.R[6 + j]));
+    t = [0, 1, 2].map((i) => R[i * 3] * r.t[0] + R[i * 3 + 1] * r.t[1] + R[i * 3 + 2] * r.t[2] + t[i]) as V3;
+    R = M;
+    if (shown(r.from)) return { from: r.from, R, t };
+    s = r.from;
+  }
+  return null;
+}
+
+/** Faces' and edges' ids of `from` → those of `to`, a moved copy of it (same order); null if they don't line up. */
+export function movedIds(from: Geom, to: Geom): { faces: Map<number, number>; edges: Map<number, number> } | null {
+  if (isMesh(from) || isMesh(to)) return null;
+  const pair = (a: { hashCode: number }[], b: { hashCode: number }[]) => (a.length === b.length ? new Map(a.map((x, i) => [x.hashCode, b[i].hashCode])) : null);
+  const faces = pair(from.faces, to.faces), edges = pair(from.edges, to.edges);
+  return faces && edges ? { faces, edges } : null;
 }
 
 export function rotateShape<T extends Geom>(shape: T, angleDeg: number, center: V3, axis: V3): T {
@@ -2516,7 +2732,10 @@ export function rotateShape<T extends Geom>(shape: T, angleDeg: number, center: 
     const mc = [0, 1, 2].map((r) => M[r * 3] * center[0] + M[r * 3 + 1] * center[1] + M[r * 3 + 2] * center[2]);
     return shape.transformed(M, [center[0] - mc[0], center[1] - mc[1], center[2] - mc[2]]) as T;
   }
-  return shape.clone().rotate(angleDeg, center, axis) as T;
+  const [x, y, z] = norm3(axis), a = (angleDeg * Math.PI) / 180, c = Math.cos(a), sn = Math.sin(a), k = 1 - c;
+  const R = [c + x * x * k, x * y * k - z * sn, x * z * k + y * sn, y * x * k + z * sn, c + y * y * k, y * z * k - x * sn, z * x * k - y * sn, z * y * k + x * sn, c + z * z * k];
+  const rc = [0, 1, 2].map((r) => R[r * 3] * center[0] + R[r * 3 + 1] * center[1] + R[r * 3 + 2] * center[2]);
+  return noteRigid(shape.clone().rotate(angleDeg, center, axis) as T, shape, R, [center[0] - rc[0], center[1] - rc[1], center[2] - rc[2]]);
 }
 
 /**
@@ -2744,7 +2963,7 @@ function wrappingAxis(shape: Shape): { O: V3; N: V3; X: V3; Y: V3 } | null {
     if (!seam) continue;
     const ad = new oc.BRepAdaptor_Surface(face.wrapped, true);
     try {
-      const g = kind === "SPHERE" ? ad.Sphere() : kind === "CYLINDRE" ? ad.Cylinder() : kind === "CONE" ? ad.Cone() : ad.Torus();
+      const g = kind === "SPHERE" ? ad.Sphere() : kind === "CYLINDRE" ? ad.Cylinder() : kind === "CONE" ? coneOf(face) : ad.Torus();
       const ax = g.Position();
       const v3 = (d: { X(): number; Y(): number; Z(): number }): V3 => [d.X(), d.Y(), d.Z()];
       const out = { O: v3(ax.Location()), N: v3(ax.Direction()), X: v3(ax.XDirection()), Y: v3(ax.YDirection()) };
@@ -2865,7 +3084,7 @@ function extrudedSurface(face: Face, keep: <T>(o: T) => T, along?: [number, numb
 function ruledCircularSurface(face: Face, keep: <T>(o: T) => T) {
   const ad = keep(new oc.BRepAdaptor_Surface(face.wrapped, true));
   const cone = face.geomType === "CONE";
-  const g = keep(cone ? ad.Cone() : ad.Cylinder());
+  const g = keep(cone ? coneOf(face) : ad.Cylinder());
   const ax = keep(g.Position());
   const v3 = (d: { X(): number; Y(): number; Z(): number }): V3 => [d.X(), d.Y(), d.Z()];
   const O = v3(keep(ax.Location())), N = v3(keep(ax.Direction())), X = v3(keep(ax.XDirection())), Y = v3(keep(ax.YDirection()));
@@ -2932,7 +3151,7 @@ export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
 }
 
 export function cloneShape<T extends Geom>(shape: T): T {
-  return isMesh(shape) ? shape : (shape.clone() as T); // a mesh is immutable: copies can share it
+  return isMesh(shape) ? shape : noteRigid(shape.clone() as T, shape, [1, 0, 0, 0, 1, 0, 0, 0, 1], [0, 0, 0]); // a mesh is immutable: copies can share it
 }
 
 // ---------------------------------------------------------------- persistence / exchange

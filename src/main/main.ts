@@ -127,6 +127,8 @@ function buildMenu(): void {
         { type: "separator" },
         item("Group", "edit.group", "CmdOrCtrl+G"),
         item("Ungroup", "edit.ungroup", "CmdOrCtrl+Shift+G"),
+        { type: "separator" },
+        item("Clear All Guides", "edit.clearGuides"),
       ],
     },
     {
@@ -139,6 +141,7 @@ function buildMenu(): void {
         item("Isometric", "view.iso"),
         { type: "separator" },
         item("Pro Layout (less text) on / off", "view.pro", "CmdOrCtrl+Shift+F1"),
+        item("Clear Recent Tools", "view.clearRecent"),
         { type: "separator" },
         { label: "Reload", click: (_m, w) => (w as BrowserWindow | undefined)?.webContents.reload() }, // no shortcut: Ctrl+R is Redo
         { role: "toggleDevTools" },

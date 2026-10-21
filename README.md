@@ -39,6 +39,8 @@ Press **F1** in the app for all shortcuts.
 * **Shift + Left-drag** or **Ctrl + Middle-drag**: pan
 * **Wheel**: zoom to cursor
 * **Left click**: select / draw / use tool
+* **Snapping**: tools snap to corners, midpoints, centres, edges, guides, axes and the grid by themselves —
+  hold **Ctrl** to place freely. Untick **Auto** (status bar, by Snap) to snap only while Ctrl is held.
 
 ## Code layout
 

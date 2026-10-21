@@ -13,7 +13,7 @@ import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension } from "./document";
 import { deg, num } from "./format";
-import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, type Shape, type TriMesh, type V3 } from "./kernel";
+import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 
 export type SelMode = "body" | "face" | "edge";
 
@@ -376,6 +376,7 @@ export class Viewport {
     this.flushBatches();
     this.renderer.render(this.scene, this.camera);
     this.renderGlow();
+    this.renderOverlay();
     this.renderInset();
     this.placeDimLabels();
   }
@@ -491,8 +492,43 @@ export class Viewport {
 
   // ------------------------------------------------------------ bodies
 
-  private buildView(body: Body, preview = false): BodyView {
-    const { faces, edges } = body.kind === "mesh" ? meshTessellation(body.shape) : tessellate(body.shape, preview);
+  /**
+   * Triangles for a body whose shape is a moved / turned copy of one on screen: that one's,
+   * transformed (no meshing again), with the face / edge ids of the new shape. Null otherwise.
+   */
+  private movedTessellation(body: Body, shown: Map<Geom, BodyView>): Tessellation | undefined {
+    if (body.kind === "mesh") return undefined;
+    const src = rigidSource(body.shape, (s) => shown.has(s));
+    const v = src && shown.get(src.from);
+    if (!src || !v || v.body.kind === "mesh") return undefined;
+    const ids = movedIds(src.from, body.shape);
+    if (!ids) return undefined;
+    const { R, t } = src;
+    const map = (a: ArrayLike<number>, shift: boolean) => {
+      const out = new Array<number>(a.length);
+      for (let i = 0; i < a.length; i += 3) {
+        const x = a[i], y = a[i + 1], z = a[i + 2];
+        for (let r = 0; r < 3; r++) out[i + r] = R[r * 3] * x + R[r * 3 + 1] * y + R[r * 3 + 2] * z + (shift ? t[r] : 0);
+      }
+      return out;
+    };
+    const g = v.mesh.geometry;
+    return {
+      faces: {
+        vertices: map(g.attributes.position.array, true),
+        normals: map(g.attributes.normal.array, false),
+        triangles: Array.from(g.index!.array),
+        faceGroups: v.faceIds.map((id, i) => ({ start: v.faceStarts[i], count: g.groups[i].count, faceId: ids.faces.get(id) ?? id })),
+      },
+      edges: {
+        lines: map(v.edgePos, true),
+        edgeGroups: v.edgeIds.map((id, i) => ({ start: v.edgeStarts[i], count: v.edgeCounts[i], edgeId: ids.edges.get(id) ?? id })),
+      },
+    };
+  }
+
+  private buildView(body: Body, preview = false, given?: Tessellation): BodyView {
+    const { faces, edges } = given ?? (body.kind === "mesh" ? meshTessellation(body.shape) : tessellate(body.shape, preview));
     const geom = new THREE.BufferGeometry();
     geom.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(faces.vertices), 3));
     geom.setAttribute("normal", new THREE.BufferAttribute(Float32Array.from(faces.normals), 3));
@@ -572,13 +608,17 @@ export class Viewport {
   sync(bodies: readonly Body[]): void {
     const live = new Set<number>();
     this.pathIds = new Set(bodies.filter((b) => b.kind === "path").map((b) => b.id));
+    /** What's on screen, by shape: a body moved / copied from one of them reuses its triangles. */
+    const shown = new Map<Geom, BodyView>();
+    for (const v of this.views.values()) shown.set(v.body.shape, v);
     for (const body of bodies) {
       live.add(body.id);
       const existing = this.views.get(body.id);
       if (existing && existing.body === body) continue;
       const chunk = existing?.chunk ?? this.chunkWithRoom();
+      const moved = this.movedTessellation(body, shown);
       if (existing) this.disposeView(existing);
-      const view = this.buildView(body);
+      const view = this.buildView(body, false, moved);
       this.views.set(body.id, view);
       view.chunk = chunk;
       chunk.ids.add(body.id);
@@ -1199,6 +1239,24 @@ export class Viewport {
   /** Grid step used to round points snapped onto the world axis lines. */
   axisSnapStep = 1;
 
+  /** Auto snap (the default): tools snap to points / grid without a key, Ctrl places freely. Off: snap only while Ctrl is held. */
+  autoSnap = true;
+
+  /** Should this pointer event snap? Auto snap flips what Ctrl does. */
+  snapping(e: { ctrlKey: boolean } | null | undefined): boolean {
+    return !!e?.ctrlKey !== this.autoSnap;
+  }
+
+  /** Hint text for snapping to `what` ("grid / points"), worded for the current Auto snap setting. */
+  snapTip(what: string): string {
+    return this.autoSnap ? `snaps to ${what}, Ctrl: free` : `hold Ctrl to snap to ${what}`;
+  }
+
+  /** Hint text for rounding to `what` ("grid steps"), worded for the current Auto snap setting. */
+  stepTip(what: string): string {
+    return this.autoSnap ? `${what}, Ctrl: free` : `Ctrl: ${what}`;
+  }
+
   /** Nearest point on the world X / Y / Z axis lines under the cursor (rounded to axisSnapStep). */
   private axisSnap(px: number, py: number, cx: number, cy: number, hitDist?: number): { point: THREE.Vector3; kind: SnapKind; d: number } | null {
     const ray = this.ray(cx, cy);
@@ -1335,7 +1393,7 @@ export class Viewport {
       this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)), axis: mk(geo(cross)), edge: mk(geo(diamond)) };
       for (const m of Object.values(this.snapMarker)) {
         m.visible = false;
-        this.scene.add(m);
+        this.overlayScene.add(m);
       }
     }
     for (const [k, m] of Object.entries(this.snapMarker)) {
@@ -1349,6 +1407,17 @@ export class Viewport {
     this.requestRender();
   }
   private snapMarker: Record<SnapKind, LineSegments2> | null = null;
+  /** Drawn after everything else: the move gizmo (renderOrder Infinity) sits right under the
+   *  cursor while dragging and would otherwise hide the snap marker. */
+  private overlayScene = new THREE.Scene();
+
+  private renderOverlay(): void {
+    if (!this.overlayScene.children.some((o) => o.visible)) return;
+    const auto = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.overlayScene, this.camera);
+    this.renderer.autoClear = auto;
+  }
 
   // ------------------------------------------------------------ highlighting
 
@@ -1457,8 +1526,14 @@ export class Viewport {
    * Preview operation results in place of the given bodies. Keys that are not
    * existing body ids (e.g. negative numbers) add a preview without hiding anything.
    */
-  showGhost(shapes: Map<number, Shape>): void {
+  showGhost(shapes: Map<number, Shape>, hide: readonly number[] = []): void {
     this.clearGhost();
+    for (const id of hide) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      v.group.visible = false;
+      this.markDirty(id);
+    }
     let k = -1;
     for (const [id, shape] of shapes) {
       const view = this.buildView({ id: k--, name: "", kind: kindOf(shape), shape }, true);
@@ -1689,7 +1764,12 @@ export class Viewport {
     if (box.isEmpty() && !pivotAt) return;
     const c = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
     if (pivotAt) c.set(...pivotAt);
-    else if (snapStep > 0) c.set(Math.round(c.x / snapStep) * snapStep, Math.round(c.y / snapStep) * snapStep, Math.round(c.z / snapStep) * snapStep);
+    else if (snapStep > 0) {
+      // Round the pivot to the grid — except across a flat selection (a face), where it stays in its plane.
+      const size = box.getSize(new THREE.Vector3());
+      const round = (v: number, s: number) => (s < 1e-4 ? v : Math.round(v / snapStep) * snapStep);
+      c.set(round(c.x, size.x), round(c.y, size.y), round(c.z, size.z));
+    }
     this.pivot.position.copy(c);
     this.pivot.quaternion.identity();
     this.pivot.updateMatrixWorld();
@@ -1741,7 +1821,7 @@ export class Viewport {
 
   /** Gizmo snapping (grid / 15° / object points) is active only while Ctrl is held. */
   private updateXfSnap(ctrl: boolean): void {
-    const on = ctrl && this.xfSnapStep > 0;
+    const on = ctrl !== this.autoSnap && this.xfSnapStep > 0;
     this.tc.setTranslationSnap(on ? this.xfSnapStep : null);
     this.tc.setRotationSnap(on ? THREE.MathUtils.degToRad(15) : null);
   }
@@ -1751,7 +1831,7 @@ export class Viewport {
     if (this.xfMode !== "translate" || !this.tc.dragging || !this.xfPointer) return;
     const ptr = this.xfPointer;
     const axis = this.tc.axis ?? "";
-    const sp = ptr.ctrl ? this.snapPoint(ptr.x, ptr.y, this.xfSet) : null;
+    const sp = ptr.ctrl !== this.autoSnap ? this.snapPoint(ptr.x, ptr.y, this.xfSet) : null;
     if (sp) {
       const p = this.pivot.position;
       if (axis.includes("X")) p.x = sp.point.x;

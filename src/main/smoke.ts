@@ -2286,7 +2286,14 @@ const SCENARIO_MEASURE = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "=", code: "Equal", bubbles: true, cancelable: true }));
   await sleep(20);
   expect("measure: = starts the Measure tool", app.tool && app.tool.name === "Measure", app.tool && app.tool.name);
-  const hover = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); return app.hudEl.hidden ? null : app.hudEl.textContent; };
+  // (the HUD follows on the next frame: wait for it to change — up to 300 ms on a busy machine)
+  const hud = () => (app.hudEl.hidden ? null : app.hudEl.textContent);
+  const hover = async (p) => {
+    const was = hud(), sc = window.__see(new V(p[0], p[1], p[2]));
+    canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }));
+    for (let i = 0; i < 15; i++) { await sleep(20); if (hud() !== was) break; }
+    return hud();
+  };
   const cases = [
     ["corner", [20, -15, 20], "Corner\nX 20  Y -15  Z 20"],
     ["edge", [5, -15, 20], "Edge\nLength 40 mm"],
@@ -2343,6 +2350,20 @@ const SCENARIO_MEASURE = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "+", code: "Equal", shiftKey: true, bubbles: true, cancelable: true }));
   await sleep(20);
   expect("measure: + (Shift+=) is still Union, not Measure", !app.tool, app.tool && app.tool.name);
+  // Cone faces (a triangle revolved: like a profile swept along an arc): per-axis scale stretches them exactly,
+  // Measure knows them (gp_Cone isn't in the wasm build — read from the surface instead)
+  {
+    const tri = K.makePolygonFace({ origin: [0, 0, 0], x: [1, 0, 0], y: [0, 0, 1], z: [0, -1, 0] }, [20, 0, 10], 8, 3, 10);
+    const ring = K.translateShape(K.revolveFace(tri, tri.faces[0].hashCode, { origin: [0, 0, 0], dir: [0, 0, 1] }, 90), [3, -4, 2]); // (90°: one arc span — measureVolume is exact on it)
+    const cones = ring.faces.filter((f) => f.geomType === "CONE");
+    const v0 = K.solidVolume(ring), f = [1.5, 0.8, 2];
+    let err = null, ratio = null, valid = false;
+    try { const st = K.scaleShape(ring, f, [10, 10, 5]); valid = K.isValidShape(st); ratio = K.solidVolume(st) / v0 / (f[0] * f[1] * f[2]); } catch (e) { err = String(e); }
+    const info = K.faceInfo(ring, cones[0].hashCode);
+    expect("scale: a solid with cone faces stretches per axis (valid, volume × 1.5 × 0.8 × 2); Measure reads a cone face",
+      cones.length >= 2 && !err && valid && Math.abs(ratio - 1) < 1e-6 && info && info.type === "cone" && info.halfAngle > 0,
+      { cones: cones.length, err, valid, ratio, info });
+  }
   const failed = checks.filter((c) => !c.ok);
   // Tab over an edge → dimension: Esc cancels, click places it; text = length; select + Del, undo, save/load
   const key = async (k, code) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true })); await sleep(20); };
@@ -2375,6 +2396,11 @@ const SCENARIO_MEASURE = String.raw`
   // Linked to the edge: push/pull the box's +X end → 50; move the box → the dimension moves with it; undo → back
   {
     const boxB = app.doc.bodies.find((b) => b.name === "Box 1");
+    if (!boxB || !app.doc.dimensions.length) {
+      expect("dimension: the reopened file has Box 1 and its dimension", false, { names: app.doc.bodies.map((b) => b.name), dims: app.doc.dimensions });
+      console.error("measure scenario failed: " + JSON.stringify(checks.filter((c) => !c.ok)));
+      return [{ label: "measure tool", passed: checks.filter((c) => c.ok).length, total: checks.length, checks }];
+    }
     expect("dimension: linked to the box after reopening", app.doc.dimensions[0].body === boxB.id, { dim: app.doc.dimensions[0], box: boxB.id });
     const endFace = boxB.shape.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[0] > 0.99).hashCode;
     app.doc.replaceShapes(new Map([[boxB.id, K.pushPull(boxB.shape, endFace, 10)]]), "Push/Pull"); await sleep(20);
@@ -2479,12 +2505,20 @@ const SCENARIO_ARRAY = String.raw`
   const opValue = (k, v) => { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event(i.tagName === "SELECT" ? "change" : "input", { bubbles: true })); } };
   const r = (n) => +n.toFixed(3);
   const arrayBtn = () => document.querySelector("#corner-tools button[data-cmd='edit.array']");
+  const ol = () => document.getElementById("outliner");
   document.getElementById("tutorial").hidden = true; document.body.classList.remove("tutorial-open");
   app.doc.reset([]);
   const box = app.doc.makeBody(K.makeBox(G, [60, 20, 0], 120, 40, 8.5), "Solid");
   const circle = app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 8.5] }, [20, 20, 8.5], 10), "Circle", "face");
   app.doc.commit([box, circle], "shapes");
   app.run("mode.body"); vp.setView("iso"); vp.fit(); await sleep(50);
+  // G on a face off the grid (z 7.63): the gizmo sits in the face's plane, not rounded to the grid above it
+  const offGrid = app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 7.63] }, [20, 80, 7.63], 10), "Circle", "face");
+  app.doc.commit([...app.doc.bodies, offGrid], "off-grid circle");
+  app.setSelection([{ kind: "face", body: offGrid.id, id: 0 }]); app.run("xf.move");
+  const gz = r(vp.pivot.position.z);
+  expect("G on a face at z 7.63: the gizmo is in its plane", app.xf && gz === 7.63, gz);
+  key("Escape", "Escape"); app.run("edit.undo");
   app.setSelection([{ kind: "body", body: circle.id, id: 0 }]);
   const n0 = app.doc.bodies.length;
   const corner = [...document.querySelectorAll("#corner-tools button")].map((b) => b.dataset.cmd);
@@ -2629,6 +2663,231 @@ const SCENARIO_ARRAY = String.raw`
   arrayBtn().click(); await sleep(20);
   panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   expect("array: Esc cancels, nothing added", app.doc.bodies.length === n1 && panel.hidden, { bodies: app.doc.bodies.length, hidden: panel.hidden });
+  // Direction marks: ±X / ±Y / ±Z round the objects while Array copy is open; a click picks the direction
+  {
+    app.doc.reset([]);
+    const cube = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 20), "Box");
+    app.doc.commit([cube], "cube"); vp.setView("iso"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+    arrayBtn().click(); await sleep(50);
+    opValue("n", 3); opValue("gap", 5); opValue("total", 0); opValue("dir", 0); await sleep(150);
+    const marks = () => [...document.querySelectorAll("#op-choices .op-choice")];
+    const shown = { labels: marks().map((m) => m.textContent).join(), lit: marks().filter((m) => m.classList.contains("on")).map((m) => m.textContent).join() };
+    const vr = document.getElementById("viewport").getBoundingClientRect();
+    const where = marks().map((m) => { const b = m.getBoundingClientRect(); return [m.textContent, Math.round(b.left - vr.left), Math.round(b.top - vr.top), Math.round(vr.right - b.right), Math.round(vr.bottom - b.bottom)].join(" "); });
+    const inView = marks().every((m) => { const b = m.getBoundingClientRect(); return b.left >= vr.left && b.right <= vr.right && b.top >= vr.top && b.bottom <= vr.bottom; });
+    marks().find((m) => m.textContent === "−Y").click(); await sleep(200);
+    const picked = { dir: val("dir"), lit: marks().filter((m) => m.classList.contains("on")).map((m) => m.textContent).join(), ys: app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 1)).sort((p, q) => p - q).join() : "" };
+    panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await sleep(20);
+    expect("array: ±X / ±Y / ±Z marks round the objects (the direction's lit); a click on −Y picks it — the preview follows; gone after Esc",
+      shown.labels === "+X,−X,+Y,−Y,+Z,−Z" && shown.lit === "+X" && inView && picked.dir === "3" && picked.lit === "−Y" && picked.ys === "-50,-25" && marks().length === 0,
+      { shown, inView, where, picked, after: marks().length });
+  }
+  // A guide line as the span (like ~/untitled.y3d: a guide from the box's corner along its top-front edge, on past it):
+  // where it lies on the edge the edge wins; past the box the guide is picked — the copies fill it
+  {
+    app.doc.reset([]);
+    const bx = app.doc.makeBody(K.makeBox(G, [58.85, 256.75, 0], 36.4, 157, 20.8), "Box");
+    app.doc.commit([bx], "box");
+    app.doc.setGuides([{ a: [40.65, 178.25, 20.8], b: [368.74, 178.25, 20.8], n: [0, 0, 1] }], "guide");
+    vp.setView("iso"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: bx.id, id: 0 }]);
+    arrayBtn().click(); await sleep(20);
+    const hoverAt = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); app.op.spec.hover(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); await sleep(20); return app.hudEl.hidden ? "" : app.hudEl.textContent; };
+    const onEdge = await hoverAt([58, 178.25, 20.8]);
+    const onGuide = await hoverAt([250, 178.25, 20.8]);
+    const lit = app.hoverGuide;
+    opCheck("centre", true); opValue("n", 4);
+    const picked = await clickAt([250, 178.25, 20.8]);
+    app.applyOp();
+    const row = app.doc.bodies.map((b) => b.shape.boundingBox.bounds).map(([lo, hi]) => [lo[0], hi[0]]).sort((p, q) => p[0] - q[0]);
+    const gaps = [row[0][0] - 40.65, ...row.slice(1).map((r, k) => r[0] - row[k][1]), 368.74 - row[row.length - 1][1]].map(r);
+    expect("array: a guide line as the span — the edge wins where they overlap; past the box the guide: the copies fill it (Align centre)",
+      /^Edge/.test(onEdge) && /^Guide: 328\.09/.test(onGuide) && lit === 0 && picked.join() === "328.09," + picked[1] + ",0" && row.length === 4 &&
+        gaps.every((g) => Math.abs(g - gaps[0]) < 1e-3) && app.hoverGuide === -1,
+      { onEdge, onGuide, lit, picked, gaps, after: app.hoverGuide });
+    app.run("edit.undo");
+  }
+  // Changing an array later (select its group, Array copy: its settings come back) — and undo kept in the saved file
+  {
+    app.doc.reset([]);
+    const plate = app.doc.makeBody(K.makeBox(G, [60, 20, 0], 120, 40, 8.5), "Solid");
+    const dot = app.doc.makeBody(K.makeCircleFace({ ...G, origin: [0, 0, 8.5] }, [20, 20, 8.5], 10), "Circle", "face");
+    app.doc.commit([plate, dot], "shapes"); vp.fit(); await sleep(30);
+    app.setSelection([{ kind: "body", body: dot.id, id: 0 }]);
+    arrayBtn().click(); await sleep(20);
+    opValue("n", 5); opValue("gap", 5); opValue("total", 0); opValue("dir", 0); opCheck("centre", false); app.applyOp();
+    const grp = app.doc.get(dot.id).group;
+    const members = () => app.doc.bodies.filter((b) => b.group === grp);
+    const xsOf = () => members().map((b) => mid(b.shape, 0)).sort((p, q) => p - q).join();
+    const pickGroup = () => app.setSelection(members().map((b) => ({ kind: "body", body: b.id, id: 0 })));
+    // Array copy (the corner button) on the group makes new copies (a grid): its own panel, no "change" option
+    const title = () => (panel.hidden ? null : panel.querySelector("h4")?.textContent);
+    app.setSelection([]); pickGroup();
+    arrayBtn().click(); await sleep(20);
+    const asNew = { title: title(), n: val("n"), option: !!panel.querySelector("[data-key=edit]") };
+    panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect("array: Array copy on an array's group makes new copies (titled Array copy, count from 2, no change option)", asNew.title === "Array copy" && asNew.n === "2" && !asNew.option, asNew);
+    // ...and a grid: the whole row along +Y (still one group)
+    pickGroup(); arrayBtn().click(); await sleep(20);
+    opValue("n", 2); opValue("gap", 5); opValue("total", 0); opValue("dir", 2); app.applyOp();
+    const grid = { n: members().length, ys: [...new Set(members().map((b) => mid(b.shape, 1)))].sort((p, q) => p - q).join() };
+    app.run("edit.undo");
+    expect("array: select the array's group later → Array copy along Y → a grid (10 in the group)", grid.n === 10 && grid.ys === "20,45", grid);
+    // The Bodies panel: the array's group has an array icon beside the eye — a click changes the array
+    app.setSelection([]); await sleep(20);
+    const icon = ol().querySelector(".ol-group[data-group='" + grp + "'] .ol-array");
+    const iconOn = !!icon && !icon.classList.contains("off");
+    icon?.click(); await sleep(20);
+    const byIcon = { on: iconOn, title: title(), n: val("n"), selected: app.selection.length };
+    panel.querySelector("[data-key=n]")?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect("array: in the Bodies panel the array's group has an icon beside the eye; a click opens Change the array", byIcon.on && byIcon.title === "Change " + grp && byIcon.n === "5" && byIcon.selected === 5, byIcon);
+    // The Properties panel says it's an array (no buttons there: its icon changes it)
+    app.setSelection([]); pickGroup(); await sleep(20);
+    const props = document.getElementById("props").textContent;
+    const propsButtons = document.querySelectorAll("#props button").length;
+    ol().querySelector(".ol-group[data-group='" + grp + "'] .ol-array")?.click(); await sleep(20);
+    const opened = { props: /5 in a row/.test(props) && propsButtons === 0, title: title(), n: val("n"), gap: val("gap"), dir: val("dir") };
+    opValue("n", 3); await sleep(200);
+    const pre = app.op.result ? { ghosts: app.op.result.ghost.size, hidden: app.op.result.hide.length } : null;
+    app.applyOp();
+    const changed = { xs: xsOf(), group: members().length, label: app.doc.undoLabel };
+    app.run("edit.undo"); const undone = xsOf();
+    app.run("edit.redo"); const redone = xsOf();
+    expect("array: the group selected → Properties shows Array (5 in a row), no buttons; its icon opens titled Change Array N with its settings; 5 → 3 rebuilds the row; undo / redo",
+      opened.props && opened.title === "Change " + grp && opened.n === "5" && opened.gap === "5" && opened.dir === "0" && pre && pre.ghosts === 2 && pre.hidden === 4 &&
+        changed.xs === "20,45,70" && changed.group === 3 && /^Change /.test(changed.label) && undone === "20,45,70,95,120" && redone === "20,45,70",
+      { opened, pre, changed, undone, redone });
+    // The whole group moved together (+10, +7, +3): still changeable; rebuilt where it is now
+    {
+      const moveAll = new Map(members().map((b) => [b.id, K.translateShape(b.shape, [10, 7, 3])]));
+      app.doc.replaceShapes(moveAll, "Move"); await sleep(20);
+      app.setSelection([]); await sleep(20);
+      const ic = ol().querySelector(".ol-group[data-group='" + grp + "'] .ol-array");
+      const on = !!ic && !ic.classList.contains("off");
+      ic?.click(); await sleep(20);
+      const t = title();
+      opValue("n", 4); app.applyOp();
+      const moved = { on, title: t, xs: xsOf(), ys: [...new Set(members().map((b) => mid(b.shape, 1)))].join(), zs: [...new Set(members().map((b) => mid(b.shape, 2)))].join() };
+      app.run("edit.undo"); app.run("edit.undo");
+      expect("array: the whole group moved together is still changeable — rebuilt where it is now", moved.on && moved.title === "Change " + grp && moved.xs === "30,55,80,105" && moved.ys === "27" && moved.zs === "11.5", moved);
+    }
+    // A copy moved on its own: the array can't be changed any more (Array copy makes new copies, and says why)
+    const lone = members().find((b) => mid(b.shape, 0) === 70);
+    app.doc.replaceShapes(new Map([[lone.id, K.translateShape(lone.shape, [0, 3, 0])]]), "Move");
+    pickGroup(); await sleep(20);
+    const dim = ol().querySelector(".ol-group[data-group='" + grp + "'] .ol-array");
+    const refused = { button: !!document.querySelector("#props button"), said: document.getElementById("props").textContent, icon: dim ? dim.classList.contains("off") && /can't be changed/.test(dim.title) : null };
+    app.run("edit.undo");
+    expect("array: after a copy is moved on its own, it can't be changed (Properties says why, no Change button; the icon dims)", !refused.button && /can't be changed any more/.test(refused.said) && refused.icon === true, refused);
+    // Saved and opened again: Undo / Redo go on where they were, and the array can still be changed
+    app.run("edit.undo"); // (back to 5: the change becomes a Redo step)
+    const before = { n: app.doc.bodies.length, undo: app.doc.undoLabel, xs: xsOf() };
+    const text = app.modelText();
+    app.loadModel(text, null); await sleep(30);
+    const after = { n: app.doc.bodies.length, undo: app.doc.undoLabel, redo: app.doc.canRedo, dirty: app.doc.dirty, xs: xsOf() };
+    app.run("edit.redo"); const reRedo = xsOf();
+    app.run("edit.undo"); app.run("edit.undo"); const firstUndo = { n: app.doc.bodies.length, grouped: members().length };
+    app.run("edit.redo");
+    pickGroup(); await sleep(20); app.run("edit.arrayChange"); await sleep(20);
+    const stillEditable = title() === "Change " + grp && val("n") === "5";
+    panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect("array: saved with its undo history — reopened, Undo / Redo carry on and the array can still be changed",
+      after.n === before.n && after.undo === before.undo && after.redo && !after.dirty && after.xs === before.xs && reRedo === "20,45,70" &&
+        firstUndo.n === 2 && firstUndo.grouped === 0 && stillEditable,
+      { before, after, reRedo, firstUndo, stillEditable, bytes: text.length });
+    // A file without the history (an older Y3D's): opens as before, no undo — the array can still be changed
+    const plain = JSON.parse(text); delete plain.history;
+    app.loadModel(JSON.stringify(plain), null); await sleep(30);
+    pickGroup(); await sleep(20); app.run("edit.arrayChange"); await sleep(20);
+    const oldFile = { undo: app.doc.canUndo, n: app.doc.bodies.length, edit: title() === "Change " + grp };
+    panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect("array: a file without history opens without undo; its array can still be changed", !oldFile.undo && oldFile.n === 6 && oldFile.edit, oldFile);
+  }
+  // Stretched circles pushed into solids (like ~/untitled.y3d): their extruded sides are drawn with few triangles,
+  // and moving / turning them reuses the triangles (no meshing again) — still the right faces to pick
+  {
+    app.doc.reset([]);
+    const circle = K.makeCircleFace(G, [0, 0, 0], 4);
+    const oval = K.scaleShape(circle, [1.3, 0.8, 1], [0, 0, 0]);
+    const post = K.extrudeFace(oval, oval.faces[0].hashCode, 74);
+    const types = post.faces.map((f) => f.geomType).sort().join();
+    const tris = K.tessellate(post).faces.triangles.length / 3;
+    // A stretched dome (half sphere, 60% wide): drawn close to the true half-ellipsoid — not a faceted tent
+    const half = K.booleanOp("subtract", K.makeSphereAt([0, 0, 0], 36.5), [K.makeBox(G, [0, 0, -100], 200, 200, 100)]);
+    const dome = K.scaleShape(half, [0.6, 1, 1], [0, 0, 0]);
+    const dm = K.tessellate(dome).faces, ax = [21.9, 36.5, 36.5];
+    let domeOff = 0;
+    for (let k = 0; k < dm.triangles.length; k += 3) {
+      const p = [0, 1, 2].map((j) => (dm.vertices[dm.triangles[k] * 3 + j] + dm.vertices[dm.triangles[k + 1] * 3 + j] + dm.vertices[dm.triangles[k + 2] * 3 + j]) / 3);
+      if (p[2] < 1e-6) continue; // (the base)
+      domeOff = Math.max(domeOff, Math.abs(Math.hypot(p[0] / ax[0], p[1] / ax[1], p[2] / ax[2]) - 1) * 21.9);
+    }
+    const posts = [0, 1, 2].flatMap((i) => [0, 1, 2].map((j) => app.doc.makeBody(K.translateShape(post, [i * 15, j * 15, 0]), "Post")));
+    app.doc.commit(posts, "posts"); vp.fit(); await sleep(50);
+    app.setSelection(posts.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "g", code: "KeyG", bubbles: true, cancelable: true })); await sleep(20);
+    const t0 = performance.now();
+    app.applyTransform({ type: "translate", vector: [5, -3, 2] });
+    app.applyTransform({ type: "rotate", angleDeg: 30, center: [10, 10, 0], axis: [0, 0, 1] });
+    const moveMs = performance.now() - t0;
+    key("Escape", "Escape"); await sleep(50);
+    /** Each body's display: its face ids are the shape's, and its triangles sit where the shape is. */
+    const views = posts.map((p) => {
+      const b = app.doc.get(p.id), v = vp.views.get(p.id), pos = v.mesh.geometry.attributes.position.array;
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < pos.length; i += 3) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], pos[i + k]); hi[k] = Math.max(hi[k], pos[i + k]); }
+      const [L, H] = b.shape.boundingBox.bounds;
+      const off = Math.max(...[0, 1, 2].map((k) => Math.max(Math.abs(lo[k] - L[k]), Math.abs(hi[k] - H[k]))));
+      const same = v.faceIds.slice().sort().join() === b.shape.faces.map((f) => f.hashCode).sort().join() && v.edgeIds.every((id) => b.shape.edges.some((e) => e.hashCode === id));
+      return { off: +off.toFixed(3), same };
+    });
+    // Click the side of a moved post: a face of that post
+    const target = app.doc.get(posts[4].id), [L, H] = target.shape.boundingBox.bounds;
+    vp.setView("top"); vp.fit(); await sleep(50);
+    const sc = window.__see(new V((L[0] + H[0]) / 2, (L[1] + H[1]) / 2, H[2]));
+    const hit = vp.pick(sc.x, sc.y, "face");
+    const picked = hit && hit.body === target.id && target.shape.faces.some((f) => f.hashCode === hit.id);
+    vp.setView("iso");
+    expect("display: a stretched dome is drawn close to its true shape; a stretched circle pushed into a solid with few triangles; moved / turned, its triangles are reused — right place, right faces",
+      types === "EXTRUSION_SURFACE,PLANE,PLANE" && tris < 2000 && views.every((v) => v.same && v.off < 0.05) && picked && domeOff < 0.5,
+      { types, tris, views, picked, moveMs: Math.round(moveMs), domeOff: +domeOff.toFixed(3), domeTris: dm.triangles.length / 3 });
+    app.setSelection(posts.map((b) => ({ kind: "body", body: b.id, id: 0 }))); app.run("edit.delete");
+  }
+  // Subtract a whole array group (like ~/untitled.y3d): the box, −, click the group in the Bodies panel →
+  // the 36 boxes cut in one pass (one at a time was ~5× slower), one undo step
+  {
+    const plate = app.doc.makeBody(K.makeBox(G, [60, 500, 0], 120, 80, 8.5), "Plate");
+    const holes = [];
+    for (let i = 0; i < 12; i++) for (let j = 0; j < 3; j++) holes.push({ ...app.doc.makeBody(K.makeBox(G, [10 + i * 9, 475 + j * 25, 4], 5, 5, 10), "Hole"), group: "Holes T" });
+    app.doc.commit([...app.doc.bodies, plate, ...holes], "holes"); app.renderOutliner(); await sleep(50);
+    const nb = app.doc.bodies.length;
+    app.setSelection([{ kind: "body", body: plate.id, id: 0 }]);
+    key("-", "Minus"); await sleep(20);
+    const head = document.querySelector(".ol-group[data-group='Holes T'] .ol-name");
+    const t0 = performance.now();
+    head?.click();
+    const ms = performance.now() - t0;
+    const cut = app.doc.get(plate.id);
+    const vol = cut ? r(K.solidVolume(cut.shape)) : null, expected = r(120 * 80 * 8.5 - 36 * 5 * 5 * 4.5);
+    expect("array: box, −, click a 36-box group → all cut at once", !!head && app.doc.bodies.length === nb - 36 && vol === expected && K.isValidShape(cut.shape),
+      { head: !!head, bodies: app.doc.bodies.length - nb, vol, expected, ms: Math.round(ms) });
+    key("Escape", "Escape"); app.run("edit.undo");
+    expect("array: the group cut is one undo step", app.doc.bodies.length === nb, app.doc.bodies.length - nb);
+    app.setSelection([plate, ...holes].map((b) => ({ kind: "body", body: b.id, id: 0 }))); app.run("edit.delete");
+  }
+  // A busy shape (over 30 faces: the plate with 36 round holes) is drawn with coarser round edges; a simple one is not
+  {
+    const disc = K.makeCylinder(G, [0, 0, -1], 5, 10);
+    const holes = Array.from({ length: 36 }, (_, i) => K.makeCylinder(G, [10 + (i % 12) * 9, (i / 12 | 0) * 25 - 25, -1], 2.5, 10));
+    const plate = K.booleanOp("subtract", K.makeBox(G, [60, 0, 0], 120, 80, 8.5), holes);
+    const ring = K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 20, 20, 8.5), [disc]);
+    /** Segments of the longest round edge (a hole's rim). */
+    const segs = (s) => Math.max(...K.tessellate(s).edges.edgeGroups.map((g) => g.count));
+    const busy = segs(plate), simple = segs(K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 20, 20, 8.5), [K.makeCylinder(G, [0, 0, -1], 2.5, 10)]));
+    expect("array: a busy shape (36 round holes) is drawn with fewer segments per hole; a simple one keeps full quality",
+      plate.faces.length > 30 && ring.faces.length <= 30 && busy < simple * 0.8, { faces: plate.faces.length, busy, simple });
+  }
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("array scenario failed: " + JSON.stringify(failed));
   return [{ label: "array copy", passed: checks.length - failed.length, total: checks.length, checks }];
@@ -2651,8 +2910,8 @@ const SCENARIO_GROUPS = String.raw`
   app.setSelection([a, b].map((x) => ({ kind: "body", body: x.id, id: 0 })));
   app.run("edit.group"); await sleep(20);
   const head = () => ol.querySelector(".ol-group");
-  expect("groups: Ctrl+G groups the selection — a header (name, count) with the members under it",
-    app.doc.get(a.id).group === "Group 1" && app.doc.get(b.id).group === "Group 1" && !app.doc.get(c.id).group &&
+  expect("groups: Ctrl+G groups the selection — a header (name, count) with the members under it (no array icon)",
+    !head()?.querySelector(".ol-array") && app.doc.get(a.id).group === "Group 1" && app.doc.get(b.id).group === "Group 1" && !app.doc.get(c.id).group &&
       head()?.querySelector(".ol-name")?.textContent === "Group 1" && head()?.querySelector(".ol-count")?.textContent === "2" && ol.querySelectorAll(".ol-row.in-group").length === 2,
     { groups: [a, b, c].map((x) => app.doc.get(x.id).group), rows: [...ol.children].map((r) => r.textContent) });
   app.setSelection([]);
@@ -2706,10 +2965,372 @@ const SCENARIO_GROUPS = String.raw`
     app.run("edit.undo"); await sleep(20);
     app.run("edit.undo"); await sleep(20);
   }
+  // Bodies panel: Shift+click selects the rows from the last clicked one down — or up — to it; Ctrl+Shift adds; Ctrl toggles one
+  {
+    const ps = [0, 1, 2, 3, 4, 5].map((k) => app.doc.makeBody(K.makeBox(G, [k * 20, 60, 0], 10, 10, 10), "Post"));
+    app.doc.commit([...app.doc.bodies, ...ps], "posts"); await sleep(20);
+    const click = (p, o = {}) => ol.querySelector(".ol-row[data-id='" + p.id + "'] .ol-name").dispatchEvent(new MouseEvent("click", { bubbles: true, ...o }));
+    const sel = () => app.selection.map((s) => ps.findIndex((p) => p.id === s.body)).sort().join();
+    click(ps[1]); click(ps[4], { shiftKey: true });
+    const down = sel();
+    click(ps[2], { shiftKey: true });
+    const shrink = sel();
+    click(ps[4]); click(ps[0], { shiftKey: true });
+    const up = sel();
+    click(ps[5], { ctrlKey: true }); const ctrlAdd = sel();
+    click(ps[5], { ctrlKey: true }); const ctrlOff = sel();
+    click(ps[0]); click(ps[1], { shiftKey: true }); click(ps[4], { ctrlKey: true }); click(ps[5], { shiftKey: true, ctrlKey: true });
+    const added = sel();
+    expect("groups: Shift+click selects a range down or up (from the last clicked row), Ctrl+Shift adds a range, Ctrl toggles one",
+      down === "1,2,3,4" && shrink === "1,2" && up === "0,1,2,3,4" && ctrlAdd === "0,1,2,3,4,5" && ctrlOff === "0,1,2,3,4" && added === "0,1,4,5",
+      { down, shrink, up, ctrlAdd, ctrlOff, added });
+    app.setSelection(ps.map((p) => ({ kind: "body", body: p.id, id: 0 }))); app.run("edit.delete"); await sleep(20);
+  }
   head().querySelector(".ol-name").click(); window.y3dApp.viewport.fit(); await sleep(50); // (selected, for the screenshot)
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("groups scenario failed: " + JSON.stringify(failed));
   return [{ label: "groups", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Recent strip: no view commands; slots stay put — a new command takes the least recently used one's slot. */
+const SCENARIO_RECENTSTRIP = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const strip = () => [...document.querySelectorAll("#recent-list [data-cmd]")].map((b) => b.dataset.cmd);
+  const saved = { recent: app.recent, use: app.recentUse };
+  app.recent = []; app.recentUse = []; app.renderRecent();
+  app.run("view.iso"); app.run("view.front"); app.run("view.top"); await sleep(20);
+  expect("recent strip: view commands (Iso / Front / Top) don't go in", strip().length === 0, strip());
+  const cmds = ["tool.box", "tool.rectangle", "op.pushpull", "op.fillet", "op.chamfer", "op.shell", "op.cut", "xf.move", "xf.rotate", "xf.scale", "bool.subtract", "bool.union"];
+  for (const c of cmds.slice(0, 10)) app.pushRecent(c);
+  const full = strip();
+  app.pushRecent("tool.box"); app.pushRecent("op.fillet"); // used again: nothing moves
+  const same = strip();
+  app.pushRecent("tool.rectangle");
+  app.pushRecent("bool.subtract"); // full: takes the slot of the least recently used one (op.pushpull)
+  const after = strip();
+  expect("recent strip: using a command again doesn't move it",
+    full.join() === cmds.slice(0, 10).join() && same.join() === full.join(), { full, same });
+  expect("recent strip: when full, a new command takes the least recently used one's slot — the others stay put",
+    after.length === 10 && after[2] === "bool.subtract" && after.filter((c, i) => i !== 2).join() === full.filter((c, i) => i !== 2).join(), after);
+  app.pushRecent("bool.union"); // next least recently used: op.chamfer (slot 4)
+  expect("recent strip: the next one replaces the next least recently used", strip()[4] === "bool.union", strip());
+  // Drag "xf.scale" (last) onto the top half of "tool.box" (first) → it goes first; then "tool.box" below "op.fillet"
+  const drag = (from, to, low) => {
+    const btn = (c) => document.querySelector("#recent-list [data-cmd='" + c + "']");
+    const dt = new DataTransfer(), a = btn(from), b = btn(to), r = b.getBoundingClientRect();
+    const at = { clientX: r.left + r.width / 2, clientY: low ? r.bottom - 2 : r.top + 2, bubbles: true, cancelable: true, dataTransfer: dt };
+    a.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
+    b.dispatchEvent(new DragEvent("dragover", at));
+    const line = b.classList.contains(low ? "drop-after" : "drop-before");
+    b.dispatchEvent(new DragEvent("drop", at));
+    a.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: dt }));
+    return line;
+  };
+  const line1 = drag("xf.scale", "tool.box", false);
+  const up = strip();
+  const line2 = drag("tool.box", "op.fillet", true);
+  const down = strip();
+  const kept = JSON.parse(localStorage.getItem("y3d.recentCmds.v2") || "[]").join() === down.join();
+  app.pushRecent("op.shell");
+  expect("recent strip: drag a button onto another to reorder (line shows above / below), saved; later uses don't undo it",
+    line1 && line2 && up[0] === "xf.scale" && up[1] === "tool.box" && down.indexOf("tool.box") === down.indexOf("op.fillet") + 1 && kept && strip().join() === down.join(),
+    { line1, line2, up, down, kept });
+  // Right-click an icon removes it; View → Clear Recent Tools empties the strip
+  const n0 = strip().length;
+  document.querySelector("#recent-list [data-cmd='op.cut']").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  const one = strip();
+  app.run("view.clearRecent");
+  const none = strip();
+  const stored = JSON.parse(localStorage.getItem("y3d.recentCmds.v2") || "null");
+  app.run("view.clearRecent"); // already empty: just says so
+  expect("recent strip: right-click removes one icon; View → Clear Recent Tools empties it (saved)",
+    one.length === n0 - 1 && !one.includes("op.cut") && none.length === 0 && Array.isArray(stored) && stored.length === 0, { n0, one, none, stored });
+  app.recent = saved.recent; app.recentUse = saved.use; app.renderRecent();
+  localStorage.setItem("y3d.recentCmds.v2", JSON.stringify(saved.recent)); localStorage.setItem("y3d.recentUse", JSON.stringify(saved.use));
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("recent strip scenario failed: " + JSON.stringify(failed));
+  return [{ label: "recent strip", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Mug handle flush: select the handle, −, click the cup (it's used up), tick "Keep the clicked solid" (it comes back),
+ *  Done; the user deletes the stub inside the cup and joins handle and cup. */
+const SCENARIO_KEEPTOOL = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const ev = (type, p) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  const panel = () => document.getElementById("tool-panel");
+  const keepBox = () => panel()?.querySelector("input[data-act=keep]");
+  const tick = (on) => { const b = keepBox(); b.checked = on; b.dispatchEvent(new Event("change", { bubbles: true })); };
+  app.doc.reset([]);
+  // A hollow cup (wall 15..20 from the centre) and a bar from x 10 to 30 through its wall
+  const cup = app.doc.makeBody(K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 40, 40, 40), [K.makeBox(G, [0, 0, 5], 30, 30, 40)]), "Cup");
+  const bar = app.doc.makeBody(K.makeBox(G, [20, 0, 10], 20, 6, 6), "Handle");
+  app.doc.commit([cup, bar], "mug");
+  app.run("mode.body"); app.run("view.iso"); vp.fit(); await sleep(50);
+  app.setSelection([{ kind: "body", body: bar.id, id: 0 }]);
+  key("-", "Minus"); await sleep(20);
+  const before = !keepBox();
+  ev("pointermove", [-17.5, 0, 40]); ev("pointerdown", [-17.5, 0, 40]); await sleep(80);
+  const gone = !app.doc.get(cup.id) && app.doc.bodies.length === 2;
+  const offered = keepBox() && !keepBox().checked;
+  tick(true); await sleep(30);
+  const back = !!app.doc.get(cup.id) && app.doc.bodies.length === 3;
+  tick(false); await sleep(30);
+  const againGone = !app.doc.get(cup.id);
+  tick(true); await sleep(30);
+  expect("subtract: click the cup → it's used up; then the panel offers 'Keep the clicked solid' — ticking brings it back, unticking takes it away",
+    before && gone && offered && back && againGone && !!app.doc.get(cup.id), { before, gone, offered, back, againGone });
+  expect("subtract: the panel lists no pieces", !panel()?.querySelector(".tp-piece") && !/mm³/.test(panel()?.textContent), panel()?.textContent);
+  panel()?.querySelector("button[data-act=done]")?.click(); await sleep(30);
+  const vols = app.doc.bodies.filter((b) => b.id !== cup.id).map((b) => Math.round(K.solidVolume(b.shape))).sort((a, b) => a - b);
+  expect("subtract: Done exits; the handle is in 2 pieces (outside, stub inside the cup), the target selected",
+    !app.tool && !panel() && vols.join() === "180,360" && app.selection.length === 1 && app.selection[0].body === bar.id, { vols, sel: app.selection });
+  // The user removes the stub, then joins
+  const stub = app.doc.bodies.find((b) => b.id !== cup.id && Math.round(K.solidVolume(b.shape)) === 180);
+  app.setSelection([{ kind: "body", body: stub.id, id: 0 }]); app.run("edit.delete"); await sleep(20);
+  app.setSelection([{ kind: "body", body: cup.id, id: 0 }]);
+  key("+", "Equal"); await sleep(20);
+  const handle = app.doc.bodies.find((b) => b.id !== cup.id);
+  app.outlinerPick && app.outlinerPick([handle.id]); await sleep(50);
+  const unionBox = !!keepBox();
+  panel()?.querySelector("button[data-act=done]")?.click(); await sleep(30);
+  const one = app.doc.bodies.length === 1 && Math.round(K.solidVolume(app.doc.bodies[0].shape));
+  const cupVol = 40 * 40 * 40 - 30 * 30 * 35;
+  expect("then Del the stub and + joins handle and cup — one solid, nothing inside (Union has no Keep option)", one === cupVol + 360 && !unionBox, { one, want: cupVol + 360, unionBox });
+  // Pro layout: the panel is short — target, count, option, Done
+  {
+    const wasPro = document.body.classList.contains("pro");
+    document.body.classList.add("pro");
+    const c2 = app.doc.makeBody(K.makeBox(G, [100, 0, 0], 10, 10, 10), "Peg");
+    app.doc.commit([...app.doc.bodies, c2], "peg");
+    app.setSelection([{ kind: "body", body: cup.id, id: 0 }]);
+    key("-", "Minus"); await sleep(20);
+    const first = panel()?.textContent;
+    app.outlinerPick && app.outlinerPick([c2.id]); await sleep(50);
+    const after = panel()?.textContent;
+    key("Escape", "Escape"); await sleep(20);
+    document.body.classList.toggle("pro", wasPro);
+    expect("subtract, Pro layout: less text — no how-to lines; the count and Keep after a click",
+      first === "SubtractTarget: " + app.doc.get(cup.id).name + "Done ⏎" && /1 done/.test(after) && /Keep the clicked solid/.test(after) && !/Click a solid|Esc/.test(after), { first, after });
+  }
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("keep tool scenario failed: " + JSON.stringify(failed));
+  return [{ label: "subtract keep", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Subtract / Union / Intersect and Cut show a panel (target, what to click, count) with Done / Cancel. */
+const SCENARIO_TOOLPANEL = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const ev = (type, p) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const panel = () => document.getElementById("tool-panel");
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  for (const [k, code, name] of [["-", "Minus", "Subtract"], ["+", "Equal", "Union"]]) {
+    app.doc.reset([]);
+    const a = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 40, 10), "Plate"), b = app.doc.makeBody(K.makeBox(G, [0, 0, 5], 10, 10, 20), "Peg");
+    app.doc.commit([a, b], "two");
+    app.run("mode.body"); app.run("view.iso"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: a.id, id: 0 }]);
+    key(k, code); await sleep(20);
+    const open = { tool: app.tool && app.tool.name, title: panel()?.querySelector("h4")?.textContent, text: panel()?.textContent };
+    ev("pointermove", [0, 0, 25]); ev("pointerdown", [0, 0, 25]); await sleep(50);
+    const after = { bodies: app.doc.bodies.length, count: panel()?.querySelector(".tp-count")?.textContent, tool: app.tool && app.tool.name };
+    panel()?.querySelector("button[data-act=done]")?.click(); await sleep(20);
+    expect(name + ": the tool shows a panel (target, what to click), counts what's done, Done finishes and closes it",
+      open.tool === name && open.title === name && /Plate/.test(open.text) && after.bodies === 1 && after.count === "1 done" && after.tool === name &&
+        !app.tool && !panel() && app.selection.length === 1 && app.selection[0].body === a.id, { open, after, tool: app.tool && app.tool.name, panel: !!panel() });
+  }
+  // Esc closes it too
+  app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]);
+  key("-", "Minus"); await sleep(20);
+  const had = !!panel();
+  key("Escape", "Escape"); await sleep(20);
+  expect("Subtract: Esc finishes and closes the panel", had && !app.tool && !panel(), { had, tool: app.tool && app.tool.name });
+  // Cut: panel with Cancel
+  app.setSelection([{ kind: "body", body: app.doc.bodies[0].id, id: 0 }]);
+  app.run("op.cut"); await sleep(20);
+  const cut = { tool: app.tool && app.tool.name, text: panel()?.textContent, name: app.doc.bodies[0].name };
+  panel()?.querySelector("button[data-act=done]")?.click(); await sleep(20);
+  expect("Cut: shows a panel (what's cut, guide or axis) — Cancel exits the tool, nothing cut",
+    cut.tool === "Cut" && cut.text.includes(cut.name) && /axis/.test(cut.text) && !app.tool && !panel() && app.doc.bodies.length === 1, { cut, tool: app.tool && app.tool.name });
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("tool panel scenario failed: " + JSON.stringify(failed));
+  return [{ label: "tool panel", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Cut by an axis: 1, select the cube, C, click the red X axis line — no guide needed; the plane follows the view. */
+const SCENARIO_CUTAXIS = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const r = (x) => Math.round(x * 1000) / 1000;
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const ev = (type, p) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const cutAt = async (view, p) => {
+    app.doc.reset([]);
+    const cube = app.doc.makeBody(K.makeBox(G, [0, 0, -10], 20, 20, 20), "Cube"); // (centred on X / Y)
+    app.doc.commit([cube], "cube");
+    app.run("mode.body"); app.run(view); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+    app.run("op.cut"); await sleep(20);
+    const tool = app.tool && app.tool.name;
+    ev("pointermove", p); await sleep(20);
+    ev("pointerdown", p); await sleep(50);
+    return { tool, boxes: app.doc.bodies.map((b) => b.shape.boundingBox.bounds.map((c) => c.map(r))) };
+  };
+  // No guides in the file: Cut still starts, and the X axis (beyond the cube) cuts it.
+  const top = await cutAt("view.top", [25, 0, 0]);
+  expect("cut by axis: no guides, 1 + select cube + C + click the X axis in Top view → cut at Y = 0 into two halves",
+    top.tool === "Cut" && top.boxes.length === 2 && top.boxes.every((b) => b[1][1] - b[0][1] === 10 && b[1][2] - b[0][2] === 20) && top.boxes.some((b) => b[0][1] === 0), top);
+  const front = await cutAt("view.front", [25, 0, 0]);
+  expect("cut by axis: the X axis in Front view → cut level at Z = 0",
+    front.boxes.length === 2 && front.boxes.every((b) => b[1][2] - b[0][2] === 10 && b[1][1] - b[0][1] === 20), front);
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("cut by axis scenario failed: " + JSON.stringify(failed));
+  return [{ label: "cut by axis", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Move gizmo + Ctrl: the snap marker (green square, axis cross) is drawn over the gizmo handle under the cursor. */
+const SCENARIO_SNAPMARK = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  app.doc.reset([]);
+  const cube = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 20), "Cube");
+  app.doc.commit([cube], "cube");
+  app.run("mode.body"); vp.fit(); await sleep(50);
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  app.run("xf.move"); await sleep(50);
+  const P = vp.pivot.position.clone();
+  vp.tc.axis = "XYZ"; // the centre handle as while dragging it (highlighted, drawn on top)
+  const greenNear = (kind, dy) => {
+    vp.showSnapMarker({ point: P, kind });
+    vp.render(); // (read back in the same task, before the frame is presented)
+    const gl = vp.renderer.getContext(), r = vp.canvas.getBoundingClientRect(), dpr = vp.renderer.getPixelRatio();
+    const s = vp.toScreen(P), n = Math.ceil(4 * dpr);
+    const x = Math.round((s.x - r.left) * dpr) - n, y = Math.round((r.bottom - s.y - dy) * dpr) - n;
+    const px = new Uint8Array((2 * n + 1) * (2 * n + 1) * 4);
+    gl.readPixels(x, y, 2 * n + 1, 2 * n + 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    let g = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i + 1] > 150 && px[i] < 140 && px[i + 2] < 180) g++;
+    return g;
+  };
+  const sq = greenNear("vertex", 7), cross = greenNear("axis", 4);
+  expect("snap marker: green square (point) shows over the move gizmo's centre handle", sq > 0, sq);
+  expect("snap marker: axis cross shows over the move gizmo's centre handle", cross > 0, cross);
+  vp.tc.axis = null;
+  vp.showSnapMarker(null);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(30);
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("snap marker scenario failed: " + JSON.stringify(failed));
+  return [{ label: "snap marker over gizmo", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Auto snap (status bar, on by default): tools snap without Ctrl, Ctrl places freely; off: only with Ctrl. */
+const SCENARIO_AUTOSNAP = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const box = document.getElementById("auto-snap");
+  const saved = localStorage.getItem("y3d.autoSnap");
+  app.doc.reset([]);
+  const cube = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 20), "Cube");
+  app.doc.commit([cube], "cube");
+  app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(50);
+  // The box turns it on (remembered) and words the hints for it
+  box.checked = true; box.dispatchEvent(new Event("change")); await sleep(20);
+  expect("auto snap: the Auto box turns it on and it's remembered", vp.autoSnap && localStorage.getItem("y3d.autoSnap") === "1", { on: vp.autoSnap, stored: localStorage.getItem("y3d.autoSnap") });
+  // Rectangle tool near a top corner of the cube: without Ctrl it snaps to the corner, with Ctrl it's free
+  app.run("tool.rectangle"); await sleep(20);
+  const corner = new V(10, -10, 20); // (the cube is centred on X / Y)
+  window.__see(corner);
+  vp.camera.updateMatrixWorld(); vp.stamp++; await sleep(30); // (__see may turn the camera: current matrices, re-projected snap points)
+  const sc = vp.toScreen(corner);
+  const marker = () => Object.values(vp.snapMarker ?? {}).some((m) => m.visible);
+  const move = async (ctrlKey) => { canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x + 3, clientY: sc.y + 2, ctrlKey, button: 0, bubbles: true })); await sleep(30); return marker(); };
+  const snapped = await move(false), free = await move(true);
+  expect("auto snap: on — the Rectangle tool snaps to a corner without Ctrl, Ctrl places freely", snapped && !free, { snapped, free });
+  expect("auto snap: on — grid step without Ctrl, none with it", app.snapStep({ ctrlKey: false }) === app.snap && app.snapStep({ ctrlKey: true }) === 0, [app.snapStep({ ctrlKey: false }), app.snapStep({ ctrlKey: true })]);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  // The move gizmo snaps to the grid without Ctrl; its hint says Ctrl is free
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  app.run("xf.move"); await sleep(30);
+  window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: false, bubbles: true }));
+  const gizmoSnap = vp.tc.translationSnap, hint = document.getElementById("status-hint").textContent;
+  window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: true, bubbles: true }));
+  const gizmoFree = vp.tc.translationSnap;
+  expect("auto snap: on — the move gizmo snaps without Ctrl, not with it; the hint says Ctrl is free", gizmoSnap === app.snap && gizmoFree === null && /Ctrl: free/.test(hint), { gizmoSnap, gizmoFree, hint });
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  // Guide line: a click on an edge / the X axis still picks it as the reference (an edge snap doesn't start a 2-point guide)
+  app.setSelection([]);
+  const guideRef = async (p) => {
+    app.run("tool.guide"); await sleep(20);
+    window.__see(new V(...p)); vp.camera.updateMatrixWorld(); vp.stamp++; await sleep(30);
+    const s = vp.toScreen(new V(...p));
+    for (const type of ["pointermove", "pointerdown"]) canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
+    await sleep(20);
+    const t = app.tool, got = { ref: !!t?.ref, onAxis: !!t?.onAxis, p1: !!t?.p1 };
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    return got;
+  };
+  const onEdge = await guideRef([5, -10, 20]), onAxis = await guideRef([40, 0, 0]);
+  expect("auto snap: on — Guide line: clicking an edge or the X axis picks it as the reference", onEdge.ref && !onEdge.p1 && onAxis.ref && onAxis.onAxis && !onAxis.p1, { onEdge, onAxis });
+  vp.setView("iso"); vp.fit(); await sleep(30);
+  app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+  app.run("xf.move"); await sleep(30);
+  // Off: the old way — only with Ctrl
+  box.checked = false; box.dispatchEvent(new Event("change")); await sleep(20);
+  window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: false, bubbles: true }));
+  const offFree = vp.tc.translationSnap, offHint = document.getElementById("status-hint").textContent;
+  window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: true, bubbles: true }));
+  const offSnap = vp.tc.translationSnap;
+  expect("auto snap: off — the gizmo snaps only with Ctrl, the hint says so; remembered", offFree === null && offSnap === app.snap && /hold Ctrl to snap/.test(offHint) && localStorage.getItem("y3d.autoSnap") === "0", { offFree, offSnap, offHint });
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  app.run("tool.rectangle"); await sleep(20);
+  const offPlain = await move(false), offCtrl = await move(true);
+  expect("auto snap: off — the Rectangle tool snaps to the corner only with Ctrl", !offPlain && offCtrl, { offPlain, offCtrl });
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  // (the other scenarios run with it off; the user's setting comes back)
+  if (saved === null) localStorage.removeItem("y3d.autoSnap"); else localStorage.setItem("y3d.autoSnap", saved);
+  app.setAutoSnap(false, false);
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("auto snap scenario failed: " + JSON.stringify(failed));
+  return [{ label: "auto snap", passed: checks.length - failed.length, total: checks.length, checks }];
 })()
 `;
 
@@ -3117,6 +3738,17 @@ const SCENARIO_SKETCH = String.raw`
     expect("sketch: right click → Select, the lines kept (a path); right click again clears the selection", r1.mode === "select" && r1.opens === 1 && r1.first === null && sel1 === 1 && r2.mode === "select" && r2.sel === 0 && r2.tool === "Sketch", { r1, sel1, r2 });
     document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
   }
+  // X-ray has its own toolbar button (not in the View drawer), lit while x-ray is on
+  {
+    const btn = document.querySelector("#toolbar .tb-btn[data-cmd='view.xray']");
+    const inDrawer = !!document.querySelector(".tb-drawer [data-cmd='view.xray']");
+    const was = vp.xray;
+    btn.click(); await sleep(20);
+    const toggled = vp.xray === !was && btn.classList.contains("active") === vp.xray;
+    btn.click(); await sleep(20);
+    const back = vp.xray === was && btn.classList.contains("active") === was;
+    expect("toolbar: X-ray is its own button outside the View drawer and shows when it's on", !!btn && !inDrawer && toggled && back, { btn: !!btn, inDrawer, toggled, back });
+  }
   // Pro layout (Ctrl+Shift+F1 / View menu): one-row sketch panel, text-only Recent strip, short hints; back again
   {
     const hintEl = document.getElementById("status-hint");
@@ -3245,6 +3877,36 @@ const SCENARIO_SKETCH = String.raw`
     app.tool.setMode("picture"); await key("Delete");
     document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(30);
     app.run("edit.undo"); await sleep(10);
+  }
+  // K on a curved face: sketches on the flat plane touching it — under the cursor, else at the face's middle
+  {
+    app.doc.reset([]);
+    const cyl = app.doc.makeBody(K.makeCylinder(G, [0, 0, 0], 10, 30), "Cylinder");
+    app.doc.commit([cyl], "cylinder");
+    app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(100);
+    const side = cyl.shape.faces.find((f) => f.geomType === "CYLINDRE");
+    /** The sketch plane: its normal and how far it is from the cylinder's axis (Z), at height 15. */
+    const plane = () => { const f = app.tool && app.tool.frame; if (!f) return null; const o = f.origin, n = f.z; return { n: n.toArray().map((x) => +x.toFixed(3)), d: +(o.x * n.x + o.y * n.y + o.z * n.z).toFixed(3) }; };
+    const moveTo = (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); window.dispatchEvent(new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, bubbles: true })); };
+    const cancel = async () => { document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); await sleep(30); };
+    const toastSaid = () => [...document.querySelectorAll("#toasts .toast")].map((t) => t.textContent).join(" | ");
+    // Cursor over the face, on the side facing the camera (the test may turn the view): the plane touches it right there
+    const a = Math.atan2(vp.camera.position.y, vp.camera.position.x);
+    moveTo([10 * Math.cos(a), 10 * Math.sin(a), 15]);
+    app.setSelection([{ kind: "face", body: cyl.id, id: side.hashCode }]);
+    await key("k"); await sleep(50);
+    const under = plane(), said = toastSaid();
+    await cancel();
+    // Cursor elsewhere: the face's middle (still touching: 10 from the axis, level normal)
+    moveTo([200, 200, 200]);
+    app.setSelection([{ kind: "face", body: cyl.id, id: side.hashCode }]);
+    await key("k"); await sleep(50);
+    const middle = plane(), name = app.tool && app.tool.name;
+    await cancel();
+    expect("sketch: K on a curved face sketches on the plane touching it under the cursor (or at its middle), with a note that it stays flat",
+      under && Math.abs(under.n[0] - Math.cos(a)) < 0.01 && Math.abs(under.n[1] - Math.sin(a)) < 0.01 && Math.abs(under.n[2]) < 1e-6 && Math.abs(under.d - 10) < 0.05 &&
+        name === "Sketch" && middle && Math.abs(middle.n[2]) < 1e-6 && Math.abs(middle.d - 10) < 1e-6 && /doesn't follow the curve/.test(said),
+      { under, expected: [Math.cos(a), Math.sin(a)].map((x) => +x.toFixed(3)), middle, name, said });
   }
   // Left open for the screenshot (cancelled afterwards), on a fresh model with just the box: a slot
   // drawn on the box top, a circle, a line on the way lined up with the slot's end (dashed guide)
@@ -3587,6 +4249,9 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
         return 0;
       })()`, true);
     }
+    // The scenarios were written for snapping only while Ctrl is held: Auto snap off (not remembered).
+    // SCENARIO_AUTOSNAP checks Auto snap itself.
+    await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.setAutoSnap(false, false); return 0; })()`, true);
     // Y3D_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
     if (process.env.Y3D_SMOKE_HALF) {
@@ -3621,6 +4286,12 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`window.__smokeDir = ${JSON.stringify(outDir)}; 0`, true);
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GROUPS, true));
     await shot("7c-groups.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SNAPMARK, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_AUTOSNAP, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CUTAXIS, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TOOLPANEL, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_KEEPTOOL, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {
       // The File menu shows the list (built in the main process).
@@ -3630,6 +4301,19 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       if (!ok) console.error("recent menu failed: " + JSON.stringify(labels));
       report.push({ label: "open recent menu", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Open Recent lists the files, newest first, + Clear Recent", ok, got: labels }] });
       if (!ok) errors.push("recent menu failed");
+    }
+    {
+      // Edit → Clear All Guides: the menu item runs the command (all guide lines gone, one undo step).
+      const mi = Menu.getApplicationMenu()?.items.find((i) => i.label === "&Edit")?.submenu?.items.find((i) => i.label === "Clear All Guides");
+      await win.webContents.executeJavaScript(`(() => { const a = window.y3dApp; a.doc.reset([]); a.doc.setGuides([{ a: [0, 0, 0], b: [10, 0, 0] }, { a: [0, 0, 0], b: [0, 10, 0] }], "guides"); return 0; })()`, true);
+      mi?.click();
+      await new Promise((r) => setTimeout(r, 100));
+      const left: [number, number] = await win.webContents.executeJavaScript(`(() => { const a = window.y3dApp, n = a.doc.guides.length; a.run("edit.undo"); const back = a.doc.guides.length; a.doc.reset([]); return [n, back]; })()`, true);
+      const ok = !!mi && left[0] === 0 && left[1] === 2;
+      if (!ok) errors.push("clear guides menu failed: " + JSON.stringify({ found: !!mi, left }));
+      const clr = Menu.getApplicationMenu()?.items.find((i) => i.label === "&View")?.submenu?.items.find((i) => i.label === "Clear Recent Tools");
+      if (!clr) errors.push("View → Clear Recent Tools missing");
+      report.push({ label: "clear guides menu", passed: ok ? 1 : 0, total: 1, checks: [{ label: "Edit → Clear All Guides removes every guide line; Undo brings them back", ok, got: { found: !!mi, left } }] });
     }
     await shot("7b-array.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
