@@ -3637,6 +3637,34 @@ const SCENARIO_HOLES = String.raw`
     if (app.op) document.querySelector("#op-panel [data-a=cancel]")?.click();
     expect("S with a straight edge selected: the usual Scale", t === "Scale", t);
     app.doc.reset([]);
+    // A Ø12 hole drilled at a slant through a dome (R21): its rims an ellipse on the base and a
+    // free-form curve on the dome — still a round hole. S on the ellipse → Ø14; Del fills it.
+    {
+      const a = 50 * Math.PI / 180, axis = [0, -Math.sin(a), Math.cos(a)];
+      const tilt = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, Math.cos(a), Math.sin(a)], z: axis };
+      const dome = K.booleanOp("subtract", K.makeSphereAt([0, 0, 0], 21), [K.makeBox(G, [0, 0, -30], 60, 60, 30)]);
+      const domeVol = K.solidVolume(dome);
+      const drilled = app.doc.makeBody(K.booleanOp("subtract", dome, [K.makeCylinder(tilt, [0, 25 * Math.sin(a), -25 * Math.cos(a)], 6, 60)]), "Drilled dome");
+      app.doc.commit([drilled], "drilled dome"); await sleep(20);
+      const v1 = vol(drilled.id);
+      const ellipse = app.doc.get(drilled.id).shape.edges.find((e) => e.geomType === "ELLIPSE");
+      const slant = await resize([{ kind: "edge", body: drilled.id, id: ellipse.hashCode }]);
+      opValue("d", 14); await sleep(100);
+      app.applyOp(); await sleep(50);
+      const err = document.querySelector("#op-panel .op-error")?.textContent || "";
+      if (app.op) document.querySelector("#op-panel [data-a=cancel]")?.click();
+      const s = app.doc.get(drilled.id).shape, v2 = K.solidVolume(s);
+      const dias = [...new Set(s.edges.map((e) => K.roundRim(s, e.hashCode)).filter(Boolean).map((x) => r(x.diameter)))];
+      expect("a hole at a slant through a dome: its ellipse rim + S → 'Resize hole (1 hole)', Diameter 12; 14 → Ø14 (from either rim), less volume, valid",
+        slant.title === "Resize hole (1 hole)" && slant.d === "12" && dias.length === 1 && dias[0] === 14 && v2 < v1 - 100 && K.isValidShape(s) && app.doc.undoLabel === "Resize hole",
+        { slant, err, dias, v1: r(v1), v2: r(v2) });
+      const rim = s.edges.find((e) => e.geomType === "ELLIPSE");
+      app.run("mode.edge"); app.setSelection([{ kind: "edge", body: drilled.id, id: rim.hashCode }]); await sleep(20);
+      app.run("edit.delete"); await sleep(50);
+      const filled = vol(drilled.id);
+      expect("…its rim + Del: the hole filled, the whole dome back", Math.abs(filled - domeVol) < 1e-3 * domeVol && K.isValidShape(app.doc.get(drilled.id).shape), { filled: r(filled), domeVol: r(domeVol) });
+    }
+    app.doc.reset([]);
   } catch (e) {
     expect("resize holes threw", false, String(e && e.stack || e));
   }

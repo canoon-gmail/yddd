@@ -183,6 +183,8 @@ interface OpOutcome {
   xform?: { ids: number[]; matrix: THREE.Matrix4 };
   /** Bodies the result removes: hidden while it is previewed. */
   hide?: number[];
+  /** Hide the selected edges' highlight while previewed (they change with it, e.g. a resized hole's rim). */
+  hideSelection?: boolean;
   /** Apply to the document. Returns the body ids to select afterwards (`then`: run once the panel has closed). */
   commit(): { select: number[]; solidMode?: boolean; then?: () => void };
 }
@@ -200,6 +202,8 @@ interface OpDrag {
   /** Smallest value the drag gives (e.g. a fillet radius can't reach 0). */
   min?: number;
   unit?: number;
+  /** Shown with the value while dragging (default: % with a `unit`, else mm). */
+  units?: string;
   mul?: string;
   look?: "arrow" | "box" | "ring";
   color?: string;
@@ -1757,7 +1761,7 @@ class App implements ToolHost {
     op.exact = sp ? { key: drag.key, shown: fmt(v), value: v } : undefined;
     if (fmt(v) === input.value) return;
     input.value = fmt(v);
-    const units = drag.unit ? "%" : "mm";
+    const units = drag.units ?? (drag.unit ? "%" : "mm");
     this.hud(sp ? `${fmt(v)} ${units} · ${sp.kind}` : `${fmt(v)} ${units}`, O.clone().addScaledVector(D, v * unit));
     if ((op.previewMs ?? 0) > SLOW_PREVIEW_MS) {
       // Heavy geometry: recomputing every frame would keep the CPU pegged. Show the instant
@@ -1807,7 +1811,7 @@ class App implements ToolHost {
       err.textContent = "";
       err.classList.remove("waiting");
       if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
-      else this.viewport.showGhost(result.ghost, result.hide);
+      else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
       op.previewMs = performance.now() - t0;
       return result;
     } catch (e) {
@@ -2563,7 +2567,7 @@ class App implements ToolHost {
     const [firstBody, [firstHole]] = [...perBody][0];
     const axis = faceAxis(this.doc.get(firstBody)!.shape as Shape, firstHole.walls[0] ?? firstHole.faces[0]);
     // (a wall's normal points into the hole: out of it is the other way)
-    const drag = axis ? { origin: axis.center, dir: axis.normal.map((k) => -k) as V3, key: "c", unit: 0.5, look: "ring" as const, title: "Drag to make the hole bigger / smaller" } : undefined;
+    const drag = axis ? { origin: axis.center, dir: axis.normal.map((k) => -k) as V3, key: "c", unit: 0.5, look: "ring" as const, units: "mm", title: "Drag to make the hole bigger / smaller" } : undefined;
     this.startOp({
       title: `Resize hole (${what})`,
       label: "Resize hole",
@@ -2572,7 +2576,7 @@ class App implements ToolHost {
       compute: ({ c }) => {
         const resized = () => new Map<number, Geom>([...perBody].map(([id, hs]) => [id, resizeHoles(this.solidOf(id, "Resize hole"), hs, c)]));
         const preview = asPreview(resized);
-        return { ghost: new Map([...preview].filter((e): e is [number, Shape] => !isMesh(e[1]))), commit: () => this.replaceOutcome(resized(), "Resize hole").commit() };
+        return { hideSelection: true, ghost: new Map([...preview].filter((e): e is [number, Shape] => !isMesh(e[1]))), commit: () => this.replaceOutcome(resized(), "Resize hole").commit() };
       },
       remember: () => {},
       drag,
@@ -2621,18 +2625,33 @@ class App implements ToolHost {
         : [{ key: "c", label: "Bigger by (mm, − smaller)", value: 0, step: 0.1 }],
       // The ring on the rim: drag it out / in (1 mm out = 2 mm wider).
       drag: same
-        ? { origin: first.center, dir: out, key: "d", unit: 0.5, min: 0.001, look: "ring", line: true, title: "Drag to change the diameter" }
-        : { origin: first.rim, dir: out, key: "c", unit: 0.5, look: "ring", title: "Drag to make them bigger / smaller" },
+        ? { origin: first.center, dir: out, key: "d", unit: 0.5, min: 0.001, look: "ring", line: true, units: "mm", title: "Drag to change the diameter" }
+        : { origin: first.rim, dir: out, key: "c", unit: 0.5, look: "ring", units: "mm", title: "Drag to make them bigger / smaller" },
       compute: ({ d, c }) => {
         const change = same ? d - d0 : c;
         const resized = () => new Map<number, Geom>([...perBody].map(([id, rs]) => [id, resizeRounds(this.solidOf(id, label), rs, change)]));
         // Fast preview; the exact result is computed on Apply (see asPreview).
         const preview = asPreview(resized);
-        return { ghost: new Map([...preview].filter((e): e is [number, Shape] => !isMesh(e[1]))), commit: () => this.replaceOutcome(resized(), label).commit() };
+        return { hideSelection: true, ghost: new Map([...preview].filter((e): e is [number, Shape] => !isMesh(e[1]))), commit: () => this.replaceOutcome(resized(), label).commit() };
       },
       remember: () => {},
       hint: `${label}: type the ${same ? "new diameter" : "change (+0.2: each 0.2 mm wider)"} or drag the ring on the rim · Enter or Done apply · Esc cancel`,
     });
+    // Once the panel is up: a first small resize, so a hole push/pull can't do (one at a slant
+    // through a curved face) is already filled for the redrill and the drag previews live.
+    if (holes) {
+      const op = this.op;
+      window.setTimeout(() => {
+        if (this.op !== op) return;
+        for (const [id, rs] of perBody) {
+          try {
+            asPreview(() => resizeRounds(this.solidOf(id, label), rs.filter((r) => r.kind === "hole"), 0.01));
+          } catch {
+            // (the dialog shows it when the user changes the size)
+          }
+        }
+      }, 50);
+    }
   }
 
   /** Cut: with solids selected, click a guide line; the solids are cut by the plane through it. */

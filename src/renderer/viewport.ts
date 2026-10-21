@@ -1671,8 +1671,9 @@ export class Viewport {
    * Preview operation results in place of the given bodies. Keys that are not
    * existing body ids (e.g. negative numbers) add a preview without hiding anything.
    */
-  showGhost(shapes: Map<number, Shape>, hide: readonly number[] = []): void {
+  showGhost(shapes: Map<number, Shape>, hide: readonly number[] = [], hideSelection = false): void {
     this.clearGhost();
+    this.selEdges.visible = !hideSelection;
     for (const id of hide) {
       const v = this.views.get(id);
       if (!v) continue;
@@ -1778,6 +1779,7 @@ export class Viewport {
 
   clearGhost(): void {
     this.glowXf = null;
+    this.selEdges.visible = true;
     for (const l of [this.selEdges, this.selOutline]) {
       l.matrix.identity();
       l.matrixWorldNeedsUpdate = true;

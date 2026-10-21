@@ -1335,7 +1335,7 @@ export interface RoundRim {
  */
 export function roundRim(shape: Shape, edgeId: number): RoundRim | null {
   const c = circleOf(shape, edgeId);
-  if (!c) return null;
+  if (!c) return slantedRim(shape, edgeId);
   const edge = shape.edges.find((e) => e.hashCode === edgeId)!;
   // All the way round: the arcs of this circle (a rim can be in pieces) add up to a full turn.
   const tol = 1e-6 * Math.max(1, c.radius);
@@ -1354,6 +1354,35 @@ export function roundRim(shape: Shape, edgeId: number): RoundRim | null {
     const w = cylinderOf(f);
     if (!w || !sameRound(w, c.center, c.normal, c.radius)) continue;
     return { kind: w.hole ? "hole" : "pin", diameter: 2 * w.radius, center: c.center, axis: w.axis, rim: edge.pointAt(0).toTuple() as V3, key: roundKey(w) };
+  }
+  return null;
+}
+
+/**
+ * A rim that isn't a circle — a hole drilled at a slant (an ellipse on a flat face) or coming out
+ * through a curved face — of a round wall that goes all the way round; `center`: the rim's start
+ * point brought onto the axis.
+ */
+function slantedRim(shape: Shape, edgeId: number): RoundRim | null {
+  const edge = shape.edges.find((e) => e.hashCode === edgeId);
+  if (!edge || edge.geomType === "LINE") return null;
+  for (const f of shape.faces) {
+    if (f.geomType !== "CYLINDRE" || !f.edges.some((e) => e.isSame(edge))) continue;
+    const w = cylinderOf(f);
+    if (!w) continue;
+    const p = edge.pointAt(0).toTuple() as V3, h = dot3(sub3(p, w.origin), w.axis);
+    const center: V3 = [w.origin[0] + h * w.axis[0], w.origin[1] + h * w.axis[1], w.origin[2] + h * w.axis[2]];
+    // All the way round: the round wall's faces (it can be in pieces) add up to a full turn.
+    let turn = 0;
+    for (const g of shape.faces) {
+      const o = cylinderOf(g);
+      if (!o || o.hole !== w.hole || !sameRound(o, center, w.axis, w.radius)) continue;
+      const ad = new oc.BRepAdaptor_Surface(g.wrapped, true);
+      turn += ad.LastUParameter() - ad.FirstUParameter();
+      ad.delete();
+    }
+    if (turn < 2 * Math.PI - 1e-6) continue;
+    return { kind: w.hole ? "hole" : "pin", diameter: 2 * w.radius, center, axis: w.axis, rim: p, key: roundKey(w) };
   }
   return null;
 }
@@ -1414,8 +1443,69 @@ export function resizeRounds(shape: Solid, rims: RoundRim[], change: number): So
     });
     if (!faces.length) throw new Error("Resize: the round wall was not found");
     // (pulling a hole's wall — along its normal, toward the axis — makes it smaller)
-    out = pushPullMany(out, faces.map((f) => f.hashCode), kind === "hole" ? -change / 2 : change / 2);
+    // A hole at a slant through a curved face can come back unchanged or wrong: then a hole that goes
+    // right through is filled and drilled again at its new size (remembered for the next drag step).
+    const memo = kind === "hole" && redrillMemo?.shape === out && redrillMemo.key === roundsKey(these) ? redrillMemo : null;
+    let moved: Solid | null = null;
+    if (!memo) {
+      try {
+        moved = pushPullMany(out, faces.map((f) => f.hashCode), kind === "hole" ? -change / 2 : change / 2);
+      } catch (e) {
+        if (kind === "pin") throw e;
+      }
+    }
+    if (kind === "hole" && (!moved || !roundsMoved(out, moved, faces, change))) out = redrill(out, these, change);
+    else out = moved!;
   }
+  return out;
+}
+
+/** The volume a resize took away (a hole) as it should, to within half: the walls' area × how far they moved. */
+function roundsMoved(before: Solid, after: Solid, walls: Face[], change: number): boolean {
+  if (!isValidShape(after)) return false;
+  const want = walls.reduce((a, f) => a + measureArea(f), 0) * change / 2, got = measureVolume(before) - measureVolume(after);
+  return got / want > 0.5 && got / want < 2;
+}
+
+/** The last holes redrilled: on that shape, push/pull doesn't do; `filled`: the shape with them filled. */
+let redrillMemo: { shape: Solid; key: string; filled: Solid } | null = null;
+
+const roundsKey = (rims: RoundRim[]) => [...new Set(rims.map((r) => r.key))].sort().join(";");
+
+/** Round holes that go right through filled and drilled again, each `change` mm bigger across. */
+function redrill(shape: Solid, rims: RoundRim[], change: number): Solid {
+  const key = roundsKey(rims);
+  let filled: Solid;
+  if (redrillMemo?.shape === shape && redrillMemo.key === key) filled = redrillMemo.filled;
+  else {
+    const faces = roundFaces(shape, rims);
+    if (faces.some((f) => f.geomType !== "CYLINDRE")) throw new Error("Resize: the geometry kernel could not compute this");
+    filled = defeature(shape, faces, rims.length === 1 ? "fill the hole" : "fill the holes");
+    redrillMemo = { shape, key, filled };
+  }
+  // Drills longer than the whole solid, centred where each hole's axis passes nearest the solid's middle.
+  const [lo, hi] = shape.boundingBox.bounds, len = 2 * Math.hypot(...sub3(hi, lo)) + 1;
+  const mid: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  const seen = new Set<string>();
+  const drills = rims.filter((r) => !seen.has(r.key) && seen.add(r.key)).map((r) => {
+    const h = dot3(sub3(mid, r.center), r.axis) - len / 2;
+    return occCylinder((r.diameter + change) / 2, len, [r.center[0] + h * r.axis[0], r.center[1] + h * r.axis[1], r.center[2] + h * r.axis[2]], r.axis) as Solid;
+  });
+  // (never as a preview: glue assumes faces don't cross, and a drill crosses them)
+  const was0 = previewing;
+  previewing = false;
+  let out: Solid;
+  try {
+    out = booleanOp("subtract", filled, drills);
+  } finally {
+    previewing = was0;
+  }
+  if (!isValidShape(out)) throw new Error("Resize: the result is not a valid solid");
+  // The drill only took the holes' place (it didn't run on into another part of the solid): the
+  // volume taken away grew with the area across, give or take the rims' slant.
+  const d = rims[0].diameter, was = measureVolume(filled) - measureVolume(shape), now = measureVolume(filled) - measureVolume(out);
+  const k = now / (was * ((d + change) / d) ** 2);
+  if (!(k > 0.8 && k < 1.25)) throw new Error("Resize: the geometry kernel could not compute this");
   return out;
 }
 
@@ -1425,6 +1515,12 @@ export function resizeRounds(shape: Solid, rims: RoundRim[], change: number): So
  * by the faces around (OpenCascade's defeaturing). Throws if it can't (e.g. a hole running into another).
  */
 export function fillRounds(shape: Solid, rims: RoundRim[]): Solid {
+  const what = rims.every((r) => r.kind === "hole") ? "fill the hole" : rims.every((r) => r.kind === "pin") ? "take off the pin" : "fill the hole / take off the pin";
+  return defeature(shape, roundFaces(shape, rims), what);
+}
+
+/** The faces of round holes / pins: their walls, and the faces inside them (a blind hole's bottom, a drill tip, a pin's top). */
+function roundFaces(shape: Solid, rims: RoundRim[]): Face[] {
   const [lo, hi] = shape.boundingBox.bounds;
   const tol = 1e-6 * Math.max(1, Math.hypot(...sub3(hi, lo)));
   const remove: Face[] = [];
@@ -1452,8 +1548,7 @@ export function fillRounds(shape: Solid, rims: RoundRim[]): Solid {
       }
     }
   }
-  const what = rims.every((r) => r.kind === "hole") ? "fill the hole" : rims.every((r) => r.kind === "pin") ? "take off the pin" : "fill the hole / take off the pin";
-  return defeature(shape, remove, what);
+  return remove;
 }
 
 /** `faces` of a solid taken away and the gap closed by the faces around (OpenCascade's defeaturing); `what` for the error. */
