@@ -532,7 +532,7 @@ function loadRecent(): string[] {
 }
 
 const MODE_HINTS: Record<SelMode, string> = {
-  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag or Alt+drag orbit · Shift+Left-drag pan · Wheel / two-finger slide zoom",
+  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag or Alt+drag orbit · Shift+drag pan · Wheel / two-finger slide zoom",
   face: "Face mode: click faces (P push/pull, H shell), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
   edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge — a closed loop of edges: a face copy).  Shift+click to add · Right-click a solid → Solid mode",
 };
@@ -5038,7 +5038,7 @@ class App implements ToolHost {
     }
     const rows: [string, string][] = [
       ["Middle-drag · Alt+Left-drag", "Orbit view"],
-      ["Shift + Left-drag · Ctrl + Middle-drag", "Pan view"],
+      ["Shift + Left-drag · Shift / Ctrl + Middle-drag", "Pan view"],
       ["Wheel · two-finger slide (touchpad)", "Zoom to cursor"],
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],

@@ -38,7 +38,7 @@ Press **F1** in the app for all shortcuts.
 ## Mouse
  
 * **Middle-drag** or **Alt + Left-drag**: orbit
-* **Shift + Left-drag** or **Ctrl + Middle-drag**: pan
+* **Shift + Left-drag** or **Shift / Ctrl + Middle-drag**: pan
 * **Wheel**: zoom to cursor
 * **Left click**: select / draw / use tool
 * **Snapping**: tools snap to corners, midpoints, centres, edges, guides, axes and the grid by themselves —

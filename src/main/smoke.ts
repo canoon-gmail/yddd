@@ -4779,6 +4779,14 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   const p2 = await cam();
   const dist = (a: number[], b: number[]) => Math.hypot(...a.map((v, k) => v - b[k]));
   expect("navigation: Ctrl + left drag doesn't pan; Ctrl + middle drag pans", dist(p1.p, p0.p) < 1e-9 && dist(p2.p, p1.p) > 1 && Math.abs(p2.d - p1.d) < 1e-6 * p1.d, { leftMoved: dist(p1.p, p0.p), middleMoved: dist(p2.p, p1.p) });
+  // Shift + middle drag pans (the target moves with it); a plain middle drag orbits (the target stays put)
+  const tgt = () => js<number[]>(`window.y3dApp.viewport.controls.target.toArray()`);
+  const t2 = await tgt();
+  await drag("middle", ["shift"], now.x + 200, now.y - 150);
+  const p3 = await cam(), t3 = await tgt();
+  await drag("middle", [], now.x + 200, now.y - 150);
+  const p4 = await cam(), t4 = await tgt();
+  expect("navigation: Shift + middle drag pans; a plain middle drag orbits", dist(t3, t2) > 1 && Math.abs(p3.d - p2.d) < 1e-6 * p2.d && dist(p4.p, p3.p) > 1 && dist(t4, t3) < 1e-9, { panTarget: dist(t3, t2), orbitMoved: dist(p4.p, p3.p), orbitTarget: dist(t4, t3) });
   await send({ type: "mouseWheel", x: now.x, y: now.y, deltaX: 0, deltaY: 120 }); // (Electron: + = scroll up / away)
   await sleep(100);
   const zoomed = await cam();
