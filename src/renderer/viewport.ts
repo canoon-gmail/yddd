@@ -1890,6 +1890,17 @@ export class Viewport {
   }
 
   /**
+   * A body's box from its drawn triangles — instant, unlike the exact `boundingBox` (tens of ms on
+   * a curved solid, every time); null if it isn't drawn (yet) or has no surface (a path).
+   */
+  drawnBox(id: number): THREE.Box3 | null {
+    const v = this.views.get(id);
+    if (!v) return null;
+    const box = new THREE.Box3().setFromObject(v.mesh);
+    return box.isEmpty() ? null : box;
+  }
+
+  /**
    * Attach the move/rotate gizmo to `ids` (or, with no ids, just to `pivotAt`).
    * `onChange` reports the live offset while a move is dragged.
    */

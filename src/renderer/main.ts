@@ -61,6 +61,14 @@ import {
   edgesAlong,
   asPreview,
   splitByPlane,
+  roundRim,
+  resizeRounds,
+  fillRounds,
+  holeAt,
+  fillHoles,
+  resizeHoles,
+  type HoleLoop,
+  type RoundRim,
   offsetDragAxis,
   offsetEdges,
   offsetEdgesAxis,
@@ -294,6 +302,9 @@ type CutLine = number | { axis: number };
 
 /** What Sweep runs along: a path object or a guide line (its index). */
 type Spine = { path: number } | { guide: number };
+
+/** Cut: more upper pieces than this go in a new group of their own. */
+const CUT_GROUP_OVER = 4;
 
 /** Undo / Redo that will take longer than this (ms) to draw shows the busy dialog. */
 const BUSY_DRAW_MS = 300;
@@ -1196,6 +1207,23 @@ class App implements ToolHost {
       else if (!e.shiftKey) this.setSelection([]);
       return;
     }
+    // Edge mode, on an edge of a hole's rim: the whole rim (Shift: added); a click on an edge of the
+    // selected rim: just that edge (e.g. to fillet one side).
+    const rim = item.kind === "edge" && this.mode === "edge" ? this.holeRimOf(item) : null;
+    if (rim && rim.length > 1) {
+      const inSel = (x: SelItem) => this.selection.some((s) => sameItem(s, x));
+      const add = e.shiftKey || e.ctrlKey;
+      if (!add && this.selection.length === rim.length && rim.every(inSel)) {
+        this.setSelection([item]);
+        this.hint("One edge of the hole's rim · click another edge of it for the whole rim again");
+        return;
+      }
+      if (!add || !inSel(item)) {
+        this.setSelection(add ? [...this.selection.filter((s) => !rim.some((r) => sameItem(r, s))), ...rim] : rim);
+        this.hint(`Hole rim (${rim.length} edges) · S resize · Del fill · F fillet the rim · click an edge of it again: just that edge · Shift+click another hole: add it`);
+        return;
+      }
+    }
     if (e.shiftKey || e.ctrlKey) {
       const exists = this.selection.some((s) => sameItem(s, item));
       this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
@@ -1214,6 +1242,14 @@ class App implements ToolHost {
       if (edge) this.setMode("edge");
       this.setSelection([edge ?? item]);
     }
+  }
+
+  /** All the edges of the hole's rim that edge `item` is on (any shape of hole), or null if it isn't a hole's rim. */
+  private holeRimOf(item: SelItem): SelItem[] | null {
+    const b = this.doc.get(item.body);
+    if (!b || b.kind !== "solid" || !isBrep(b)) return null;
+    const hole = holeAt(b.shape, item.id);
+    return hole ? hole.rim.map((id) => ({ kind: "edge" as const, body: item.body, id })) : null;
   }
 
   /** Smart object select: right-click on a solid switches to Solid mode and selects it (Shift/Ctrl toggles). */
@@ -2411,6 +2447,10 @@ class App implements ToolHost {
 
   /** Scale the selected objects about the bottom centre of their bounding box (they stay on the ground). */
   private opScale(): void {
+    const rims = this.selectedRims();
+    if (rims) return this.opResizeRounds(rims);
+    const holes = this.selectedHoles();
+    if (holes) return this.opResizeHoles(holes);
     const ids = this.selectedBodyIds();
     if (!ids.length) {
       this.toast("Scale: select one or more objects first", "error");
@@ -2475,6 +2515,123 @@ class App implements ToolHost {
         };
       },
       drag: drags.length ? drags : undefined,
+    });
+  }
+
+  /**
+   * The selection is only rims of round holes / pins (Edge mode: circle edges of a solid's round
+   * walls): one per hole (its top and bottom rims, or both halves of a split one, count once). Else null.
+   */
+  private selectedRims(): { body: number; rim: RoundRim }[] | null {
+    if (!this.selection.length || this.selection.some((x) => x.kind !== "edge")) return null;
+    const out: { body: number; rim: RoundRim }[] = [];
+    for (const x of this.selection) {
+      const b = this.doc.get(x.body);
+      if (!b || b.kind !== "solid" || !isBrep(b)) return null;
+      const rim = roundRim(b.shape, x.id);
+      if (!rim) return null;
+      if (!out.some((o) => o.body === x.body && o.rim.key === rim.key)) out.push({ body: x.body, rim });
+    }
+    return out;
+  }
+
+  /**
+   * The selection is only edges of holes' rims, any shape (Edge mode: an edge of an inner outline
+   * of a face): one per hole, per solid. Else null.
+   */
+  private selectedHoles(): Map<number, HoleLoop[]> | null {
+    if (!this.selection.length || this.selection.some((x) => x.kind !== "edge")) return null;
+    const out = new Map<number, HoleLoop[]>();
+    for (const x of this.selection) {
+      const b = this.doc.get(x.body);
+      if (!b || b.kind !== "solid" || !isBrep(b)) return null;
+      const hole = holeAt(b.shape, x.id);
+      if (!hole) return null;
+      const list = out.get(x.body) ?? [];
+      if (!list.some((h) => h.key === hole.key)) out.set(x.body, [...list, hole]);
+    }
+    return out;
+  }
+
+  /**
+   * Scale (S) with edges of holes' rims selected (not all round): each hole the same amount wider
+   * all round — typed, or dragged on the ring at the first one's wall. One undo step.
+   */
+  private opResizeHoles(perBody: Map<number, HoleLoop[]>): void {
+    const n = [...perBody.values()].reduce((a, hs) => a + hs.length, 0);
+    const what = `${n} hole${n === 1 ? "" : "s"}`;
+    const [firstBody, [firstHole]] = [...perBody][0];
+    const axis = faceAxis(this.doc.get(firstBody)!.shape as Shape, firstHole.walls[0] ?? firstHole.faces[0]);
+    // (a wall's normal points into the hole: out of it is the other way)
+    const drag = axis ? { origin: axis.center, dir: axis.normal.map((k) => -k) as V3, key: "c", unit: 0.5, look: "ring" as const, title: "Drag to make the hole bigger / smaller" } : undefined;
+    this.startOp({
+      title: `Resize hole (${what})`,
+      label: "Resize hole",
+      note: `<div>${what} · every wall moves out (or in) by half the change</div>`,
+      fields: [{ key: "c", label: "Bigger by (mm, − smaller)", value: 0, step: 0.1 }],
+      compute: ({ c }) => {
+        const resized = () => new Map<number, Geom>([...perBody].map(([id, hs]) => [id, resizeHoles(this.solidOf(id, "Resize hole"), hs, c)]));
+        const preview = asPreview(resized);
+        return { ghost: new Map([...preview].filter((e): e is [number, Shape] => !isMesh(e[1]))), commit: () => this.replaceOutcome(resized(), "Resize hole").commit() };
+      },
+      remember: () => {},
+      drag,
+      hint: "Resize hole: type how much wider (+0.2: 0.2 mm wider across, each wall 0.1 out) or drag the ring · Enter or Done apply · Esc cancel",
+    });
+  }
+
+  /** Delete with edges of holes' rims selected: the holes filled (one undo step); the solids are selected. */
+  private deleteHoles(perBody: Map<number, HoleLoop[]>): void {
+    const n = [...perBody.values()].reduce((a, hs) => a + hs.length, 0);
+    const label = `Fill ${n} hole${n === 1 ? "" : "s"}`;
+    let shapes: Map<number, Shape>;
+    try {
+      shapes = new Map([...perBody].map(([id, hs]) => [id, fillHoles(this.solidOf(id, "Delete"), hs)]));
+    } catch (e) {
+      return this.toast(errorMessage(e), "error");
+    }
+    this.doc.replaceShapes(shapes, label);
+    this.setMode("body");
+    this.setSelection([...shapes.keys()].map((id) => ({ kind: "body", body: id, id: 0 })));
+    this.toast(`${label} — Ctrl+Z brings ${n === 1 ? "it" : "them"} back`);
+  }
+
+  /**
+   * Scale (S) with rims of round holes / pins selected: their diameter — typed, or dragged on the
+   * ring at the first one's rim. The same size: type the new diameter; different sizes: how much
+   * bigger (each grows the same). A hole grows into the solid, a pin out of it; one undo step.
+   */
+  private opResizeRounds(rims: { body: number; rim: RoundRim }[]): void {
+    const holes = rims.filter((r) => r.rim.kind === "hole").length, pins = rims.length - holes;
+    const many = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+    const what = [holes ? many(holes, "hole") : "", pins ? many(pins, "pin") : ""].filter(Boolean).join(" + ");
+    const sizes = [...new Set(rims.map((r) => fmt(r.rim.diameter)))];
+    const same = rims.every((r) => Math.abs(r.rim.diameter - rims[0].rim.diameter) < 1e-6);
+    const d0 = rims[0].rim.diameter, first = rims[0].rim;
+    const out = new THREE.Vector3(...first.rim).sub(new THREE.Vector3(...first.center)).normalize().toArray() as V3;
+    const perBody = new Map<number, RoundRim[]>();
+    for (const { body, rim } of rims) perBody.set(body, [...(perBody.get(body) ?? []), rim]);
+    const label = holes ? (pins ? "Resize holes / pins" : "Resize hole") : "Resize pin";
+    this.startOp({
+      title: `${label} (${what})`,
+      label,
+      note: `<div>${escapeHtml(what)} · Ø ${sizes.join(" / ")} mm</div>`,
+      fields: same
+        ? [{ key: "d", label: "Diameter (mm)", value: +d0.toFixed(4), step: 0.1, min: 0.001 }]
+        : [{ key: "c", label: "Bigger by (mm, − smaller)", value: 0, step: 0.1 }],
+      // The ring on the rim: drag it out / in (1 mm out = 2 mm wider).
+      drag: same
+        ? { origin: first.center, dir: out, key: "d", unit: 0.5, min: 0.001, look: "ring", line: true, title: "Drag to change the diameter" }
+        : { origin: first.rim, dir: out, key: "c", unit: 0.5, look: "ring", title: "Drag to make them bigger / smaller" },
+      compute: ({ d, c }) => {
+        const change = same ? d - d0 : c;
+        const resized = () => new Map<number, Geom>([...perBody].map(([id, rs]) => [id, resizeRounds(this.solidOf(id, label), rs, change)]));
+        // Fast preview; the exact result is computed on Apply (see asPreview).
+        const preview = asPreview(resized);
+        return { ghost: new Map([...preview].filter((e): e is [number, Shape] => !isMesh(e[1]))), commit: () => this.replaceOutcome(resized(), label).commit() };
+      },
+      remember: () => {},
+      hint: `${label}: type the ${same ? "new diameter" : "change (+0.2: each 0.2 mm wider)"} or drag the ring on the rim · Enter or Done apply · Esc cancel`,
     });
   }
 
@@ -2613,16 +2770,28 @@ class App implements ToolHost {
       return { point: [0, 0, 0], normal: guidePlaneNormal([], [0, 0, 0], u, this.viewDir()), along: u };
     }
     const { a, b, n } = this.doc.guides[line];
-    return { point: a, normal: guidePlaneNormal(ids.map((id) => this.doc.get(id)!.shape).filter(notMesh), a, b, this.viewDir(), n), along: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] };
+    // Only solids the guide passes through (their drawn boxes): it can't lie on a face of the others,
+    // and looking through all their faces is slow (17 sweeps: ~0.7 s each hover).
+    const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b), len = A.distanceTo(B);
+    const ray = new THREE.Ray(A, B.clone().sub(A).normalize()), hit = new THREE.Vector3();
+    const near = (id: number) => {
+      const box = this.viewport.drawnBox(id);
+      if (!box) return true;
+      box.expandByScalar(0.02 * box.getSize(new THREE.Vector3()).length() + 1e-3);
+      return !!ray.intersectBox(box, hit) && hit.distanceTo(A) <= len + 1e-6;
+    };
+    const shapes = ids.filter(near).map((id) => this.doc.get(id)!.shape).filter(notMesh);
+    return { point: a, normal: guidePlaneNormal(shapes, a, b, this.viewDir(), n), along: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] };
   }
 
   /**
    * Cut: the copies among `ids` of an array / circular copy (all of it being cut, still as made)
    * that the plane crosses just as it does their source — it maps onto itself (same side up) when
-   * moved like the copy: copy id → its source and how to put the source's pieces in its place.
+   * moved like the copy: copy id → its source and how to put the source's pieces in its place;
+   * `recs`: the records all of whose copies are cut like that (both halves are still such a copy).
    */
-  private cutLikeSource(ids: number[], point: V3, normal: V3): Map<number, { from: number; place: (s: Geom) => Geom }> {
-    const out = new Map<number, { from: number; place: (s: Geom) => Geom }>();
+  private cutLikeSource(ids: number[], point: V3, normal: V3): { like: Map<number, { from: number; place: (s: Geom) => Geom }>; recs: ArrayRecord[] } {
+    const out = new Map<number, { from: number; place: (s: Geom) => Geom }>(), recs: ArrayRecord[] = [];
     const set = new Set(ids);
     const n = new THREE.Vector3(...normal).normalize(), p = new THREE.Vector3(...point);
     const u = new THREE.Vector3(1, 0, 0).cross(n);
@@ -2643,8 +2812,9 @@ class App implements ToolHost {
         if (!probes.every((q) => Math.abs(off(at(q, k))) < tol) || off(at(up, k)) < L / 2) return;
         out.set(id, { from: rec.sources[i % S], place: (s) => place(s, k) });
       });
+      if (rec.copies.every((id) => out.has(id))) recs.push(rec);
     }
-    return out;
+    return { like: out, recs };
   }
 
   /** Translucent square of the cut plane across the solids being cut (null hides it). */
@@ -2652,8 +2822,13 @@ class App implements ToolHost {
     if (!plane) return this.viewport.setOverlay([]);
     const box = new THREE.Box3();
     for (const id of ids) {
-      const [lo, hi] = this.doc.get(id)!.shape.boundingBox.bounds;
-      box.expandByPoint(new THREE.Vector3(...lo)).expandByPoint(new THREE.Vector3(...hi));
+      // (its drawn box: the exact one is slow on curved solids, and this runs on every hover)
+      const drawn = this.viewport.drawnBox(id);
+      if (drawn) box.union(drawn);
+      else {
+        const [lo, hi] = this.doc.get(id)!.shape.boundingBox.bounds;
+        box.expandByPoint(new THREE.Vector3(...lo)).expandByPoint(new THREE.Vector3(...hi));
+      }
     }
     const N = new THREE.Vector3(...plane.normal).normalize(), P = new THREE.Vector3(...plane.point);
     const c = box.getCenter(new THREE.Vector3());
@@ -2687,11 +2862,13 @@ class App implements ToolHost {
     const kept = new Map<number, Shape>();
     const cutOff: Body[] = [];
     const facePieces: number[] = [];
+    const uppers = new Map<number, Body>(); // solid id → its upper piece
+    let arrays = this.doc.arrays, newGroup: string | null = null;
     try {
       const { point, normal } = this.cutPlane(line, ids);
       // Copies the plane cuts just like their source (a ring round Z cut level, a row cut along it):
       // its pieces turned / moved into place — one cut, and the display reuses their triangles.
-      const like = this.cutLikeSource(ids, point, normal);
+      const { like, recs } = this.cutLikeSource(ids, point, normal);
       const halves = new Map<number, { above: Solid | null; below: Solid | null }>();
       const order = [...ids.filter((id) => !like.has(id)), ...ids.filter((id) => like.has(id))];
       for (const [i, id] of order.entries()) {
@@ -2719,14 +2896,33 @@ class App implements ToolHost {
         const { above, below } = halves.get(id)!;
         if (!above || !below) throw new Error(`Cut: the ${typeof line === "number" ? "guide's" : "axis'"} cut plane does not pass through "${body.name}"`);
         kept.set(id, below);
-        cutOff.push(inGroupOf(this.doc.makeBody(above, "Solid"), body));
+        uppers.set(id, inGroupOf(this.doc.makeBody(above, "Solid"), body));
       }
+      // Many upper pieces (e.g. a circular copy's 17): a group of their own, so they're moved, hidden
+      // or deleted together; an array / circular copy cut the same all round stays one, in both halves.
+      if (uppers.size > CUT_GROUP_OVER) {
+        const groups = new Set(ids.filter((id) => uppers.has(id)).map((id) => this.doc.get(id)!.group));
+        const from = groups.size === 1 ? [...groups][0] : undefined;
+        newGroup = from ? this.uniqueGroupName(`${from} cut`) : this.newGroupName("Cut");
+        for (const [id, b] of uppers) uppers.set(id, { ...b, group: newGroup });
+        arrays = this.doc.arrays.flatMap((rec) => {
+          if (!recs.includes(rec)) return [rec];
+          const top = (id: number) => uppers.get(id)!.id;
+          const made = new Map([...uppers.values()].map((b) => [b.id, b.shape as Shape]));
+          const halves: [ArrayRecord, (id: number) => Shape][] = [
+            [rec, (id) => kept.get(id)!],
+            [{ ...rec, group: newGroup!, sources: rec.sources.map(top), copies: rec.copies.map(top) }, (id) => made.get(id)!],
+          ];
+          return halves.map(([r, shapeOf]) => this.recutRecord(r, rec, shapeOf));
+        });
+      }
+      cutOff.push(...uppers.values());
     } catch (e) {
       this.toast(errorMessage(e), "error");
       return;
     }
     if (say) await say(`Drawing ${ids.length + cutOff.length} pieces…`);
-    this.doc.commit([...this.doc.bodies.map((bd) => (kept.has(bd.id) ? withShape(bd, kept.get(bd.id)!) : bd)), ...cutOff], "Cut");
+    this.doc.commit([...this.doc.bodies.map((bd) => (kept.has(bd.id) ? withShape(bd, kept.get(bd.id)!) : bd)), ...cutOff], "Cut", this.doc.guides, this.doc.dimensions, arrays);
     const solidPieces = cutOff.filter((b) => b.kind !== "face");
     if (!solidPieces.length) {
       // Only faces: select all the pieces (each can be moved / pushed on its own).
@@ -2736,7 +2932,25 @@ class App implements ToolHost {
     }
     // Select the upper pieces, so Del removes them straight away.
     this.setSelection(solidPieces.map((bd) => ({ kind: "body", body: bd.id, id: 0 })));
-    this.toast(`Cut into ${ids.length * 2} objects — the upper part is selected (Del removes it)`);
+    this.toast(newGroup
+      ? `Cut into ${ids.length * 2} objects — the ${solidPieces.length} upper pieces are a new group, ${newGroup}, selected (Del removes it)`
+      : `Cut into ${ids.length * 2} objects — the upper part is selected (Del removes it)`);
+  }
+
+  /**
+   * An array / circular copy record for one half of a cut (`r`: its group and ids; `was`: the record
+   * before; `shapeOf`: a member's new shape): a circular one notes its sources' boxes as they are now
+   * and where the group had moved to, so it can still be changed.
+   */
+  private recutRecord(r: ArrayRecord, was: ArrayRecord, shapeOf: (id: number) => Shape): ArrayRecord {
+    const c = was.circular;
+    if (!c) return r;
+    const shift = this.circularShift(was) ?? [0, 0, 0], centre = this.circularCentre(was);
+    const plus = (p: V3): V3 => [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]];
+    return {
+      ...r,
+      circular: { ...c, axis: { origin: plus(c.axis.origin), dir: c.axis.dir }, centre: plus(centre), boxes: r.sources.map((id) => shapeOf(id).boundingBox.bounds as [V3, V3]) },
+    };
   }
 
   // ================================================================ booleans
@@ -3548,13 +3762,37 @@ class App implements ToolHost {
       this.selGuide = -1;
       return this.doc.setGuides(this.doc.guides.filter((_, k) => k !== i), "Delete guide");
     }
+    // Rims of round holes / pins (Edge mode): fill the holes, take off the pins.
+    const rims = this.selectedRims();
+    if (rims) return this.deleteRounds(rims);
+    const holes = this.selectedHoles();
+    if (holes) return this.deleteHoles(holes);
     const ids = new Set(this.selection.filter((s) => s.kind === "body").map((s) => s.body));
     if (!ids.size) {
-      this.toast("Delete: select objects (Solid mode, key 1)", "error");
+      this.toast("Delete: select objects (Solid mode, key 1) — or the rims of round holes / pins (Edge mode) to fill them", "error");
       return;
     }
     this.doc.commit(this.doc.bodies.filter((b) => !ids.has(b.id)), ids.size > 1 ? `Delete ${ids.size} objects` : "Delete");
     this.setSelection([]);
+  }
+
+  /** Delete with hole / pin rims selected: the holes filled, the pins taken off (one undo step); the solids are selected. */
+  private deleteRounds(rims: { body: number; rim: RoundRim }[]): void {
+    const perBody = new Map<number, RoundRim[]>();
+    for (const { body, rim } of rims) perBody.set(body, [...(perBody.get(body) ?? []), rim]);
+    const holes = rims.filter((r) => r.rim.kind === "hole").length, pins = rims.length - holes;
+    const many = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
+    const label = [holes ? `Fill ${many(holes, "hole")}` : "", pins ? `Remove ${many(pins, "pin")}` : ""].filter(Boolean).join(", ");
+    let shapes: Map<number, Shape>;
+    try {
+      shapes = new Map([...perBody].map(([id, rs]) => [id, fillRounds(this.solidOf(id, "Delete"), rs)]));
+    } catch (e) {
+      return this.toast(errorMessage(e), "error");
+    }
+    this.doc.replaceShapes(shapes, label);
+    this.setMode("body");
+    this.setSelection([...shapes.keys()].map((id) => ({ kind: "body", body: id, id: 0 })));
+    this.toast(`${label} — Ctrl+Z brings ${rims.length === 1 ? "it" : "them"} back`);
   }
 
   private duplicate(): void {
@@ -4340,6 +4578,15 @@ class App implements ToolHost {
   // ---------------------------------------------------------------- groups
 
   /** "Group 1", "Group 2"... — the first not in use. */
+  /** `name` if no object uses it as a group yet, else "name 2", "name 3"... */
+  private uniqueGroupName(name: string): string {
+    const used = new Set(this.doc.bodies.map((b) => b.group));
+    let n = 2;
+    if (!used.has(name)) return name;
+    while (used.has(`${name} ${n}`)) n++;
+    return `${name} ${n}`;
+  }
+
   private newGroupName(base = "Group"): string {
     const used = new Set(this.doc.bodies.map((b) => b.group));
     let n = 1;
@@ -4804,13 +5051,14 @@ class App implements ToolHost {
       ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo"],
       ["S", `Scale selected objects about their bottom centre: drag the ring for Scale % or the red / green / blue boxes for X / Y / Z % (${this.viewport.autoSnap ? "snaps, Ctrl: free" : "Ctrl snaps"}; per-axis works on curved shapes too)`],
+      ["S with hole rims selected", "Resize hole / pin: Edge mode, click the rim of a round hole or pin (Shift+click more), S — type the new diameter (holes of different sizes: how much bigger, e.g. 0.2 for a looser fit) or drag the ring on the rim; a hole grows into the solid, a pin out of it · any other hole (rectangle, slot, a sketched shape): click one edge of its rim, S — Bigger by (mm): every wall moves out by half of it, corners stay sharp"],
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
       ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
-      ["Del / X", "Delete selected objects"],
+      ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
@@ -5330,7 +5578,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

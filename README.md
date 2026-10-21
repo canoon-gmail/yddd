@@ -1,7 +1,8 @@
 # Y3D
 
-A direct-modeling NURBS / B-rep CAD app for Linux, in the spirit of Plasticity.
-Built with **Electron + TypeScript**, **Three.js** for the viewport and
+A simple, easy 3D CAD app for Linux: draw a shape, push and pull it, and get
+exact sizes — no history tree or settings to learn first. Under the hood it is
+a direct-modeling B-rep modeller, so models stay exact. Built with **Electron + TypeScript**, **Three.js** for the viewport and
 **OpenCascade** (via [replicad](https://replicad.xyz) / WebAssembly) as the
 geometry kernel. Units are millimetres, Z is up.
 
@@ -26,6 +27,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Select | Solid / Face / Edge modes with hover highlight, Shift+click multi-select |
 | Modify | Push/Pull face (flat face → new solid; solid face → modify, or tick *New solid*), Fillet & Chamfer (selected edges or whole solid), Shell (open selected faces) — all with live preview |
 | Revolve / Sweep | **Revolve** (Modify menu; Pro: **R E**) a flat face about a guide line, one of its edges or X / Y / Z (any angle; a circle beside the axis → a donut) · **Sweep** (Pro: **S W**) a flat face along a path or guide line — a flat ring makes a tube; pick the face and path in the viewport while the panel is open |
+| Holes | **Resize hole / pin**: Edge mode, click a round hole's (or pin's) rim, **S**, type the diameter — or how much bigger for several of different sizes (a looser fit for 3D printing); any other hole — rectangle, slot, a sketched shape — one rim edge + **S**: *Bigger by* mm, all round · **Del** with rims selected fills the holes (any shape) / takes off the pins |
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
 | Transform | Move / Rotate gizmo (snaps to grid / 5°), Duplicate, Delete |
 | History | Unlimited-ish undo / redo (200 steps) |

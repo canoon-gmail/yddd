@@ -3098,11 +3098,17 @@ const SCENARIO_ARRAY = String.raw`
       for (let i = 0; i < 150 && document.getElementById("busy"); i++) await sleep(20);
       const vols = app.doc.bodies.map((b) => r(K.solidVolume(b.shape))), valid = app.doc.bodies.every((b) => K.isValidShape(b.shape));
       const out = centres().map((c) => r(Math.hypot(c[0], c[1]))), lows = ids.map((id) => r(app.doc.get(id).shape.boundingBox.bounds[1][2]));
-      const sel = app.selection.map((x) => x.body).filter((id) => !ids.includes(id)).length, same = app.doc.bodies.every((b) => b.group === g);
+      const sel = app.selection.map((x) => x.body).filter((id) => !ids.includes(id)).length;
+      const groups = [...new Set(app.doc.bodies.map((b) => b.group))], top = g + " cut";
+      const split = ids.every((id) => app.doc.get(id).group === g) && app.doc.bodies.filter((b) => b.group === top).length === 6;
+      const icon = (gr) => { const ic = ol().querySelector('.ol-group[data-group="' + gr + '"] .ol-array'); return !!ic && !ic.classList.contains("off"); };
+      const still = [g, top].map((gr) => app.arrayToChange(app.doc.bodies.filter((b) => b.group === gr).map((b) => b.id))?.group === gr && icon(gr));
       expect("cut a whole circular copy by a level guide: busy dialog, 12 valid pieces (6 × 400 below, 6 × 600 above), all 50 mm out, the upper 6 selected",
         Math.abs(pl.normal[2]) > 0.999 && /Cutting 6 objects/.test(busy) && app.doc.bodies.length === 12 && valid && vols.slice(0, 6).every((v) => v === 400) &&
-          vols.slice(6).every((v) => v === 600) && out.every((x) => x === 50) && lows.every((z) => z === 2) && sel === 6 && same,
-        { normal: pl.normal, busy, vols, valid, out, lows, sel, same });
+          vols.slice(6).every((v) => v === 600) && out.every((x) => x === 50) && lows.every((z) => z === 2) && sel === 6,
+        { normal: pl.normal, busy, vols, valid, out, lows, sel });
+      expect("cut a circular copy: more than 4 upper pieces → their own group (" + g + " cut); both halves still circular copies (icons on)",
+        split && groups.length === 2 && still.every(Boolean), { groups, split, still });
       app.run("edit.undo"); await sleep(20);
       const back = app.doc.bodies.length === 6 && app.doc.bodies.every((b) => r(K.solidVolume(b.shape)) === 1000);
       expect("cut a circular copy: one undo puts the 6 back whole", back, app.doc.bodies.length);
@@ -3375,6 +3381,271 @@ const SCENARIO_KEEPTOOL = String.raw`
 `;
 
 /** Subtract / Union / Intersect and Cut show a panel (target, what to click, count) with Done / Cancel. */
+/** Resize holes / pins: Edge mode, click a round hole's rim (or several), S → its diameter. */
+const SCENARIO_HOLES = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const r = (x) => Math.round(x * 1000) / 1000;
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); } };
+  const fieldVal = (k) => document.querySelector("#op-panel [data-key=" + k + "]")?.value;
+  const vol = (id) => K.solidVolume(app.doc.get(id).shape);
+  /** The circle edge of body id centred at (x, y, z) with radius rad. */
+  const rimAt = (id, [x, y, z], rad) => {
+    const b = app.doc.get(id);
+    const e = b.shape.edges.find((e) => {
+      if (e.geomType !== "CIRCLE") return false;
+      const p = e.pointAt(0), q = e.pointAt(0.5);
+      const c = [(p.x + q.x) / 2, (p.y + q.y) / 2];
+      return Math.abs(p.z - z) < 1e-6 && Math.abs(Math.hypot(p.x - x, p.y - y) - rad) < 1e-6;
+    });
+    return e ? { kind: "edge", body: id, id: e.hashCode } : null;
+  };
+  /** The hole / pin through the rim at (x, y, z) now, from any of its rims there: its diameter. */
+  const diaAt = (id, xyz) => {
+    const b = app.doc.get(id);
+    for (const e of b.shape.edges) {
+      if (e.geomType !== "CIRCLE") continue;
+      const rim = K.roundRim(b.shape, e.hashCode);
+      if (rim && Math.abs(rim.center[0] - xyz[0]) < 1e-6 && Math.abs(rim.center[1] - xyz[1]) < 1e-6 && Math.abs(rim.center[2] - xyz[2]) < 1e-6) return r(rim.diameter);
+    }
+    return null;
+  };
+  const resize = async (items) => {
+    app.run("mode.edge"); app.setSelection(items.filter(Boolean)); await sleep(20);
+    app.run("xf.scale"); await sleep(50);
+    return { title: app.op && app.op.spec.title, d: fieldVal("d"), c: fieldVal("c"), note: document.querySelector("#op-panel")?.textContent || "" };
+  };
+  try {
+    app.doc.reset([]);
+    // A 60 × 40 × 10 plate: through holes Ø8 at x −20 and 0, Ø6 at x 20; a blind Ø5 hole 6 deep at (0, 12)
+    const through = [[-20, 0, 4], [0, 0, 4], [20, 0, 3]].map(([x, y, rad]) => K.makeCylinder(G, [x, y, -1], rad, 12));
+    const plateShape = K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 60, 40, 10), [...through, K.makeCylinder(G, [0, 12, 4], 2.5, 7)]);
+    const plate = app.doc.makeBody(plateShape, "Plate");
+    // A block with a Ø10 pin 5 tall on top, at x 60
+    const block = app.doc.makeBody(K.booleanOp("union", K.makeBox(G, [60, 0, 0], 20, 20, 10), [K.makeCylinder(G, [60, 0, 10], 5, 5)]), "Block");
+    app.doc.commit([plate, block], "plate + block");
+    vp.setView("iso"); vp.fit(); await sleep(50);
+    const v0 = vol(plate.id);
+
+    // One hole: its top rim, S → Resize hole, Diameter 8; type 8.4 → Ø8.4 through, the plate lost exactly that ring
+    const one = await resize([rimAt(plate.id, [-20, 0, 10], 4)]);
+    opValue("d", 8.4); await sleep(100);
+    const ghost = app.op && app.op.result ? app.op.result.ghost.size : -1;
+    app.applyOp(); await sleep(50);
+    const d1 = diaAt(plate.id, [-20, 0, 10]), lost = r(v0 - vol(plate.id)), want = r(Math.PI * (4.2 * 4.2 - 16) * 10);
+    expect("resize hole: rim + S → 'Resize hole (1 hole)', Diameter 8; 8.4 → the hole is Ø8.4, the plate exactly the ring less, valid, one step",
+      one.title === "Resize hole (1 hole)" && one.d === "8" && ghost === 1 && d1 === 8.4 && Math.abs(lost - want) < 1e-3 && K.isValidShape(app.doc.get(plate.id).shape) && app.doc.undoLabel === "Resize hole",
+      { one, ghost, d1, lost, want });
+    app.run("edit.undo"); await sleep(20);
+    const back = diaAt(plate.id, [-20, 0, 10]);
+    expect("resize hole: one undo → Ø8 again", back === 8 && r(vol(plate.id)) === r(v0), { back });
+
+    // Two Ø8 holes, three rims (one hole's top and bottom): counted as 2 holes; 9 → both Ø9
+    const two = await resize([rimAt(plate.id, [-20, 0, 10], 4), rimAt(plate.id, [-20, 0, 0], 4), rimAt(plate.id, [0, 0, 10], 4)]);
+    opValue("d", 9); await sleep(50); app.applyOp(); await sleep(50);
+    const d2 = [diaAt(plate.id, [-20, 0, 10]), diaAt(plate.id, [0, 0, 10])];
+    expect("resize holes: two Ø8 (one picked top and bottom) → 'Resize hole (2 holes)'; 9 → both Ø9", two.title === "Resize hole (2 holes)" && d2.join() === "9,9", { two, d2 });
+    app.run("edit.undo"); await sleep(20);
+
+    // Different sizes (Ø8 and Ø6): 'Bigger by' — +0.5 → Ø8.5 and Ø6.5
+    const mixed = await resize([rimAt(plate.id, [0, 0, 10], 4), rimAt(plate.id, [20, 0, 10], 3)]);
+    opValue("c", 0.5); await sleep(50); app.applyOp(); await sleep(50);
+    const d3 = [diaAt(plate.id, [0, 0, 10]), diaAt(plate.id, [20, 0, 10])];
+    expect("resize holes: Ø8 and Ø6 → a 'Bigger by' field (Ø 8 / 6 in the note); +0.5 → Ø8.5 and Ø6.5",
+      mixed.c === "0" && mixed.d === undefined && /Ø 8 \/ 6/.test(mixed.note) && d3.join() === "8.5,6.5", { mixed, d3 });
+    app.run("edit.undo"); await sleep(20);
+
+    // The blind hole: Ø5 → 6, still 6 deep with a flat bottom (exactly the ring less)
+    const vb = vol(plate.id);
+    await resize([rimAt(plate.id, [0, 12, 10], 2.5)]);
+    opValue("d", 6); await sleep(50); app.applyOp(); await sleep(50);
+    const lostB = r(vb - vol(plate.id)), wantB = r(Math.PI * (9 - 6.25) * 6);
+    expect("resize a blind hole: Ø5 → 6, still 6 deep (exactly the ring less)", diaAt(plate.id, [0, 12, 10]) === 6 && Math.abs(lostB - wantB) < 1e-3, { lostB, wantB });
+    app.run("edit.undo"); await sleep(20);
+
+    // A pin: its top rim → 'Resize pin'; Ø10 → 11 adds exactly the ring
+    const vp0 = vol(block.id);
+    const pin = await resize([rimAt(block.id, [60, 0, 15], 5)]);
+    opValue("d", 11); await sleep(50); app.applyOp(); await sleep(50);
+    const gained = r(vol(block.id) - vp0), wantP = r(Math.PI * (5.5 * 5.5 - 25) * 5);
+    expect("resize a pin: its rim + S → 'Resize pin (1 pin)'; Ø10 → 11 adds exactly the ring", pin.title === "Resize pin (1 pin)" && diaAt(block.id, [60, 0, 15]) === 11 && Math.abs(gained - wantP) < 1e-3, { pin, gained, wantP });
+    app.run("edit.undo"); await sleep(20);
+
+    // A hole and a pin (two objects): +1 → each 1 mm wider
+    const both = await resize([rimAt(plate.id, [20, 0, 10], 3), rimAt(block.id, [60, 0, 15], 5)]);
+    opValue("c", 1); await sleep(50); app.applyOp(); await sleep(50);
+    const d4 = [diaAt(plate.id, [20, 0, 10]), diaAt(block.id, [60, 0, 15])];
+    expect("resize a hole and a pin together: '1 hole + 1 pin'; +1 → Ø7 and Ø11", both.title === "Resize holes / pins (1 hole + 1 pin)" && d4.join() === "7,11", { both, d4 });
+    app.run("edit.undo"); await sleep(20);
+
+    // Too small: Ø6 − 7 would close it → an error, nothing changed
+    const n0 = app.doc.undoLabel;
+    await resize([rimAt(plate.id, [0, 0, 10], 4), rimAt(plate.id, [20, 0, 10], 3)]);
+    opValue("c", -7); await sleep(50); app.applyOp(); await sleep(50);
+    const unchanged = app.doc.undoLabel === n0 && diaAt(plate.id, [20, 0, 10]) === 6;
+    if (app.op) document.querySelector("#op-panel [data-a=cancel]")?.click();
+    await sleep(20);
+    expect("resize holes: smaller than nothing → refused, nothing changed", unchanged, { label: app.doc.undoLabel });
+
+    // A hole whose wall is in two halves (split by a guide across it): one half-rim resizes both halves
+    {
+      const sh = app.doc.get(plate.id).shape, rim = rimAt(plate.id, [-20, 0, 10], 4);
+      const edge = sh.edges.find((e) => e.hashCode === rim.id);
+      const wall = sh.faces.find((f) => f.geomType === "CYLINDRE" && f.edges.some((e) => e.isSame(edge)));
+      app.doc.setGuides([{ a: [-20, -30, 10], b: [-20, 30, 10], n: [1, 0, 0] }], "guide");
+      app.opSplitFace(new Map([[plate.id, [wall.hashCode]]]), 0); await sleep(30);
+      const said = [...document.querySelectorAll("#toasts .toast")].map((t) => t.textContent).pop();
+      const splitOk = app.doc.undoLabel === "Split face";
+      const walls = app.doc.get(plate.id).shape.faces.filter((f) => f.geomType === "CYLINDRE" && f.edges.some((e) => e.geomType === "CIRCLE" && Math.abs(e.pointAt(0).z - 10) < 1e-6 && Math.abs(Math.hypot(e.pointAt(0).x + 20, e.pointAt(0).y) - 4) < 1e-6)).length;
+      const half = await resize([rimAt(plate.id, [-20, 0, 10], 4)]);
+      const vh = vol(plate.id);
+      opValue("d", 8.4); await sleep(50); app.applyOp(); await sleep(50);
+      const lostH = r(vh - vol(plate.id)), wantH = r(Math.PI * (4.2 * 4.2 - 16) * 10);
+      expect("resize a hole whose wall is split in pieces: one piece's rim → 'Resize hole (1 hole)'; 8.4 → the whole wall Ø8.4 (exactly the ring less), valid",
+        walls >= 2 && half.title === "Resize hole (1 hole)" && Math.abs(lostH - wantH) < 1e-3 && K.isValidShape(app.doc.get(plate.id).shape), { walls, half, lostH, wantH, said });
+      app.run("edit.undo"); if (splitOk) app.run("edit.undo"); app.run("edit.undo"); await sleep(20); // (resize, split, guide)
+    }
+    // Delete with rims selected: holes filled, pins taken off
+    {
+      const del = async (items) => { app.run("mode.edge"); app.setSelection(items); await sleep(20); app.run("edit.delete"); await sleep(50); };
+      const cyls = (id) => app.doc.get(id).shape.faces.filter((f) => f.geomType === "CYLINDRE").length;
+      const va = vol(plate.id), ca = cyls(plate.id);
+      await del([rimAt(plate.id, [-20, 0, 10], 4)]);
+      const gainA = r(vol(plate.id) - va), wantA = r(Math.PI * 16 * 10);
+      expect("delete a hole's rim (Del): the hole filled (exactly Ø8 × 10 more), one round wall fewer, valid, 'Fill 1 hole', the plate selected",
+        Math.abs(gainA - wantA) < 1e-3 && cyls(plate.id) < ca && diaAt(plate.id, [-20, 0, 10]) === null && K.isValidShape(app.doc.get(plate.id).shape) &&
+          app.doc.undoLabel === "Fill 1 hole" && app.mode === "body" && app.selection.length === 1 && app.selection[0].body === plate.id, { gainA, wantA, label: app.doc.undoLabel, mode: app.mode });
+      app.run("edit.undo"); await sleep(20);
+      const vb2 = vol(plate.id);
+      await del([rimAt(plate.id, [0, 12, 10], 2.5)]);
+      const gainB = r(vol(plate.id) - vb2), wantB2 = r(Math.PI * 6.25 * 6);
+      expect("delete a blind hole's rim: filled with its bottom (exactly Ø5 × 6 more)", Math.abs(gainB - wantB2) < 1e-3 && K.isValidShape(app.doc.get(plate.id).shape), { gainB, wantB2 });
+      app.run("edit.undo"); await sleep(20);
+      await del([rimAt(plate.id, [0, 0, 10], 4), rimAt(plate.id, [20, 0, 10], 3), rimAt(block.id, [60, 0, 15], 5)]);
+      const vBlock = r(vol(block.id)), label = app.doc.undoLabel, gainC = r(vol(plate.id) - vb2), wantC = r(Math.PI * (16 + 9) * 10);
+      expect("delete 2 holes and a pin at once (two objects): 'Fill 2 holes, Remove 1 pin' — the block back to 20 × 20 × 10, both holes filled; one undo",
+        label === "Fill 2 holes, Remove 1 pin" && vBlock === 4000 && Math.abs(gainC - wantC) < 1e-3, { label, vBlock, gainC, wantC });
+      app.run("edit.undo"); await sleep(20);
+      // A plain box with one hole: filled, it is a plain box again (6 faces, 12 edges, 8 corners — no seams left)
+      {
+        const box = app.doc.makeBody(K.booleanOp("subtract", K.makeBox(G, [0, 80, 0], 30, 20, 10), [K.makeCylinder(G, [0, 80, -1], 4, 12)]), "Holed box");
+        app.doc.commit([...app.doc.bodies, box], "holed box"); await sleep(20);
+        const before = { faces: app.doc.get(box.id).shape.faces.length, edges: app.doc.get(box.id).shape.edges.length };
+        await del([rimAt(box.id, [0, 80, 10], 4)]);
+        const sh = app.doc.get(box.id).shape, plain = K.makeBox(G, [0, 80, 0], 30, 20, 10);
+        const corners = new Set(sh.edges.flatMap((e) => [e.startPoint, e.endPoint].map((p) => [p.x, p.y, p.z].map(r).join()))).size;
+        const after = { faces: sh.faces.length, edges: sh.edges.length, corners, types: [...new Set(sh.faces.map((f) => f.geomType))], file: K.serializeShape(sh).length, plainFile: K.serializeShape(plain).length };
+        expect("fill the hole of a plain box: a plain box again — 6 flat faces, 12 edges, 8 corners, about as small saved as a new box",
+          before.faces === 7 && after.faces === 6 && after.edges === 12 && corners === 8 && after.types.join() === "PLANE" && after.file < after.plainFile * 1.5 && r(vol(box.id)) === 6000,
+          { before, after });
+        app.run("edit.undo"); app.run("edit.undo"); await sleep(20);
+      }
+      expect("delete holes: undo → all back", r(vol(plate.id)) === r(vb2) && diaAt(block.id, [60, 0, 15]) === 10, { v: vol(plate.id) });
+    }
+    // Holes of any shape: a 10 × 6 rectangle and a 16 × 6 slot through, a hexagon pocket 6 deep (r 4) — one edge of the rim picks the hole
+    {
+      const hex = K.makePolygonFace(G, [0, -70, 4], 4, 6, 0);
+      const cutters = [
+        K.makeBox(G, [-18, -80, -1], 10, 6, 12),
+        K.booleanOp("union", K.makeBox(G, [12, -80, -1], 10, 6, 12), [K.makeCylinder(G, [7, -80, -1], 3, 12), K.makeCylinder(G, [17, -80, -1], 3, 12)]),
+        K.extrudeFace(hex, hex.faces[0].hashCode, 7),
+      ];
+      const holed = app.doc.makeBody(K.booleanOp("subtract", K.makeBox(G, [0, -80, 0], 60, 40, 10), cutters), "Holed");
+      app.doc.commit([...app.doc.bodies, holed], "holed plate"); await sleep(20);
+      /** An edge of the top rim through (x, y, 10): the one nearest it. */
+      const topEdge = (x, y) => {
+        const es = app.doc.get(holed.id).shape.edges.filter((e) => Math.abs(e.startPoint.z - 10) < 1e-6 && Math.abs(e.endPoint.z - 10) < 1e-6 && Math.abs(Math.abs(e.startPoint.x) - 30) > 1e-6 && Math.abs(e.startPoint.y + 80) < 19.9);
+        const d = (e) => Math.hypot(e.pointAt(0.5).x - x, e.pointAt(0.5).y - y);
+        return { kind: "edge", body: holed.id, id: es.sort((a, b) => d(a) - d(b))[0].hashCode };
+      };
+      const hv = () => vol(holed.id), base = hv();
+      const hexArea = 3 * Math.sqrt(3) / 2 * 16, slotArea = 10 * 6 + Math.PI * 9;
+      expect("any-shape holes: the plate has the 3 holes (its volume)", Math.abs(r(base) - r(24000 - 600 - slotArea * 10 - hexArea * 6)) < 1e-3, { base });
+      // Del on one edge of each: the rectangle, the slot (a round end's edge), the hexagon pocket
+      const delOne = async (item) => { app.run("mode.edge"); app.setSelection([item]); await sleep(20); app.run("edit.delete"); await sleep(50); const g = r(hv() - base), l = app.doc.undoLabel, ok = K.isValidShape(app.doc.get(holed.id).shape), f = app.doc.get(holed.id).shape.faces.length; app.run("edit.undo"); await sleep(20); return { g, l, ok, f }; };
+      const dr = await delOne(topEdge(-18, -77)), ds = await delOne(topEdge(2, -80)), dh = await delOne(topEdge(0, -66));
+      expect("delete a rectangle hole (one rim edge + Del): filled (exactly 10 × 6 × 10 more), 'Fill 1 hole', valid", Math.abs(dr.g - 600) < 1e-3 && dr.l === "Fill 1 hole" && dr.ok, dr);
+      expect("delete a slot hole (an edge of its round end): filled (exactly the slot × 10)", Math.abs(ds.g - r(slotArea * 10)) < 1e-3 && ds.ok, ds);
+      expect("delete a hexagon pocket: filled with its floor (exactly the hexagon × 6)", Math.abs(dh.g - r(hexArea * 6)) < 1e-3 && dh.ok, dh);
+      // All three filled at once: a plain box again (6 faces)
+      app.run("mode.edge"); app.setSelection([topEdge(-18, -77), topEdge(2, -80), topEdge(0, -66)]); await sleep(20); app.run("edit.delete"); await sleep(50);
+      const allF = { faces: app.doc.get(holed.id).shape.faces.length, v: r(hv()), label: app.doc.undoLabel };
+      expect("delete all 3 at once: 'Fill 3 holes' — a plain box again (6 faces, 60 × 40 × 10)", allF.faces === 6 && allF.v === 24000 && allF.label === "Fill 3 holes", allF);
+      app.run("edit.undo"); await sleep(20);
+      // S on the rectangle's rim: 'Bigger by' — +1 → 11 × 7, still 4 flat walls (sharp corners)
+      const sz = async (items, c) => {
+        app.run("mode.edge"); app.setSelection(items); await sleep(20); app.run("xf.scale"); await sleep(50);
+        const t = app.op && app.op.spec.title, f = fieldVal("c"), dragOn = !!(app.op && app.op.spec.drag);
+        opValue("c", c); await sleep(50); app.applyOp(); await sleep(50);
+        const out = { t, f, dragOn, lost: r(base - hv()), ok: K.isValidShape(app.doc.get(holed.id).shape), faces: app.doc.get(holed.id).shape.faces.length, label: app.doc.undoLabel };
+        app.run("edit.undo"); await sleep(20);
+        return out;
+      };
+      const f0 = app.doc.get(holed.id).shape.faces.length;
+      const sr = await sz([topEdge(-18, -77)], 1);
+      expect("resize a rectangle hole (rim edge + S): 'Resize hole (1 hole)', a 'Bigger by' field and a drag ring; +1 → 11 × 7 (exactly), sharp corners (no new faces)",
+        sr.t === "Resize hole (1 hole)" && sr.f === "0" && sr.dragOn && Math.abs(sr.lost - 170) < 1e-3 && sr.ok && sr.faces === f0 && sr.label === "Resize hole", { sr, f0 });
+      const ss = await sz([topEdge(2, -80)], 1);
+      const wantS = r((10 * 7 + Math.PI * 3.5 * 3.5 - slotArea) * 10);
+      expect("resize a slot: +1 → 7 wide, ends Ø7 (exactly)", Math.abs(ss.lost - wantS) < 1e-3 && ss.ok, { ss, wantS });
+      const sh = await sz([topEdge(0, -66)], 1);
+      const wantH = r((3 * Math.sqrt(3) / 2 * (4 + 1 / Math.sqrt(3)) ** 2 - hexArea) * 6);
+      expect("resize a hexagon pocket: +1 across the flats → each wall 0.5 out, still 6 deep (exactly)", Math.abs(sh.lost - wantH) < 1e-3 && sh.ok, { sh, wantH });
+      const s3 = await sz([topEdge(-18, -77), topEdge(2, -80), topEdge(0, -66)], -0.5);
+      expect("resize all 3 at once: '3 holes'; −0.5 → each smaller (the plate gains)", s3.t === "Resize hole (3 holes)" && s3.lost < 0 && s3.ok, s3);
+      // Click one edge of a rim (Edge mode, Top view): the whole rim is selected; again: just that edge; Shift+click another hole: added
+      {
+        const V = vp.camera.position.constructor, canvas = vp.canvas;
+        const clickEdge = (item, mods = {}) => {
+          const e = app.doc.get(holed.id).shape.edges.find((x) => x.hashCode === item.id), m = e.pointAt(0.5), s = vp.toScreen(new V(m.x, m.y, m.z));
+          for (const t of ["pointermove", "pointerdown", "pointerup"]) canvas.dispatchEvent(new PointerEvent(t, { clientX: s.x, clientY: s.y, button: 0, bubbles: true, ...mods }));
+        };
+        app.run("mode.edge"); app.setSelection([]); vp.setView("top"); vp.fit([holed.id]); await sleep(80);
+        const rectEdge = topEdge(-18, -77);
+        clickEdge(rectEdge); await sleep(30);
+        const whole = app.selection.length, hintW = document.getElementById("status-hint")?.textContent || "";
+        clickEdge(rectEdge); await sleep(30);
+        const justOne = app.selection.length === 1 && app.selection[0].id === rectEdge.id;
+        clickEdge(rectEdge); await sleep(30); // (the whole rim again)
+        clickEdge(topEdge(0, -66), { shiftKey: true }); await sleep(30);
+        const both = app.selection.length;
+        app.run("xf.scale"); await sleep(50);
+        const t2 = app.op && app.op.spec.title;
+        if (app.op) document.querySelector("#op-panel [data-a=cancel]")?.click();
+        await sleep(20);
+        expect("click one edge of a rectangle hole's rim: the whole rim (4 edges), the hint says so; click it again: just that edge; Shift+click the hexagon's: added (10); S → 2 holes",
+          whole === 4 && /Hole rim \(4 edges\)/.test(hintW) && justOne && both === 10 && t2 === "Resize hole (2 holes)", { whole, hintW, justOne, both, t2 });
+        vp.setView("iso"); app.setSelection([]);
+      }
+      // A plate's outer edge isn't a hole's rim: Del still says to select objects, S is the usual Scale
+      const outer = app.doc.get(holed.id).shape.edges.find((e) => Math.abs(e.startPoint.x - 30) < 1e-6 && Math.abs(e.endPoint.x - 30) < 1e-6);
+      app.run("mode.edge"); app.setSelection([{ kind: "edge", body: holed.id, id: outer.hashCode }]); await sleep(20);
+      app.run("edit.delete"); await sleep(20);
+      const kept = app.doc.bodies.some((b) => b.id === holed.id) && app.doc.undoLabel === "holed plate";
+      expect("an outer edge + Del: not a hole — nothing changes", kept, app.doc.undoLabel);
+      app.run("edit.undo"); await sleep(20);
+    }
+    // A straight edge (not a rim) + S: the usual Scale
+    const straight = app.doc.get(plate.id).shape.edges.find((e) => e.geomType === "LINE");
+    app.run("mode.edge"); app.setSelection([{ kind: "edge", body: plate.id, id: straight.hashCode }]); await sleep(20);
+    app.run("xf.scale"); await sleep(50);
+    const t = app.op && app.op.spec.title;
+    if (app.op) document.querySelector("#op-panel [data-a=cancel]")?.click();
+    expect("S with a straight edge selected: the usual Scale", t === "Scale", t);
+    app.doc.reset([]);
+  } catch (e) {
+    expect("resize holes threw", false, String(e && e.stack || e));
+  }
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("resize holes scenario failed: " + JSON.stringify(failed));
+  return [{ label: "resize holes", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 const SCENARIO_TOOLPANEL = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -4614,6 +4885,23 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.setAutoSnap(false, false); return 0; })()`, true);
     // Y3D_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
+    if (process.env.Y3D_SMOKE_ONLY === "holes") {
+      // (while working on it: just this scenario)
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_HOLES, true));
+      // A screenshot of the dialog and its ring on a plate's hole
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.y3dApp, K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+        const plate = app.doc.makeBody(K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 60, 40, 10), [K.makeCylinder(G, [0, 0, -1], 8, 12)]), "Plate");
+        app.doc.commit([plate], "plate"); app.viewport.setView("iso"); app.viewport.fit(); await new Promise((r) => setTimeout(r, 100));
+        const e = app.doc.get(plate.id).shape.edges.find((e) => e.geomType === "CIRCLE" && Math.abs(e.pointAt(0).z - 10) < 1e-6);
+        app.run("mode.edge"); app.setSelection([{ kind: "edge", body: plate.id, id: e.hashCode }]); app.run("xf.scale");
+        await new Promise((r) => setTimeout(r, 300)); return 0;
+      })()`, true);
+      await shot("holes-resize.png");
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.Y3D_SMOKE_HALF) {
       await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.doc.reset([]); return 0; })()`, true);
     } else {
@@ -4649,6 +4937,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SNAPMARK, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_AUTOSNAP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CUTAXIS, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_HOLES, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TOOLPANEL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_KEEPTOOL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));

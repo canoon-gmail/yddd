@@ -165,6 +165,8 @@ const OPS = String.raw`
         // Cut the whole group by the first guide (select it, C, click the guide)
         if (app.doc.guides.length) {
           const ids = app.doc.bodies.filter((b) => b.group === grp && b.kind === "solid").map((b) => b.id);
+          bench("cut", "hover the guide: its cut plane (" + ids.length + " solids)", () => app.cutPlane(0, ids), 3, false);
+          bench("cut", "hover the guide: draw the plane square", () => app.showCutPlane(app.cutPlane(0, ids), ids), 3, false);
           const { point, normal } = app.cutPlane(0, ids);
           const one = app.doc.get(ids[0]);
           bench("cut", "cut " + one.name + " by the guide (kernel)", () => K.splitByPlane(one.shape, point, normal), 1, false);

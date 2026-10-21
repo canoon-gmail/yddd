@@ -1111,8 +1111,8 @@ function sameWallFaces(shape: Solid, face: Face): Face[] {
 }
 
 /**
- * A curved wall (e.g. half an elliptic cylinder from a stretched circle) pushed/pulled the way
- * Plasticity does: its section across the wall's axis — an ellipse — scaled about its centre so
+ * A curved wall (e.g. half an elliptic cylinder from a stretched circle) pushed/pulled so it keeps
+ * its shape: its section across the wall's axis — an ellipse — scaled about its centre so
  * each semi-axis grows by `distance` (exact for a circle), the strip between old and new section
  * swept along the wall. Null if the face is not such a wall (then the caller sweeps it straight).
  */
@@ -1313,6 +1313,246 @@ export function circleOf(shape: Shape, edgeId: number): { center: V3; normal: V3
   } finally {
     for (const o of [dir, ax, loc, c, ad]) o.delete();
   }
+}
+
+/**
+ * A round hole or pin of a solid, found from a rim edge (a circle edge of its round wall): its
+ * diameter, axis (`center` on the rim's plane, unit `axis`) and a point on the rim. `key`: the same
+ * for every rim of one hole (top, bottom, a wall split in halves).
+ */
+export interface RoundRim {
+  kind: "hole" | "pin";
+  diameter: number;
+  center: V3;
+  axis: V3;
+  rim: V3;
+  key: string;
+}
+
+/**
+ * The round hole or pin whose wall edge `edgeId` is a rim of; null if it isn't one (not a circle,
+ * no round wall on it, or the rim doesn't go all the way round — a slot's round end).
+ */
+export function roundRim(shape: Shape, edgeId: number): RoundRim | null {
+  const c = circleOf(shape, edgeId);
+  if (!c) return null;
+  const edge = shape.edges.find((e) => e.hashCode === edgeId)!;
+  // All the way round: the arcs of this circle (a rim can be in pieces) add up to a full turn.
+  const tol = 1e-6 * Math.max(1, c.radius);
+  let turn = 0;
+  for (const e of shape.edges) {
+    if (e.geomType !== "CIRCLE") continue;
+    const o = circleOf(shape, e.hashCode)!;
+    if (Math.abs(o.radius - c.radius) > tol || Math.hypot(...sub3(o.center, c.center)) > tol || Math.hypot(...cross3(o.normal, c.normal)) > 1e-7) continue;
+    const ad = new oc.BRepAdaptor_Curve(e.wrapped);
+    turn += Math.abs(ad.LastParameter() - ad.FirstParameter());
+    ad.delete();
+  }
+  if (turn < 2 * Math.PI - 1e-6) return null;
+  for (const f of shape.faces) {
+    if (f.geomType !== "CYLINDRE" || !f.edges.some((e) => e.isSame(edge))) continue;
+    const w = cylinderOf(f);
+    if (!w || !sameRound(w, c.center, c.normal, c.radius)) continue;
+    return { kind: w.hole ? "hole" : "pin", diameter: 2 * w.radius, center: c.center, axis: w.axis, rim: edge.pointAt(0).toTuple() as V3, key: roundKey(w) };
+  }
+  return null;
+}
+
+/** A cylinder face's axis (through `origin`, unit `axis`, one way round for either), radius, and whether it is a hole's wall (its normal toward the axis). */
+function cylinderOf(face: Face): { origin: V3; axis: V3; radius: number; hole: boolean } | null {
+  if (face.geomType !== "CYLINDRE") return null;
+  const ad = new oc.BRepAdaptor_Surface(face.wrapped, true);
+  const tmp: { delete(): void }[] = [ad];
+  const keep = <T extends { delete(): void }>(o: T) => (tmp.push(o), o);
+  const v3 = (d: { X(): number; Y(): number; Z(): number }): V3 => [d.X(), d.Y(), d.Z()];
+  try {
+    const cyl = keep(ad.Cylinder()), ax = keep(cyl.Position());
+    let axis = v3(keep(ax.Direction()));
+    if (axis[2] < -1e-9 || (Math.abs(axis[2]) <= 1e-9 && (axis[1] < -1e-9 || (Math.abs(axis[1]) <= 1e-9 && axis[0] < 0)))) axis = [-axis[0], -axis[1], -axis[2]];
+    const origin = v3(keep(ax.Location()));
+    const p = face.pointOnSurface(0.5, 0.5).toTuple() as V3, n = normalAtUV(face, 0.5, 0.5);
+    const rel = sub3(p, origin), h = dot3(rel, axis);
+    const radial: V3 = [rel[0] - h * axis[0], rel[1] - h * axis[1], rel[2] - h * axis[2]];
+    return { origin, axis, radius: cyl.Radius(), hole: dot3(n, radial) < 0 };
+  } catch {
+    return null;
+  } finally {
+    for (const o of tmp) o.delete();
+  }
+}
+
+/** A cylinder on the line through `center` along `axis`, of `radius`? */
+function sameRound(w: { origin: V3; axis: V3; radius: number }, center: V3, axis: V3, radius: number): boolean {
+  const tol = 1e-6 * Math.max(1, radius);
+  if (Math.abs(w.radius - radius) > tol || Math.hypot(...cross3(w.axis, norm3(axis))) > 1e-7) return false;
+  const rel = sub3(center, w.origin), h = dot3(rel, w.axis);
+  return Math.hypot(rel[0] - h * w.axis[0], rel[1] - h * w.axis[1], rel[2] - h * w.axis[2]) < tol;
+}
+
+/** One key per round wall: its axis line (where it crosses the plane through the origin) and radius. */
+function roundKey(w: { origin: V3; axis: V3; radius: number }): string {
+  const h = dot3(w.origin, w.axis), foot = [0, 1, 2].map((i) => w.origin[i] - h * w.axis[i]);
+  const r = (x: number) => (Math.abs(x) < 5e-7 ? 0 : +x.toFixed(6));
+  return [...foot, ...w.axis, w.radius].map(r).join(",");
+}
+
+/**
+ * Resize round holes / pins of a solid: each diameter `change` mm bigger (smaller if negative) —
+ * its wall pushed / pulled round its axis (walls found afresh on the shape as it is, so a hole and
+ * a pin can both change). Throws if a hole would close, or the kernel can't do it.
+ */
+export function resizeRounds(shape: Solid, rims: RoundRim[], change: number): Solid {
+  if (Math.abs(change) < 1e-9) return shape;
+  let out = shape;
+  for (const kind of ["hole", "pin"] as const) {
+    const these = rims.filter((r) => r.kind === kind);
+    if (!these.length) continue;
+    if (these.some((r) => r.diameter + change < 1e-3)) throw new Error(`Resize: that would close the ${kind === "hole" ? "hole" : "pin"} (Ø ${+these[0].diameter.toFixed(3)} mm ${change < 0 ? "−" : "+"} ${+Math.abs(change).toFixed(3)} mm)`);
+    const faces = out.faces.filter((f) => {
+      const w = cylinderOf(f);
+      return !!w && w.hole === (kind === "hole") && these.some((r) => sameRound(w, r.center, r.axis, r.diameter / 2));
+    });
+    if (!faces.length) throw new Error("Resize: the round wall was not found");
+    // (pulling a hole's wall — along its normal, toward the axis — makes it smaller)
+    out = pushPullMany(out, faces.map((f) => f.hashCode), kind === "hole" ? -change / 2 : change / 2);
+  }
+  return out;
+}
+
+/**
+ * Fill round holes / take off round pins (Delete with their rims selected): their walls, and the
+ * faces inside them (a blind hole's bottom, a drill tip, a pin's top), removed and the gap closed
+ * by the faces around (OpenCascade's defeaturing). Throws if it can't (e.g. a hole running into another).
+ */
+export function fillRounds(shape: Solid, rims: RoundRim[]): Solid {
+  const [lo, hi] = shape.boundingBox.bounds;
+  const tol = 1e-6 * Math.max(1, Math.hypot(...sub3(hi, lo)));
+  const remove: Face[] = [];
+  const has = (f: Face) => remove.some((g) => g.isSame(f));
+  for (const r of rims) {
+    const walls = shape.faces.filter((f) => {
+      const w = cylinderOf(f);
+      return !!w && w.hole === (r.kind === "hole") && sameRound(w, r.center, r.axis, r.diameter / 2);
+    });
+    if (!walls.length) throw new Error("Delete: the round wall was not found");
+    // Inside the round: every edge point within its radius of the axis (not the face it opens into).
+    const inside = (f: Face) =>
+      f.edges.every((e) => [0, 0.25, 0.5, 0.75, 1].every((t) => {
+        const rel = sub3(e.pointAt(t).toTuple() as V3, r.center), h = dot3(rel, r.axis);
+        return Math.hypot(rel[0] - h * r.axis[0], rel[1] - h * r.axis[1], rel[2] - h * r.axis[2]) <= r.diameter / 2 + tol;
+      }));
+    const queue = [...walls];
+    for (const w of walls) if (!has(w)) remove.push(w);
+    while (queue.length) {
+      const f = queue.shift()!;
+      for (const g of shape.faces) {
+        if (has(g) || !g.edges.some((e) => f.edges.some((x) => x.isSame(e))) || !inside(g)) continue;
+        remove.push(g);
+        queue.push(g);
+      }
+    }
+  }
+  const what = rims.every((r) => r.kind === "hole") ? "fill the hole" : rims.every((r) => r.kind === "pin") ? "take off the pin" : "fill the hole / take off the pin";
+  return defeature(shape, remove, what);
+}
+
+/** `faces` of a solid taken away and the gap closed by the faces around (OpenCascade's defeaturing); `what` for the error. */
+function defeature(shape: Solid, faces: Face[], what: string): Solid {
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const df = keep(new oc.BRepAlgoAPI_Defeaturing());
+    df.SetShape(shape.wrapped);
+    for (const f of faces) df.AddFaceToRemove(f.wrapped);
+    df.SetRunParallel(false);
+    df.Build(keep(new oc.Message_ProgressRange()));
+    if (!df.IsDone() || df.HasErrors()) throw new Error(`Delete: the geometry kernel could not ${what} (does it run into another one?)`);
+    const solids = [...iterTopo(df.Shape(), "solid")].map((x) => cast(x) as Solid);
+    if (solids.length !== 1) throw new Error(`Delete: the geometry kernel could not ${what}`);
+    const out = solids[0].simplify() as Solid;
+    if (!isValidShape(out)) throw new Error(`Delete: the result is not a valid solid`);
+    return out;
+  } finally {
+    for (const o of tmp) {
+      try {
+        o.delete();
+      } catch {
+        // already owned by OpenCascade
+      }
+    }
+  }
+}
+
+/**
+ * A hole of any shape (rectangle, slot, a sketched outline...) found from an edge of its rim: the
+ * rim is an inner outline of a face (a notch at its border is not a hole). `faces`: all of the
+ * hole — its walls, a pocket's floor, fillets in it; `walls`: the ones that meet a face it opens
+ * into (moved to resize it); `key`: the same for any edge of one hole.
+ */
+export interface HoleLoop {
+  faces: number[];
+  walls: number[];
+  key: string;
+  /** The edges of the rim the edge is on (that inner outline). */
+  rim: number[];
+}
+
+export function holeAt(shape: Shape, edgeId: number): HoleLoop | null {
+  const edge = shape.edges.find((e) => e.hashCode === edgeId);
+  if (!edge) return null;
+  const all = shape.faces;
+  const innerLoops = new Map<Face, Edge[][]>();
+  const inner = (f: Face) => {
+    if (!innerLoops.has(f)) innerLoops.set(f, f.clone().innerWires().map((w) => w.edges));
+    return innerLoops.get(f)!;
+  };
+  const on = (es: Edge[], e: Edge) => es.some((x) => x.isSame(e));
+  const host = all.find((f) => inner(f).some((es) => on(es, edge)));
+  if (!host) return null;
+  const loop = inner(host).find((es) => on(es, edge))!;
+  const shares = (f: Face, es: Edge[]) => f.edges.some((e) => on(es, e));
+  const feature = all.filter((f) => !f.isSame(host) && shares(f, loop));
+  if (!feature.length) return null;
+  const has = (f: Face) => feature.some((x) => x.isSame(f));
+  // Spread through the hole; stop at faces it opens into (its edges there are an inner outline of them).
+  const opens: Edge[][] = [loop];
+  for (let i = 0; i < feature.length; i++) {
+    const f = feature[i];
+    for (const g of all) {
+      if (g.isSame(host) || has(g)) continue;
+      const shared = g.edges.filter((e) => on(f.edges, e));
+      if (!shared.length) continue;
+      const far = inner(g).find((es) => shared.every((e) => on(es, e)));
+      if (far) {
+        opens.push(far);
+        continue;
+      }
+      feature.push(g);
+    }
+  }
+  const border = host.clone().outerWire().edges;
+  if (feature.some((f) => shares(f, border)) || feature.length >= all.length - 1) return null;
+  const walls = feature.filter((f) => opens.some((es) => shares(f, es)));
+  return { faces: feature.map((f) => f.hashCode), walls: walls.map((f) => f.hashCode), key: feature.map((f) => f.hashCode).sort((a, b) => a - b).join(","), rim: loop.map((e) => e.hashCode) };
+}
+
+/** Fill holes of any shape (Delete with an edge of each rim selected). Throws if it can't. */
+export function fillHoles(shape: Solid, holes: HoleLoop[]): Solid {
+  const ids = new Set(holes.flatMap((h) => h.faces));
+  return defeature(shape, shape.faces.filter((f) => ids.has(f.hashCode)), holes.length === 1 ? "fill the hole" : "fill the holes");
+}
+
+/**
+ * Holes of any shape `change` mm wider (narrower if negative) across, all round: each wall moved
+ * out by half of it — straight walls along their normals (corners stay sharp), round ones round
+ * their axis. Throws if the kernel can't, or the result isn't a valid solid.
+ */
+export function resizeHoles(shape: Solid, holes: HoleLoop[], change: number): Solid {
+  if (Math.abs(change) < 1e-9) return shape;
+  // (a hole's walls face into it: pulling them in, along their normals, makes it smaller)
+  const out = pushPullMany(shape, holes.flatMap((h) => h.walls), -change / 2);
+  if (!previewing && !isValidShape(out)) throw new Error("Resize: the result is not a valid solid — try a smaller change");
+  return out;
 }
 
 /**
