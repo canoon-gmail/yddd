@@ -2367,7 +2367,7 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
   const tol = Math.max(1e-5, diag * 1e-7);
   const len = Math.hypot(...sub3(b, a));
-  if (len < tol * 10) throw new Error("Divide face: the two points are the same");
+  if (len < tol * 10) throw new Error("Draw line on face: the two points are the same");
   const onBoundary = (f: Face, p: V3) =>
     f.edges.some((e) => e.geomType === "LINE" && segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10);
   const face = shape.faces.find((f) => {
@@ -2380,7 +2380,7 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
     const m: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
     return !onBoundary(f, m);
   });
-  if (!face) throw new Error("Divide face: start and end on the edges of the same flat face (corners, midpoints or anywhere along an edge)");
+  if (!face) throw new Error("Draw line on face: start and end on the edges of the same flat face (corners, midpoints or anywhere along an edge)");
   // Clicked points carry float32 snap error: make them exact corners / midpoints / points on the edge.
   const exact = (p: V3): V3 => {
     let best: V3 = p, bestD = Infinity;
@@ -2421,11 +2421,11 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   builder.Build(new oc.Message_ProgressRange());
   if (builder.HasErrors()) {
     builder.delete();
-    throw new Error("Divide face: the geometry kernel could not divide this face");
+    throw new Error("Draw line on face: the geometry kernel could not divide this face");
   }
   const solids = [...iterTopo(builder.Shape(), "solid")].map((x) => cast(x) as Solid);
   builder.delete();
-  if (solids.length !== 1 || !isValidShape(solids[0])) throw new Error("Divide face: dividing this face did not give a valid solid");
+  if (solids.length !== 1 || !isValidShape(solids[0])) throw new Error("Draw line on face: dividing this face did not give a valid solid");
   return solids[0];
 }
 

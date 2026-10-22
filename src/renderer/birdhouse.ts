@@ -69,7 +69,7 @@ export const BIRD_HOUSE: Tutorial = {
     },
     {
       title: "Ridge line",
-      how: "<kbd>D</kbd> (Divide face): click the <b>midpoint</b> of the front top edge, then of the back top edge (midpoints snap). The new edge is selected.",
+      how: "<kbd>D</kbd> (Draw line on face): click the <b>midpoint</b> of the front top edge, then of the back top edge (midpoints snap). The new edge is selected.",
       run(doc, ctx, label) {
         const h = body(doc, ctx, "house");
         replace(doc, h.id, splitFaceByLine(h.shape as Solid, [0, FRONT_Y, EAVE_Z], [0, -FRONT_Y, EAVE_Z]), label);

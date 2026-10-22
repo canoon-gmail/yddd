@@ -13,6 +13,7 @@ import * as THREE from "three";
 import type { Viewport, SnapKind, GizmoFrame } from "./viewport";
 import {
   planarFaceFrame,
+  axisCrossEdge,
   makeBox,
   makeCylinder,
   makeSphereAt,
@@ -1106,6 +1107,16 @@ export function axisLockPoint(vp: Viewport, p1: THREE.Vector3, e: PointerEvent, 
   return { point: p1.clone().setComponent(best.k, p1.getComponent(best.k) + t), k: best.k };
 }
 
+/** What the Guide line tool has and waits for (its panel): the start, else a reference and how far from it. */
+export interface GuideState {
+  /** "start": waiting for an edge / axis / first point; "second": for the second point; "offset": sliding off `from`. */
+  step: "start" | "second" | "offset";
+  /** What it starts from: "edge", "X axis", "point (1, 2, 0)"... (null at "start"). */
+  from: string | null;
+  dist: number;
+  count: number;
+}
+
 export class GuideTool implements Tool {
   readonly name = "Guide line";
   private sides: EdgeSides | null = null;
@@ -1134,7 +1145,16 @@ export class GuideTool implements Tool {
     /** Adjacent flat faces of an edge (null if the edge is not straight / has no flat face). */
     private sidesOf: (bodyId: number, edgeId: number) => EdgeSides | null,
     private onDone: (lines: { a: V3; b: V3 }[]) => void,
+    /** Its state changed (null: the tool is closing) — for a panel. */
+    private onState: (s: GuideState | null) => void = () => {},
   ) {}
+
+  private emitState(): void {
+    const at = (p: THREE.Vector3) => `point (${p.toArray().map((n) => fmt(n)).join(", ")})`;
+    const step = this.p1 ? "second" : this.ref ? "offset" : "start";
+    const from = this.p1 ? at(this.p1) : this.ref ? (this.onAxis ? `${"XYZ"[this.axisOf(this.ref).k]} axis` : "edge") : null;
+    this.onState({ step, from, dist: this.dist, count: this.count });
+  }
 
   start(bodyId?: number, edgeId?: number): this {
     if (bodyId !== undefined && edgeId !== undefined) {
@@ -1204,8 +1224,9 @@ export class GuideTool implements Tool {
         ? this.axisHint()
         : this.ref
         ? `Guide line: move across the face under the cursor (${this.host.viewport.snapTip("points / grid")}) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel`
-        : "Guide line: click a reference edge or an X / Y / Z axis (parallel guide), or click a point — corner / midpoint / centre, Ctrl: any snap — to draw a guide through two points";
+        : "Guide line: click a reference edge or an X / Y / Z axis (parallel guide), or click a point — corner / midpoint / centre, Ctrl: any snap — to draw a guide through two points (in Top / Front / Right view: anywhere)";
     this.host.hint(this.typed ? `${t}   ⌨ ${this.typed}_` : t);
+    this.emitState();
   }
 
   private axisHint(): string {
@@ -1224,6 +1245,31 @@ export class GuideTool implements Tool {
     return sp && (e.ctrlKey || sp.kind === "vertex" || sp.kind === "midpoint" || sp.kind === "center") ? sp : null;
   }
 
+  /** World axis the camera looks straight along (Top / Front / Right and their other sides), or -1 in a slanted view. */
+  private mainViewAxis(): number {
+    const d = this.host.viewport.camera.getWorldDirection(new THREE.Vector3());
+    return [d.x, d.y, d.z].findIndex((c) => Math.abs(c) > 0.9998);
+  }
+
+  /**
+   * Main view (see mainViewAxis), nothing to snap to: the face under the cursor, else the plane
+   * across the view through `through` (the first point; else the origin: Top Z = 0, Front Y = 0...),
+   * on the grid step. Null in a slanted view.
+   */
+  private viewPoint(e: PointerEvent, through?: THREE.Vector3): THREE.Vector3 | null {
+    const k = this.mainViewAxis();
+    if (k < 0) return null;
+    const vp = this.host.viewport;
+    const hit = vp.faceUnder(e.clientX, e.clientY);
+    if (hit) return hit.point.clone();
+    const n = new THREE.Vector3().setComponent(k, 1);
+    const p = vp.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane(n, -(through?.getComponent(k) ?? 0)), new THREE.Vector3());
+    if (!p) return null;
+    const step = this.host.snapStep(e);
+    for (let i = 0; i < 3; i++) if (i !== k) p.setComponent(i, snapValue(p.getComponent(i), step));
+    return p;
+  }
+
   /** Second point: a snap, else locked onto a world axis, else the face under the cursor, else the view plane through the first point. */
   private secondPoint(e: PointerEvent): THREE.Vector3 | null {
     const vp = this.host.viewport;
@@ -1233,6 +1279,8 @@ export class GuideTool implements Tool {
     if (sp) return sp.point;
     const locked = this.axisLock(e);
     if (locked) return locked;
+    const onView = this.viewPoint(e, this.p1!);
+    if (onView) return onView;
     const hit = vp.faceUnder(e.clientX, e.clientY);
     if (hit) return hit.point.clone();
     const n = vp.camera.getWorldDirection(new THREE.Vector3());
@@ -1296,11 +1344,13 @@ export class GuideTool implements Tool {
       const at = new THREE.Vector3().setComponent(k, this.axisAt).addScaledVector(this.v(r.inward), this.dist);
       const across = this.across ? ` · ${fmt(((signed - this.across.lo) / (this.across.hi - this.across.lo)) * 100)}% across ${this.across.name}` : "";
       this.host.hud(`${"XYZ"[slide]} = ${fmt(signed)} mm${across}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
+      this.emitState();
       return;
     }
     const at = this.v(r.b).add(this.v(r.inward).multiplyScalar(this.dist));
     const pct = r.width > 0 && Number.isFinite(r.width) ? ` · ${fmt((this.dist / r.width) * 100)}%` : "";
     this.host.hud(`${fmt(this.dist)} mm${pct}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
+    this.emitState();
   }
 
   move(e: PointerEvent): void {
@@ -1317,6 +1367,9 @@ export class GuideTool implements Tool {
       const h = sp ? null : this.edgeUnder(e);
       // No point or edge here: a world axis line under the cursor (a reference too).
       const ax = sp || h ? -1 : this.host.viewport.axisUnder(e.clientX, e.clientY);
+      // Main view, nothing else here: a click starts a 2-point guide at this point.
+      const vpt = sp || h || ax >= 0 ? null : this.viewPoint(e);
+      if (vpt) this.host.viewport.showSnapMarker({ point: vpt, kind: "axis" });
       if (h?.faces[0].ref.id !== this.hoverSides?.faces[0].ref.id || ax !== this.hoverAxis) {
         this.hoverSides = h;
         this.hoverAxis = ax;
@@ -1402,7 +1455,14 @@ export class GuideTool implements Tool {
       const h = this.edgeUnder(e);
       if (!h) {
         const ax = this.host.viewport.axisUnder(e.clientX, e.clientY);
-        if (ax < 0) return this.host.hint("Guide line: click a straight edge next to a flat face, or an X / Y / Z axis");
+        const vpt = ax < 0 ? this.viewPoint(e) : null;
+        if (vpt) {
+          this.p1 = vpt;
+          this.draw();
+          this.updateHint();
+          return;
+        }
+        if (ax < 0) return this.host.hint("Guide line: click a straight edge next to a flat face, or an X / Y / Z axis — or, in Top / Front / Right view, any two points");
         this.ref = this.axisRef(ax);
         this.onAxis = true;
         this.axisAt = this.alongAxis(e, ax);
@@ -1487,41 +1547,58 @@ export class GuideTool implements Tool {
     this.host.viewport.setOverlay([]);
     this.host.viewport.showSnapMarker(null);
     this.host.hud(null);
+    this.onState(null);
   }
 }
 
 // ------------------------------------------------------------------ pencil
 
 /**
- * Divide face (D): click two points on the edges of a flat face to split it with a line
+ * Draw line on face (D): click two points on the edges of a flat face to split it with a line
  * (e.g. the two top midpoints of a box → a ridge edge that Move can lift into a gable).
- * Corners and midpoints snap automatically; anywhere along an edge works too.
+ * Corners and midpoints snap automatically; anywhere along an edge works too. The end point locks
+ * where the X / Y / Z axis line through the start meets the edge under the cursor when the cursor
+ * runs (nearly) along that axis on screen: a line parallel to an axis without hunting for it.
  */
 export class DivideFaceTool implements Tool {
-  readonly name = "Divide face";
+  readonly name = "Draw line on face";
   private a: { point: THREE.Vector3; body: number } | null = null;
   private cur: THREE.Vector3 | null = null;
+  /** World axis (0 = X, 1 = Y, 2 = Z) the end point is locked onto, or -1. */
+  private axis = -1;
 
   constructor(
     private host: ToolHost,
     private onDivide: (bodyId: number, a: V3, b: V3) => void,
     /** Why the body can't be divided (e.g. a flat face body, a mesh), or null if it can. */
     private refuse: (bodyId: number) => string | null = () => null,
+    private shapeOf: (bodyId: number) => Shape | null = () => null,
   ) {}
 
   start(): this {
-    this.host.hint("Divide face: click a point on an edge of a solid's flat face (corners / midpoints snap) · Esc cancel");
+    this.host.hint("Draw line on face: click a point on an edge of a solid's flat face (corners / midpoints snap) · Esc cancel");
     return this;
   }
 
   /** Point under the cursor: a corner / midpoint, else the nearest point on an edge. */
-  private pointAt(e: PointerEvent): { point: THREE.Vector3; body: number; kind: SnapKind } | null {
+  private pointAt(e: PointerEvent): { point: THREE.Vector3; body: number; kind: SnapKind; axis?: number } | null {
     const vp = this.host.viewport;
     const edge = vp.pick(e.clientX, e.clientY, "edge");
     if (!edge) return null;
     const sp = vp.snapPoint(e.clientX, e.clientY);
     if (sp && (sp.kind === "vertex" || sp.kind === "midpoint")) return { point: sp.point, body: edge.body, kind: sp.kind };
+    const lock = this.a && edge.kind === "edge" ? this.axisOnEdge(e, edge.body, edge.id) : null;
+    if (lock) return { point: lock.point, body: edge.body, kind: "axis", axis: lock.k };
     return { point: edge.point.clone(), body: edge.body, kind: "axis" };
+  }
+
+  /** End point locked on a world axis through the start (see axisLockPoint): where that axis line meets the edge, if it does. */
+  private axisOnEdge(e: PointerEvent, body: number, edgeId: number): { point: THREE.Vector3; k: number } | null {
+    const from = this.a!.point;
+    const lock = axisLockPoint(this.host.viewport, from, e, 0);
+    const shape = lock ? this.shapeOf(body) : null;
+    const q = shape ? axisCrossEdge(shape, edgeId, from.toArray() as V3, lock!.k) : null;
+    return q && new THREE.Vector3(...q).distanceTo(from) > 1e-6 ? { point: new THREE.Vector3(...q), k: lock!.k } : null;
   }
 
   private draw(): void {
@@ -1529,7 +1606,7 @@ export class DivideFaceTool implements Tool {
     if (this.a && this.cur) {
       objs.push(new THREE.Line(
         new THREE.BufferGeometry().setFromPoints([this.a.point, this.cur]),
-        new THREE.LineBasicMaterial({ color: 0xff6fb5, depthTest: false, transparent: true }),
+        new THREE.LineBasicMaterial({ color: this.axis >= 0 ? AXIS_COLORS[this.axis] : 0xff6fb5, depthTest: false, transparent: true }),
       ));
     }
     this.host.viewport.setOverlay(objs);
@@ -1537,24 +1614,25 @@ export class DivideFaceTool implements Tool {
 
   move(e: PointerEvent): void {
     const p = this.pointAt(e);
-    this.host.viewport.showSnapMarker(p);
+    this.axis = p?.axis ?? -1;
+    this.host.viewport.showSnapMarker(p && this.axis < 0 ? p : null);
     if (!this.a) return;
     this.cur = p?.point ?? this.host.viewport.faceUnder(e.clientX, e.clientY)?.point ?? null;
     this.draw();
-    if (this.cur) this.host.hud(fmt(this.cur.distanceTo(this.a.point)), this.cur);
+    if (this.cur) this.host.hud(`${this.axis >= 0 ? `On ${"XYZ"[this.axis]} axis\n` : ""}${fmt(this.cur.distanceTo(this.a.point))}`, this.cur);
   }
 
   down(e: PointerEvent): void {
     const p = this.pointAt(e);
-    if (!p) return this.host.hint("Divide face: click on an edge (corners / midpoints snap)");
+    if (!p) return this.host.hint("Draw line on face: click on an edge (corners / midpoints snap)");
     if (!this.a) {
       const why = this.refuse(p.body);
       if (why) return this.host.toast(why, "error");
       this.a = { point: p.point, body: p.body };
-      this.host.hint("Divide face: click the end point on another edge of the same face · Esc cancel");
+      this.host.hint("Draw line on face: click the end point on another edge of the same face — move along X / Y / Z to lock the line parallel to it · Esc cancel");
       return;
     }
-    if (p.body !== this.a.body) return this.host.toast("Divide face: the end point must be on the same solid as the start", "error");
+    if (p.body !== this.a.body) return this.host.toast("Draw line on face: the end point must be on the same solid as the start", "error");
     const t = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
     this.onDivide(p.body, t(this.a.point), t(p.point));
   }

@@ -1686,6 +1686,22 @@ export class Viewport {
     return group;
   }
 
+  /** A thick line through `pts` (for setOverlay; `width` in px, on top of everything), e.g. a sketch's paths. */
+  thickLine(pts: THREE.Vector3[], color: number, width: number, opacity = 1): THREE.Object3D {
+    const key = `${color}:${width}:${opacity}`;
+    let m = this.glowMats.get(key);
+    if (!m) {
+      m = new LineMaterial({ color, linewidth: width, transparent: true, opacity, depthTest: false, depthWrite: false });
+      m.resolution.set(this.width, this.height);
+      this.glowMats.set(key, m); // (kept the window's size with the glow lines')
+    }
+    const g = new LineSegmentsGeometry();
+    g.setPositions(pts.slice(1).flatMap((b, i) => [pts[i].x, pts[i].y, pts[i].z, b.x, b.y, b.z]));
+    const line = new LineSegments2(g, m);
+    line.frustumCulled = false;
+    return line;
+  }
+
   /** Replace tool overlay objects (previous overlay geometries are disposed). */
   setOverlay(objects: THREE.Object3D[]): void {
     for (const child of [...this.overlayRoot.children]) {

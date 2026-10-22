@@ -64,7 +64,7 @@ export const HOUSE: Tutorial = {
     },
     {
       title: "Main ridge line",
-      how: "<kbd>D</kbd> (Divide face): click the <b>midpoint</b> of the top's left edge, then of its right edge (midpoints snap). The new edge is selected.",
+      how: "<kbd>D</kbd> (Draw line on face): click the <b>midpoint</b> of the top's left edge, then of its right edge (midpoints snap). The new edge is selected.",
       run: (doc, ctx, label) => ridgeLine(doc, ctx, "house", [-MAIN_L / 2, 0, WALL_H], [MAIN_L / 2, 0, WALL_H], label),
     },
     {

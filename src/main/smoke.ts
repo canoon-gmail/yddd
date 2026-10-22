@@ -836,7 +836,7 @@ const SCENARIO_3 = String.raw`
     expect("13j Shift+D on a non-flat loop threw", false, String(e && e.stack || e));
   }
 
-  // 14) Divide face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
+  // 14) Draw line on face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
   try {
     const valid = window.y3dKernel.isValidShape;
     app.run("mode.body");
@@ -853,7 +853,7 @@ const SCENARIO_3 = String.raw`
     app.run("tool.divideFace");
     toolClicks([[420, 0, 20], [420, 30, 20]]);
     const sel = app.selection[0];
-    expect("14 divide face splits the top face, new edge selected in Edge mode", sh().faces.length === 7 && valid(sh()) && app.mode === "edge" && app.selection.length === 1 && sel.kind === "edge", [sh().faces.length, valid(sh()), app.mode, app.selection]);
+    expect("14 draw line on face splits the top face, new edge selected in Edge mode", sh().faces.length === 7 && valid(sh()) && app.mode === "edge" && app.selection.length === 1 && sel.kind === "edge", [sh().faces.length, valid(sh()), app.mode, app.selection]);
     const e = sel && sh().edges.find((x) => x.hashCode === sel.id);
     const r3 = (p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6));
     expect("14 new edge runs exactly between the midpoints", e && eq([r3(e.startPoint), r3(e.endPoint)].sort(), [[420, 0, 20], [420, 30, 20]].sort()), e && [r3(e.startPoint), r3(e.endPoint)]);
@@ -862,7 +862,7 @@ const SCENARIO_3 = String.raw`
     dialog([0, 0, 10]);
     key("Enter", "Enter");
     expect("14 G lifts the ridge: gable house (7 faces, 30 tall)", valid(sh()) && eq(size(bx), [40, 30, 30]) && sh().faces.length === 7, [valid(sh()), size(bx), sh().faces.length]);
-    // 14b) Divide face on a flat rectangle face: refused with an error toast, face unchanged, tool stays
+    // 14b) Draw line on face on a flat rectangle face: refused with an error toast, face unchanged, tool stays
     app.setSelection([]);
     app.run("tool.rectangle"); ev("pointermove", [400, 100, 0]); key("Tab", "Tab"); dialog([40, 30]);
     const rf = last(), rfFaces = rf.shape.faces ? rf.shape.faces.length : 1, toasts = document.querySelectorAll(".toast.error").length;
@@ -877,7 +877,7 @@ const SCENARIO_3 = String.raw`
     app.setSelection([{ kind: "body", body: bx, id: 0 }]); app.run("view.fitSelection"); await sleep(50); app.setSelection([]); // camera back for the next steps
     app.run("mode.body");
   } catch (e) {
-    expect("14 divide face threw", false, String(e && e.stack || e));
+    expect("14 draw line on face threw", false, String(e && e.stack || e));
   }
 
   // 15) Offset face with round corners: 40 x 30 top grows by 5 (4 arcs), shrinks by 5 (still 4 arcs)
@@ -1012,6 +1012,20 @@ const SCENARIO_3 = String.raw`
     const g2 = { ok: !!(app.op && app.op.result), err: opErr() };
     key("Escape", "Escape");
     expect("15b Sweep with a guide selected: waits for a face click, then previews", /Path: guide line/.test(g1.note) && /flat face/.test(g1.err) && g2.ok, { g1, g2 });
+    // Picked in the Bodies panel: nothing selected, S W, click the square's row then the path's row → the same L sweep
+    const sq2 = add(K.makeRectFace(G, [500, 4200, 0], 10, 10), "Square", "face");
+    app.setSelection([]); app.selGuide = -1;
+    await chord("s", "w");
+    const row = (id) => document.querySelector("#outliner .ol-row[data-id='" + id + "'] .ol-name").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    row(sq2); await sleep(150);
+    const olFace = { note: document.querySelector("#op-panel .op-note").textContent, err: opErr() };
+    row(path); await sleep(150);
+    const olPath = { note: document.querySelector("#op-panel .op-note").textContent, ok: !!(app.op && app.op.result) };
+    app.applyOp();
+    const olSw = last(), olV = K.solidVolume(olSw.shape);
+    expect("15b Sweep picked in the Bodies panel: a face object row is the profile, a path row the path → volume 9000",
+      /Profile: Square/.test(olFace.note) && /click a path or guide/.test(olFace.err) && /Path: Path/.test(olPath.note) && olPath.ok && !app.doc.get(sq2) && near(olV, 9000), { olFace, olPath, olV });
+    app.setSelection([{ kind: "body", body: olSw.id, id: 0 }]); app.run("edit.delete");
     // Turn profile: a 10 x 4 bar moved onto the Z guide lies along X; turned 90° it lies along Y
     const bar = add(K.makeRectFace(G, [400, 4300, 0], 10, 4), "Bar", "face");
     app.setSelection([{ kind: "body", body: bar, id: 0 }]); app.selGuide = gz;
@@ -3788,6 +3802,75 @@ const SCENARIO_CUTAXIS = String.raw`
   const front = await cutAt("view.front", [25, 0, 0]);
   expect("cut by axis: the X axis in Front view → cut level at Z = 0",
     front.boxes.length === 2 && front.boxes.every((b) => b[1][2] - b[0][2] === 10 && b[1][1] - b[0][1] === 20), front);
+  // Nothing selected: C opens the panel and waits — the line then the cube, or the cube then the line
+  const pickOrder = async (lineFirst) => {
+    app.doc.reset([]);
+    const cube = app.doc.makeBody(K.makeBox(G, [0, 0, -10], 20, 20, 20), "Cube");
+    app.doc.commit([cube], "cube");
+    app.run("mode.body"); app.run("view.top"); vp.fit(); await sleep(50);
+    app.setSelection([]);
+    app.run("op.cut"); await sleep(20);
+    const text0 = document.getElementById("tool-panel")?.textContent ?? "";
+    const click = async (p) => { ev("pointermove", p); await sleep(20); ev("pointerdown", p); await sleep(50); };
+    await click(lineFirst ? [25, 0, 0] : [5, 5, 10]);
+    const text1 = document.getElementById("tool-panel")?.textContent ?? "";
+    await click(lineFirst ? [5, 5, 10] : [25, 0, 0]);
+    return { text0, text1, tool: app.tool && app.tool.name, n: app.doc.bodies.length };
+  };
+  const lf = await pickOrder(true), cf = await pickOrder(false);
+  expect("cut with nothing selected: C opens the panel waiting for a solid and a line; X axis then cube → cut",
+    /click a solid/.test(lf.text0) && /click a guide line/.test(lf.text0) && /X axis/.test(lf.text1) && !lf.tool && lf.n === 2, lf);
+  expect("cut with nothing selected: cube then X axis → cut", /Cube/.test(cf.text1) && !cf.tool && cf.n === 2, cf);
+  // Cut along a straight path (a sketch line turned −15°, on the ground, longer than the cube): C, click the
+  // path beyond the cube, click the cube → cut upright through the path into two equal halves; the path stays
+  {
+    app.doc.reset([]);
+    const cube = app.doc.makeBody(K.makeBox(G, [0, 0, -10], 20, 20, 20), "Cube");
+    const t = (-15 * Math.PI) / 180, A = [-40 * Math.cos(t), -40 * Math.sin(t), 0], B = [40 * Math.cos(t), 40 * Math.sin(t), 0];
+    const path = app.doc.makeBody(K.sketchPath([{ kind: "line", a: A, b: B }]), "Path", "path");
+    app.doc.commit([cube, path], "cube + path");
+    app.run("mode.body"); app.run("view.top"); vp.fit(); await sleep(50);
+    app.setSelection([]);
+    app.run("op.cut"); await sleep(20);
+    const onPath = [35 * Math.cos(t), 35 * Math.sin(t), 0];
+    ev("pointermove", onPath); await sleep(20); ev("pointerdown", onPath); await sleep(50);
+    const text = document.getElementById("tool-panel")?.textContent ?? "";
+    ev("pointermove", [-5, 5, 10]); await sleep(20); ev("pointerdown", [-5, 5, 10]); await sleep(50);
+    const solids = app.doc.bodies.filter((b) => b.kind === "solid");
+    const vols = solids.map((b) => +K.solidVolume(b.shape).toFixed(3)).sort();
+    const tall = solids.map((b) => { const [lo, hi] = b.shape.boundingBox.bounds; return +(hi[2] - lo[2]).toFixed(6); });
+    expect("cut along a straight path (−15°): C, click the path, click the cube → cut upright into two equal halves, the path kept",
+      /Along: Path/.test(text) && !app.tool && solids.length === 2 && vols.every((v) => Math.abs(v - 4000) < 1e-3) && tall.every((h) => h === 20) && !!app.doc.get(path.id),
+      { text, vols, tall, n: app.doc.bodies.length });
+  }
+  // Split face (Shift+C) with nothing selected: the panel waits — the guide then the face, or the face then the guide
+  const splitOrder = async (guideFirst) => {
+    app.doc.reset([]);
+    const bx = app.doc.makeBody(K.makeBox(G, [0, 600, 0], 40, 30, 20), "Box"); // (front face at Y = 585)
+    app.doc.commit([bx], "box");
+    app.doc.setGuides([{ a: [5, 585, 0], b: [5, 585, 20], n: [1, 0, 0] }], "guide");
+    app.run("mode.body"); app.run("view.front"); vp.fit(); await sleep(50);
+    app.setSelection([]);
+    app.run("op.splitFace"); await sleep(20);
+    const text0 = document.getElementById("tool-panel")?.textContent ?? "";
+    const click = async (p) => { ev("pointermove", p); await sleep(20); ev("pointerdown", p); await sleep(50); };
+    await click(guideFirst ? [5, 585, 10] : [12, 585, 10]);
+    const text1 = document.getElementById("tool-panel")?.textContent ?? "";
+    await click(guideFirst ? [12, 585, 10] : [5, 585, 10]);
+    return { text0, text1, tool: app.tool && app.tool.name, faces: app.doc.get(bx.id).shape.faces.length, n: app.doc.bodies.length };
+  };
+  const sg = await splitOrder(true), sf = await splitOrder(false);
+  expect("split face with nothing selected: Shift+C opens the panel; guide then face → face split, one solid",
+    /click a face/.test(sg.text0) && /click a guide line/.test(sg.text0) && /guide line 1/.test(sg.text1) && !sg.tool && sg.faces === 7 && sg.n === 1, sg);
+  expect("split face with nothing selected: face then guide → face split", /1 on Box/.test(sf.text1) && !sf.tool && sf.faces === 7 && sf.n === 1, sf);
+  app.doc.setGuides([], "no guides");
+  // Pro layout: the panel shows just what's picked (no instructions)
+  app.run("view.pro"); await sleep(20);
+  app.setSelection([]); app.run("op.cut"); await sleep(20);
+  const proText = document.getElementById("tool-panel")?.textContent ?? "";
+  app.run("view.pro"); await sleep(20); // (pro off again — Cut stays open)
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+  expect("cut panel in the pro layout: Cutting / Along only, no instructions", /Cutting: —/.test(proText) && /Along: —/.test(proText) && !/click|Esc/.test(proText), { proText, tool: app.tool && app.tool.name });
   app.doc.reset([]);
   // A selected guide line glows (halos under its dashed line); the others don't
   try {
@@ -4048,14 +4131,34 @@ const SCENARIO_AUTOSNAP = String.raw`
   const shiftG = { xf: !!app.xf, tool: app.tool?.name ?? null };
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
   expect("G = move gizmo, G G = Move from point, Shift+G = Guide line", oneG.xf && !oneG.tool && twoG.tool === "Move from point" && !twoG.xf && !shiftG.xf && shiftG.tool === "Guide line", { oneG, twoG, shiftG });
-  // D: Divide face (L no longer)
+  // D: Draw line on face (L no longer)
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", bubbles: true, cancelable: true })); await sleep(20);
   const dTool = app.tool?.name ?? null;
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", code: "KeyL", bubbles: true, cancelable: true })); await sleep(20);
   const lTool = app.tool?.name ?? null;
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
-  expect("D = Divide face (L does nothing now)", dTool === "Divide face" && lTool === null, { dTool, lTool });
+  expect("D = Draw line on face (L does nothing now)", dTool === "Draw line on face" && lTool === null, { dTool, lTool });
+  // Draw line on face: an end point a little off the Y direction locks where the Y axis line through the start meets the far edge
+  {
+    const slab = app.doc.makeBody(K.makeBox(G, [200, 0, 0], 40, 30, 20), "Slab"); // (x 180…220, y −15…15, z 0…20)
+    app.doc.commit([...app.doc.bodies, slab], "slab");
+    app.setSelection([]); vp.setView("iso"); vp.fit([slab.id]); await sleep(50);
+    const at = (p, type) => { const s = vp.toScreen(new V(...p)); canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+    app.run("tool.divideFace"); await sleep(20);
+    at([193, -15, 20], "pointermove"); at([193, -15, 20], "pointerdown"); at([193, -15, 20], "pointerup");
+    at([194, 15, 20], "pointermove"); await sleep(20); // (≈ 2° off Y)
+    const hud = document.getElementById("hud")?.textContent ?? "";
+    at([194, 15, 20], "pointerdown"); at([194, 15, 20], "pointerup"); await sleep(20);
+    const sh = app.doc.get(slab.id).shape, sel = app.selection[0];
+    const e = sel && sel.kind === "edge" && sh.edges.find((x) => x.hashCode === sel.id);
+    const ends = e ? [e.startPoint, e.endPoint].map((p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6))).sort((p, q) => p[1] - q[1]) : null;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    expect("Draw line on face: end point near the Y direction locks parallel to Y (HUD says so)",
+      JSON.stringify(ends) === JSON.stringify([[193, -15, 20], [193, 15, 20]]) && /On Y axis/.test(hud) && sh.faces.length === 7, { ends, hud, faces: sh.faces.length });
+    app.doc.commit(app.doc.bodies.filter((b) => b.id !== slab.id), "remove slab");
+    app.run("mode.body"); app.setSelection([]); vp.fit(); await sleep(20);
+  }
   // Guide line: a click on an edge / the X axis still picks it as the reference (an edge snap doesn't start a 2-point guide)
   app.setSelection([]);
   const guideRef = async (p) => {
@@ -4079,6 +4182,34 @@ const SCENARIO_AUTOSNAP = String.raw`
   const onEdge = await guideRef([5, -10, 20]), onAxis = await guideRef([40, 0, 0]);
   expect("auto snap: on — Guide line: an edge or the X axis glows under the cursor, a click picks it as the reference", onEdge.glow && onEdge.ref && !onEdge.p1 && onAxis.glow && onAxis.ref && onAxis.onAxis && !onAxis.p1, { onEdge, onAxis });
   expect("Guide line: a hovered axis glows in thinner lines than an edge", onAxis.width > 0 && onAxis.width < onEdge.width, { onEdge, onAxis });
+  // Guide line in a main view: two clicks on empty space (nothing to snap to) → a guide on the view's
+  // base plane (Top: Z = 0, Front: Y = 0); in a slanted view the same click does nothing
+  {
+    const twoClicks = async (view) => {
+      vp.setView(view); vp.fit(); await sleep(30); vp.camera.updateMatrixWorld(); vp.stamp++;
+      const r = canvas.getBoundingClientRect(), g0 = app.doc.guides.length;
+      // empty spots: 8% in from the top-left / top-right corners (no solid, no axis line there)
+      const spots = [[r.left + r.width * 0.08, r.top + r.height * 0.12], [r.left + r.width * 0.3, r.top + r.height * 0.12]];
+      const empty = spots.every(([x, y]) => !vp.faceUnder(x, y) && vp.axisUnder(x, y) < 0 && !vp.snapPoint(x, y));
+      app.run("tool.guide"); await sleep(20);
+      const texts = [document.getElementById("tool-panel")?.textContent ?? ""];
+      for (const [x, y] of spots) {
+        for (const type of ["pointermove", "pointerdown", "pointerup"]) canvas.dispatchEvent(new PointerEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+        await sleep(20);
+        texts.push(document.getElementById("tool-panel")?.textContent ?? "");
+      }
+      const g = app.doc.guides.length > g0 ? app.doc.guides[app.doc.guides.length - 1] : null;
+      if (app.tool) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+      await sleep(20);
+      if (g) app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guide");
+      return { empty, texts, g: g && [g.a, g.b].map((p) => p.map((n) => +n.toFixed(4))) };
+    };
+    const top = await twoClicks("top"), front = await twoClicks("front"), iso = await twoClicks("iso");
+    expect("Guide line panel: waits for an edge / axis / point, then shows the first point and asks for the second; closes once added",
+    /click an edge, axis or point/.test(top.texts[0]) && /From: point \(/.test(top.texts[1]) && /second point/.test(top.texts[1]) && top.texts[2] === "", top.texts);
+  expect("Guide line in Top / Front view: click two empty spots → a guide on Z = 0 / Y = 0; none in a slanted view",
+      top.empty && top.g && top.g.every((p) => p[2] === 0) && front.empty && front.g && front.g.every((p) => p[1] === 0) && !iso.g, { top, front, iso });
+  }
   // Snapping leaves out what the eye can't see: a corner of a small box behind the cube, with the cursor just
   // off the cube's outline (nothing under the cursor) — and push/pull drags leave out the world X / Y / Z lines.
   vp.setView("iso"); vp.fit(); await sleep(30); vp.camera.updateMatrixWorld(); vp.stamp++;
@@ -4369,6 +4500,10 @@ const SCENARIO_SKETCH = String.raw`
   await click([60, 0, 0]); await click([70, 0, 0]); await click([70, 10, 0]); await click([70, 10, 0]);
   const tri = app.tool.opens[nOpens];
   expect("sketch: double-click ends the lines, open (a path)", app.tool.loops.length === nLoops && app.tool.opens.length === nOpens + 1 && tri && tri.length === 2 && app.tool.first === null, { loops: app.tool.loops.length, tri });
+  // (the path drawn thicker than outlines: 2.5 px, in pink)
+  app.tool.update(); await sleep(20);
+  const thick = vp.overlayRoot.children.filter((o) => o.isLineSegments2 && o.material.linewidth === 2.5 && o.material.color.getHex() === 0xff69b4).length;
+  expect("sketch: open paths are drawn thicker (2.5 px pink lines)", thick >= 1, { thick });
   // Capsule: line 30, arc with R 5 typed (clicked a little off the half turn — it snaps), line 30,
   // arc R 5 clicked on the start point
   await key("l"); await click([80, -20, 0]); await hover([120, -20, 0]); await type("30");

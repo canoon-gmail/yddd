@@ -115,6 +115,19 @@ const OPS = String.raw`
       bench("file", "open " + file.split("/").pop() + " (parse only; meshed when drawn)", () => app.loadModel(text, null), 3, false);
       const solids = app.doc.bodies.filter((b) => b.kind === "solid");
       bench("file", "re-mesh its " + solids.length + " solids", () => solids.map((b) => K.tessellate(b.shape)), 3, false);
+      // F on its first solid: the fillet preview (all edges, the default radius) — kernel, meshing, and the whole key press
+      if (solids.length) {
+        const s0 = solids[0], r = app.defaults.fillet;
+        const f = bench("fillet", "F on " + s0.name + " (" + s0.shape.faces.length + " faces, " + s0.shape.edges.length + " edges): fillet all, r " + r + " (kernel)", () => K.filletEdges(s0.shape, null, r), 1, false);
+        if (f) bench("fillet", "  mesh the result", () => K.tessellate(f), 1, false);
+        app.setSelection([{ kind: "body", body: s0.id, id: 0 }]);
+        const t = performance.now();
+        app.run("op.fillet");
+        rows.push({ group: "fillet", name: "  key F → the panel on screen (blocked this long first)", ms: +(performance.now() - t).toFixed(1) });
+        while (app.op && !app.op.result) await new Promise((r) => setTimeout(r, 5));
+        rows.push({ group: "fillet", name: "  … and the preview shown", ms: +(performance.now() - t).toFixed(1) });
+        app.cancelOp();
+      }
       if (solids.length >= 2) bench("file", "its first solid − the next one", () => K.booleanOp("subtract", solids[0].shape, [solids[1].shape]), 3);
       // Linked copies: fillet one object of its first array / circular copy (every copy follows), then draw
       const rec = app.doc.arrays.find((r) => app.doc.get(r.sources[0])?.kind === "solid");

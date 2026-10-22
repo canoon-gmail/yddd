@@ -106,7 +106,7 @@ import {
 } from "./kernel";
 import { Doc, isBrep, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type Guide, type HistoryEntry, type ShapeBody } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
@@ -238,6 +238,10 @@ interface OpSpec {
   pick?(e: PointerEvent): void;
   /** With `pick`: the pointer moved over the viewport (e.g. light up what a click would pick). */
   hover?(e: PointerEvent): void;
+  /** Its preview takes a while (e.g. a fillet round a gear's 171 edges: ~1 s): the panel shows first, "Working…", then the preview. */
+  slow?: boolean;
+  /** The op picks objects: a click on a row in the Bodies panel goes here (not to selection). */
+  pickBody?(id: number): void;
   /** Labelled marks in the view to click (e.g. Array copy's ±X / ±Y / ±Z): see OpChoice. */
   choices?: OpChoice[];
   /** Caption of the apply button (default "Apply ⏎"). */
@@ -302,11 +306,14 @@ const OPEN_RECENT = "file.openRecent:";
 /** Thrown by an op's compute while it waits for a pick (not a mistake): shown as a prompt, not in red. */
 class OpWaiting extends Error {}
 
-/** What Cut cuts along: a guide line (its index), or a world axis line (0 = X, 1 = Y, 2 = Z). */
-type CutLine = number | { axis: number };
+/** What Cut cuts along: a guide line (its index), a world axis line (0 = X, 1 = Y, 2 = Z), or a straight path (its body id). */
+type CutLine = number | { axis: number } | { path: number };
 
 /** What Sweep runs along: a path object or a guide line (its index). */
 type Spine = { path: number } | { guide: number };
+
+/** Fillet / Chamfer on this many edges or more: the panel shows before the (slow) preview. */
+const SLOW_EDGES = 60;
 
 /** Cut: more upper pieces than this go in a new group of their own. */
 const CUT_GROUP_OVER = 4;
@@ -368,7 +375,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.sweep", icon: "sweep", label: "Sweep", key: "Pro: S W" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis", key: "C" },
       { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide", key: "Shift+C" },
-      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face", key: "D" },
+      { cmd: "tool.divideFace", icon: "pencil", label: "Draw line on face", key: "D" },
       { cmd: "tool.guide", icon: "guide", label: "Guide line", key: "Shift+G" },
       { cmd: "edit.clearGuides", icon: "clearGuides", label: "Clear guides", key: "" },
     ],
@@ -1065,7 +1072,13 @@ class App implements ToolHost {
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
       case "tool.measure": return this.startMeasure();
-      case "tool.divideFace": return this.startTool(new DivideFaceTool(this, (id, a, b) => this.divideFace(id, a, b), (id) => this.divideRefusal(id)).start());
+      case "tool.divideFace": {
+        const shapeOf = (id: number) => {
+          const b = this.doc.get(id);
+          return b && isBrep(b) ? b.shape : null;
+        };
+        return this.startTool(new DivideFaceTool(this, (id, a, b) => this.divideFace(id, a, b), (id) => this.divideRefusal(id), shapeOf).start());
+      }
       case "edit.clearGuides":
         if (!this.doc.guides.length) return this.toast("No guide lines");
         this.selGuide = -1;
@@ -1740,7 +1753,8 @@ class App implements ToolHost {
       ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (${this.viewport.snapTip("grid / points")}) · click or Enter apply · Esc cancel`
       : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`));
     this.renderToolbarState();
-    this.previewOp();
+    if (spec.slow) this.previewAfterPaint();
+    else this.previewOp();
     this.positionHandle();
     const first = inputs.find((i) => i.type === "number" || i.dataset.mm) ?? inputs[0];
     first?.focus();
@@ -1820,7 +1834,19 @@ class App implements ToolHost {
     this.positionHandle();
     if (!this.op) return;
     clearTimeout(this.op.timer);
-    this.op.timer = window.setTimeout(() => this.previewOp(), 120);
+    this.op.timer = window.setTimeout(() => (this.op?.spec.slow ? this.previewAfterPaint() : this.previewOp()), 120);
+  }
+
+  /** A slow preview: "Working…" in the panel first, painted, then the preview (the app is busy while it's worked out). */
+  private previewAfterPaint(): void {
+    const op = this.op;
+    if (!op || op.key === this.opValues().key) return;
+    const err = this.opPanel.querySelector(".op-error");
+    if (err) {
+      err.textContent = "Working out the preview…";
+      err.classList.add("waiting");
+    }
+    requestAnimationFrame(() => setTimeout(() => this.op === op && this.previewOp(), 0));
   }
 
   private previewOp(): OpOutcome | null {
@@ -2152,6 +2178,8 @@ class App implements ToolHost {
         if (which !== undefined) this.defaults.edgesWhich = which;
       },
       drag: dragFor(wholeSolids ? this.defaults.edgesWhich : undefined),
+      // (many edges: OpenCascade takes its time — a 171-edge gear ~1.1 s)
+      slow: [...perBody].reduce((n, [id, picked]) => n + (picked?.size ?? (this.doc.get(id)?.shape as Shape | undefined)?.edges?.length ?? 0), 0) >= SLOW_EDGES,
     };
     this.startOp(spec);
   }
@@ -2433,6 +2461,20 @@ class App implements ToolHost {
       if (hit.kind === "face" && isBrep(b) && findFace(b.shape, hit.id)?.geomType === "PLANE") return { profile: { bodyId: b.id, faceId: hit.id } };
       return "bad";
     };
+    // A row in the Bodies panel: a path, or a flat face object (a solid's face has to be clicked in the view).
+    const targetOf = (id: number): Target => {
+      const b = this.doc.get(id);
+      if (b?.kind === "path") return { spine: { path: b.id } };
+      if (b?.kind === "face" && b.shape.faces[0]?.geomType === "PLANE") return { profile: { bodyId: b.id, faceId: b.shape.faces[0].hashCode } };
+      return "bad";
+    };
+    const take = (t: Target) => {
+      if (!t) return;
+      if (t === "bad") return this.toast("Sweep: the profile must be a flat face — or click a path or guide line to sweep along", "error");
+      spec.remember!(this.opValues().values); // (the panel opens again with them)
+      if ("spine" in t) this.openSweep(profile, t.spine);
+      else this.openSweep(t.profile, spine);
+    };
     const picked: SelItem[] = [];
     if (body) picked.push(body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: profile!.faceId });
     if (pathBody) picked.push({ kind: "body", body: pathBody.id, id: 0 });
@@ -2452,14 +2494,8 @@ class App implements ToolHost {
         if (turn !== undefined) this.defaults.sweepTurn = turn;
         if (newBody !== undefined) this.defaults.joinNew = !!newBody;
       },
-      pick: (e) => {
-        const t = targetAt(e);
-        if (!t) return;
-        if (t === "bad") return this.toast("Sweep: the profile must be a flat face — or click a path or guide line to sweep along", "error");
-        spec.remember!(this.opValues().values); // (the panel opens again with them)
-        if ("spine" in t) this.openSweep(profile, t.spine);
-        else this.openSweep(t.profile, spine);
-      },
+      pick: (e) => take(targetAt(e)),
+      pickBody: (id) => take(targetOf(id)),
       hover: (e) => {
         // Light up what a click would pick; "not allowed" over what it can't use.
         const t = targetAt(e);
@@ -2681,100 +2717,217 @@ class App implements ToolHost {
     }
   }
 
-  /** Cut: with solids selected, click a guide line; the solids are cut by the plane through it. */
+  /**
+   * Cut: the panel waits for what to cut (selected first, or clicked: solids / flat faces, in the view
+   * or the Bodies panel) and a line (a selected guide, or click a guide / an axis line), either order;
+   * once it has both it cuts by the plane through the line.
+   */
   private startCut(): void {
-    const ids = this.selectedBodyIds();
-    if (!ids.length) {
-      this.toast("Cut: select the solid(s) or flat face(s) to cut first, then press C and click a guide line or an axis line (X / Y / Z)", "error");
-      return;
-    }
-    // A guide line under the cursor, else a world axis line (X / Y / Z).
+    let ids = this.selectedBodyIds().filter((id) => { const b = this.doc.get(id); return !!b && isBrep(b); });
+    // (a straight path selected with them: the line)
+    const selPath = this.selectedBodyIds().find((id) => this.straightPath(id));
+    let line: CutLine | null = this.selGuide >= 0 ? this.selGuide : selPath !== undefined ? { path: selPath } : null;
+    const bodyAt = (e: PointerEvent): number | null => this.viewport.pick(e.clientX, e.clientY, "body")?.body ?? null;
+    // A guide line under the cursor, else a world axis line (X / Y / Z), else a straight path.
     const lineAt = (e: PointerEvent): CutLine | null => {
       const g = this.viewport.guideAt(e.clientX, e.clientY);
       if (g >= 0) return g;
       const k = this.viewport.axisUnder(e.clientX, e.clientY);
-      return k >= 0 ? { axis: k } : null;
+      if (k >= 0) return { axis: k };
+      const b = bodyAt(e);
+      return b !== null && this.straightPath(b) ? { path: b } : null;
     };
+    const lineName = (l: CutLine) => (typeof l === "number" ? `guide line ${l + 1}` : "axis" in l ? `${"XYZ"[l.axis]} axis` : (this.doc.get(l.path)?.name ?? "path"));
     const panel = this.toolPanel("Cut", { label: "Cancel" }, () => this.endTool());
-    const names = ids.map((id) => this.doc.get(id)?.name ?? "").join(", ");
-    panel.set(
-      `<div>Cutting: <b>${escapeHtml(names)}</b></div>` +
-        `<div class="tp-tip">Click a guide line (pink dashed) or an axis line (red X / green Y / blue Z). Hover one to see its cut plane.</div>` +
-        `<div class="tp-tip">Cancel or Esc exits.</div>`,
-    );
+    const showPanel = () => {
+      const names = ids.map((id) => this.doc.get(id)?.name ?? "").join(", ");
+      // (Pro layout: just what's picked so far — a dash for what's still to click)
+      const pro = isPro();
+      panel.set(
+        `<div>Cutting: ${ids.length ? `<b>${escapeHtml(names)}</b>` : pro ? "—" : "<i>click a solid or flat face (or a row in the Bodies panel)</i>"}</div>` +
+          `<div>Along: ${line !== null ? `<b>${lineName(line)}</b>` : pro ? "—" : "<i>click a guide line (pink dashed), an axis line (red X / green Y / blue Z) or a straight path</i>"}</div>` +
+          (pro ? "" : `<div class="tp-tip">${line !== null ? "Click a solid to cut it — Shift+click picks more first, Enter cuts." : "Hover a line to see its cut plane, click it to cut."}</div>` +
+            `<div class="tp-tip">Cancel or Esc exits.</div>`),
+      );
+      this.viewport.setHighlight(ids.map((id) => ({ kind: "body", body: id, id: 0 }) as SelItem), null);
+    };
     let hovered = "";
-    const hover = (line: CutLine | null) => {
-      const key = JSON.stringify(line);
+    /** Show the cut plane of `l` across `on` (the hovered line over the picked solids, or the picked line over the hovered solid). */
+    const hover = (l: CutLine | null, on: number[]) => {
+      const key = JSON.stringify([l, on]);
       if (key === hovered) return;
       hovered = key;
-      this.hoverGuide = typeof line === "number" ? line : -1;
+      this.hoverGuide = typeof l === "number" ? l : -1;
       this.showGuides();
-      this.viewport.canvas.style.cursor = line !== null ? "pointer" : "crosshair";
+      this.viewport.canvas.style.cursor = l !== null || on.length ? "pointer" : "crosshair";
       let plane: ReturnType<App["cutPlane"]> | null = null;
       try {
-        plane = line !== null ? this.cutPlane(line, ids) : null;
+        plane = l !== null && on.length ? this.cutPlane(l, on) : null;
       } catch {
         plane = null;
       }
-      this.showCutPlane(plane, ids);
+      this.showCutPlane(plane, on);
+    };
+    const cut = () => {
+      if (!ids.length || line === null) return;
+      const [what, along] = [ids, line];
+      this.endTool();
+      this.opCut(what, along);
+    };
+    const setLine = (l: CutLine) => {
+      line = l;
+      hovered = "";
+      if (ids.length) return cut();
+      showPanel();
+      this.hint(`Cut along ${typeof l === "object" && "path" in l ? `"${lineName(l)}"` : `the ${lineName(l)}`}: click the solid(s) or flat face(s) to cut · Esc cancel`);
+    };
+    /** Add solids / flat faces to the pick (a click on a picked one takes it out); with a line chosen, cut unless `more`. */
+    const add = (picked: number[], more: boolean) => {
+      if (picked.length === 1 && this.straightPath(picked[0])) return setLine({ path: picked[0] }); // (a path's row in the Bodies panel)
+      const bad = picked.map((id) => this.doc.get(id)).find((b) => b && !isBrep(b));
+      if (bad?.kind === "path") return this.toast(`Cut: "${bad.name}" isn't one straight line — only a straight path can be the cut line (a path can't be cut)`, "error");
+      if (bad) return this.toast(`Cut: "${bad.name}" can't be cut — pick a solid or a flat face`, "error");
+      if (picked.length === 1 && ids.includes(picked[0])) ids = ids.filter((id) => id !== picked[0]);
+      else ids = [...new Set([...ids, ...picked])];
+      hovered = "";
+      if (line !== null && !more && ids.length) return cut();
+      showPanel();
     };
     this.startTool({
       name: "Cut",
-      move: (e) => hover(lineAt(e)),
-      down: (e) => {
-        const line = lineAt(e);
-        if (line === null) return this.hint("Cut: click a guide line (pink dashed) or an axis line (red X / green Y / blue Z)");
-        this.endTool();
-        this.opCut(ids, line);
+      move: (e) => {
+        const l = lineAt(e);
+        if (l !== null) return hover(l, ids);
+        const b = bodyAt(e);
+        hover(line, b !== null ? [...new Set([...ids, b])] : ids);
       },
-      key: () => false,
+      down: (e) => {
+        const l = lineAt(e);
+        if (l !== null) return setLine(l);
+        const b = bodyAt(e);
+        if (b !== null) return add([b], e.shiftKey);
+        this.hint(line === null ? "Cut: click a guide line (pink dashed) or an axis line (red X / green Y / blue Z)" : "Cut: click a solid or flat face to cut");
+      },
+      key: (e) => {
+        if (e.key === "Enter" && ids.length && line !== null) {
+          cut();
+          return true;
+        }
+        return false;
+      },
       dispose: () => {
-        hover(null);
+        if (this.outlinerPick === pickRows) this.outlinerPick = null;
+        hover(null, []);
         this.viewport.setOverlay([]);
         panel.remove();
       },
     });
-    this.hint("Cut: hover a guide line or an axis line to see its cut plane, click to cut — a guide's plane runs straight across the face it was drawn on (off a flat face, e.g. on a sphere: along the line as seen when it was drawn); an axis' plane is the world plane through it that faces you most · Esc cancel");
-    this.toast("Cut: click a guide line (pink dashed) or an axis line (X / Y / Z) · Esc cancel");
+    const pickRows = (rows: number[]) => add(rows, rows.length > 1);
+    this.outlinerPick = pickRows;
+    showPanel();
+    this.hint("Cut: pick what to cut (solids / flat faces) and a guide line or axis line, in either order — a guide's plane runs straight across the face it was drawn on (off a flat face, e.g. on a sphere: along the line as seen when it was drawn); an axis' plane is the world plane through it that faces you most · Esc cancel");
   }
 
-  /** Split face: with faces selected, click a guide line; each face is split where the guide's plane crosses it. */
+  /**
+   * Split face: the panel waits for the faces (selected first, or clicked: flat or curved faces of
+   * solids) and a guide line (selected, or clicked), either order; once it has both, each face is
+   * split where the guide's plane crosses it.
+   */
   private startSplitFace(): void {
-    const perBody = new Map<number, number[]>();
-    for (const s of this.selection) if (s.kind === "face" && this.doc.get(s.body)?.kind === "solid") perBody.set(s.body, [...(perBody.get(s.body) ?? []), s.id]);
-    if (!perBody.size) {
-      this.toast("Split face: select the face(s) to split first (Face mode, key 2), then press Shift+C and click a guide line", "error");
-      return;
-    }
     if (!this.doc.guides.length) {
       this.toast("Split face: draw a guide line first (Shift+G — two points or parallel to an edge)", "error");
       return;
     }
-    const ids = [...perBody.keys()];
-    const hover = (g: number) => {
-      if (g === this.hoverGuide) return;
+    let faces: SelItem[] = this.selection.filter((s) => s.kind === "face" && this.doc.get(s.body)?.kind === "solid");
+    let guide = this.selGuide;
+    const faceAt = (e: PointerEvent): SelItem | null => {
+      const p = this.viewport.pick(e.clientX, e.clientY, "face");
+      return p && p.kind === "face" && this.doc.get(p.body)?.kind === "solid" ? { kind: "face", body: p.body, id: p.id } : null;
+    };
+    const bodiesOf = (items: SelItem[]) => [...new Set(items.map((s) => s.body))];
+    const panel = this.toolPanel("Split face", { label: "Cancel" }, () => this.endTool());
+    let hoverFace: SelItem | null = null;
+    const showPanel = () => {
+      // (Pro layout: just what's picked so far — a dash for what's still to click)
+      const pro = isPro();
+      const names = bodiesOf(faces).map((id) => this.doc.get(id)?.name ?? "").join(", ");
+      const n = faces.length;
+      panel.set(
+        `<div>Faces: ${n ? `<b>${n} on ${escapeHtml(names)}</b>` : pro ? "—" : "<i>click a face of a solid</i>"}</div>` +
+          `<div>Along: ${guide >= 0 ? `<b>guide line ${guide + 1}</b>` : pro ? "—" : "<i>click a guide line (pink dashed)</i>"}</div>` +
+          (pro ? "" : `<div class="tp-tip">${guide >= 0 ? "Click a face to split it — Shift+click picks more first, Enter splits." : "Hover a guide line to see its plane, click it to split."} The solid stays one piece.</div>` +
+            `<div class="tp-tip">Cancel or Esc exits.</div>`),
+      );
+      this.viewport.setHighlight(faces, hoverFace);
+    };
+    let hovered = "";
+    /** Show the plane of guide `g` across the solids `on`. */
+    const hover = (g: number, on: number[]) => {
+      const key = JSON.stringify([g, on]);
+      if (key === hovered) return;
+      hovered = key;
       this.hoverGuide = g;
       this.showGuides();
-      this.viewport.canvas.style.cursor = g >= 0 ? "pointer" : "crosshair";
-      this.showCutPlane(g >= 0 ? this.cutPlane(g, ids) : null, ids);
+      let plane: ReturnType<App["cutPlane"]> | null = null;
+      try {
+        plane = g >= 0 && on.length ? this.cutPlane(g, on) : null;
+      } catch {
+        plane = null;
+      }
+      this.showCutPlane(plane, on);
+    };
+    const split = () => {
+      if (!faces.length || guide < 0) return;
+      const perBody = new Map<number, number[]>();
+      for (const s of faces) perBody.set(s.body, [...(perBody.get(s.body) ?? []), s.id]);
+      const g = guide;
+      this.endTool();
+      this.opSplitFace(perBody, g);
     };
     this.startTool({
       name: "Split face",
-      move: (e) => hover(this.viewport.guideAt(e.clientX, e.clientY)),
+      move: (e) => {
+        const g = this.viewport.guideAt(e.clientX, e.clientY);
+        const f = g >= 0 ? null : faceAt(e);
+        if (!sameItem(f, hoverFace) && (f || hoverFace)) {
+          hoverFace = f;
+          this.viewport.setHighlight(faces, hoverFace);
+        }
+        this.viewport.canvas.style.cursor = g >= 0 || f ? "pointer" : "crosshair";
+        hover(g >= 0 ? g : guide, bodiesOf(f ? [...faces, f] : faces));
+      },
       down: (e) => {
         const g = this.viewport.guideAt(e.clientX, e.clientY);
-        if (g < 0) return this.hint("Split face: click a guide line (pink dashed)");
-        this.endTool();
-        this.opSplitFace(perBody, g);
+        if (g >= 0) {
+          guide = g;
+          hovered = "";
+          if (faces.length) return split();
+          showPanel();
+          return this.hint(`Split face along guide line ${g + 1}: click the face(s) to split · Esc cancel`);
+        }
+        const f = faceAt(e);
+        if (!f) return this.hint(guide < 0 ? "Split face: click a guide line (pink dashed) or a face of a solid" : "Split face: click a face of a solid to split");
+        // (a click on a picked face takes it out)
+        faces = faces.some((s) => sameItem(s, f)) ? faces.filter((s) => !sameItem(s, f)) : [...faces, f];
+        hovered = "";
+        if (guide >= 0 && !e.shiftKey && faces.length) return split();
+        showPanel();
       },
-      key: () => false,
+      key: (e) => {
+        if (e.key === "Enter" && faces.length && guide >= 0) {
+          split();
+          return true;
+        }
+        return false;
+      },
       dispose: () => {
-        hover(-1);
+        hover(-1, []);
         this.viewport.setOverlay([]);
+        panel.remove();
       },
     });
-    this.hint("Split face: hover a guide line to see its plane, click to split the selected face(s) along it — the solid stays one piece · Esc cancel");
-    this.toast("Split face: select a guide line (click the pink dashed line) · Esc cancel");
+    showPanel();
+    this.hint("Split face: pick the face(s) and a guide line, in either order — each face is split where the guide's plane crosses it, the solid stays one piece · Esc cancel");
   }
 
   /** Split the faces where the guide's plane crosses them (one undo step); the pieces are selected. */
@@ -2803,12 +2956,28 @@ class App implements ToolHost {
     return this.viewport.camera.getWorldDirection(new THREE.Vector3()).toArray() as V3;
   }
 
+  /** A path that is one straight line: its ends (Cut can cut along it), else null. */
+  private straightPath(id: number): { a: V3; b: V3 } | null {
+    const b = this.doc.get(id);
+    if (b?.kind !== "path") return null;
+    const es = b.shape.edges;
+    if (es.length !== 1 || es[0].geomType !== "LINE") return null;
+    return { a: es[0].startPoint.toTuple() as V3, b: es[0].endPoint.toTuple() as V3 };
+  }
+
   /**
    * The cut plane of a guide: straight across the face of the solids being cut that it lies on
    * (unless its stored direction already is), else its stored direction, else (older files) the view;
    * off a face, guides along X / Y / Z snap to the nearest world plane.
    */
   private cutPlane(line: CutLine, ids: number[]): { point: V3; normal: V3; along: V3 } {
+    if (typeof line === "object" && "path" in line) {
+      // A straight path (e.g. a sketch line): the upright plane through it; standing upright itself, the one facing you.
+      const { a, b } = this.straightPath(line.path) ?? (() => { throw new Error("Cut: the path is gone"); })();
+      const u: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const up = Math.abs(u[2]) < 0.999 * Math.hypot(...u) ? ([u[1], -u[0], 0] as V3) : undefined;
+      return { point: a, normal: guidePlaneNormal([], a, b, this.viewDir(), up), along: u };
+    }
     if (typeof line !== "number") {
       // A world axis: not drawn on a face, so the world plane through it seen most square-on.
       const u: V3 = [0, 0, 0];
@@ -2940,7 +3109,7 @@ class App implements ToolHost {
           continue;
         }
         const { above, below } = halves.get(id)!;
-        if (!above || !below) throw new Error(`Cut: the ${typeof line === "number" ? "guide's" : "axis'"} cut plane does not pass through "${body.name}"`);
+        if (!above || !below) throw new Error(`Cut: the ${typeof line === "number" ? "guide's" : "axis" in line ? "axis'" : "path's"} cut plane does not pass through "${body.name}"`);
         kept.set(id, below);
         uppers.set(id, inGroupOf(this.doc.makeBody(above, "Solid"), body));
       }
@@ -3374,16 +3543,16 @@ class App implements ToolHost {
     if (!next.length) this.toast("Edge moved (it merged into a neighbouring face)");
   }
 
-  /** Why Divide face can't work on this body (shown to the user), or null if it can. */
+  /** Why Draw line on face can't work on this body (shown to the user), or null if it can. */
   private divideRefusal(bodyId: number): string | null {
     const body = this.doc.get(bodyId);
-    if (!body) return "Divide face: click an edge of a solid";
-    if (body.kind === "face") return `Divide face works on solids only — "${body.name}" is a flat face. Push/Pull it (P) into a solid first.`;
-    if (body.kind === "mesh") return `Divide face can't edit "${body.name}" — it's an imported STL mesh`;
+    if (!body) return "Draw line on face: click an edge of a solid";
+    if (body.kind === "face") return `Draw line on face works on solids only — "${body.name}" is a flat face. Push/Pull it (P) into a solid first.`;
+    if (body.kind === "mesh") return `Draw line on face can't edit "${body.name}" — it's an imported STL mesh`;
     return null;
   }
 
-  /** Divide face (D): split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
+  /** Draw line on face (D): split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
   private divideFace(bodyId: number, a: V3, b: V3): void {
     const why = this.divideRefusal(bodyId);
     if (why) return this.toast(why, "error");
@@ -3395,7 +3564,7 @@ class App implements ToolHost {
       return this.toast(errorMessage(e), "error"); // keep the tool so the user can retry
     }
     this.endTool();
-    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Divide face");
+    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Draw line on face");
     const id = edgeBetween(shape, a, b, 1e-3);
     this.setMode("edge");
     this.setSelection(id === null ? [] : [{ kind: "edge", body: bodyId, id }]);
@@ -3491,28 +3660,39 @@ class App implements ToolHost {
       return this.toast("Guide line: the edge must be straight and next to a flat face", "error");
     }
     this.endInteractions();
-    this.startTool(
-      new GuideTool(this, (bid, eid) => this.edgeSides(bid, eid), (lines) => {
-        this.endTool();
-        // Fix each guide's cut direction now: the face it lies on, or the view it was drawn in.
-        const view = this.viewDir();
-        const shapes = this.doc.bodies.map((b) => b.shape).filter(notMesh);
-        // More than 4 at once: one group, listed in the Bodies panel (select / hide / delete them together).
-        let group: string | undefined;
-        if (lines.length > GUIDE_GROUP_MIN) {
-          const taken = new Set(this.doc.guides.map((g) => g.group));
-          for (let k = 1; !group; k++) if (!taken.has(`Guides ${k}`)) group = `Guides ${k}`;
-        }
-        const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(shapes, l.a, l.b, view), ...(group ? { group } : {}) }));
-        this.doc.setGuides([...this.doc.guides, ...made], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
-        this.toast(`Added ${lines.length} guide line(s)${group ? ` as "${group}" in the Bodies panel` : ""} — ${this.viewport.autoSnap ? "tools snap to them" : "hold Ctrl to snap to them"}`);
-      }).start(bodyId, edgeId),
-    );
-    this.toast(
-      bodyId !== undefined && edgeId !== undefined
-        ? "Guide line: move across the face, click (or type a distance) to add · Esc cancel"
-        : "Guide line: click an edge for a parallel guide, or click two points (locks to X / Y / Z when close) · Esc cancel",
-    );
+    const tool = new GuideTool(this, (bid, eid) => this.edgeSides(bid, eid), (lines) => {
+      this.endTool();
+      // Fix each guide's cut direction now: the face it lies on, or the view it was drawn in.
+      const view = this.viewDir();
+      const shapes = this.doc.bodies.map((b) => b.shape).filter(notMesh);
+      // More than 4 at once: one group, listed in the Bodies panel (select / hide / delete them together).
+      let group: string | undefined;
+      if (lines.length > GUIDE_GROUP_MIN) {
+        const taken = new Set(this.doc.guides.map((g) => g.group));
+        for (let k = 1; !group; k++) if (!taken.has(`Guides ${k}`)) group = `Guides ${k}`;
+      }
+      const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(shapes, l.a, l.b, view), ...(group ? { group } : {}) }));
+      this.doc.setGuides([...this.doc.guides, ...made], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
+      this.toast(`Added ${lines.length} guide line(s)${group ? ` as "${group}" in the Bodies panel` : ""} — ${this.viewport.autoSnap ? "tools snap to them" : "hold Ctrl to snap to them"}`);
+    }, (st) => (st ? showPanel(st) : panel.remove()));
+    this.startTool(tool);
+    const panel = this.toolPanel("Guide line", { label: "Cancel" }, () => this.endTool());
+    let shown = "";
+    const showPanel = (st: GuideState) => {
+      // (Pro layout: just what it starts from and the distance — no instructions)
+      const pro = isPro();
+      const tip = {
+        start: "Click an edge or an X / Y / Z axis for a parallel guide — or a point (corner / midpoint / centre; in Top / Front / Right view anywhere) to draw a guide through two points.",
+        second: "Click the second point — near an X / Y / Z direction it locks on.",
+        offset: "Move across, type a distance or Tab for distance / % / count — Enter or a click adds.",
+      }[st.step];
+      const html =
+        `<div>From: ${st.from ? `<b>${escapeHtml(st.from)}</b>` : pro ? "—" : "<i>click an edge, axis or point</i>"}</div>` +
+        (st.step === "offset" ? `<div>Distance: <b>${fmt(st.dist)} mm${st.count > 1 ? ` ×${st.count}` : ""}</b></div>` : "") +
+        (pro ? "" : `<div class="tp-tip">${tip}</div><div class="tp-tip">Cancel or Esc exits.</div>`);
+      if (html !== shown) panel.set((shown = html));
+    };
+    tool.start(bodyId, edgeId);
   }
 
   private selGuide = -1;
@@ -4813,6 +4993,7 @@ class App implements ToolHost {
         const b = bodyOf(e);
         if (!b) return;
         if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick([b.id]);
+        if (this.op?.spec.pickBody && !this.tool && !t.closest(".ol-eye")) return this.op.spec.pickBody(b.id);
         if (t.closest(".ol-eye")) {
           if (this.hidden.has(b.id)) this.hidden.delete(b.id);
           else this.hidden.add(b.id);
@@ -5196,7 +5377,7 @@ class App implements ToolHost {
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
-      ["D", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap); the new edge is selected"],
+      ["D", "Draw line on face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap; move the end along X / Y / Z and it locks parallel to that axis, the line in the axis colour); the new edge is selected"],
       ["G with a guide line selected", `Move the guide with the gizmo (${this.viewport.snapTip("points / other guides")}) · Tab: exact ΔX,ΔY,ΔZ · Enter done`],
       ["G with edges selected", "Move edge: drag the edge, reshaping its flat-faced solid (bent faces split into triangles)"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
@@ -5206,12 +5387,12 @@ class App implements ToolHost {
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list)"],
       ["H", "Shell / hollow (opens the selected faces)"],
-      ["C", "Cut by guide or axis: select solid(s), press C, click a guide line or a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
+      ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
       ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns"],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
-      ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
+      ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line), the blue arrow in mm steps, Tab: the distance along it"],

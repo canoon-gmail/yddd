@@ -112,6 +112,9 @@ function thumbOf(tex: THREE.Texture): HTMLCanvasElement {
   return cv;
 }
 
+/** Width of a sketch's open paths on screen, px (outlines are 1 px). */
+const PATH_WIDTH = 2.5;
+
 export interface SketchFrame {
   origin: THREE.Vector3;
   x: THREE.Vector3;
@@ -1907,6 +1910,8 @@ export class SketchTool implements Tool {
       const g = new THREE.BufferGeometry().setFromPoints(pts.map((p) => this.world(p)));
       objs.push(closed ? new THREE.LineLoop(g, mat) : new THREE.Line(g, mat));
     };
+    /** Open paths: thicker than outlines (2.5 px), in the line material's colour. */
+    const pathLine = (pts: P[], mat: THREE.LineBasicMaterial) => objs.push(vp.thickLine(pts.map((p) => this.world(p)), mat.color.getHex(), PATH_WIDTH, mat.opacity));
     const dot = (p: P) => {
       const w = this.world(p), m = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), vp.mats.cursor);
       m.position.copy(w);
@@ -1953,7 +1958,7 @@ export class SketchTool implements Tool {
     for (const l of this.loops) if (shown(l)) lines(loopPolygon(l), this.mats.line, true);
     // Open paths, and the lines being drawn.
     // (open lines in pink — the colour of the paths they become: not a closed outline)
-    for (const o of this.opens) lines([...o.flatMap(segPoints), o[o.length - 1].b], this.mats.open);
+    for (const o of this.opens) pathLine([...o.flatMap(segPoints), o[o.length - 1].b], this.mats.open);
     if (this.path.length) lines([...this.path.flatMap(segPoints), this.cur!], this.mats.line);
     for (const p of [this.first, this.arcEnd, this.anchor]) if (p) dot(p);
     // Select: the selected outlines / paths in blue (outlines also filled), the one under the cursor in white.
@@ -1974,7 +1979,7 @@ export class SketchTool implements Tool {
       if (it.kind === "loop") lines(loopPolygon(this.loops[it.i]), mat, true);
       else {
         const o = this.opens[it.i];
-        lines([...o.flatMap(segPoints), o[o.length - 1].b], mat);
+        pathLine([...o.flatMap(segPoints), o[o.length - 1].b], mat);
       }
     };
     const itemFill = (it: Item, mat: THREE.Material) => {
