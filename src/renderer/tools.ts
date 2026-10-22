@@ -880,7 +880,8 @@ export class PolygonTool extends DrawTool {
 /**
  * Base-point move: the selection's pivot candidates (corners, edge midpoints, centres)
  * are shown as dots. Press on one and drag to the target (or click it, then click the
- * target). A base can also be clicked anywhere else (Ctrl snaps to any solid). The selection moves by target − base.
+ * target): while dragging, the centres of the other solids' circles and flat faces show as dots
+ * to drop it on (centre to centre, e.g. a rod onto the middle of a round face at any slant). A base can also be clicked anywhere else (Ctrl snaps to any solid). The selection moves by target − base.
  * Off-snap points use a horizontal plane through the base (grid-snapped). Shift locks
  * to the dominant axis; typing "dx,dy,dz" + Enter moves by an exact offset.
  */
@@ -893,6 +894,8 @@ export class PointMoveTool implements Tool {
   private pivots: { point: THREE.Vector3; kind: SnapKind }[] = [];
   private press: { x: number; y: number } | null = null;
   private all: { point: THREE.Vector3; kind: SnapKind }[] = [];
+  /** Once a base is picked: the other solids' centre marks to drop it on. */
+  private targets: { point: THREE.Vector3; kind: SnapKind }[] = [];
   private camKey = "";
 
   constructor(
@@ -912,19 +915,26 @@ export class PointMoveTool implements Tool {
     return this;
   }
 
-  /** Recompute which marks are visible (not behind a body) when the camera moves. */
+  /** Recompute which marks are visible (not behind a body) when the camera moves: the base marks, or once a base is picked, the target centres. */
   private refreshPivots(): void {
-    const c = this.host.viewport.camera;
+    const vp = this.host.viewport, c = vp.camera;
     const key = c.position.toArray().concat(c.quaternion.toArray() as number[]).map((n) => n.toFixed(4)).join();
     if (key === this.camKey) return;
     this.camKey = key;
-    this.pivots = this.host.viewport.visiblePoints(this.all);
-    this.host.viewport.showPivotDots(this.pivots.map((p) => p.point));
+    if (this.base) {
+      this.targets = vp.centerTargets(this.exclude);
+      vp.showPivotDots(this.targets.map((p) => p.point));
+    } else {
+      // (centres: unless another solid hides them — e.g. a rod's end in a hole, behind the rod itself)
+      const centres = new Set(vp.visiblePoints(this.all.filter((p) => p.kind === "center"), this.exclude));
+      this.pivots = [...centres, ...vp.visiblePoints(this.all.filter((p) => p.kind !== "center"))];
+      vp.showPivotDots(this.pivots.map((p) => p.point));
+    }
   }
 
   private updateHint(): void {
     const base = this.base
-      ? `Move: drag/click to the target point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
+      ? `Move: drop on a blue centre mark (centre to centre) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
       : "Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target";
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
@@ -953,7 +963,11 @@ export class PointMoveTool implements Tool {
       vp.showSnapMarker(pv ?? null);
       return;
     }
-    const t = this.pointAt(e, this.base.z, this.exclude);
+    this.refreshPivots();
+    // A centre mark of another solid near the cursor wins (exactly centre to centre).
+    const mark = vp.snapping(e) ? vp.nearestOnScreen(e.clientX, e.clientY, this.targets) : null;
+    if (mark) vp.showSnapMarker(mark);
+    const t = mark ? mark.point.clone() : this.pointAt(e, this.base.z, this.exclude);
     if (!t) return;
     const d = t.sub(this.base);
     if (e.shiftKey) {
@@ -975,7 +989,8 @@ export class PointMoveTool implements Tool {
       const p = pv.point;
       this.base = p.clone();
       this.press = { x: e.clientX, y: e.clientY };
-      this.host.viewport.showPivotDots(null);
+      this.camKey = ""; // (shows the target centres now)
+      this.refreshPivots();
       this.updateHint();
       return;
     }
@@ -1152,7 +1167,7 @@ export class GuideTool implements Tool {
       if (r) objs.push(this.host.viewport.glowLine(this.v(r.a), this.v(r.b), 0xffd166));
       else if (this.hoverAxis >= 0) {
         const r2 = this.axisRef(this.hoverAxis);
-        objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), AXIS_COLORS[this.hoverAxis]));
+        objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), AXIS_COLORS[this.hoverAxis], 3, 0.5));
       }
     } else {
       const r = this.ref;

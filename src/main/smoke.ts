@@ -3758,11 +3758,76 @@ const SCENARIO_CUTAXIS = String.raw`
     vp.setGuides(app.doc.guides, g0, g0 + 1);
     const kids = vp.guideRoot.children, glows = kids.filter((c) => c.type === "Group");
     expect("selected guide glows, hovered / others don't", glows.length === 1 && kids.length === app.doc.guides.length + 1, { kids: kids.length, glows: glows.length });
+    const haloW = glows.length ? Math.max(...glows[0].children.map((l) => l.material.linewidth)) : 0;
+    expect("selected guide's glow is thin (halos at most 7 px)", haloW > 0 && haloW <= 7, haloW);
     vp.setGuides(app.doc.guides, -1, -1);
     expect("no glow with nothing selected", !vp.guideRoot.children.some((c) => c.type === "Group"), vp.guideRoot.children.length);
     app.doc.setGuides(app.doc.guides.slice(0, g0), "remove guides");
   } catch (e) {
     expect("guide glow threw", false, String(e && e.stack || e));
+  }
+  // Selecting a solid: the panel's Size comes from its drawn box (the exact box is slow on some spline
+  // faces) — still the exact size to the 0.01 shown, on round solids too.
+  try {
+    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const sph = app.doc.makeBody(K.makeSphereAt([0, 6000, 0], 10.37), "Sphere"), cyl = app.doc.makeBody(K.makeCylinder(G, [50, 6000, 0], 7.3, 12.5), "Cylinder");
+    app.doc.commit([...app.doc.bodies, sph, cyl], "round solids");
+    vp.render();
+    const sizeOf = (b) => {
+      app.setSelection([{ kind: "body", body: b.id, id: 0 }]);
+      const row = [...document.querySelectorAll("#props tr")].find((r) => r.cells[0].textContent === "Size");
+      const [lo, hi] = b.shape.boundingBox.bounds, f = (n) => String(Math.round(n * 100) / 100);
+      return { shown: row?.cells[1].textContent, exact: [0, 1, 2].map((i) => f(hi[i] - lo[i])).join(" × "), drawn: !!vp.drawnBox(b.id) };
+    };
+    const s = sizeOf(sph), c = sizeOf(cyl);
+    expect("Size in the panel: from the drawn box, the exact size to 0.01 (sphere, cylinder)", s.drawn && c.drawn && s.shown === s.exact && c.shown === c.exact, { s, c });
+    // An edge selected, then the solid: an op's preview ending (e.g. a failed fillet cancelled, then
+    // Scale after a move) doesn't bring the old edge's yellow lines back where it was
+    app.setSelection([{ kind: "edge", body: cyl.id, id: app.doc.get(cyl.id).shape.edges[0].hashCode }]);
+    const had = vp.selEdges.geometry.attributes.instanceStart?.count ?? 0;
+    app.setSelection([{ kind: "body", body: cyl.id, id: 0 }]);
+    vp.showGhost(new Map(), []); vp.clearGhost();
+    const left = vp.selEdges.visible ? vp.selEdges.geometry.attributes.instanceStart?.count ?? 0 : 0;
+    expect("edge, then solid selected: no old edge lines come back after a preview", had > 0 && left === 0, { had, left });
+    // A fillet OpenCascade can't make (radius far too big): the panel says so in words, not "[object WebAssembly.Exception]"
+    const bx = app.doc.makeBody(K.makeBox(G, [100, 6000, 0], 10, 10, 10), "Box");
+    app.doc.commit([...app.doc.bodies, bx], "box");
+    app.run("mode.edge");
+    app.setSelection([{ kind: "edge", body: bx.id, id: app.doc.get(bx.id).shape.edges[0].hashCode }]);
+    app.run("op.fillet");
+    const rIn = document.querySelector("#op-panel input");
+    rIn.value = "50"; rIn.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(400);
+    const filletErr = document.querySelector("#op-panel .op-error")?.textContent ?? "";
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    app.run("mode.body");
+    expect("a fillet the kernel can't make: a readable error, with OpenCascade's reason", /could not compute this \(OpenCascade/.test(filletErr) && !/object/.test(filletErr), filletErr);
+    app.doc.undo();
+    // G G centre to centre: pressing a rod's end centre shows the other solids' centres as marks; dropping
+    // on the cup's top centre puts the rod's end exactly there
+    const cup = app.doc.makeBody(K.makeCylinder(G, [0, 7000, 0], 10, 5), "Cup"), rod = app.doc.makeBody(K.makeCylinder(G, [40, 7000, 0], 2, 20), "Rod");
+    app.doc.commit([...app.doc.bodies, cup, rod], "cup and rod");
+    app.setSelection([{ kind: "body", body: cup.id, id: 0 }, { kind: "body", body: rod.id, id: 0 }]);
+    app.run("view.fitSelection"); await sleep(700); // (the view glides there)
+    app.setSelection([{ kind: "body", body: rod.id, id: 0 }]);
+    app.setAutoSnap(true, false); // (as by default: these scenarios run with it off)
+    app.run("xf.moveFrom"); await sleep(30);
+    const pe = (type, p, buttons) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, buttons, pointerId: 1, isPrimary: true, pointerType: "mouse", bubbles: true })); };
+    const at = (q, p) => Math.hypot(q.x - p[0], q.y - p[1], q.z - p[2]) < 1e-6;
+    const tool = app.tool, baseShown = !!tool?.pivots.some((p) => at(p.point, [40, 7000, 0]));
+    pe("pointermove", [40, 7000, 0], 0); pe("pointerdown", [40, 7000, 0], 1); await sleep(20);
+    const targetShown = !!tool?.targets.some((p) => at(p.point, [0, 7000, 5]));
+    pe("pointermove", [0, 7000, 5], 1); await sleep(20); pe("pointerup", [0, 7000, 5], 0); await sleep(30);
+    const [lo, hi] = app.doc.get(rod.id).shape.boundingBox.bounds, bottom = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]].map(r);
+    expect("G G: the rod's end centre is a start mark, the cup's top centre a target; dropped there exactly", baseShown && targetShown && bottom.join() === "0,7000,5", { baseShown, targetShown, bottom });
+    app.setAutoSnap(false, false);
+    if (app.tool) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    app.setSelection([]);
+    app.doc.undo(); app.doc.undo();
+    app.setSelection([]);
+    app.doc.undo();
+  } catch (e) {
+    expect("panel size threw", false, String(e && e.stack || e));
   }
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("cut by axis scenario failed: " + JSON.stringify(failed));
@@ -3889,18 +3954,20 @@ const SCENARIO_AUTOSNAP = String.raw`
     canvas.dispatchEvent(new PointerEvent("pointermove", { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
     await sleep(20);
     // Hovered: it glows (a group of thick lines over everything) — a picture of it for a look
-    const glow = vp.overlayRoot.children.some((o) => o.isGroup && o.children.length === 3 && o.children.every((l) => l.isLineSegments2));
+    const glowG = vp.overlayRoot.children.find((o) => o.isGroup && o.children.length === 3 && o.children.every((l) => l.isLineSegments2));
+    const glow = !!glowG, width = glowG ? Math.max(...glowG.children.map((l) => l.material.linewidth)) : 0;
     vp.render(); // (now, so the canvas holds this frame)
     const png = vp.canvas.toDataURL("image/png");
     await window.y3d.writeFile((window.__smokeDir || "/tmp/y3d-smoke") + "/guide-glow-" + (p[2] === 0 ? "axis" : "edge") + ".png", Uint8Array.from(atob(png.split(",")[1]), (c) => c.charCodeAt(0)));
     canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
     await sleep(20);
-    const t = app.tool, got = { glow, ref: !!t?.ref, onAxis: !!t?.onAxis, p1: !!t?.p1 };
+    const t = app.tool, got = { glow, width, ref: !!t?.ref, onAxis: !!t?.onAxis, p1: !!t?.p1 };
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
     return got;
   };
   const onEdge = await guideRef([5, -10, 20]), onAxis = await guideRef([40, 0, 0]);
   expect("auto snap: on — Guide line: an edge or the X axis glows under the cursor, a click picks it as the reference", onEdge.glow && onEdge.ref && !onEdge.p1 && onAxis.glow && onAxis.ref && onAxis.onAxis && !onAxis.p1, { onEdge, onAxis });
+  expect("Guide line: a hovered axis glows in thinner lines than an edge", onAxis.width > 0 && onAxis.width < onEdge.width, { onEdge, onAxis });
   // Snapping leaves out what the eye can't see: a corner of a small box behind the cube, with the cursor just
   // off the cube's outline (nothing under the cursor) — and push/pull drags leave out the world X / Y / Z lines.
   vp.setView("iso"); vp.fit(); await sleep(30); vp.camera.updateMatrixWorld(); vp.stamp++;

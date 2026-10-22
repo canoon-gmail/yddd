@@ -4879,7 +4879,9 @@ class App implements ToolHost {
       if (sel.length === 1) {
         const b = this.doc.get(sel[0].body);
         if (b) {
-          const [w, d, h] = boundingSize(b.shape);
+          // (its drawn box: the exact one can take ~0.7 s on a solid with a complex spline face, on every click)
+          const drawn = this.viewport.drawnBox(b.id)?.getSize(new THREE.Vector3());
+          const [w, d, h] = drawn ? drawn.toArray() : boundingSize(b.shape);
           rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : b.kind === "mesh" ? "Mesh (STL)" : "Solid"]);
           rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`]);
           if (b.kind === "mesh") rows.push(["Triangles", b.shape.triangleCount.toLocaleString()]);
@@ -5074,7 +5076,7 @@ class App implements ToolHost {
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
-      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target"],
+      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre)"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],

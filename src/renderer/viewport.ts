@@ -1330,7 +1330,7 @@ export class Viewport {
       l.renderOrder = 15;
       if (i === selected) {
         // Soft halos under the dashed line (no solid core, so it still reads as a guide).
-        const glow = this.glowLine(g.a, g.b, 0xffd166, 2);
+        const glow = this.glowLine(g.a, g.b, 0xffd166, 2, 0.5);
         glow.renderOrder = 14;
         this.guideRoot.add(glow);
       }
@@ -1441,9 +1441,27 @@ export class Viewport {
     return out;
   }
 
-  /** Keep only points not hidden behind any body (as seen from the camera). */
-  visiblePoints<T extends { point: THREE.Vector3 }>(pts: T[]): T[] {
-    const meshes = [...this.views.values()].map((v) => v.mesh);
+  /**
+   * Centre marks of the shown bodies other than `exclude`: centres of their circles and flat faces,
+   * not hidden behind a solid (the excluded ones don't hide them: they are the ones being moved).
+   */
+  centerTargets(exclude: Set<number>): { point: THREE.Vector3; kind: SnapKind }[] {
+    const out: { point: THREE.Vector3; kind: SnapKind }[] = [];
+    for (const v of this.views.values()) {
+      if (exclude.has(v.body.id) || !v.group.visible) continue;
+      const s = this.snapsOf(v);
+      for (let i = 0; i < s.kinds.length; i++) {
+        if (SNAP_KINDS[s.kinds[i]] !== "center") continue;
+        const p = new THREE.Vector3().fromArray(s.pts, i * 3);
+        if (!this.hiddenFrom(p, exclude)) out.push({ point: p, kind: "center" });
+      }
+    }
+    return out;
+  }
+
+  /** Keep only points not hidden behind any body (as seen from the camera), not counting the bodies in `skip`. */
+  visiblePoints<T extends { point: THREE.Vector3 }>(pts: T[], skip?: Set<number>): T[] {
+    const meshes = [...this.views.values()].filter((v) => !skip?.has(v.body.id)).map((v) => v.mesh);
     const eye = this.camera.position;
     const tol = Math.max(0.05, eye.distanceTo(this.controls.target) * 2e-3);
     return pts.filter((p) => {
@@ -1614,15 +1632,13 @@ export class Viewport {
   }
 
   private setOverlayLines(lines: LineSegments2, pts: number[]): void {
-    if (pts.length < 6) {
-      lines.visible = false;
-      return;
-    }
+    // (nothing: emptied, not just hidden — a ghost preview ending shows the selection lines again,
+    // which would bring back old ones, e.g. an edge selected before the solid was moved)
     lines.geometry.dispose();
     const g = new LineSegmentsGeometry();
-    g.setPositions(pts);
+    if (pts.length >= 6) g.setPositions(pts);
     lines.geometry = g;
-    lines.visible = true;
+    lines.visible = pts.length >= 6;
   }
 
   // ------------------------------------------------------------ tool overlays & ghosts
@@ -1632,11 +1648,12 @@ export class Viewport {
 
   /**
    * A glowing line a–b (for setOverlay), e.g. the edge / axis under the cursor: wide faint halos under a thick core, on top of everything.
-   * `layers` = 2 gives just the halos (e.g. round a dashed guide line).
+   * `layers` = 2 gives just the halos (e.g. round a dashed guide line); `scale` scales the line widths.
    */
-  glowLine(a: THREE.Vector3, b: THREE.Vector3, color: number, layers = 3): THREE.Object3D {
+  glowLine(a: THREE.Vector3, b: THREE.Vector3, color: number, layers = 3, scale = 1): THREE.Object3D {
     const group = new THREE.Group();
-    ([[14, 0.18], [8, 0.35], [3.5, 1]] as const).slice(0, layers).forEach(([width, opacity], i) => {
+    ([[14, 0.18], [8, 0.35], [3.5, 1]] as const).slice(0, layers).forEach(([w, opacity], i) => {
+      const width = w * scale;
       const key = `${color}:${width}`;
       let m = this.glowMats.get(key);
       if (!m) {

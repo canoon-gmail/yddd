@@ -289,7 +289,19 @@ export function isValidShape(shape: Shape): boolean {
 /** Human-readable message for errors thrown by JS or by the wasm kernel. */
 export function errorMessage(e: unknown): string {
   if (e instanceof Error) return e.message;
-  if (typeof e === "number") return "geometry kernel could not compute this (OpenCascade exception)";
+  const kernel = "geometry kernel could not compute this";
+  if (typeof e === "number") return `${kernel} (OpenCascade exception)`;
+  if (typeof WebAssembly !== "undefined" && e instanceof WebAssembly.Exception) {
+    // (OpenCascade's C++ exception: its type and message, e.g. "StdFail_NotDone: BRep_API: command not done")
+    let what = "";
+    try {
+      const [type, msg] = oc.getExceptionMessage(e) as [string, string | undefined];
+      what = [type, msg].filter(Boolean).join(": ");
+    } catch {
+      // (no details available)
+    }
+    return `${kernel} (OpenCascade${what ? ": " + what : " exception"})`;
+  }
   return String(e);
 }
 
