@@ -2109,6 +2109,20 @@ export function edgeEnds(shape: Shape, edgeId: number): [V3, V3] | null {
   return e ? [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] : null;
 }
 
+/** Centre, axis (unit, either way round) and radius of a circle / arc edge; null for any other edge. */
+export function circleOfEdge(shape: Shape, edgeId: number): { center: V3; normal: V3; r: number } | null {
+  const e = shape.edges.find((x) => x.hashCode === edgeId);
+  if (!e || e.geomType !== "CIRCLE") return null;
+  // (three points on it: the centre of the circle through them, exact for a circle)
+  const [p, q, s] = [0, 1 / 3, 2 / 3].map((t) => e.pointAt(t).toTuple() as V3);
+  const a = sub3(q, p), b = sub3(s, p), n = cross3(a, b), nn = dot3(n, n);
+  if (nn < 1e-18) return null;
+  const k1 = cross3(n, a), k2 = cross3(b, n), aa = dot3(a, a), bb = dot3(b, b);
+  const center: V3 = [0, 1, 2].map((i) => p[i] + (bb * k1[i] + aa * k2[i]) / (2 * nn)) as V3;
+  const len = Math.sqrt(nn);
+  return { center, normal: n.map((x) => x / len) as V3, r: Math.hypot(...sub3(p, center)) };
+}
+
 /** Id of the edge running between `a` and `b` (either direction), if any. */
 export function edgeBetween(shape: Shape, a: V3, b: V3, tol = 1e-5): number | null {
   const near = (p: V3, q: V3) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < tol;

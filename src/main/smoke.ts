@@ -3234,6 +3234,44 @@ const SCENARIO_GROUPS = String.raw`
       { down, shrink, up, ctrlAdd, ctrlOff, added });
     app.setSelection(ps.map((p) => ({ kind: "body", body: p.id, id: 0 }))); app.run("edit.delete"); await sleep(20);
   }
+  // Guide lines: more than 4 from one Guide tool run → one group in the Bodies panel (select, hide, Del, undo); 3 → none
+  {
+    const plate = app.doc.makeBody(K.makeBox(G, [0, 100, 0], 40, 40, 10), "Plate");
+    app.doc.commit([...app.doc.bodies, plate], "plate"); app.setSelection([]);
+    const near = (p, y, z) => Math.abs(p.y - y) < 1e-6 && Math.abs(p.z - z) < 1e-6;
+    const edge = app.doc.get(plate.id).shape.edges.find((e) => e.geomType === "LINE" && near(e.pointAt(0), 80, 10) && near(e.pointAt(1), 80, 10));
+    const g0 = app.doc.guides.length;
+    const addGuides = async (count) => {
+      app.startGuide(plate.id, edge.hashCode); await sleep(20);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true })); await sleep(20);
+      const dlg = document.getElementById("props-dlg"), ins = dlg ? [...dlg.querySelectorAll("input")] : [];
+      [3, 0, count].forEach((v, k) => { if (ins[k]) ins[k].value = String(v); });
+      dlg?.requestSubmit(); await sleep(30);
+    };
+    await addGuides(3);
+    const few = app.doc.guides.length - g0, fewGrouped = app.doc.guides.some((g) => g.group), fewRows = ol.querySelectorAll(".ol-guides").length;
+    await addGuides(6);
+    const gh = () => ol.querySelector(".ol-guides");
+    const inGroup = app.doc.guides.filter((g) => g.group === "Guides 1").length;
+    expect("guides: 3 at once — no group; 6 at once — group \"Guides 1\" in the Bodies panel (name, count 6)",
+      few === 3 && !fewGrouped && fewRows === 0 && app.doc.guides.length === g0 + 9 && inGroup === 6 && gh()?.querySelector(".ol-name")?.textContent === "Guides 1" && gh()?.querySelector(".ol-count")?.textContent === "6",
+      { few, fewGrouped, fewRows, all: app.doc.guides.length - g0, inGroup, row: gh()?.textContent });
+    gh().querySelector(".ol-name").click(); await sleep(20);
+    const picked = app.selGuideGroup === "Guides 1" && gh().classList.contains("selected");
+    gh().querySelector(".ol-eye").click(); await sleep(20);
+    const hid = app.hiddenGuideGroups.has("Guides 1") && app.viewport.hiddenGuides.size === 6 && gh().classList.contains("hidden");
+    gh().querySelector(".ol-eye").click(); await sleep(20);
+    const shown = app.viewport.hiddenGuides.size === 0;
+    gh().querySelector(".ol-name").click(); await sleep(20);
+    app.run("edit.delete"); await sleep(20);
+    const deleted = app.doc.guides.length === g0 + 3 && !gh();
+    app.run("edit.undo"); await sleep(20);
+    const back = app.doc.guides.filter((g) => g.group === "Guides 1").length === 6 && !!gh();
+    expect("guides: click the group lights its lines, the eye hides / shows them, Del removes the 6, undo brings them back",
+      picked && hid && shown && deleted && back, { picked, hid, shown, deleted, back });
+    app.run("edit.clearGuides"); await sleep(20);
+    app.doc.commit(app.doc.bodies.filter((b) => b.id !== plate.id), "drop plate"); await sleep(20);
+  }
   head().querySelector(".ol-name").click(); window.y3dApp.viewport.fit(); await sleep(50); // (selected, for the screenshot)
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("groups scenario failed: " + JSON.stringify(failed));
@@ -3820,6 +3858,79 @@ const SCENARIO_CUTAXIS = String.raw`
     pe("pointermove", [0, 7000, 5], 1); await sleep(20); pe("pointerup", [0, 7000, 5], 0); await sleep(30);
     const [lo, hi] = app.doc.get(rod.id).shape.boundingBox.bounds, bottom = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]].map(r);
     expect("G G: the rod's end centre is a start mark, the cup's top centre a target; dropped there exactly", baseShown && targetShown && bottom.join() === "0,7000,5", { baseShown, targetShown, bottom });
+    if (app.tool) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    // G G on a round edge (a slanted cup's rim): the gizmo turned to its circle — Z along its axis; a Z drag
+    // of 2.4 moves the rod exactly 2 along it (1 mm steps), Tab "Z (along axis)" 5 → 5 in all, still centred
+    {
+      const u = [0.70089, -0.41139, 0.58269], C = [0, 8000, 0], F = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: u };
+      const scup = app.doc.makeBody(K.makeCylinder(F, C.map((x, i) => x - 5 * u[i]), 12, 5), "Slanted cup"), srod = app.doc.makeBody(K.makeCylinder(F, C, 1.9, 20), "Slanted rod");
+      app.doc.commit([...app.doc.bodies, scup, srod], "slanted cup and rod");
+      app.setSelection([{ kind: "body", body: scup.id, id: 0 }, { kind: "body", body: srod.id, id: 0 }]);
+      app.run("view.fitSelection"); await sleep(700);
+      app.setSelection([{ kind: "body", body: srod.id, id: 0 }]);
+      app.run("xf.moveFrom"); await sleep(30);
+      const ring = app.doc.get(scup.id).shape.edges.find((e) => { const p = e.pointAt(0); return e.geomType === "CIRCLE" && Math.abs(Math.hypot(p.x - C[0], p.y - C[1], p.z - C[2]) - 12) < 0.01; });
+      const q = ring.pointAt(0.25);
+      pe("pointermove", [q.x, q.y, q.z], 0); pe("pointerdown", [q.x, q.y, q.z], 1); pe("pointerup", [q.x, q.y, q.z], 0); await sleep(30);
+      // (the dashed axis line through the cup's centre)
+      const axisLine = !!vp.xfAxis && (() => { const p = vp.xfAxis.geometry.attributes.position, a = new V().fromBufferAttribute(p, 0), b = new V().fromBufferAttribute(p, 1), m = a.clone().add(b).multiplyScalar(0.5); return m.distanceTo(new V(...C)) < 1e-3 || Math.abs(b.clone().sub(a).normalize().dot(m.clone().sub(new V(...C)).normalize())) > 0.9999; })();
+      const fz = app.xf?.frame?.z, turned = !!fz && Math.abs(Math.abs(fz[0] * u[0] + fz[1] * u[1] + fz[2] * u[2]) - 1) < 1e-4 && vp.tc.space === "local";
+      // (a drag: the pivot from where it started, as the gizmo does; the test's cursor stays on the rim, so no point snapping)
+      const start = vp.pivot.position.clone(), z = new V(...fz);
+      vp.xfPointer = null; vp.tc.axis = "Z"; vp.tc.dragging = true;
+      vp.pivot.position.copy(start).addScaledVector(z, 2.4); vp.tc.dispatchEvent({ type: "objectChange" });
+      vp.tc.dragging = false; vp.tc.axis = null; vp.finishTransformDrag(); await sleep(30);
+      const along = () => {
+        const sh = app.doc.get(srod.id).shape, faces = sh.faces.filter((f) => f.geomType === "PLANE").map((f) => f.center);
+        const lo = faces.map((c) => { const v = [c.x - C[0], c.y - C[1], c.z - C[2]], t = v[0] * u[0] + v[1] * u[1] + v[2] * u[2]; return { t, off: Math.hypot(...v.map((x, i) => x - t * u[i])) }; }).sort((a, b) => a.t - b.t)[0];
+        return { t: r(lo.t * Math.sign(fz[0] * u[0] + fz[1] * u[1] + fz[2] * u[2])), off: r(lo.off) };
+      };
+      const dragged = along();
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true })); await sleep(20);
+      const dlg = document.getElementById("props-dlg"), ins = dlg ? [...dlg.querySelectorAll("input")] : [];
+      const labels = dlg ? [...dlg.querySelectorAll("label")].map((l) => l.textContent) : [];
+      const hiddenMore = dlg ? [...dlg.querySelectorAll("label.more")].filter((l) => l.style.display === "none").length : -1;
+      if (ins[0]) ins[0].value = "5";
+      dlg?.requestSubmit(); await sleep(30);
+      const typed = along();
+      expect("G G on a round edge: gizmo turned (Z along the circle's axis); Z drag 2.4 → 2 along it, Tab Z 5 → 5, centred",
+        turned && dragged.t === 2 && dragged.off === 0 && labels[0] === "Along the axis (mm)" && hiddenMore === 2 && axisLine && typed.t === 5 && typed.off === 0, { turned, axisLine, dragged, labels, hiddenMore, typed });
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+      app.setSelection([]);
+      // Plain G: a click on the cup's rim (gizmo up, not on it) turns the gizmo the same way
+      app.setSelection([{ kind: "body", body: srod.id, id: 0 }]);
+      app.run("xf.move"); await sleep(20);
+      const before = !!app.xf?.frame;
+      pe("pointermove", [q.x, q.y, q.z], 0); pe("pointerdown", [q.x, q.y, q.z], 1); pe("pointerup", [q.x, q.y, q.z], 0); await sleep(30);
+      const gz = app.xf?.frame?.z, gTurned = !before && !!gz && Math.abs(Math.abs(gz[0] * u[0] + gz[1] * u[1] + gz[2] * u[2]) - 1) < 1e-4 && app.selection.length === 1 && app.selection[0].body === srod.id;
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+      const after = { xf: !!app.xf, line: !!vp.xfAxis };
+      expect("plain G: a click on a round edge turns the gizmo to its circle (rod still selected); Esc: back to normal, no axis line", gTurned && !after.xf && !after.line, { before, gTurned, after });
+      // The Snap step is remembered for next time (as Auto is)
+      const sel = document.getElementById("snap-select");
+      sel.value = "0.5"; sel.dispatchEvent(new Event("change"));
+      const saved = { stored: localStorage.getItem("y3d.snapStep"), step: vp.axisSnapStep };
+      sel.value = "1"; sel.dispatchEvent(new Event("change"));
+      expect("Snap step: a new choice is remembered (0.5 → stored), back to 1", saved.stored === "0.5" && saved.step === 0.5 && localStorage.getItem("y3d.snapStep") === "1", saved);
+      // Long guide / path whose midpoint is far off-screen: G places the move gizmo inside the viewport
+      const g0 = app.doc.guides.length;
+      app.doc.setGuides([...app.doc.guides, { a: [-5000, 8000, 0], b: [1000, 8000, 0] }], "long guide");
+      app.selGuide = g0; app.setSelection([]);
+      app.run("xf.move"); await sleep(20);
+      const gPivotInView = vp.inView(vp.pivot.position);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+      app.doc.setGuides(app.doc.guides.slice(0, g0), "remove long guide");
+      const longPath = app.doc.makeBody(K.sketchPath([{ kind: "line", a: [-5000, 8000, 0], b: [1000, 8000, 0] }]), "Long path", "path");
+      app.doc.commit([...app.doc.bodies, longPath], "long path");
+      app.setSelection([{ kind: "body", body: longPath.id, id: 0 }]);
+      app.run("xf.move"); await sleep(20);
+      const pPivotInView = vp.inView(vp.pivot.position);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+      app.doc.undo();
+      expect("long guide / path with midpoint off-screen: G keeps the move gizmo inside the viewport", gPivotInView && pPivotInView, { gPivotInView, pPivotInView });
+      app.setSelection([]);
+      for (let k = 0; k < 3; k++) app.doc.undo();
+    }
     app.setAutoSnap(false, false);
     if (app.tool) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
     app.setSelection([]);
@@ -4118,6 +4229,8 @@ const SCENARIO_SKETCH = String.raw`
   expect("sketch: K on a top face starts the sketch, looking straight down, with its panel", app.tool && app.tool.name === "Sketch" && dir.z < -0.999 && document.getElementById("sketch-panel"), { tool: app.tool && app.tool.name, dir: dir.toArray() });
   await key("g"); await key("5");
   expect("sketch: other commands wait (G, view keys)", app.tool && app.tool.name === "Sketch" && vp.camera.getWorldDirection(new V()).z < -0.999, app.tool && app.tool.name);
+  await key("g"); await key("g");
+  expect("sketch: G G (a chord) doesn't end the sketch", app.tool && app.tool.name === "Sketch", app.tool && app.tool.name);
   const z = 20, at = (x, y) => [x, y, z];
   // L shape (300 mm²) with a round hole (r 2) in it
   for (const p of [[-10, -10], [10, -10], [10, 0], [0, 0], [0, 10], [-10, 10], [-10, -10]]) await click(at(...p));
@@ -4132,6 +4245,98 @@ const SCENARIO_SKETCH = String.raw`
   // Slot beside the box (10 x 10 + two half circles r 5): line, arc, line, arc back to the start
   await click(at(25, -5)); await hover(at(35, -5)); await type("10"); await key("a"); await click(at(35, 5)); await key("l"); await click(at(25, 5)); await key("a"); await click(at(25, -5));
   expect("sketch: 3 closed outlines; undo took back the stray line", app.tool.loops.length === 3 && stray, { loops: app.tool.loops.length, stray });
+  // Join shows while drawing too; a click there goes to Select (nothing joined yet)
+  const joinB = () => document.querySelector("#sketch-panel button[data-act=join]");
+  const joinDrawing = !!joinB() && !joinB().disabled && app.tool.mode === "arc";
+  joinB().click(); await sleep(30);
+  expect("sketch: Join button while drawing; click → Select, greyed until 2 are selected", joinDrawing && app.tool.mode === "select" && joinB()?.disabled && app.tool.loops.length === 3, { joinDrawing, mode: app.tool.mode, disabled: joinB()?.disabled });
+  // G: the move gizmo on the selection (the slot) — the X arrow moves along X only, the square freely (grid steps);
+  // Esc puts it all back; G again + Tab: exact ΔX, ΔY, applied as one undo step
+  {
+    const t = app.tool;
+    t.selected = [{ kind: "loop", i: 2 }];
+    const c0 = t.selectionCenter();
+    const off = () => { t.selected = [{ kind: "loop", i: 2 }]; return t.selectionCenter().map((v, i) => +(v - c0[i]).toFixed(6)); }; // (undo clears the selection)
+    const W = (p) => t.world(p).toArray();
+    const drag = async (from, d) => {
+      const to = [from[0] + d[0], from[1] + d[1]];
+      pe("pointermove", W(from)); await sleep(10); pe("pointerdown", W(from)); pe("pointermove", W(to)); await sleep(10); pe("pointerup", W(to)); await sleep(10);
+    };
+    const st = vp.snapping({ ctrlKey: false }) ? app.snap : 0, rnd = (v) => (st > 0 ? +(Math.round(v / st) * st).toFixed(6) : v);
+    await key("g");
+    const shown = !!t.moving && !!document.querySelector("#sketch-panel button[data-act=move].primary");
+    let g = t.moveGizmo();
+    await drag([g.o[0] + (g.x[0] - g.o[0]) * 0.6, g.o[1]], [10.3, 7]);
+    const alongX = off();
+    g = t.moveGizmo();
+    await drag(g.sq, [-3.2, 4.1]);
+    const free = off();
+    await key("Escape");
+    const back = off(), gone = !t.moving;
+    await key("g");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true })); await sleep(20);
+    const dlg = document.getElementById("props-dlg"), ins = dlg ? [...dlg.querySelectorAll("input")] : [];
+    if (ins[0]) ins[0].value = "5"; if (ins[1]) ins[1].value = "-2";
+    dlg?.requestSubmit(); await sleep(20);
+    const typed = off(), applied = !t.moving;
+    await key("z", { ctrlKey: true });
+    const undone = off();
+    expect("sketch: G — move gizmo; X arrow along X only, the square free (grid steps); Esc back; Tab ΔX 5, ΔY -2; one undo step",
+      shown && alongX.join() === [rnd(10.3), 0].join() && free.join() === [rnd(10.3) + rnd(-3.2), rnd(4.1)].map((v) => +v.toFixed(6)).join() && back.join() === "0,0" && gone &&
+        typed.join() === "5,-2" && applied && undone.join() === "0,0" && t.loops.length === 3,
+      { shown, st, alongX, free, back, gone, typed, applied, undone, loops: t.loops.length });
+    t.selected = [];
+  }
+  // S: one gizmo scales and rotates — the blue ring dragged a quarter turn about the centre turns the slot
+  // (20 x 10 → 10 x 20, centre kept, arcs stay arcs); Tab shows Rotate 90, 45 typed → applied; one undo step back
+  {
+    const t = app.tool;
+    t.selected = [{ kind: "loop", i: 2 }];
+    const c0 = t.selectionCenter(), W = (p) => t.world(p).toArray();
+    const box = () => {
+      const pts = t.loops[2].kind === "circle" ? [] : t.loops[2].segs.flatMap((g) => (g.kind === "arc" ? [g.a, g.m, g.b] : [g.a, g.b]));
+      const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+      return [Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)].map((v) => +v.toFixed(2));
+    };
+    const size0 = box();
+    await key("s");
+    const shown = !!t.scaling && !!document.querySelector("#sketch-panel button[data-act=scale].primary");
+    const p = t.handlePos("rot"), to = [c0[0] - (p[1] - c0[1]), c0[1] + (p[0] - c0[0])];
+    pe("pointermove", W(p)); await sleep(10); pe("pointerdown", W(p)); pe("pointermove", W(to)); await sleep(10); pe("pointerup", W(to)); await sleep(10);
+    const deg = +((t.scaling.ang * 180) / Math.PI).toFixed(1), size90 = box(), arcs = t.loops[2].segs.filter((g) => g.kind === "arc").length;
+    t.selected = [{ kind: "loop", i: 2 }];
+    const c90 = t.selectionCenter().map((v, i) => +(v - c0[i]).toFixed(3));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true })); await sleep(20);
+    const dlg = document.getElementById("props-dlg"), ins = dlg ? [...dlg.querySelectorAll("input")] : [];
+    const shownDeg = ins[3] ? Math.round(+ins[3].value) : null;
+    if (ins[3]) ins[3].value = "45";
+    dlg?.requestSubmit(); await sleep(20);
+    const applied = !t.scaling, d45 = Math.abs(box()[0] - box()[1]) < 0.01;
+    await key("z", { ctrlKey: true });
+    const undone = box();
+    expect("sketch: S — one scale / rotate gizmo; blue ring a quarter turn: 20 x 10 → 10 x 20, centre kept, arcs kept; Tab Rotate 90 → 45 applied; one undo back",
+      shown && Math.abs(Math.abs(deg) - 90) < 0.5 && Math.abs(size90[0] - size0[1]) < 0.05 && Math.abs(size90[1] - size0[0]) < 0.05 && arcs === 2 && c90.every((v) => Math.abs(v) < 0.01) &&
+        ins.length === 4 && shownDeg === 90 && applied && d45 && undone.join() === size0.join(),
+      { shown, deg, size0, size90, arcs, c90, n: ins.length, shownDeg, applied, d45, undone });
+    t.selected = [];
+  }
+  // Arc: start, end, a point on it → right click ends it (a path); Ctrl+Z, Ctrl+Z → back in the Arc tool with
+  // its start and end picked (not two loose dots in Select); Esc / Ctrl+Z clean up
+  {
+    const t = app.tool, opens0 = t.opens.length;
+    const rclick = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); for (const ty of ["pointerdown", "pointerup"]) canvas.dispatchEvent(new PointerEvent(ty, { clientX: sc.x, clientY: sc.y, button: 2, bubbles: true })); await sleep(10); };
+    await key("a"); await click(at(-20, 20)); await click(at(-10, 20)); await click(at(-15, 24));
+    await rclick(at(-30, 30));
+    const ended = t.mode === "select" && t.opens.length === opens0 + 1 && !t.first;
+    await key("z", { ctrlKey: true });
+    const one = { mode: t.mode, path: t.path.length, first: !!t.first };
+    await key("z", { ctrlKey: true });
+    const two = { mode: t.mode, path: t.path.length, first: !!t.first, arcEnd: !!t.arcEnd };
+    expect("sketch: arc, right click (a path), Ctrl+Z ×2 → back in the Arc tool, its start and end picked (not loose dots in Select)",
+      ended && one.mode === "arc" && one.path === 1 && one.first && two.mode === "arc" && two.path === 0 && two.first && two.arcEnd && t.opens.length === opens0,
+      { ended, one, two, opens: t.opens.length - opens0 });
+    await key("Escape"); await key("Escape");
+  }
   const n0 = app.doc.bodies.length;
   document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(50);
   const made = app.doc.bodies.slice(n0);

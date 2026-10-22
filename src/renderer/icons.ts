@@ -1,52 +1,73 @@
 /** Inline 24×24 stroke icons for the toolbar (inherit `currentColor`). */
 const svg = (body: string) =>
-  `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
+  `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">${body}</svg>`;
 
-const FILL = 'fill="currentColor" fill-opacity="0.35"';
+const FILL = 'fill="currentColor" fill-opacity="0.32"';
+const SOFT = 'stroke-opacity="0.45"';
+const DASH = 'stroke-dasharray="2.4 2.1"';
+const DOT = 'fill="currentColor" stroke="none"';
 
 export const ICONS: Record<string, string> = {
+  // Selection modes: isometric cube with whole solid, one face, or one edge highlighted.
   solid: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${FILL}/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>`),
-  face: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5v9L12 21z" ${FILL}/>`),
-  edge: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" stroke-opacity="0.45"/><path d="M12 12v9" stroke-width="3"/>`),
-  box: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>`),
-  cylinder: svg(`<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/>`),
-  sketch: svg(`<path d="M3 21l7-1 10-10-6-6L4 14z" ${FILL}/><path d="M3 21h18" stroke-dasharray="2.5 2"/><path d="M14 4l6 6"/>`),
-  turnView: svg(`<path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M17.5 3v4.5H13"/><rect x="9" y="9" width="6" height="6" ${FILL}/>`),
-  picture: svg(`<rect x="3" y="5" width="18" height="14" rx="1.5"/><circle cx="8.5" cy="10" r="1.6"/><path d="M3 17l5-4.5 4 3.5 3-2.5 6 4.5" ${FILL}/>`),
-  pencil: svg(`<path d="M4 20l1-4L16 5l3 3L8 19z" ${FILL}/><path d="M14 7l3 3M4 20l4-1"/>`),
-  rectangle: svg(`<rect x="4" y="7" width="16" height="10" rx="0.5" ${FILL}/>`),
-  circle: svg(`<circle cx="12" cy="12" r="7.5" ${FILL}/>`),
-  polygon: svg(`<path d="M12 3l8.5 6.2-3.3 10H6.8L3.5 9.2z" ${FILL}/>`),
-  sphere: svg(`<circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="8" ry="3"/>`),
-  pushpull: svg(`<path d="M4 14l8-3 8 3-8 3z" ${FILL}/><path d="M4 14v4l8 3 8-3v-4"/><path d="M12 9V2M9 5l3-3 3 3"/>`),
-  fillet: svg(`<path d="M4 20V12a8 8 0 0 1 8-8h8"/><path d="M4 8V4h4" stroke-opacity="0.4" stroke-dasharray="2 2"/>`),
-  chamfer: svg(`<path d="M4 20V10l6-6h10"/><path d="M4 10V4h6" stroke-opacity="0.4" stroke-dasharray="2 2"/>`),
-  offset: svg(`<rect x="7.5" y="9" width="9" height="6" ${FILL}/><rect x="3.5" y="5" width="17" height="14" stroke-dasharray="2.5 2"/>`),
-  guide: svg(`<rect x="4" y="6" width="16" height="12" rx="0.5" stroke-opacity="0.45"/><path d="M2 20L22 4" stroke-width="2" stroke-dasharray="0.1 3.4"/>`),
-  cut: svg(`<path d="M3 9h18v11H3z" stroke-opacity="0.45"/><path d="M3 20V13l18-4v11z" ${FILL}/><path d="M2 14.5L22 7" stroke-dasharray="2.5 2"/>`),
-  revolve: svg(`<path d="M7 2v20" stroke-dasharray="2.5 2"/><rect x="11" y="5" width="6" height="9" ${FILL}/><path d="M20 15.5c0 2-4.5 3.5-10 3.5c-2 0-3.7-.2-5-.5"/><path d="M7 16.5l-2 2 2 2"/>`),
-  sweep: svg(`<path d="M4 20c0-8 5-13 13-13h4" stroke-dasharray="2.5 2"/><path d="M1 20c0-10 6-16 16-16h4M7 20c0-5 4-10 10-10h4"/><ellipse cx="4" cy="20" rx="3" ry="1.5" ${FILL}/>`),
-  shell: svg(`<path d="M3 6v15h18V6"/><path d="M7 6v11h10V6"/><path d="M3 6h4M17 6h4"/>`),
-  union: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 1 0 12 6.8z" ${FILL}/><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>`),
-  subtract: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 0 1 12 6.8z" ${FILL}/><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6" stroke-dasharray="2 2"/>`),
-  intersect: svg(`<path d="M12 6.8A6 6 0 0 1 12 17.2A6 6 0 0 1 12 6.8z" ${FILL}/><circle cx="9" cy="12" r="6" stroke-opacity="0.5"/><circle cx="15" cy="12" r="6" stroke-opacity="0.5"/>`),
-  move: svg(`<path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/>`),
-  scale: svg(`<rect x="3" y="11" width="10" height="10" ${FILL}/><path d="M3 11V3h18v18h-8" stroke-dasharray="2.5 2"/><path d="M11 13l9-9M15 4h5v5"/>`),
-  rotate: svg(`<path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/>`),
-  circular: svg(`<circle cx="12" cy="12" r="1.2"/><rect x="10" y="2" width="4" height="5" rx="1" ${FILL}/><rect x="17" y="9.5" width="5" height="4" rx="1"/><rect x="10" y="17" width="4" height="5" rx="1"/><rect x="2" y="9.5" width="5" height="4" rx="1"/><path d="M16.5 4.5a9 9 0 0 1 3 3.5M19.5 7.8l.3-2.3-2.2.6"/>`),
-  array: svg(`<rect x="2" y="9" width="5" height="6" rx="1" ${FILL}/><rect x="9.5" y="9" width="5" height="6" rx="1"/><rect x="17" y="9" width="5" height="6" rx="1"/><path d="M2 19h20M19 17l3 2-3 2"/>`),
-  duplicate: svg(`<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>`),
-  measure: svg(`<path d="M3 16.5L16.5 3 21 7.5 7.5 21z" ${FILL}/><path d="M7 12.5l1.8 1.8M9.5 10l2.5 2.5M12 7.5l1.8 1.8M14.5 5l2.5 2.5"/>`),
-  delete: svg(`<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/>`),
-  undo: svg(`<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>`),
-  redo: svg(`<path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/>`),
-  fit: svg(`<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><rect x="9" y="9" width="6" height="6"/>`),
-  iso: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" stroke-opacity="0.5"/>`),
-  // View buttons: a square with the view's letter (T / F / R), easy to tell apart.
-  top: svg(`<rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M8 8h8M12 8v9" stroke-width="2"/>`),
-  xray: svg(`<rect x="4" y="8" width="11" height="11"/><rect x="9" y="4" width="11" height="11" stroke-opacity="0.5" stroke-dasharray="2 2"/>`),
-  right: svg(`<rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M9 17V7.5h3.75a2.6 2.6 0 0 1 0 5.2H9M12.5 12.7L15.5 17" stroke-width="2"/>`),
-  front: svg(`<rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M9.5 17V7.5h6M9.5 12h4.5" stroke-width="2"/>`),
-  eye: svg(`<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/>`),
-  eyeOff: svg(`<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" stroke-opacity="0.35"/><path d="M4 4l16 16"/>`),
+  face: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${SOFT}/><path d="M12 12L4 7.5" ${SOFT}/><path d="M12 12l8-4.5v9L12 21z" ${FILL}/>`),
+  edge: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${SOFT}/><path d="M12 12l8-4.5M12 12L4 7.5" ${SOFT}/><path d="M12 12v9" stroke-width="2.8"/><circle cx="12" cy="12" r="1.9" ${DOT}/><circle cx="12" cy="21" r="1.9" ${DOT}/>`),
+
+  // Primitives (3D): shaded top/lighting cue + clean wireframe.
+  box: svg(`<path d="M12 3l8 4.5L12 12 4 7.5z" ${FILL}/><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>`),
+  cylinder: svg(`<ellipse cx="12" cy="6" rx="7" ry="3" ${FILL}/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" ${SOFT} ${DASH}/>`),
+  sphere: svg(`<circle cx="12" cy="12" r="8" ${FILL}/><ellipse cx="12" cy="12" rx="8" ry="3"/><ellipse cx="12" cy="12" rx="3" ry="8" ${SOFT}/>`),
+
+  // Flat faces & 2D Sketch: geometric shapes with vertex dots / construction plane.
+  rectangle: svg(`<rect x="3.5" y="6.5" width="17" height="11" rx="1" ${FILL}/><circle cx="3.5" cy="6.5" r="1.6" ${DOT}/><circle cx="20.5" cy="17.5" r="1.6" ${DOT}/>`),
+  circle: svg(`<circle cx="12" cy="12" r="7.5" ${FILL}/><circle cx="12" cy="12" r="1.6" ${DOT}/><path d="M12 12l5.3-5.3" ${SOFT}/>`),
+  polygon: svg(`<path d="M12 3l7.8 4.5v9L12 21l-7.8-4.5v-9z" ${FILL}/><circle cx="12" cy="3" r="1.5" ${DOT}/><circle cx="19.8" cy="7.5" r="1.5" ${DOT}/><circle cx="4.2" cy="7.5" r="1.5" ${DOT}/>`),
+  sketch: svg(`<path d="M3 16l9-4 9 4-9 5z" ${SOFT}/><path d="M7.5 15.5l4.5-2 4.5 2-4.5 2.2z" ${FILL}/><path d="M14 11l4.5-7 2.5 2.5-7 4.5z" ${FILL}/><circle cx="12" cy="13.5" r="1.3" ${DOT}/>`),
+  turnView: svg(`<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 3v4h-4"/><rect x="9" y="9" width="6" height="6" rx="0.8" ${FILL}/>`),
+  picture: svg(`<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6" ${FILL}/><path d="M3 16.5l5-4.5 4 3.5 3-2.5 6 4.5V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" ${FILL}/>`),
+  pencil: svg(`<rect x="4" y="5" width="16" height="14" rx="1.5" ${FILL}/><path d="M3 15.5L21 8.5" stroke-width="2"/><circle cx="4" cy="15.1" r="1.8" ${DOT}/><circle cx="20" cy="8.9" r="1.8" ${DOT}/>`),
+
+  // Modelling operations.
+  pushpull: svg(`<path d="M4 13.5l8-3.2 8 3.2-8 3.2z" ${FILL}/><path d="M4 13.5v4.3L12 21l8-3.2v-4.3"/><path d="M12 16.7V21" ${SOFT}/><path d="M12 10V2.5M8.8 5.7L12 2.5l3.2 3.2" stroke-width="1.9"/>`),
+  fillet: svg(`<path d="M4 20v-7a9 9 0 0 1 9-9h7"/><path d="M4 13A9 9 0 0 1 13 4L4 4z" ${FILL} stroke="none"/><path d="M4 11V4h7" ${SOFT} ${DASH}/><circle cx="4" cy="4" r="1.4" ${DOT}/>`),
+  chamfer: svg(`<path d="M4 20v-8l8-8h8"/><path d="M4 12l8-8H4z" ${FILL} stroke="none"/><path d="M4 10V4h6" ${SOFT} ${DASH}/><circle cx="4" cy="4" r="1.4" ${DOT}/>`),
+  shell: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 6.2l5 2.8L12 11.8 7 9z" ${FILL}/><path d="M12 11.8V15M12 21v-5" ${SOFT}/>`),
+  offset: svg(`<rect x="3.5" y="5" width="17" height="14" rx="1.5" ${DASH} ${SOFT}/><rect x="7.5" y="8.5" width="9" height="7" rx="0.8" ${FILL}/><path d="M16.5 12h4M19 10.3l1.7 1.7-1.7 1.7"/>`),
+  revolve: svg(`<path d="M6 2.5v19" ${DASH} ${SOFT}/><rect x="10.5" y="5" width="6.5" height="8.5" rx="0.8" ${FILL}/><path d="M19.5 15c0 2.2-4 3.8-9 3.8-2.2 0-4.2-.3-5.6-.8"/><path d="M6.8 16l-2.2 1.8 1.8 2.2"/>`),
+  sweep: svg(`<path d="M4 19c0-7.5 5.5-12 14-12" ${DASH}/><path d="M1.5 19C1.5 9.5 8 4 18 4M6.5 19c0-5.5 4.2-9 11.5-9" ${SOFT}/><ellipse cx="4" cy="19" rx="2.8" ry="1.6" ${FILL}/><ellipse cx="18" cy="7" rx="1.6" ry="3" ${FILL}/>`),
+  cut: svg(`<path d="M3.5 14v5a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1v-8z" ${FILL}/><path d="M3.5 11.2V6a1 1 0 0 1 1-1h15a1 1 0 0 1 1 1v2.2" ${SOFT}/><path d="M2 13L22 9.5" stroke-width="2" ${DASH}/>`),
+  splitFace: svg(`<rect x="4" y="5" width="16" height="14" rx="1.5" ${SOFT}/><path d="M4 14.5L20 9.5V17.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z" ${FILL}/><path d="M2 15.1L22 8.9" stroke-width="1.9" ${DASH}/>`),
+  guide: svg(`<rect x="4" y="6" width="16" height="12" rx="1" ${SOFT}/><path d="M2 18.5L22 5.5" stroke-width="2" stroke-dasharray="3 2.5"/><circle cx="7" cy="15.2" r="1.7" ${DOT}/><circle cx="17" cy="8.8" r="1.7" ${DOT}/>`),
+  clearGuides: svg(`<path d="M2 16L18 5.5" ${SOFT} stroke-dasharray="2.8 2.4"/><path d="M4 20L20 9.5" ${SOFT} stroke-dasharray="2.8 2.4"/><circle cx="17.5" cy="17.5" r="4.5" ${FILL}/><path d="M15.7 15.7l3.6 3.6M19.3 15.7l-3.6 3.6"/>`),
+
+  // Booleans.
+  union: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 1 0 12 6.8z" ${FILL}/>`),
+  subtract: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 0 1 12 6.8z" ${FILL}/><circle cx="15" cy="12" r="6" ${SOFT} ${DASH}/>`),
+  intersect: svg(`<path d="M12 6.8A6 6 0 0 1 12 17.2A6 6 0 0 1 12 6.8z" ${FILL}/><circle cx="9" cy="12" r="6" ${SOFT} ${DASH}/><circle cx="15" cy="12" r="6" ${SOFT} ${DASH}/>`),
+
+  // Transforms & copies.
+  move: svg(`<path d="M12 2.5v19M2.5 12h19M12 2.5l-2.8 2.8M12 2.5l2.8 2.8M12 21.5l-2.8-2.8M12 21.5l2.8-2.8M2.5 12l2.8-2.8M2.5 12l2.8 2.8M21.5 12l-2.8-2.8M21.5 12l-2.8 2.8"/><circle cx="12" cy="12" r="1.7" ${DOT}/>`),
+  moveFrom: svg(`<circle cx="5.5" cy="18.5" r="2.3" ${SOFT} ${DASH}/><circle cx="18.5" cy="5.5" r="2.5" ${FILL}/><path d="M7.5 16.5l8.5-8.5M11.5 8h4.5v4.5"/>`),
+  rotate: svg(`<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 3v4h-4"/><circle cx="12" cy="12" r="2" ${FILL}/>`),
+  scale: svg(`<rect x="3" y="11" width="9.5" height="9.5" rx="1" ${FILL}/><path d="M3 10.5V3.5h17v17h-7" ${SOFT} ${DASH}/><path d="M12.5 11.5L19.5 4.5M15 4.5h4.5V9"/>`),
+  repeat: svg(`<rect x="3" y="12" width="6.5" height="6.5" rx="1" ${SOFT} ${DASH}/><rect x="14.5" y="12" width="6.5" height="6.5" rx="1" ${FILL}/><path d="M6.2 9.5c2-4 9.6-4 11.6 0M15.2 9.2l2.6.5.4-2.6"/>`),
+  duplicate: svg(`<rect x="4" y="4" width="11" height="11" rx="1.8" ${SOFT}/><rect x="9" y="9" width="11" height="11" rx="1.8" ${FILL}/>`),
+  array: svg(`<rect x="2" y="7.5" width="5" height="6.5" rx="1" ${FILL}/><rect x="9.5" y="7.5" width="5" height="6.5" rx="1" ${FILL}/><rect x="17" y="7.5" width="5" height="6.5" rx="1"/><path d="M2.5 18.5h19M18.5 16l3 2.5-3 2.5"/>`),
+  circular: svg(`<circle cx="12" cy="12" r="1.5" ${DOT}/><circle cx="12" cy="12" r="7.5" ${SOFT} ${DASH}/><rect x="10" y="2" width="4" height="4" rx="0.9" ${FILL}/><rect x="18" y="10" width="4" height="4" rx="0.9" ${FILL}/><rect x="10" y="18" width="4" height="4" rx="0.9"/><rect x="2" y="10" width="4" height="4" rx="0.9"/>`),
+
+  // Utility & History.
+  measure: svg(`<path d="M3 16.5L16.5 3 21 7.5 7.5 21z" ${FILL}/><path d="M7 12.5l1.8 1.8M9.5 10l2.4 2.4M12 7.5l1.8 1.8M14.5 5l2.4 2.4"/>`),
+  delete: svg(`<path d="M4.5 6.5h15M9.5 6.5V4.2a.8.8 0 0 1 .8-.8h3.4a.8.8 0 0 1 .8.8v2.3"/><path d="M6.5 6.5l.9 13a1.2 1.2 0 0 0 1.2 1.1h6.8a1.2 1.2 0 0 0 1.2-1.1l.9-13" ${FILL}/><path d="M10 10.5v6M14 10.5v6"/>`),
+  undo: svg(`<path d="M8.5 13.5L4 9l4.5-4.5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>`),
+  redo: svg(`<path d="M15.5 13.5L20 9l-4.5-4.5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>`),
+
+  // Views & visibility: 3D cube with highlighted face (Top / Front / Right) or isometric axes.
+  fit: svg(`<path d="M3.5 8.5V4h4.5M20.5 8.5V4H16M3.5 15.5V20h4.5M20.5 15.5V20H16"/><path d="M12 7.5l4.5 2.5v4L12 16.5 7.5 14v-4z" ${FILL}/>`),
+  iso: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${FILL}/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>`),
+  top: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${SOFT}/><path d="M12 12v9" ${SOFT}/><path d="M12 3l8 4.5L12 12 4 7.5z" ${FILL}/>`),
+  front: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${SOFT}/><path d="M12 12l8-4.5" ${SOFT}/><path d="M4 7.5L12 12v9l-8-4.5z" ${FILL}/>`),
+  right: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${SOFT}/><path d="M12 12L4 7.5" ${SOFT}/><path d="M12 12l8-4.5v9L12 21z" ${FILL}/>`),
+  xray: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${FILL}/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/><path d="M12 3v9M12 12l-8 4.5M12 12l8 4.5" ${SOFT} ${DASH}/>`),
+  eye: svg(`<path d="M2.2 12s3.5-6 9.8-6 9.8 6 9.8 6-3.5 6-9.8 6-9.8-6-9.8-6z"/><circle cx="12" cy="12" r="2.8" ${FILL}/>`),
+  eyeOff: svg(`<path d="M2.2 12s3.5-6 9.8-6 9.8 6 9.8 6-3.5 6-9.8 6-9.8-6-9.8-6z" ${SOFT}/><path d="M4 4l16 16"/>`),
 };

@@ -105,6 +105,7 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-swatch { width: 10px; height: 10px; border-radius: 2px; background: #9aa5b1; flex: none; }
 .ol-swatch.face { background: transparent; border: 2px solid #6f9bd1; height: 6px; margin: 2px 0; }
 .ol-swatch.path { background: transparent; border-top: 2px solid #ff69b4; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
+.ol-swatch.guide { background: transparent; border-top: 2px dashed #ff6fb5; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
 .ol-swatch.mesh { background: repeating-linear-gradient(45deg, #9aa5b1 0 2px, #5d6670 2px 4px); }
 .ol-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ol-name input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 3px; }

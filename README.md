@@ -23,7 +23,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 |---|---|
 | Solids | Box, Cylinder, Sphere drawn interactively on the grid **or on any planar face**, grid snapping (Ctrl = free), typed exact dimensions |
 | Faces | Rectangle, Circle, Polygon (3–64 sides) create **flat faces**; **Push/Pull** a flat face to extrude it into a new solid |
-| Sketch | **K**: draw lines, tangent arcs, rectangles and circles on a flat face or the ground in a flat view (3D preview in the corner); Done turns the closed outlines into flat faces (with holes) and open lines (ended with Enter / double-click) into **paths** |
+| Sketch | **K**: draw lines, tangent arcs, rectangles and circles on a flat face or the ground in a flat view (3D preview in the corner); select outlines to move them (**G**) or scale / rotate them with one gizmo (**S**: squares and yellow ring scale, blue ring rotates); Done turns the closed outlines into flat faces (with holes) and open lines (ended with Enter / double-click) into **paths** |
 | Select | Solid / Face / Edge modes with hover highlight, Shift+click multi-select |
 | Modify | Push/Pull face (flat face → new solid; solid face → modify, or tick *New solid*), Fillet & Chamfer (selected edges or whole solid), Shell (open selected faces) — all with live preview |
 | Revolve / Sweep | **Revolve** (Modify menu; Pro: **R E**) a flat face about a guide line, one of its edges or X / Y / Z (any angle; a circle beside the axis → a donut) · **Sweep** (Pro: **S W**) a flat face along a path or guide line — a flat ring makes a tube; pick the face and path in the viewport while the panel is open |

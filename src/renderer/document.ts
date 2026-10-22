@@ -15,6 +15,8 @@ export interface Guide {
    * unless this already runs straight across it. Missing in older files: worked out at cut time.
    */
   readonly n?: V3;
+  /** Group it was added in (more than 4 guides from one Guide tool run): listed together in the Bodies panel. */
+  readonly group?: string;
 }
 
 /**

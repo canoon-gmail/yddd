@@ -65,6 +65,7 @@ import {
   resizeRounds,
   fillRounds,
   holeAt,
+  circleOfEdge,
   fillHoles,
   resizeHoles,
   type HoleLoop,
@@ -104,7 +105,7 @@ import {
   parseStl,
 } from "./kernel";
 import { Doc, isBrep, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type Guide, type HistoryEntry, type ShapeBody } from "./document";
-import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult } from "./viewport";
+import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
@@ -366,10 +367,10 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "edit.circular", icon: "circular", label: "Circular copy", key: "" },
       { cmd: "op.sweep", icon: "sweep", label: "Sweep", key: "Pro: S W" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis", key: "C" },
-      { cmd: "op.splitFace", icon: "cut", label: "Split face by guide", key: "Shift+C" },
+      { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide", key: "Shift+C" },
       { cmd: "tool.divideFace", icon: "pencil", label: "Divide face", key: "D" },
       { cmd: "tool.guide", icon: "guide", label: "Guide line", key: "Shift+G" },
-      { cmd: "edit.clearGuides", icon: "delete", label: "Clear guides", key: "" },
+      { cmd: "edit.clearGuides", icon: "clearGuides", label: "Clear guides", key: "" },
     ],
   },
   {
@@ -386,10 +387,10 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
     drawer: true,
     items: [
       { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
-      { cmd: "xf.moveFrom", icon: "move", label: "Move from point", key: "G G" },
+      { cmd: "xf.moveFrom", icon: "moveFrom", label: "Move from point", key: "G G" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
       { cmd: "xf.scale", icon: "scale", label: "Scale", key: "S" },
-      { cmd: "xf.repeat", icon: "duplicate", label: "Repeat last", key: "Shift+R" },
+      { cmd: "xf.repeat", icon: "repeat", label: "Repeat last", key: "Shift+R" },
       { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Shift+D / Ctrl+D" },
     ],
   },
@@ -436,6 +437,11 @@ const SIDEBAR_KEY = "y3d.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
 const PRO_TIP_SAVES = 20;
 /** localStorage: Auto snap off ("0"); on by default. */
 const AUTO_SNAP_KEY = "y3d.autoSnap";
+/** More guides than this from one Guide tool run are grouped (Bodies panel). */
+const GUIDE_GROUP_MIN = 4;
+
+/** The Snap step (status bar), remembered for next time. */
+const SNAP_STEP_KEY = "y3d.snapStep";
 
 /** Edge mode's pointer: the arrow with a small "E" by it. */
 const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
@@ -571,7 +577,8 @@ class App implements ToolHost {
     dragTimer?: number;
   } | null = null;
   /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
-  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; edges?: SelItem[]; guide?: number } | null = null;
+  /** The move / rotate gizmo session; `frame`: a move along turned axes (G G on a round edge: Z along its circle's axis). */
+  private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; frame?: GizmoFrame; edges?: SelItem[]; guide?: number } | null = null;
   /** Latest edge-move drag offset waiting for its (once per frame) preview. */
   private edgePreview: V3 | null = null;
   /**
@@ -878,8 +885,9 @@ class App implements ToolHost {
     dlg.innerHTML =
       `<h4>${title}</h4>` +
       fields
-        .map((f, i) => `<label><span>${f.label}</span><input type="number" data-i="${i}" value="${f.value}" step="${f.step ?? "any"}"${f.min !== undefined ? ` min="${f.min}"` : ""}></label>`)
+        .map((f, i) => `<label${f.more ? ` class="more" style="display:none"` : ""}><span>${f.label}</span><input type="number" data-i="${i}" value="${f.value}" step="${f.step ?? "any"}"${f.min !== undefined ? ` min="${f.min}"` : ""}></label>`)
         .join("") +
+      (fields.some((f) => f.more) ? `<button type="button" class="more-link" data-act="more" style="background:none;border:0;padding:2px 0;color:inherit;opacity:.7;text-decoration:underline;cursor:pointer;font:inherit;font-size:12px">More…</button>` : "") +
       `<div class="op-buttons"><button type="button" class="btn" data-act="cancel">Cancel</button><button type="submit" class="btn primary">${okLabel}</button></div>`;
     const inputs = [...dlg.querySelectorAll<HTMLInputElement>("input")];
     const close = (): void => {
@@ -894,6 +902,10 @@ class App implements ToolHost {
       onOk(vals);
     });
     dlg.querySelector("[data-act=cancel]")!.addEventListener("click", close);
+    dlg.querySelector("[data-act=more]")?.addEventListener("click", (e) => {
+      for (const l of dlg.querySelectorAll<HTMLElement>("label.more")) l.style.display = "";
+      (e.currentTarget as HTMLElement).remove();
+    });
     dlg.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Escape") close();
@@ -1154,6 +1166,7 @@ class App implements ToolHost {
 
   private setSelection(items: SelItem[]): void {
     this.selection = items;
+    if (items.length) this.clearGuideGroup();
     this.refreshSelection();
     if (this.xf?.guide !== undefined) {
       // Clicking another guide moves the gizmo to it; anything else ends the guide move.
@@ -1174,6 +1187,7 @@ class App implements ToolHost {
   }
 
   private click(e: PointerEvent): void {
+    this.clearGuideGroup();
     if (this.selDim >= 0) {
       this.selDim = -1;
       this.showDimensions();
@@ -1187,6 +1201,11 @@ class App implements ToolHost {
       this.setSelection([]);
       this.hint("Guide line selected · G moves it · Del removes it");
       return;
+    }
+    // Moving solids (G): a click on a round edge turns the gizmo to its circle — slide along its axis.
+    if (this.xf?.mode === "translate" && this.xf.ids.length && !this.xf.edges && this.xf.guide === undefined && !e.shiftKey && !e.ctrlKey) {
+      const round = this.roundEdgeAt(e);
+      if (round) return this.startTransform("translate", true, round.point, round.frame);
     }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
     let item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
@@ -1270,6 +1289,7 @@ class App implements ToolHost {
         this.selGuide = -1;
         this.showGuides();
       }
+      this.clearGuideGroup();
       this.setSelection([]);
       return;
     }
@@ -1447,6 +1467,11 @@ class App implements ToolHost {
       this.viewport.canvas.style.cursor = "pointer";
       return;
     }
+    // Moving solids (G): a round edge under the cursor shows a mark — a click turns the gizmo to it.
+    if (this.xf?.mode === "translate" && this.xf.ids.length && !this.xf.edges && this.xf.guide === undefined) {
+      const round = this.roundEdgeAt(e);
+      this.viewport.showSnapMarker(round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null);
+    }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
     // Face mode: preview the edge a click would switch to.
     const item: SelItem | null = this.selectedEdgeHit(e) ?? (pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null);
@@ -1539,7 +1564,9 @@ class App implements ToolHost {
         this.chordToasts = new Set($("toasts").children);
         this.run(cmd);
         const chord = CHORDS[combo] ?? (isPro() ? PRO_CHORDS[combo] : undefined);
-        if (chord) this.chord = { keys: chord, at: performance.now() };
+        // (not while sketching, where the first key was turned down: its second key would end the sketch)
+        const blocked = this.tool instanceof SketchTool && !SKETCH_COMMANDS.has(cmd);
+        if (chord && !blocked) this.chord = { keys: chord, at: performance.now() };
       }
     });
   }
@@ -3194,8 +3221,10 @@ class App implements ToolHost {
 
   // ================================================================ transforms
 
-  private startTransform(mode: "translate" | "rotate", keep = false, pivot?: V3): void {
+  private startTransform(mode: "translate" | "rotate", keep = false, pivot?: V3, frame?: GizmoFrame): void {
     pivot ??= keep ? this.xf?.pivot : undefined;
+    frame ??= keep ? this.xf?.frame : undefined;
+    if (mode !== "translate") frame = undefined; // (rotate: world axes, for now)
     if (!keep) {
       this.endTool();
       this.cancelOp();
@@ -3210,10 +3239,16 @@ class App implements ToolHost {
       this.toast(`${mode === "translate" ? "Move" : "Rotate"}: select one or more solids first`, "error");
       return;
     }
-    this.xf = { mode, ids, pivot };
-    this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r), pivot);
+    this.xf = { mode, ids, pivot, frame };
+    const turnedHint = (d: V3) => {
+      const [x, y, z] = this.viewport.toGizmoAxes(d).map((n) => +n.toFixed(3));
+      const steps = this.snap > 0 ? this.viewport.stepTip(`${this.snap} mm steps`) : "free";
+      const off = x || y ? ` (off the axis: X ${x}, Y ${y})` : "";
+      return `Slide along the dashed axis: drag the blue arrow (${steps}) · moved ${z} mm${off} · Tab: type mm · Enter/Esc: done`;
+    };
+    this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r), pivot, frame ? (d) => this.hint(turnedHint(d)) : undefined, frame);
     this.renderToolbarState();
-    this.hint(`${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")}) · Tab: type exact values · Enter/Esc: done`);
+    this.hint(frame ? turnedHint([0, 0, 0]) : `${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")})${mode === "translate" ? " · click a round edge: slide along its axis" : ""} · Tab: type exact values · Enter/Esc: done`);
   }
 
   /** G with edges selected: drag them with the gizmo, reshaping their (flat-faced) solids. */
@@ -3255,7 +3290,7 @@ class App implements ToolHost {
     const g = this.selGuide;
     const guide = this.doc.guides[g];
     if (!guide) return this.stopTransform();
-    const mid: V3 = [(guide.a[0] + guide.b[0]) / 2, (guide.a[1] + guide.b[1]) / 2, (guide.a[2] + guide.b[2]) / 2];
+    const mid = this.viewport.guidePivot(guide.a, guide.b);
     this.xf = { mode: "translate", ids: [], pivot: mid, guide: g };
     this.viewport.snapSkipGuide = g;
     this.viewport.startTransform("translate", [], this.snap, (r) => r.type === "translate" && this.applyGuideMove(r.vector, true), mid, (d) => this.previewGuideMove(d));
@@ -3462,9 +3497,15 @@ class App implements ToolHost {
         // Fix each guide's cut direction now: the face it lies on, or the view it was drawn in.
         const view = this.viewDir();
         const shapes = this.doc.bodies.map((b) => b.shape).filter(notMesh);
-        const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(shapes, l.a, l.b, view) }));
+        // More than 4 at once: one group, listed in the Bodies panel (select / hide / delete them together).
+        let group: string | undefined;
+        if (lines.length > GUIDE_GROUP_MIN) {
+          const taken = new Set(this.doc.guides.map((g) => g.group));
+          for (let k = 1; !group; k++) if (!taken.has(`Guides ${k}`)) group = `Guides ${k}`;
+        }
+        const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(shapes, l.a, l.b, view), ...(group ? { group } : {}) }));
         this.doc.setGuides([...this.doc.guides, ...made], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
-        this.toast(`Added ${lines.length} guide line(s) — ${this.viewport.autoSnap ? "tools snap to them" : "hold Ctrl to snap to them"}`);
+        this.toast(`Added ${lines.length} guide line(s)${group ? ` as "${group}" in the Bodies panel` : ""} — ${this.viewport.autoSnap ? "tools snap to them" : "hold Ctrl to snap to them"}`);
       }).start(bodyId, edgeId),
     );
     this.toast(
@@ -3476,6 +3517,9 @@ class App implements ToolHost {
 
   private selGuide = -1;
   private hoverGuide = -1;
+  /** A guide group selected in the Bodies panel (all its lines lit; Del removes them), and the groups hidden there (eye). */
+  private selGuideGroup: string | null = null;
+  private hiddenGuideGroups = new Set<string>();
   /** Selected dimension (click its text), -1 = none. */
   private selDim = -1;
 
@@ -3498,7 +3542,18 @@ class App implements ToolHost {
   private showGuides(): void {
     if (this.selGuide >= this.doc.guides.length) this.selGuide = -1;
     if (this.hoverGuide >= this.doc.guides.length) this.hoverGuide = -1;
-    this.viewport.setGuides(this.doc.guides, this.selGuide, this.hoverGuide);
+    const inGroups = (names: { has(g: string): boolean }) => new Set(this.doc.guides.flatMap((g, i) => (g.group !== undefined && names.has(g.group) ? [i] : [])));
+    if (this.selGuideGroup !== null && !this.doc.guides.some((g) => g.group === this.selGuideGroup)) this.selGuideGroup = null;
+    const sel = this.selGuideGroup !== null ? inGroups(new Set([this.selGuideGroup])) : this.selGuide;
+    this.viewport.setGuides(this.doc.guides, sel, this.hoverGuide, inGroups(this.hiddenGuideGroups));
+  }
+
+  /** Drop the Bodies panel's guide group selection (another click took over). */
+  private clearGuideGroup(): void {
+    if (this.selGuideGroup === null) return;
+    this.selGuideGroup = null;
+    this.showGuides();
+    this.renderOutliner();
   }
 
   /** Base-point move: pick a point on/near the selection, then a target point. */
@@ -3519,13 +3574,35 @@ class App implements ToolHost {
         }
         this.doc.replaceShapes(shapes, "Move");
       },
-        (p) => {
+        (p, frame) => {
           this.endTool();
           this.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
-          this.startTransform("translate", false, [...p] as V3);
-          this.hint(`Move: drag the gizmo from the picked mark (${this.viewport.snapTip("grid / points")}) · Tab: exact values · Enter/Esc: done`);
-        }).start(),
+          this.startTransform("translate", false, [...p] as V3, frame);
+          if (!frame) this.hint(`Move: drag the gizmo from the picked mark (${this.viewport.snapTip("grid / points")}) · Tab: exact values · Enter/Esc: done`);
+        },
+        (e) => this.roundEdgeAt(e)).start(),
     );
+  }
+
+  /**
+   * G G: the point on a round edge (circle / arc, any solid) under the cursor, and that circle's
+   * axes for the move gizmo — Z along its axis (the way facing the eye), X to its centre.
+   */
+  private roundEdgeAt(e: PointerEvent): { point: V3; frame: GizmoFrame } | null {
+    const hit = this.viewport.pick(e.clientX, e.clientY, "edge");
+    const b = hit?.kind === "edge" ? this.doc.get(hit.body) : null;
+    if (!hit || !b || !isBrep(b)) return null;
+    const c = circleOfEdge(b.shape, hit.id);
+    if (!c) return null;
+    const C = new THREE.Vector3(...c.center), z = new THREE.Vector3(...c.normal);
+    const out = hit.point.clone().sub(C);
+    out.addScaledVector(z, -out.dot(z)); // (into the circle's plane)
+    if (out.lengthSq() < 1e-12) return null;
+    out.normalize();
+    if (z.dot(this.viewport.camera.position.clone().sub(C)) < 0) z.negate();
+    const x = out.clone().negate(), y = z.clone().cross(x);
+    const point = C.clone().addScaledVector(out, c.r);
+    return { point: point.toArray() as V3, frame: { x: x.toArray() as V3, y: y.toArray() as V3, z: z.toArray() as V3, toAxis: c.r } };
   }
 
   /**
@@ -3699,9 +3776,19 @@ class App implements ToolHost {
       }, "Rotate");
       return;
     }
+    // A turned gizmo (G G on a round edge): typed along its axes — Z along the circle's axis.
+    const frame = this.xf.frame;
+    const world = (n: number[]): V3 => (frame ? [0, 1, 2].map((k) => frame.x[k] * n[0] + frame.y[k] * n[1] + frame.z[k] * n[2]) : [n[0], n[1], n[2]]) as V3;
+    const moveFields = (v: V3) => frame
+      ? [{ label: "Along the axis (mm)", value: r3(v[2]) }, { label: "Off the axis: X (to centre)", value: r3(v[0]), more: true }, { label: "Off the axis: Y (across)", value: r3(v[1]), more: true }]
+      : [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }];
+    // (the dialog's order back to X, Y, Z)
+    const typed = (n: number[]): number[] => (frame ? [n[1], n[2], n[0]] : n);
     if (last?.type === "translate" && mode === "translate") {
       const v = last.vector;
-      this.propsDialog("Move (last drag)", [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }], (n) => {
+      const shown = this.viewport.toGizmoAxes(v);
+      this.propsDialog(frame ? "Slide along the axis (last drag)" : "Move (last drag)", moveFields(shown), (raw) => {
+        const n = world(typed(raw));
         const d: V3 = [n[0] - v[0], n[1] - v[1], n[2] - v[2]];
         if (d.some((x) => Math.abs(x) > 1e-9)) apply((s) => translateShape(s, d), "Move", { type: "translate", vector: d });
         this.lastXf = { r: { type: "translate", vector: [n[0], n[1], n[2]] }, ids: ids.join() };
@@ -3709,7 +3796,8 @@ class App implements ToolHost {
       return;
     }
     if (mode === "translate") {
-      this.propsDialog("Move by", [{ label: "ΔX", value: 0 }, { label: "ΔY", value: 0 }, { label: "ΔZ", value: 0 }], ([x, y, z]) => {
+      this.propsDialog(frame ? "Slide along the axis by" : "Move by", moveFields([0, 0, 0]), (raw) => {
+        const [x, y, z] = world(typed(raw));
         if (x || y || z) apply((s) => translateShape(s, [x, y, z]), "Move", { type: "translate", vector: [x, y, z] });
       }, "Move");
       return;
@@ -3752,6 +3840,7 @@ class App implements ToolHost {
     this.placing = null;
     if (wasGuide) this.showGuides(); // drop any unapplied preview
     this.viewport.stopTransform();
+    this.viewport.showSnapMarker(null); // (a round edge's mark, see processHover)
     this.refreshSelection();
   }
 
@@ -3775,6 +3864,12 @@ class App implements ToolHost {
       const i = this.selDim;
       this.selDim = -1;
       return this.doc.setDimensions(this.doc.dimensions.filter((_, k) => k !== i), "Delete dimension");
+    }
+    if (this.selGuideGroup !== null) {
+      const g = this.selGuideGroup, n = this.doc.guides.filter((x) => x.group === g).length;
+      this.selGuideGroup = null;
+      this.doc.setGuides(this.doc.guides.filter((x) => x.group !== g), `Delete ${g}`);
+      return this.toast(`Deleted ${n} guide lines — Ctrl+Z brings them back`);
     }
     if (this.selGuide >= 0) {
       const i = this.selGuide;
@@ -4637,6 +4732,8 @@ class App implements ToolHost {
   /** Group header rows by group name, and the groups folded shut. */
   private olGroups = new Map<string, HTMLElement>();
   private olCollapsed = new Set<string>();
+  /** Guide group rows (see Guide.group) by group name. */
+  private olGuideGroups = new Map<string, HTMLElement>();
   /** The last row clicked (without Shift) in the Bodies panel: where a Shift+click range starts. */
   private olAnchor: number | null = null;
   private olBound = false;
@@ -4655,6 +4752,24 @@ class App implements ToolHost {
       el.addEventListener("click", (e) => {
         const t = e.target as HTMLElement;
         if (t.closest("input")) return;
+        const gg = t.closest<HTMLElement>(".ol-guides")?.dataset.guides;
+        if (gg !== undefined) {
+          if (t.closest(".ol-eye")) {
+            if (!this.hiddenGuideGroups.delete(gg)) this.hiddenGuideGroups.add(gg);
+            if (this.selGuideGroup === gg) this.selGuideGroup = null;
+          } else {
+            // Select the group's lines (lit in the viewport); clicking it again deselects.
+            if (this.xf) this.stopTransform();
+            this.selGuide = -1;
+            this.selDim = -1;
+            this.showDimensions();
+            if (this.selection.length) this.setSelection([]);
+            this.selGuideGroup = this.selGuideGroup === gg ? null : gg;
+            if (this.selGuideGroup !== null) this.hint(`${gg}: ${this.doc.guides.filter((x) => x.group === gg).length} guide lines selected · Del removes them · the eye hides them`);
+          }
+          this.showGuides();
+          return this.renderOutliner();
+        }
         const g = groupOf(e);
         if (g !== null) {
           const ms = members(g);
@@ -4731,9 +4846,12 @@ class App implements ToolHost {
       });
     }
     const selected = new Set(this.selection.map((s) => s.body));
-    if (!this.doc.bodies.length) {
+    const guideGroups = new Map<string, number>();
+    for (const g of this.doc.guides) if (g.group !== undefined) guideGroups.set(g.group, (guideGroups.get(g.group) ?? 0) + 1);
+    if (!this.doc.bodies.length && !guideGroups.size) {
       this.olRows.clear();
       this.olGroups.clear();
+      this.olGuideGroups.clear();
       el.innerHTML = `<div class="ol-empty">No bodies yet.<br>Press <kbd>B</kbd> to draw a box.</div>`;
       return;
     }
@@ -4791,6 +4909,24 @@ class App implements ToolHost {
       if (open) for (const m of ms) order.push(bodyRow(m));
       else for (const m of ms) live.add(m.id); // (kept, just not shown)
     }
+    // Guide groups (more than 4 guides from one Guide tool run), after the bodies.
+    for (const [g, n] of guideGroups) {
+      let head = this.olGuideGroups.get(g);
+      if (!head) {
+        head = document.createElement("div");
+        head.className = "ol-group ol-guides";
+        head.dataset.guides = g;
+        this.olGuideGroups.set(g, head);
+      }
+      const hidden = this.hiddenGuideGroups.has(g);
+      const html = `<span class="ol-swatch guide" title="Guide lines"></span><span class="ol-name" title="Click: select its guide lines (Del removes them)">${escapeHtml(g)}</span><span class="ol-count">${n}</span><button class="ol-eye" title="Show/hide these guide lines">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+      if (head.innerHTML !== html) head.innerHTML = html;
+      head.classList.toggle("selected", this.selGuideGroup === g);
+      head.classList.toggle("hidden", hidden);
+      order.push(head);
+    }
+    for (const g of [...this.olGuideGroups.keys()]) if (!guideGroups.has(g)) this.olGuideGroups.delete(g);
+    for (const g of [...this.hiddenGuideGroups]) if (!guideGroups.has(g)) this.hiddenGuideGroups.delete(g);
     // Keep DOM order in sync (no-op when already correct); folded members leave the DOM.
     let prev: Element | null = null;
     for (const row of order) {
@@ -4937,9 +5073,17 @@ class App implements ToolHost {
       this.toast(auto.checked ? "Auto snap on — hold Ctrl to place freely" : "Auto snap off — hold Ctrl to snap");
     });
     const select = $<HTMLSelectElement>("snap-select");
+    // (the step from last time, if it is still one of the choices)
+    const saved = localStorage.getItem(SNAP_STEP_KEY);
+    if (saved !== null && [...select.options].some((o) => o.value === saved)) {
+      select.value = saved;
+      this.snap = Number(saved);
+      this.viewport.axisSnapStep = this.snap;
+    }
     select.addEventListener("change", () => {
       this.snap = Number(select.value);
       this.viewport.axisSnapStep = this.snap;
+      localStorage.setItem(SNAP_STEP_KEY, select.value);
       select.blur();
       if (this.xf?.guide !== undefined) this.startGuideMove(true);
       else if (this.xf?.edges) this.startEdgeMove(true);
@@ -5047,7 +5191,7 @@ class App implements ToolHost {
       ["Bodies panel: Shift+click · Ctrl+click", "Select all the rows from the last clicked one to this one (Ctrl+Shift: add them) · add / remove one"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
-      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
+      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
@@ -5067,16 +5211,16 @@ class App implements ToolHost {
       ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns"],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
-      ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
+      ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
-      ["G · R", "Move · Rotate gizmo"],
+      ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line), the blue arrow in mm steps, Tab: the distance along it"],
       ["S", `Scale selected objects about their bottom centre: drag the ring for Scale % or the red / green / blue boxes for X / Y / Z % (${this.viewport.autoSnap ? "snaps, Ctrl: free" : "Ctrl snaps"}; per-axis works on curved shapes too)`],
       ["S with hole rims selected", "Resize hole / pin: Edge mode, click the rim of a round hole or pin (Shift+click more), S — type the new diameter (holes of different sizes: how much bigger, e.g. 0.2 for a looser fit) or drag the ring on the rim; a hole grows into the solid, a pin out of it · any other hole (rectangle, slot, a sketched shape): click one edge of its rim, S — Bigger by (mm): every wall moves out by half of it, corners stay sharp"],
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
-      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre)"],
+      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) → slide along its axis, as with G"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],

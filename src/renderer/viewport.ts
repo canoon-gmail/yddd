@@ -66,6 +66,15 @@ interface BodyView {
 }
 
 /** Object snap kinds, in priority order. */
+/** Turned axes for the move gizmo (unit, at right angles), e.g. Z along a circle's axis. */
+export interface GizmoFrame {
+  x: V3;
+  y: V3;
+  z: V3;
+  /** From the gizmo along X to the axis (a circle's radius): a dashed line is drawn along Z there. */
+  toAxis?: number;
+}
+
 export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge";
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
 const SNAP_PX = 12;
@@ -1082,7 +1091,7 @@ export class Viewport {
   /** Where guide lines cross each other or a world X / Y / Z axis line (snap points, like corners). */
   private guideCrossings(): THREE.Vector3[] {
     const lines = this.guides
-      .filter((_, i) => i !== this.snapSkipGuide)
+      .filter((_, i) => i !== this.snapSkipGuide && !this.hiddenGuides.has(i))
       .map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) }));
     const axes = [0, 1, 2].map((k) => ({ o: new THREE.Vector3(), dir: new THREE.Vector3().setComponent(k, 1), len: Infinity, axis: true }));
     const out: THREE.Vector3[] = [];
@@ -1314,9 +1323,13 @@ export class Viewport {
 
   /** Guide not offered as a snap target (the one being moved), -1 = none. */
   snapSkipGuide = -1;
+  /** Guides hidden via the Bodies panel eye button. */
+  private hiddenGuides = new Set<number>();
 
   /** Show guide lines (dashed); `selected` is drawn highlighted, with a glow round it. */
-  setGuides(list: readonly { a: V3; b: V3 }[], selected = -1, hover = -1): void {
+  setGuides(list: readonly { a: V3; b: V3 }[], selected: number | ReadonlySet<number> = -1, hover = -1, hidden: ReadonlySet<number> = this.hiddenGuides): void {
+    this.hiddenGuides = new Set(hidden);
+    const isSel = (i: number) => (typeof selected === "number" ? i === selected : selected.has(i));
     for (const c of [...this.guideRoot.children]) {
       c.removeFromParent();
       c.traverse((o) => (o as THREE.Line).geometry?.dispose());
@@ -1324,11 +1337,12 @@ export class Viewport {
     }
     this.guides = list.map((g) => ({ a: new THREE.Vector3(...g.a), b: new THREE.Vector3(...g.b) }));
     this.guides.forEach((g, i) => {
-      const mat = new THREE.LineDashedMaterial({ color: i === selected ? 0xffd166 : i === hover ? 0xffffff : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
+      if (this.hiddenGuides.has(i)) return;
+      const mat = new THREE.LineDashedMaterial({ color: isSel(i) ? 0xffd166 : i === hover ? 0xffffff : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
       const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([g.a, g.b]), mat);
       l.computeLineDistances();
       l.renderOrder = 15;
-      if (i === selected) {
+      if (isSel(i)) {
         // Soft halos under the dashed line (no solid core, so it still reads as a guide).
         const glow = this.glowLine(g.a, g.b, 0xffd166, 2, 0.5);
         glow.renderOrder = 14;
@@ -1343,6 +1357,7 @@ export class Viewport {
   guideAt(cx: number, cy: number): number {
     let best = -1, bd = 6;
     this.guides.forEach((g, i) => {
+      if (this.hiddenGuides.has(i)) return;
       const seg = this.segmentToScreen(g.a, g.b);
       if (!seg) return;
       const [a, b] = seg;
@@ -1382,7 +1397,7 @@ export class Viewport {
     const q = new THREE.Vector3();
     const lines: { o: THREE.Vector3; dir: THREE.Vector3; len: number }[] = [
       ...(axes ? [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)] : []).map((dir) => ({ o: new THREE.Vector3(), dir, len: Infinity })),
-      ...this.guides.filter((_, i) => i !== this.snapSkipGuide).map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) })),
+      ...this.guides.filter((_, i) => i !== this.snapSkipGuide && !this.hiddenGuides.has(i)).map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) })),
     ];
     for (const { o, dir, len } of lines) {
       // Closest point on the axis / guide line to the cursor ray.
@@ -1842,6 +1857,103 @@ export class Viewport {
     return { x: r.left + ((p.x + 1) / 2) * r.width, y: r.top + ((1 - p.y) / 2) * r.height };
   }
 
+  /** Is a 3D point inside the viewport (with `margin` px inset from the edges so the gizmo fits)? */
+  inView(point: THREE.Vector3, margin = 48): boolean {
+    this.camera.updateMatrixWorld();
+    const p = point.clone().project(this.camera);
+    if (p.z < -1 || p.z > 1) return false;
+    const mx = this.width > 2 * margin ? (2 * margin) / this.width : 0.1;
+    const my = this.height > 2 * margin ? (2 * margin) / this.height : 0.1;
+    return Math.abs(p.x) <= 1 - mx && Math.abs(p.y) <= 1 - my;
+  }
+
+  /**
+   * The part of segment `a`–`b` inside the viewport (cut at the near/far planes and inset by `margin`
+   * px from the screen edges), or null if the segment misses the viewport altogether.
+   */
+  private clipSegmentToView(a: THREE.Vector3, b: THREE.Vector3, margin = 48): [THREE.Vector3, THREE.Vector3] | null {
+    this.camera.updateMatrixWorld();
+    const va = a.clone().applyMatrix4(this.camera.matrixWorldInverse);
+    const vb = b.clone().applyMatrix4(this.camera.matrixWorldInverse);
+    const near = (this.camera as THREE.PerspectiveCamera).isPerspectiveCamera ? -(this.camera as THREE.PerspectiveCamera).near * 1.01 : Infinity;
+    if (va.z > near && vb.z > near) return null;
+    if (va.z > near) va.lerp(vb, (va.z - near) / (va.z - vb.z));
+    else if (vb.z > near) vb.lerp(va, (vb.z - near) / (vb.z - va.z));
+    const wa = va.applyMatrix4(this.camera.matrixWorld);
+    const wb = vb.applyMatrix4(this.camera.matrixWorld);
+    const pa = wa.clone().project(this.camera), pb = wb.clone().project(this.camera);
+    const mx = this.width > 2 * margin ? 1 - (2 * margin) / this.width : 0.9;
+    const my = this.height > 2 * margin ? 1 - (2 * margin) / this.height : 0.9;
+    let t0 = 0, t1 = 1;
+    const clip = (p: number, q: number): boolean => {
+      if (Math.abs(p) < 1e-12) return q >= 0;
+      const r = q / p;
+      if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; }
+      else { if (r < t0) return false; if (r < t1) t1 = r; }
+      return true;
+    };
+    const dx = pb.x - pa.x, dy = pb.y - pa.y;
+    if (!clip(-dx, pa.x + mx) || !clip(dx, mx - pa.x) || !clip(-dy, pa.y + my) || !clip(dy, my - pa.y)) return null;
+    const rayAt = (t: number): THREE.Vector3 => {
+      const x = pa.x + dx * t, y = pa.y + dy * t;
+      this.raycaster.setFromCamera(new THREE.Vector2(x, y), this.camera);
+      const out = new THREE.Vector3();
+      this.raycaster.ray.distanceSqToSegment(wa, wb, undefined, out);
+      return out;
+    };
+    return [rayAt(t0), rayAt(t1)];
+  }
+
+  /**
+   * A pivot for a guide line `a`–`b`: its midpoint when that's inside the viewport, otherwise the
+   * middle of the part of the guide visible in the viewport (so a long / axis guide's gizmo isn't off-screen).
+   */
+  guidePivot(a: V3, b: V3): V3 {
+    const va = new THREE.Vector3(...a), vb = new THREE.Vector3(...b);
+    const mid = va.clone().add(vb).multiplyScalar(0.5);
+    if (this.inView(mid)) return mid.toArray() as V3;
+    const seg = this.clipSegmentToView(va, vb) ?? this.clipSegmentToView(va, vb, 0);
+    if (!seg) return mid.toArray() as V3;
+    return this.screenMidpointOnSegment(seg[0], seg[1]).toArray() as V3;
+  }
+
+  /** Point on segment `a`–`b` whose screen projection is the midpoint of `a` and `b` on screen. */
+  private screenMidpointOnSegment(a: THREE.Vector3, b: THREE.Vector3): THREE.Vector3 {
+    const pa = a.clone().project(this.camera), pb = b.clone().project(this.camera);
+    this.raycaster.setFromCamera(new THREE.Vector2((pa.x + pb.x) / 2, (pa.y + pb.y) / 2), this.camera);
+    const out = new THREE.Vector3();
+    this.raycaster.ray.distanceSqToSegment(a, b, undefined, out);
+    return out;
+  }
+
+  /**
+   * When a long path / body has its bounding-box centre off-screen, pick a pivot on the part of its
+   * edges visible in the viewport (closest to the screen centre), or null if no edge is on-screen.
+   */
+  private visibleEdgePivot(ids: number[]): THREE.Vector3 | null {
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), p = new THREE.Vector3();
+    for (const margin of [48, 0]) {
+      let best: { pt: THREE.Vector3; d2: number } | null = null;
+      for (const id of ids) {
+        const v = this.views.get(id);
+        if (!v) continue;
+        const E = v.edgePos;
+        for (let k = 0; k + 5 < E.length; k += 6) {
+          a.fromArray(E, k);
+          b.fromArray(E, k + 3);
+          const seg = this.clipSegmentToView(a, b, margin);
+          if (!seg) continue;
+          const m = this.screenMidpointOnSegment(seg[0], seg[1]);
+          p.copy(m).project(this.camera);
+          const d2 = p.x * p.x + p.y * p.y;
+          if (!best || d2 < best.d2) best = { pt: m, d2 };
+        }
+      }
+      if (best) return best.pt;
+    }
+    return null;
+  }
+
   // ------------------------------------------------------------ camera
 
   /** Frame the bodies (or `ids`); `rightInset` px on the right are covered (e.g. by a panel), so centre in the rest. */
@@ -1930,6 +2042,7 @@ export class Viewport {
     onEnd: (r: TransformResult) => void,
     pivotAt?: V3,
     onChange?: (d: V3) => void,
+    frame?: GizmoFrame,
   ): void {
     const box = new THREE.Box3();
     for (const id of ids) {
@@ -1947,9 +2060,21 @@ export class Viewport {
     const c = box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
     // (the pivot at the true centre, grid or not: grid snapping moves in whole steps from there — see gridSteps)
     if (pivotAt) c.set(...pivotAt);
+    else if (!this.inView(c)) {
+      const vis = this.visibleEdgePivot(ids);
+      if (vis) c.copy(vis);
+    }
     this.pivot.position.copy(c);
-    this.pivot.quaternion.identity();
+    // A turned frame (moves only): the gizmo's arrows along its axes, snapping in steps along them.
+    const turned = mode === "translate" && frame ? frame : null;
+    this.xfFrame = turned ? new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(...turned.x), new THREE.Vector3(...turned.y), new THREE.Vector3(...turned.z))) : null;
+    this.pivot.quaternion.copy(this.xfFrame ?? new THREE.Quaternion());
+    this.tc.setSpace(this.xfFrame ? "local" : "world");
     this.pivot.updateMatrixWorld();
+    // The line it slides along: dashed, through the circle's centre, seen through the solids.
+    const x = turned ? new THREE.Vector3(...turned.x) : null;
+    this.showXfAxis(turned && x ? c.clone().addScaledVector(x, turned.toAxis ?? 0) : null, turned ? new THREE.Vector3(...turned.z) : undefined,
+      Math.max(30, 1.5 * (box.isEmpty() ? 0 : box.getSize(new THREE.Vector3()).length())));
     this.xfStart.copy(c);
     this.xfIds = ids;
     this.setXfSet(ids);
@@ -1965,6 +2090,9 @@ export class Viewport {
 
   stopTransform(): void {
     this.tc.detach();
+    this.xfFrame = null;
+    this.showXfAxis(null);
+    this.tc.setSpace("world");
     this.resetBodyMatrices();
     this.xfIds = [];
     this.setXfSet([]);
@@ -1994,6 +2122,36 @@ export class Viewport {
   }
 
   private xfPointer: { x: number; y: number; ctrl: boolean } | null = null;
+  /** A turned move's axis line (see startTransform). */
+  private xfAxis: THREE.Line | null = null;
+
+  private showXfAxis(at: THREE.Vector3 | null, dir?: THREE.Vector3, half = 0): void {
+    if (this.xfAxis) {
+      this.xfAxis.removeFromParent();
+      this.xfAxis.geometry.dispose();
+      (this.xfAxis.material as THREE.Material).dispose();
+      this.xfAxis = null;
+    }
+    if (at && dir) {
+      const g = new THREE.BufferGeometry().setFromPoints([at.clone().addScaledVector(dir, -half), at.clone().addScaledVector(dir, half)]);
+      const m = new THREE.LineDashedMaterial({ color: 0x3e8bff, dashSize: half / 25, gapSize: half / 50, depthTest: false, transparent: true, opacity: 0.9 });
+      this.xfAxis = new THREE.Line(g, m);
+      this.xfAxis.computeLineDistances();
+      this.xfAxis.renderOrder = 25;
+      this.xfAxis.raycast = () => {};
+      this.scene.add(this.xfAxis);
+    }
+    this.requestRender();
+  }
+  /** The move gizmo's turned axes (see startTransform), or null: world X / Y / Z. */
+  private xfFrame: THREE.Quaternion | null = null;
+
+  /** An offset in the gizmo's turned axes (or world ones) — e.g. for a readout. */
+  toGizmoAxes(d: V3): V3 {
+    const v = new THREE.Vector3(...d);
+    if (this.xfFrame) v.applyQuaternion(this.xfFrame.clone().invert());
+    return [v.x, v.y, v.z];
+  }
   private xfSnapStep = 0;
 
   /** Gizmo snapping (grid / 5° / object points) is active only while Ctrl is held. */
@@ -2011,7 +2169,12 @@ export class Viewport {
     const step = this.tc.translationSnap;
     if (this.xfMode !== "translate" || !this.tc.dragging || !step) return;
     const p = this.pivot.position, s = this.xfStart;
-    p.set(s.x + Math.round((p.x - s.x) / step) * step, s.y + Math.round((p.y - s.y) / step) * step, s.z + Math.round((p.z - s.z) / step) * step);
+    // (in the turned axes, if any: whole steps along them)
+    const d = p.clone().sub(s);
+    if (this.xfFrame) d.applyQuaternion(this.xfFrame.clone().invert());
+    d.set(Math.round(d.x / step) * step, Math.round(d.y / step) * step, Math.round(d.z / step) * step);
+    if (this.xfFrame) d.applyQuaternion(this.xfFrame);
+    p.copy(s).add(d);
   }
 
   /** During a move drag, pull the pivot onto a nearby object snap point (only along the dragged axes). */
@@ -2021,10 +2184,18 @@ export class Viewport {
     const axis = this.tc.axis ?? "";
     const sp = ptr.ctrl !== this.autoSnap ? this.snapPoint(ptr.x, ptr.y, this.xfSet) : null;
     if (sp) {
-      const p = this.pivot.position;
-      if (axis.includes("X")) p.x = sp.point.x;
-      if (axis.includes("Y")) p.y = sp.point.y;
-      if (axis.includes("Z")) p.z = sp.point.z;
+      // Along the dragged axes only (the turned ones, if any): the snap point's offset from the start in them.
+      const inv = this.xfFrame?.clone().invert();
+      const cur = this.pivot.position.clone().sub(this.xfStart), want = sp.point.clone().sub(this.xfStart);
+      if (inv) {
+        cur.applyQuaternion(inv);
+        want.applyQuaternion(inv);
+      }
+      if (axis.includes("X")) cur.x = want.x;
+      if (axis.includes("Y")) cur.y = want.y;
+      if (axis.includes("Z")) cur.z = want.z;
+      if (this.xfFrame) cur.applyQuaternion(this.xfFrame);
+      this.pivot.position.copy(this.xfStart).add(cur);
     }
     this.showSnapMarker(sp);
   }
@@ -2051,7 +2222,9 @@ export class Viewport {
   private applyPivotToBodies(): void {
     this.pivot.updateMatrixWorld();
     const start = new THREE.Matrix4().makeTranslation(this.xfStart.x, this.xfStart.y, this.xfStart.z);
-    const m = this.pivot.matrixWorld.clone().multiply(start.invert());
+    // (a move: just the offset — a turned gizmo's own turn isn't a rotation of the bodies)
+    const d = this.pivot.position.clone().sub(this.xfStart);
+    const m = this.xfMode === "translate" ? new THREE.Matrix4().makeTranslation(d.x, d.y, d.z) : this.pivot.matrixWorld.clone().multiply(start.invert());
     for (const id of this.xfIds) {
       const v = this.views.get(id);
       if (!v) continue;

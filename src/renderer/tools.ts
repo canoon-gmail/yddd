@@ -10,7 +10,7 @@
  * can also type exact dimensions (e.g. "40,25" then Enter for a rectangle).
  */
 import * as THREE from "three";
-import type { Viewport, SnapKind } from "./viewport";
+import type { Viewport, SnapKind, GizmoFrame } from "./viewport";
 import {
   planarFaceFrame,
   makeBox,
@@ -45,6 +45,8 @@ export interface PropField {
   value: number;
   step?: number;
   min?: number;
+  /** Hidden behind a "More…" link (still sent back, with its value). */
+  more?: boolean;
 }
 
 export interface Tool {
@@ -902,8 +904,10 @@ export class PointMoveTool implements Tool {
     private host: ToolHost,
     private ids: number[],
     private onDone: (d: V3) => void,
-    /** Clicking a mark (no drag) hands it over, e.g. to show the move gizmo there. */
-    private onPick?: (p: V3) => void,
+    /** Clicking a mark (no drag) hands it over, e.g. to show the move gizmo there — or a point on a round edge, with its circle's turned axes. */
+    private onPick?: (p: V3, frame?: GizmoFrame) => void,
+    /** The point on a round edge under the cursor and its circle's axes (Z along its axis, X to its centre), if any. */
+    private roundEdgeAt?: (e: PointerEvent) => { point: V3; frame: GizmoFrame } | null,
   ) {
     this.exclude = new Set(ids);
   }
@@ -935,7 +939,7 @@ export class PointMoveTool implements Tool {
   private updateHint(): void {
     const base = this.base
       ? `Move: drop on a blue centre mark (centre to centre) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
-      : "Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target";
+      : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.roundEdgeAt ? " · click a round edge: the gizmo turned to its circle (Z along its axis)" : ""}`;
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -960,7 +964,8 @@ export class PointMoveTool implements Tool {
     if (!this.base) {
       this.refreshPivots();
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
-      vp.showSnapMarker(pv ?? null);
+      const round = pv ? null : this.roundEdgeAt?.(e);
+      vp.showSnapMarker(pv ?? (round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null));
       return;
     }
     this.refreshPivots();
@@ -985,7 +990,13 @@ export class PointMoveTool implements Tool {
   down(e: PointerEvent): void {
     if (!this.base) {
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
-      if (!pv) { this.host.hint("Move: start from a blue mark (corner / edge midpoint / centre) · Esc cancel"); return; }
+      if (!pv) {
+        // A round edge: the gizmo there, turned to its circle.
+        const round = this.onPick ? this.roundEdgeAt?.(e) : null;
+        if (round) return this.onPick!(round.point, round.frame);
+        this.host.hint("Move: start from a blue mark (corner / edge midpoint / centre) · Esc cancel");
+        return;
+      }
       const p = pv.point;
       this.base = p.clone();
       this.press = { x: e.clientX, y: e.clientY };
