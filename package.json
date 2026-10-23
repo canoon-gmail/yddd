@@ -1,8 +1,8 @@
 {
-  "name": "y3d",
-  "productName": "Y3D",
+  "name": "yddd",
+  "productName": "YDDD",
   "version": "0.1.0",
-  "description": "Y3D - a direct NURBS/B-rep CAD modeler for Linux (Electron + Three.js + OpenCascade)",
+  "description": "YDDD - a direct NURBS/B-rep CAD modeler for Linux (Electron + Three.js + OpenCascade)",
   "main": "dist/main/main.js",
   "type": "commonjs",
   "license": "MIT",
@@ -12,12 +12,12 @@
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "npm run build && electron .",
-    "start:stress": "npm run build && Y3D_STRESS=${N:-2000} electron .",
+    "start:stress": "npm run build && YDDD_STRESS=${N:-2000} electron .",
     "dev": "npm run build:main && node scripts/dev.mjs",
-    "smoke": "npm run build && Y3D_SMOKE=/tmp/y3d-smoke electron .",
-    "smoke:half": "npm run build && Y3D_SMOKE=/tmp/y3d-smoke Y3D_SMOKE_HALF=1 electron .",
-    "bench": "npm run build && Y3D_STRESS=${N:-2000} Y3D_BENCH=1 electron .",
-    "bench:ops": "npm run build && Y3D_BENCH=ops electron ."
+    "smoke": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke electron .",
+    "smoke:half": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke YDDD_SMOKE_HALF=1 electron .",
+    "bench": "npm run build && YDDD_STRESS=${N:-2000} YDDD_BENCH=1 electron .",
+    "bench:ops": "npm run build && YDDD_BENCH=ops electron ."
   },
   "dependencies": {
     "replicad": "^1.1.0",

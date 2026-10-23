@@ -1,10 +1,10 @@
 /**
- * Opt-in end-to-end smoke test. Run with:  Y3D_SMOKE=/tmp/y3d-smoke npx electron .
- * (npm run smoke; npm run smoke:half skips scenarios 1–3 — see Y3D_SMOKE_HALF.)
+ * Opt-in end-to-end smoke test. Run with:  YDDD_SMOKE=/tmp/yddd-smoke npx electron .
+ * (npm run smoke; npm run smoke:half skips scenarios 1–3 — see YDDD_SMOKE_HALF.)
  * Drives the real UI with synthetic pointer events, captures screenshots and
  * prints a JSON report, then quits. Not loaded during normal use. Real mouse input is ignored until the
- * last checks (navigation), so the mouse over the window can't upset it; Y3D_SMOKE_JITTER=1 checks that.
- * One run at a time: runs share /tmp/y3d-smoke (settings, panel width) and the CPU.
+ * last checks (navigation), so the mouse over the window can't upset it; YDDD_SMOKE_JITTER=1 checks that.
+ * One run at a time: runs share /tmp/yddd-smoke (settings, panel width) and the CPU.
  */
 import type { BrowserWindow } from "electron";
 import { app, Menu } from "electron";
@@ -14,8 +14,8 @@ import * as path from "node:path";
 const SCENARIO = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  for (let i = 0; i < 200 && !window.y3dApp; i++) await sleep(100);
-  const app = window.y3dApp;
+  for (let i = 0; i < 200 && !window.ydddApp; i++) await sleep(100);
+  const app = window.ydddApp;
   if (!app) throw new Error("app did not start");
   const vp = app.viewport;
   const V = vp.camera.position.constructor;
@@ -67,7 +67,7 @@ const SCENARIO = String.raw`
 const SCENARIO_2 = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp;
+  const app = window.ydddApp;
   const vp = app.viewport;
   const V = vp.camera.position.constructor;
   const canvas = vp.canvas;
@@ -292,7 +292,7 @@ const SCENARIO_3 = String.raw`
 (async () => {
   // Complex workflow on a fresh document: draw → select → push/pull → boolean → fillet → copy/array → undo/redo.
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp;
+  const app = window.ydddApp;
   const vp = app.viewport;
   const V = vp.camera.position.constructor;
   const canvas = vp.canvas;
@@ -463,7 +463,7 @@ const SCENARIO_3 = String.raw`
   // 11) Box with a filleted top edge along X; Push/Pull its X end face (outline includes the fillet arc)
   //     with several live previews first: booleans must not damage the document solid.
   {
-    const valid = window.y3dKernel.isValidShape;
+    const valid = window.ydddKernel.isValidShape;
     app.run("mode.body");
     app.setSelection([]);
     app.run("tool.box");
@@ -530,7 +530,7 @@ const SCENARIO_3 = String.raw`
     dialog([40, 30, 20]);
     const bx = last().id;
     const sh = () => app.doc.get(bx).shape;
-    const valid = window.y3dKernel.isValidShape;
+    const valid = window.ydddKernel.isValidShape;
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     // top edge along X at the back (y = max, z = 20)
     const [blo, bhi] = sh().boundingBox.bounds;
@@ -559,7 +559,7 @@ const SCENARIO_3 = String.raw`
 
   // 13b) Move edge on a solid with a curved part elsewhere (box + cylinder): only the faces round the edge must be flat
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     // 40 × 30 × 20 box at x -20..20, y 685..715 with a R10 cylinder on its +X side; the -X face divided at z = 10
     let u = K.booleanOp("union", K.makeBox(G, [0, 700, 0], 40, 30, 20), [K.makeCylinder(G, [25, 700, 0], 10, 30)]);
@@ -586,7 +586,7 @@ const SCENARIO_3 = String.raw`
 
   // 13c) …and a vertical edge whose ends lie on faces with arcs (the cylinder cuts into the top / bottom): those stay flat
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     // 40 × 30 × 20 box at x -20..20, y 685..715, a R10 cylinder round its back edge; the front face divided at x = 0
     let u = K.booleanOp("union", K.makeBox(G, [0, 700, 0], 40, 30, 20), [K.makeCylinder(G, [0, 715, 0], 10, 30)]);
@@ -613,7 +613,7 @@ const SCENARIO_3 = String.raw`
 
   // 13d) Shift+D on a closed loop of edges → a flat face copy (on the move gizmo); a single straight edge still starts a guide
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     const cyl = app.doc.makeBody(K.makeCylinder(G, [0, 900, 0], 10, 20), "Cylinder"), box = app.doc.makeBody(K.makeBox(G, [60, 900, 0], 40, 30, 20), "Box");
     app.doc.commit([...app.doc.bodies, cyl, box], "loop shapes");
@@ -647,7 +647,7 @@ const SCENARIO_3 = String.raw`
 
   // 13e) Scale: the ring dragged with Shift scales about the centre (without: the base stays put); the X / Y / Z boxes ignore Shift
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const r3 = (v) => Math.round(v * 1e6) / 1e6;
     const bx = app.doc.makeBody(K.makeBox(G, [0, 1100, 0], 40, 30, 20), "Box");
     app.doc.commit([...app.doc.bodies, bx], "scale box");
@@ -694,7 +694,7 @@ const SCENARIO_3 = String.raw`
 
   // 13f) Scale panel: sizes typed into the % fields — X "+10mm", Z "-5mm"; Scale "60mm" (the longest side → 60)
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const bx = app.doc.makeBody(K.makeBox(G, [0, 1200, 0], 40, 30, 20), "Box");
     app.doc.commit([...app.doc.bodies, bx], "scale box mm");
     const field = (k) => document.querySelector("#op-panel input[data-key=" + k + "]");
@@ -718,7 +718,7 @@ const SCENARIO_3 = String.raw`
 
   // 13g) Tapered planter (300 square top, 220 bottom, 450 high): box, G each bottom edge 40 inward (Tab), Shell the top open
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     const pl = app.doc.makeBody(K.makeBox(G, [0, 2000, 0], 300, 300, 450), "Planter");
     app.doc.commit([...app.doc.bodies, pl], "planter box");
@@ -756,7 +756,7 @@ const SCENARIO_3 = String.raw`
 
   // 13h) Move edge: Tab right after a drag shows that drag's offset; OK replaces it (one undo step back to the box)
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const near = (a, b) => Math.abs(a - b) < 1e-6;
     const pb = app.doc.makeBody(K.makeBox(G, [0, 2600, 0], 300, 300, 450), "Box");
     app.doc.commit([...app.doc.bodies, pb], "edge tab box");
@@ -817,7 +817,7 @@ const SCENARIO_3 = String.raw`
 
   // 13j) Shift+D on a closed loop that isn't flat (where a thin cylinder pierces a thick one): refused, nothing added
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const SIDE = { origin: [0, 0, 0], x: [0, 1, 0], y: [0, 0, 1], z: [1, 0, 0] }; // (along X)
     const u = K.booleanOp("union", K.makeCylinder(G, [0, 3000, 0], 10, 40), [K.makeCylinder(SIDE, [-20, 3000, 20], 6, 40)]);
     const cb = app.doc.makeBody(u, "Pierced");
@@ -840,7 +840,7 @@ const SCENARIO_3 = String.raw`
 
   // 14) Draw line on face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
   try {
-    const valid = window.y3dKernel.isValidShape;
+    const valid = window.ydddKernel.isValidShape;
     app.run("mode.body");
     app.setSelection([]);
     app.run("tool.box");
@@ -894,7 +894,7 @@ const SCENARIO_3 = String.raw`
       const cb = document.querySelector("#op-panel input[data-key=round]"); cb.checked = true; cb.dispatchEvent(new Event("change", { bubbles: true }));
       app.applyOp();
       const f = last().shape, arcs = f.edges.filter((e) => e.geomType === "CIRCLE").length;
-      expect("15 round offset " + d, last().id !== ob && eq(size(last().id), want) && arcs === 4 && window.y3dKernel.isValidShape(f), [size(last().id), arcs]);
+      expect("15 round offset " + d, last().id !== ob && eq(size(last().id), want) && arcs === 4 && window.ydddKernel.isValidShape(f), [size(last().id), arcs]);
     }
     // Make ring: only the band between the top's outline and the offset outline (a face with one hole)
     const check = (k, on) => { const cb = document.querySelector("#op-panel input[data-key=" + k + "]"); cb.checked = on; cb.dispatchEvent(new Event("change", { bubbles: true })); };
@@ -903,7 +903,7 @@ const SCENARIO_3 = String.raw`
       app.run("op.offset"); opValue("d", d); check("round", false); check("ring", true);
       app.applyOp();
       const f = last().shape, holes = f.faces.length === 1 ? f.faces[0].clone().innerWires().length : -1;
-      expect("15 offset ring " + d, last().id !== ob && eq(size(last().id), want) && holes === 1 && window.y3dKernel.isValidShape(f), [size(last().id), holes]);
+      expect("15 offset ring " + d, last().id !== ob && eq(size(last().id), want) && holes === 1 && window.ydddKernel.isValidShape(f), [size(last().id), holes]);
     }
     // Right click on empty space clears the selection (like a left click)
     app.setSelection([{ kind: "body", body: ob, id: 0 }]);
@@ -917,7 +917,7 @@ const SCENARIO_3 = String.raw`
 
   // 15b) Revolve (Pro: R E) and Sweep (Pro: S W) — the second key lands in the panel the first one opened
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const XZ = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 0, 1], z: [0, -1, 0] }; // a plane square to Y
     const add = (shape, name, kind) => { const b = app.doc.makeBody(shape, name, kind); app.doc.commit([...app.doc.bodies, b], name); return b.id; };
     const pick = (k, text) => { const sel = document.querySelector("#op-panel select[data-key=" + k + "]"); const o = [...sel.options].find((o) => o.text.startsWith(text)); sel.value = o.value; sel.dispatchEvent(new Event("change", { bubbles: true })); };
@@ -1078,7 +1078,7 @@ const SCENARIO_3 = String.raw`
 
   // 15c) Shell a cylinder cut in half (OpenCascade's own shell gave it back unchanged): hollowed, exact walls
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const half = K.booleanOp("subtract", K.makeCylinder(G, [0, 4500, 0], 20, 50), [K.makeBox(G, [50, 4500, 0], 100, 100, 200)]);
     const hb = app.doc.makeBody(half, "Half"); app.doc.commit([...app.doc.bodies, hb], "half cylinder");
     const top = app.doc.get(hb.id).shape.faces.find((f) => f.geomType === "PLANE" && f.center.z > 49);
@@ -1104,14 +1104,14 @@ const SCENARIO_3 = String.raw`
     const b0 = app.doc.get(tray).shape.boundingBox.bounds;
     const inner = faceBy(tray, (n, c) => (n[0] > 0.99 && Math.abs(c[0] - (b0[0][0] + 6)) < 1e-3) || (n[1] > 0.99 && Math.abs(c[1] - (b0[0][1] + 6)) < 1e-3));
     let sh = pp(tray, inner, -3);
-    expect("16 inner walls pushed: clean corner", inner.length === 2 && window.y3dKernel.isValidShape(sh) && sh.faces.length === 11 && eq(size(tray), [50, 50, 20]), [inner.length, sh.faces.length, size(tray)]);
+    expect("16 inner walls pushed: clean corner", inner.length === 2 && window.ydddKernel.isValidShape(sh) && sh.faces.length === 11 && eq(size(tray), [50, 50, 20]), [inner.length, sh.faces.length, size(tray)]);
     // Two adjacent outside walls pulled 5 → no notch
     sh = pp(tray, faceBy(tray, (n, c) => n[0] < -0.99 && Math.abs(c[0] - b0[0][0]) < 1e-3 || n[1] < -0.99 && Math.abs(c[1] - b0[0][1]) < 1e-3), 5);
-    expect("16 outer walls pulled: no notch", window.y3dKernel.isValidShape(sh) && sh.faces.length === 11 && eq(size(tray), [55, 55, 20]), [sh.faces.length, size(tray)]);
+    expect("16 outer walls pulled: no notch", window.ydddKernel.isValidShape(sh) && sh.faces.length === 11 && eq(size(tray), [55, 55, 20]), [sh.faces.length, size(tray)]);
     // Top + two sides of a plain box pulled 5 → corner block filled too
     const blk = mkBox([200, -300, 0], [40, 40, 30]);
     sh = pp(blk, faceBy(blk, (n) => n[2] > 0.99 || n[0] > 0.99 || n[1] > 0.99), 5);
-    expect("16 three faces pulled: plain box", window.y3dKernel.isValidShape(sh) && sh.faces.length === 6 && eq(size(blk), [45, 45, 35]), [sh.faces.length, size(blk)]);
+    expect("16 three faces pulled: plain box", window.ydddKernel.isValidShape(sh) && sh.faces.length === 6 && eq(size(blk), [45, 45, 35]), [sh.faces.length, size(blk)]);
     app.run("mode.body");
   } catch (e) {
     expect("16 corner push/pull threw", false, String(e && e.stack || e));
@@ -1167,7 +1167,7 @@ const SCENARIO_3 = String.raw`
       const sh = app.doc.get(fb).shape, cyl = sh.faces.filter((f) => f.geomType === "CYLINDRE");
       const arc = cyl[0] && cyl[0].edges.find((e) => e.geomType === "CIRCLE");
       const rad = arc ? +(Math.hypot(...[0, 1].map((k) => arc.startPoint.toTuple()[k] - arc.endPoint.toTuple()[k])) / Math.SQRT2).toFixed(3) : null;
-      expect("17 fillet + walls push/pull " + d, sel.length === 3 && window.y3dKernel.isValidShape(sh) && sh.faces.length === 7 && cyl.length === 1 && eq(size(fb), want) && rad === rr, [sel.length, sh.faces.length, cyl.length, size(fb), rad]);
+      expect("17 fillet + walls push/pull " + d, sel.length === 3 && window.ydddKernel.isValidShape(sh) && sh.faces.length === 7 && cyl.length === 1 && eq(size(fb), want) && rad === rr, [sel.length, sh.faces.length, cyl.length, size(fb), rad]);
       app.setSelection([{ kind: "body", body: fb, id: 0 }]); app.run("edit.delete");
     }
     app.run("mode.body");
@@ -1315,8 +1315,8 @@ const SCENARIO_3 = String.raw`
       for (let i = 0; i <= 6; i++) for (let j = 0; j <= 6; j++) { const q = fc.pointOnSurface(i / 6, j / 6).toTuple(); worst = Math.max(worst, Math.abs(Math.hypot(...[0, 1, 2].map((k) => (q[k] - C[k]) / f[k])) - R)); }
     }
     expect("22 stretched sphere halves: valid, exact size, on the ellipsoid",
-      shapes.every((sh) => window.y3dKernel.isValidShape(sh)) && eq([0, 1, 2].map((k) => r(hi[k] - lo[k])), [r(3 * R), r(2 * R), r(1.4 * R)]) && worst < 1e-9,
-      [shapes.map((sh) => window.y3dKernel.isValidShape(sh)), [0, 1, 2].map((k) => r(hi[k] - lo[k])), worst]);
+      shapes.every((sh) => window.ydddKernel.isValidShape(sh)) && eq([0, 1, 2].map((k) => r(hi[k] - lo[k])), [r(3 * R), r(2 * R), r(1.4 * R)]) && worst < 1e-9,
+      [shapes.map((sh) => window.ydddKernel.isValidShape(sh)), [0, 1, 2].map((k) => r(hi[k] - lo[k])), worst]);
     app.setSelection(halves.map((id) => ({ kind: "body", body: id, id: 0 }))); app.run("edit.delete");
   } catch (e) {
     expect("22 curved per-axis scale threw", false, String(e && e.stack || e));
@@ -1389,11 +1389,11 @@ const SCENARIO_3 = String.raw`
     app.run("op.pushpull");
     let slowest = 0;
     for (const v of [2, -2, 4]) { opValue("d", v); app.op.key = ""; app.previewOp(); slowest = Math.max(slowest, app.op.previewMs); }
-    const srcValid = window.y3dKernel.isValidShape(src);
+    const srcValid = window.ydddKernel.isValidShape(src);
     opValue("d", 3); app.applyOp();
     const out = app.doc.get(bid).shape;
-    expect("24 stretched fillet push/pull: fast preview, source intact, valid result", fillet && slowest < 150 && srcValid && window.y3dKernel.isValidShape(out) && out !== src,
-      { slowestPreviewMs: Math.round(slowest), srcValid, outValid: window.y3dKernel.isValidShape(out) });
+    expect("24 stretched fillet push/pull: fast preview, source intact, valid result", fillet && slowest < 150 && srcValid && window.ydddKernel.isValidShape(out) && out !== src,
+      { slowestPreviewMs: Math.round(slowest), srcValid, outValid: window.ydddKernel.isValidShape(out) });
     app.run("mode.body"); app.setSelection([{ kind: "body", body: bid, id: 0 }]); app.run("edit.delete");
   } catch (e) {
     expect("24 stretched fillet push/pull threw", false, String(e && e.stack || e));
@@ -1412,12 +1412,12 @@ const SCENARIO_3 = String.raw`
     app.run("mode.body"); app.setSelection([{ kind: "body", body: tray, id: 0 }]);
     app.run("op.fillet"); const hasList = choose("which", 1); opValue("r", 3); app.applyOp();
     const sh = app.doc.get(tray).shape;
-    expect("25 tray: Edges = Vertical rounds exactly the 8 corners (4 outside, 4 inside)", hasList && window.y3dKernel.isValidShape(sh) && cyl(tray) === 8 && sh.faces.length === facesBefore + 8, [hasList, cyl(tray), facesBefore, sh.faces.length]);
+    expect("25 tray: Edges = Vertical rounds exactly the 8 corners (4 outside, 4 inside)", hasList && window.ydddKernel.isValidShape(sh) && cyl(tray) === 8 && sh.faces.length === facesBefore + 8, [hasList, cyl(tray), facesBefore, sh.faces.length]);
     // Plain box: Horizontal rounds the 8 top / bottom edges, not the 4 vertical ones
     const bx = mk([30, 20, 10]);
     app.setSelection([{ kind: "body", body: bx, id: 0 }]);
     app.run("op.fillet"); choose("which", 2); opValue("r", 2); app.applyOp();
-    expect("25 box: Edges = Horizontal rounds the 8 top / bottom edges", window.y3dKernel.isValidShape(app.doc.get(bx).shape) && cyl(bx) === 8, cyl(bx));
+    expect("25 box: Edges = Horizontal rounds the 8 top / bottom edges", window.ydddKernel.isValidShape(app.doc.get(bx).shape) && cyl(bx) === 8, cyl(bx));
     app.setSelection([tray, bx].map((id) => ({ kind: "body", body: id, id: 0 }))); app.run("edit.delete");
     // The choice is remembered: put it back to All for later checks
     app.setSelection([]);
@@ -1473,8 +1473,8 @@ const SCENARIO_3 = String.raw`
     app.applyOp();
     const sh = app.doc.get(tid).shape, b2 = sh.boundingBox.bounds;
     expect("26 stretched tray: wall drag is instant, real preview on pause, exact Apply",
-      firstMs > 60 && slowest < 40 && deformed >= 5 && Math.abs(ghostGrow[1] - dragged) < 0.01 && Math.abs(ghostGrow[0]) < 0.01 && Math.abs(ghostGrow[2]) < 0.01 && realShown && dragged >= 5 && window.y3dKernel.isValidShape(sh) && Math.abs((b2[1][1] - b2[0][1]) - (hi[1] - lo[1] + dragged)) < 1e-6,
-      { firstPreviewMs: Math.round(firstMs), slowestDragStepMs: Math.round(slowest), deformed, ghostGrow, realShown, dragged, valid: window.y3dKernel.isValidShape(sh), dy: +(b2[1][1] - b2[0][1] - (hi[1] - lo[1])).toFixed(4) });
+      firstMs > 60 && slowest < 40 && deformed >= 5 && Math.abs(ghostGrow[1] - dragged) < 0.01 && Math.abs(ghostGrow[0]) < 0.01 && Math.abs(ghostGrow[2]) < 0.01 && realShown && dragged >= 5 && window.ydddKernel.isValidShape(sh) && Math.abs((b2[1][1] - b2[0][1]) - (hi[1] - lo[1] + dragged)) < 1e-6,
+      { firstPreviewMs: Math.round(firstMs), slowestDragStepMs: Math.round(slowest), deformed, ghostGrow, realShown, dragged, valid: window.ydddKernel.isValidShape(sh), dy: +(b2[1][1] - b2[0][1] - (hi[1] - lo[1])).toFixed(4) });
     app.run("mode.body"); app.setSelection([{ kind: "body", body: tid, id: 0 }]); app.run("edit.delete");
   } catch (e) {
     expect("26 stretched drag threw", false, String(e && e.stack || e));
@@ -1495,12 +1495,12 @@ const SCENARIO_3 = String.raw`
     // Pivot: bottom centre → the centre stays put; points must satisfy (dx / 1.5R)^2 + (dy / R)^2 = 1
     let worst = 0;
     for (const e of face.shape.edges) for (let k = 0; k <= 24; k++) { const p = e.pointAt(k / 24).toTuple(); worst = Math.max(worst, Math.abs(((p[0] - c[0]) / (1.5 * R)) ** 2 + ((p[1] - c[1]) / R) ** 2 - 1)); }
-    expect("27 circle face stretched: valid ellipse face of the right size", face.kind === "face" && window.y3dKernel.isValidShape(face.shape) && r(fb[0] - fa[0]) === r(3 * R) && r(fb[1] - fa[1]) === r(2 * R) && worst < 1e-9,
+    expect("27 circle face stretched: valid ellipse face of the right size", face.kind === "face" && window.ydddKernel.isValidShape(face.shape) && r(fb[0] - fa[0]) === r(3 * R) && r(fb[1] - fa[1]) === r(2 * R) && worst < 1e-9,
       { kind: face.kind, size: [r(fb[0] - fa[0]), r(fb[1] - fa[1])], worst });
     app.setSelection([{ kind: "body", body: cid, id: 0 }]); app.run("op.pushpull"); opValue("d", -10); app.applyOp();
     const solid = last();
     const sb = solid.shape.boundingBox.bounds;
-    expect("27 then push/pull → elliptical solid", solid.kind === "solid" && window.y3dKernel.isValidShape(solid.shape) && r(sb[1][2] - sb[0][2]) === 10, { kind: solid.kind, h: r(sb[1][2] - sb[0][2]) });
+    expect("27 then push/pull → elliptical solid", solid.kind === "solid" && window.ydddKernel.isValidShape(solid.shape) && r(sb[1][2] - sb[0][2]) === 10, { kind: solid.kind, h: r(sb[1][2] - sb[0][2]) });
     app.setSelection([{ kind: "body", body: solid.id, id: 0 }]); app.run("edit.delete");
   } catch (e) {
     expect("27 circle stretch threw", false, String(e && e.stack || e));
@@ -1523,7 +1523,7 @@ const SCENARIO_3 = String.raw`
     const out = app.doc.get(sol.id).shape, [oa, ob] = out.boundingBox.bounds;
     const err = document.querySelector("#op-panel .op-error")?.textContent ?? "";
     expect("28 stretched ellipse prism (extrusion surface + seam): Apply works",
-      types.includes("EXTRUSION_SURFACE") && !app.op && out !== sol.shape && window.y3dKernel.isValidShape(out) &&
+      types.includes("EXTRUSION_SURFACE") && !app.op && out !== sol.shape && window.ydddKernel.isValidShape(out) &&
         r(ob[0] - oa[0]) === r(b[0] - a[0]) && r(ob[1] - oa[1]) === r(1.5 * (b[1] - a[1])) && r(ob[2] - oa[2]) === r(b[2] - a[2]),
       { types, panelStillOpen: !!app.op, err, before: [0, 1, 2].map((k) => r(b[k] - a[k])), after: [0, 1, 2].map((k) => r(ob[k] - oa[k])) });
     if (app.op) app.cancelOp && key("Escape", "Escape");
@@ -1541,7 +1541,7 @@ const SCENARIO_3 = String.raw`
     const bid = last().id;
     app.setSelection([{ kind: "body", body: bid, id: 0 }]); app.run("op.fillet"); opValue("r", 3); app.applyOp();
     await sleep(50); // displayed → the shape now carries triangulations
-    const K = window.y3dKernel, sh = app.doc.get(bid).shape;
+    const K = window.ydddKernel, sh = app.doc.get(bid).shape;
     const txt = K.serializeShape(sh), back = K.deserialize(txt);
     const tri = /Triangulations (\d+)/.exec(txt);
     const bb = (x) => x.boundingBox.bounds.flat().map((v) => v.toFixed(6)).join(",");
@@ -1563,7 +1563,7 @@ const SCENARIO_3 = String.raw`
     app.setSelection([{ kind: "body", body: bid, id: 0 }]); app.run("op.fillet"); opValue("r", 4); app.applyOp();
     app.setSelection([{ kind: "body", body: bid, id: 0 }]); app.run("xf.scale"); opValue("y", 150); app.applyOp();
     const src = app.doc.get(bid).shape;
-    const K = window.y3dKernel;
+    const K = window.ydddKernel;
     const xf = src.faces.filter((f) => f.geomType === "PLANE").sort((a, b) => b.center.x - a.center.x)[0];
     app.run("mode.face"); app.setSelection([{ kind: "face", body: bid, id: xf.hashCode }]);
     app.run("op.pushpull"); opValue("d", 10); app.applyOp();
@@ -1605,7 +1605,7 @@ const SCENARIO_3 = String.raw`
     app.run("mode.body"); app.setSelection([{ kind: "body", body: cyl.id, id: 0 }]); app.run("xf.scale"); opValue("x", 150); app.applyOp();
     const ell = app.doc.get(cyl.id).shape, s2 = size(ell);
     // The same elliptic cylinder tilted (wall axis no longer vertical), pulled the same way: tilted back, same size.
-    const K = window.y3dKernel, tilted = K.rotateShape(ell, 37, [3, 4, 5], [1, 1, 0]);
+    const K = window.ydddKernel, tilted = K.rotateShape(ell, 37, [3, 4, 5], [1, 1, 0]);
     const tw = tilted.faces.find((f) => f.geomType !== "PLANE");
     const st = size(K.rotateShape(K.pushPull(tilted, tw.hashCode, 3), -37, [3, 4, 5], [1, 1, 0]));
     const out = pullWall(cyl.id, 3), s3 = size(out);
@@ -1623,7 +1623,7 @@ const SCENARIO_3 = String.raw`
   //     pushed up to the other's top through the display mesh): Union gives one solid, one top face
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const h = 52.690614026, h32 = Math.fround(h);
     const a = app.doc.makeBody(K.makeCylinder(G, [200, 0, 0], 20, h), "Cylinder"), b = app.doc.makeBody(K.makeCylinder(G, [215, 10, 0], 12, h32), "Cylinder");
     app.doc.commit([...app.doc.bodies, a, b], "two cylinders");
@@ -1653,7 +1653,7 @@ const SCENARIO_3 = String.raw`
     const topFace = src.faces.filter((f) => f.geomType === "PLANE").sort((a, b) => b.center.z - a.center.z)[0];
     app.run("mode.face"); app.setSelection([{ kind: "face", body: sid, id: topFace.hashCode }]);
     app.run("op.shell"); opValue("t", 1); app.applyOp();
-    const out = app.doc.get(sid).shape, K = window.y3dKernel;
+    const out = app.doc.get(sid).shape, K = window.ydddKernel;
     const err = document.querySelector("#op-panel .op-error")?.textContent ?? "";
     const [a, b] = out.boundingBox.bounds, [a0, b0] = src.boundingBox.bounds;
     expect("33 shell of a stretched cylinder: hollow, valid, same outside", out !== src && K.isValidShape(out) && out.faces.length > src.faces.length &&
@@ -1669,7 +1669,7 @@ const SCENARIO_3 = String.raw`
   //     touching ones still become one solid
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const lastToast = () => [...document.querySelectorAll("#toasts .toast")].pop()?.textContent ?? "";
     const add = (x, name) => { const b = app.doc.makeBody(K.makeBox(G, [x, 400, 0], 10, 10, 10), name); app.doc.commit([...app.doc.bodies, b], "box"); return b; };
     const sel = (...bs) => app.setSelection(bs.map((b) => ({ kind: "body", body: b.id, id: 0 })));
@@ -1696,7 +1696,7 @@ const SCENARIO_3 = String.raw`
   //     selected; Undo brings back the bar and the block
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const bar = app.doc.makeBody(K.makeBox(G, [0, 500, 0], 40, 10, 10), "Bar"), blk = app.doc.makeBody(K.makeBox(G, [5, 500, -5], 4, 20, 30), "Block");
     app.doc.commit([...app.doc.bodies, bar, blk], "bar + block");
     const n0 = app.doc.bodies.length;
@@ -1721,7 +1721,7 @@ const SCENARIO_3 = String.raw`
   //     piece, both halves selected); pulling one half moves only that half
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const bx = app.doc.makeBody(K.makeBox(G, [0, 600, 0], 40, 30, 20), "Box");
     app.doc.commit([...app.doc.bodies, bx], "box");
     const guides0 = app.doc.guides.length;
@@ -1767,7 +1767,7 @@ const SCENARIO_3 = String.raw`
     app.run("edit.undo");
     const back = app.doc.bodies.length === n0 + 1 && app.doc.get(cid)?.kind === "face";
     expect("37 cut a circle face by a guide: two separate half faces, undo restores",
-      nCut === n0 + 2 && sel.length === 2 && sel.every((b) => b.kind === "face" && window.y3dKernel.isValidShape(b.shape)) &&
+      nCut === n0 + 2 && sel.length === 2 && sel.every((b) => b.kind === "face" && window.ydddKernel.isValidShape(b.shape)) &&
         areas.every(([w, h]) => w === 20 && h === 10) && back,
       { bodies: [n0, nCut], selected: sel.length, kinds: sel.map((b) => b.kind), sizes: areas, undoRestores: back });
     app.doc.setGuides(app.doc.guides.slice(0, guides0), "remove guide");
@@ -1781,11 +1781,11 @@ const SCENARIO_3 = String.raw`
   //     the same model, and is dropped once the work is saved
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const b = app.doc.makeBody(K.makeBox(G, [0, 700, 0], 12, 8, 6), "Recover me");
     app.doc.commit([...app.doc.bodies, b], "box");
     await app.autosave();
-    const rec = await window.y3d.readRecovery();
+    const rec = await window.yddd.readRecovery();
     const parsed = rec ? JSON.parse(rec.data) : null;
     const saved = parsed?.bodies.find((x) => x.name === b.name);
     const back = saved ? K.deserialize(saved.brep) : null;
@@ -1793,7 +1793,7 @@ const SCENARIO_3 = String.raw`
     const fresh = !!rec && Date.now() - rec.savedAt < 60000;
     app.dropRecovery();
     await new Promise((res) => setTimeout(res, 100));
-    const gone = (await window.y3d.readRecovery()) === null;
+    const gone = (await window.yddd.readRecovery()) === null;
     expect("38 autosave writes the model to the recovery file; dropped when safe", same && fresh && gone,
       { written: !!rec, bodies: parsed?.bodies.length, docBodies: app.doc.bodies.length, same, fresh, droppedAfterSave: gone });
     app.setSelection([{ kind: "body", body: b.id, id: 0 }]); app.run("edit.delete");
@@ -1861,7 +1861,7 @@ const SCENARIO_3 = String.raw`
   //     default view) can be picked all along where it is drawn
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const bx = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 12, 12, 8), "Small");
     app.doc.commit([...app.doc.bodies, bx], "box");
     const g0 = app.doc.guides.length;
@@ -1893,7 +1893,7 @@ const SCENARIO_3 = String.raw`
   //     (the plane drawn in iso would miss it) cuts it straight up; a diagonal guide keeps its slant
   try {
     app.run("mode.body"); app.setSelection([]);
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const n = [0, 0.8741521676311549, 0.48565212634740257]; // from an X-axis guide drawn in an orbited view
     const g0 = app.doc.guides.length;
     const cutWith = (shape, guide) => {
@@ -1930,8 +1930,8 @@ const SCENARIO_3 = String.raw`
   // 39) STL quality dialog: presets fill the values, the estimate drops for Draft, editing a
   //     value selects Custom, Export returns the values and remembers them
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
-    localStorage.removeItem("y3d.stlQuality");
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    localStorage.removeItem("yddd.stlQuality");
     const cyl = K.makeCylinder(G, [0, 0, 0], 10, 30);
     const done = app.stlQualityDialog([cyl]);
     const dlg = document.getElementById("props-dlg");
@@ -1947,11 +1947,11 @@ const SCENARIO_3 = String.raw`
     const custom = radio("custom").checked;
     dlg.requestSubmit();
     const q = await done;
-    const saved = JSON.parse(localStorage.getItem("y3d.stlQuality") || "null");
+    const saved = JSON.parse(localStorage.getItem("yddd.stlQuality") || "null");
     expect("39 STL quality dialog: Normal default, Draft fewer triangles, edit → Custom, values returned + remembered",
       normal.checked && normal.tri > 0 && draft.tol === "0.1" && draft.tri > 0 && draft.tri < normal.tri && custom && q && q.tolerance === 0.05 && q.angle === 15 && saved && saved.tolerance === 0.05 && !document.getElementById("props-dlg"),
       { normal, draft, custom, q, saved });
-    localStorage.removeItem("y3d.stlQuality");
+    localStorage.removeItem("yddd.stlQuality");
   } catch (e) {
     expect("39 STL dialog threw", false, String(e && e.stack || e));
   }
@@ -1969,7 +1969,7 @@ const SCENARIO_3 = String.raw`
 const SCENARIO_STL = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel;
+  const app = window.ydddApp, K = window.ydddKernel;
   const checks = [];
   const check = (label, ok, info) => checks.push({ label, ok: !!ok, info });
   // Triangles of an axis-aligned box, wound outward (flip = inward).
@@ -2030,7 +2030,7 @@ const SCENARIO_STL = String.raw`
 /** STEP export → import round trip: solids, volumes and positions come back; bad files fail cleanly. */
 const SCENARIO_STEP = String.raw`
 (async () => {
-  const K = window.y3dKernel;
+  const K = window.ydddKernel;
   const checks = [];
   const check = (label, ok, info) => checks.push({ label, ok: !!ok, info });
   const near = (a, b, tol = 1e-3) => Math.abs(a - b) < tol * Math.max(1, Math.abs(b));
@@ -2061,7 +2061,7 @@ const SCENARIO_STEP = String.raw`
 const SCENARIO_HOUSE = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel;
+  const app = window.ydddApp, K = window.ydddKernel;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
@@ -2121,7 +2121,7 @@ const SCENARIO_HOUSE = String.raw`
 const SCENARIO_PLANTER = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel;
+  const app = window.ydddApp, K = window.ydddKernel;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
@@ -2165,7 +2165,7 @@ const SCENARIO_PLANTER = String.raw`
 const SCENARIO_BIRD = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel;
+  const app = window.ydddApp, K = window.ydddKernel;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
@@ -2224,7 +2224,7 @@ const SCENARIO_BIRD = String.raw`
 const SCENARIO_CABLE = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const r = (n) => +n.toFixed(3);
@@ -2294,7 +2294,7 @@ const SCENARIO_CABLE = String.raw`
 const SCENARIO_MEASURE = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -2419,7 +2419,7 @@ const SCENARIO_MEASURE = String.raw`
   await key("Delete", "Delete");
   expect("dimension: click its text selects it, Del removes it", selected && app.doc.dimensions.length === 0 && labels().length === 0, { selected, dims: app.doc.dimensions.length });
   app.doc.dirty = false; app.loadModel(saved, null); await sleep(50);
-  expect("dimension: saved in the .y3d file", app.doc.dimensions.length === 1 && labels().join() === "40", app.doc.dimensions);
+  expect("dimension: saved in the .yddd file", app.doc.dimensions.length === 1 && labels().join() === "40", app.doc.dimensions);
   // Linked to the edge: push/pull the box's +X end → 50; move the box → the dimension moves with it; undo → back
   {
     const boxB = app.doc.bodies.find((b) => b.name === "Box 1");
@@ -2520,12 +2520,12 @@ const SCENARIO_MEASURE = String.raw`
 })()
 `;
 
-/** Array copy (Shift+D on objects): a circle face on a box (like ~/untitled.y3d) → a row of copies, gap edge to edge. */
+/** Array copy (Shift+D on objects): a circle face on a box (like ~/untitled.yddd) → a row of copies, gap edge to edge. */
 /** Text (T): flat letter faces — a capital H the height tall, from the baseline — one group; P pushes them all; upright on a wall. */
 const SCENARIO_TEXT = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -2957,7 +2957,7 @@ const SCENARIO_TEXT = String.raw`
 const SCENARIO_ARRAY = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -3230,7 +3230,7 @@ const SCENARIO_ARRAY = String.raw`
         solids.some((x) => x.id !== a.id && x.id !== b.id && bb(x.id) === "50 0 0 / 60 10 10"),
       { n: all.length, b: bb(b.id), solids: solids.map((x) => bb(x.id)) });
   }
-  // A guide line as the span (like ~/untitled.y3d: a guide from the box's corner along its top-front edge, on past it):
+  // A guide line as the span (like ~/untitled.yddd: a guide from the box's corner along its top-front edge, on past it):
   // where it lies on the edge the edge wins; past the box the guide is picked — the copies fill it
   {
     app.doc.reset([]);
@@ -3343,7 +3343,7 @@ const SCENARIO_ARRAY = String.raw`
       after.n === before.n && after.undo === before.undo && after.redo && !after.dirty && after.xs === before.xs && reRedo === "20,45,70" &&
         firstUndo.n === 2 && firstUndo.grouped === 0 && stillEditable,
       { before, after, reRedo, firstUndo, stillEditable, bytes: text.length });
-    // A file without the history (an older Y3D's): opens as before, no undo — the array can still be changed
+    // A file without the history (an older YDDD's): opens as before, no undo — the array can still be changed
     const plain = JSON.parse(text); delete plain.history;
     app.loadModel(JSON.stringify(plain), null); await sleep(30);
     pickGroup(); await sleep(20); app.run("edit.arrayChange"); await sleep(20);
@@ -3351,7 +3351,7 @@ const SCENARIO_ARRAY = String.raw`
     panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect("array: a file without history opens without undo; its array can still be changed", !oldFile.undo && oldFile.n === 6 && oldFile.edit, oldFile);
   }
-  // Stretched circles pushed into solids (like ~/untitled.y3d): their extruded sides are drawn with few triangles,
+  // Stretched circles pushed into solids (like ~/untitled.yddd): their extruded sides are drawn with few triangles,
   // and moving / turning them reuses the triangles (no meshing again) — still the right faces to pick
   {
     app.doc.reset([]);
@@ -3401,7 +3401,7 @@ const SCENARIO_ARRAY = String.raw`
       { types, tris, views, picked, moveMs: Math.round(moveMs), domeOff: +domeOff.toFixed(3), domeTris: dm.triangles.length / 3 });
     app.setSelection(posts.map((b) => ({ kind: "body", body: b.id, id: 0 }))); app.run("edit.delete");
   }
-  // Subtract a whole array group (like ~/untitled.y3d): the box, −, click the group in the Bodies panel →
+  // Subtract a whole array group (like ~/untitled.yddd): the box, −, click the group in the Bodies panel →
   // the 36 boxes cut in one pass (one at a time was ~5× slower), one undo step
   {
     const plate = app.doc.makeBody(K.makeBox(G, [60, 500, 0], 120, 80, 8.5), "Plate");
@@ -3648,7 +3648,7 @@ const SCENARIO_ARRAY = String.raw`
 const SCENARIO_GROUPS = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel;
+  const app = window.ydddApp, K = window.ydddKernel;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -3774,7 +3774,7 @@ const SCENARIO_GROUPS = String.raw`
     app.run("edit.clearGuides"); await sleep(20);
     app.doc.commit(app.doc.bodies.filter((b) => b.id !== plate.id), "drop plate"); await sleep(20);
   }
-  head().querySelector(".ol-name").click(); window.y3dApp.viewport.fit(); await sleep(50); // (selected, for the screenshot)
+  head().querySelector(".ol-name").click(); window.ydddApp.viewport.fit(); await sleep(50); // (selected, for the screenshot)
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("groups scenario failed: " + JSON.stringify(failed));
   return [{ label: "groups", passed: checks.length - failed.length, total: checks.length, checks }];
@@ -3785,7 +3785,7 @@ const SCENARIO_GROUPS = String.raw`
 const SCENARIO_RECENTSTRIP = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp;
+  const app = window.ydddApp;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const strip = () => [...document.querySelectorAll("#recent-list [data-cmd]")].map((b) => b.dataset.cmd);
@@ -3823,7 +3823,7 @@ const SCENARIO_RECENTSTRIP = String.raw`
   const up = strip();
   const line2 = drag("tool.box", "op.fillet", true);
   const down = strip();
-  const kept = JSON.parse(localStorage.getItem("y3d.recentCmds.v2") || "[]").join() === down.join();
+  const kept = JSON.parse(localStorage.getItem("yddd.recentCmds.v2") || "[]").join() === down.join();
   app.pushRecent("op.shell");
   expect("recent strip: drag a button onto another to reorder (line shows above / below), saved; later uses don't undo it",
     line1 && line2 && up[0] === "xf.scale" && up[1] === "tool.box" && down.indexOf("tool.box") === down.indexOf("op.fillet") + 1 && kept && strip().join() === down.join(),
@@ -3834,12 +3834,12 @@ const SCENARIO_RECENTSTRIP = String.raw`
   const one = strip();
   app.run("view.clearRecent");
   const none = strip();
-  const stored = JSON.parse(localStorage.getItem("y3d.recentCmds.v2") || "null");
+  const stored = JSON.parse(localStorage.getItem("yddd.recentCmds.v2") || "null");
   app.run("view.clearRecent"); // already empty: just says so
   expect("recent strip: right-click removes one icon; View → Clear Recent Tools empties it (saved)",
     one.length === n0 - 1 && !one.includes("op.cut") && none.length === 0 && Array.isArray(stored) && stored.length === 0, { n0, one, none, stored });
   app.recent = saved.recent; app.recentUse = saved.use; app.renderRecent();
-  localStorage.setItem("y3d.recentCmds.v2", JSON.stringify(saved.recent)); localStorage.setItem("y3d.recentUse", JSON.stringify(saved.use));
+  localStorage.setItem("yddd.recentCmds.v2", JSON.stringify(saved.recent)); localStorage.setItem("yddd.recentUse", JSON.stringify(saved.use));
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("recent strip scenario failed: " + JSON.stringify(failed));
   return [{ label: "recent strip", passed: checks.length - failed.length, total: checks.length, checks }];
@@ -3851,7 +3851,7 @@ const SCENARIO_RECENTSTRIP = String.raw`
 const SCENARIO_KEEPTOOL = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const V = vp.camera.position.constructor;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
@@ -3925,7 +3925,7 @@ const SCENARIO_KEEPTOOL = String.raw`
 const SCENARIO_HOLES = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const r = (x) => Math.round(x * 1000) / 1000;
@@ -4217,7 +4217,7 @@ const SCENARIO_HOLES = String.raw`
 const SCENARIO_TOOLPANEL = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const V = vp.camera.position.constructor;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
@@ -4264,7 +4264,7 @@ const SCENARIO_TOOLPANEL = String.raw`
 const SCENARIO_CUTAXIS = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const V = vp.camera.position.constructor;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
@@ -4378,7 +4378,7 @@ const SCENARIO_CUTAXIS = String.raw`
   // Selecting a solid: the panel's Size comes from its drawn box (the exact box is slow on some spline
   // faces) — still the exact size to the 0.01 shown, on round solids too.
   try {
-    const K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const sph = app.doc.makeBody(K.makeSphereAt([0, 6000, 0], 10.37), "Sphere"), cyl = app.doc.makeBody(K.makeCylinder(G, [50, 6000, 0], 7.3, 12.5), "Cylinder");
     app.doc.commit([...app.doc.bodies, sph, cyl], "round solids");
     vp.render();
@@ -4520,9 +4520,9 @@ const SCENARIO_CUTAXIS = String.raw`
       // The Snap step is remembered for next time (as Auto is)
       const sel = document.getElementById("snap-select");
       sel.value = "0.5"; sel.dispatchEvent(new Event("change"));
-      const saved = { stored: localStorage.getItem("y3d.snapStep"), step: vp.axisSnapStep };
+      const saved = { stored: localStorage.getItem("yddd.snapStep"), step: vp.axisSnapStep };
       sel.value = "1"; sel.dispatchEvent(new Event("change"));
-      expect("Snap step: a new choice is remembered (0.5 → stored), back to 1", saved.stored === "0.5" && saved.step === 0.5 && localStorage.getItem("y3d.snapStep") === "1", saved);
+      expect("Snap step: a new choice is remembered (0.5 → stored), back to 1", saved.stored === "0.5" && saved.step === 0.5 && localStorage.getItem("yddd.snapStep") === "1", saved);
       // Long guide / path whose midpoint is far off-screen: G places the move gizmo inside the viewport
       const g0 = app.doc.guides.length;
       app.doc.setGuides([...app.doc.guides, { a: [-5000, 8000, 0], b: [1000, 8000, 0] }], "long guide");
@@ -4561,7 +4561,7 @@ const SCENARIO_CUTAXIS = String.raw`
 const SCENARIO_SNAPMARK = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -4602,19 +4602,19 @@ const SCENARIO_SNAPMARK = String.raw`
 const SCENARIO_AUTOSNAP = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
   const box = document.getElementById("auto-snap");
-  const saved = localStorage.getItem("y3d.autoSnap");
+  const saved = localStorage.getItem("yddd.autoSnap");
   app.doc.reset([]);
   const cube = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 20), "Cube");
   app.doc.commit([cube], "cube");
   app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(50);
   // The box turns it on (remembered) and words the hints for it
   box.checked = true; box.dispatchEvent(new Event("change")); await sleep(20);
-  expect("auto snap: the Auto box turns it on and it's remembered", vp.autoSnap && localStorage.getItem("y3d.autoSnap") === "1", { on: vp.autoSnap, stored: localStorage.getItem("y3d.autoSnap") });
+  expect("auto snap: the Auto box turns it on and it's remembered", vp.autoSnap && localStorage.getItem("yddd.autoSnap") === "1", { on: vp.autoSnap, stored: localStorage.getItem("yddd.autoSnap") });
   // Rectangle tool near a top corner of the cube: without Ctrl it snaps to the corner, with Ctrl it's free
   app.run("tool.rectangle"); await sleep(20);
   const corner = new V(10, -10, 20); // (the cube is centred on X / Y)
@@ -4700,7 +4700,7 @@ const SCENARIO_AUTOSNAP = String.raw`
     const glow = !!glowG, width = glowG ? Math.max(...glowG.children.map((l) => l.material.linewidth)) : 0;
     vp.render(); // (now, so the canvas holds this frame)
     const png = vp.canvas.toDataURL("image/png");
-    await window.y3d.writeFile((window.__smokeDir || "/tmp/y3d-smoke") + "/guide-glow-" + (p[2] === 0 ? "axis" : "edge") + ".png", Uint8Array.from(atob(png.split(",")[1]), (c) => c.charCodeAt(0)));
+    await window.yddd.writeFile((window.__smokeDir || "/tmp/yddd-smoke") + "/guide-glow-" + (p[2] === 0 ? "axis" : "edge") + ".png", Uint8Array.from(atob(png.split(",")[1]), (c) => c.charCodeAt(0)));
     canvas.dispatchEvent(new PointerEvent("pointerdown", { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
     await sleep(20);
     const t = app.tool, got = { glow, width, ref: !!t?.ref, onAxis: !!t?.onAxis, p1: !!t?.p1 };
@@ -4777,7 +4777,7 @@ const SCENARIO_AUTOSNAP = String.raw`
   const edgeHud = await guideHud([5, -10, 20], [0, 0, 20]), axisHud = await guideHud([40, 0, 0], [0, 5, 20]);
   expect("guide line: moving it shows length and percent — edge: mm · % of the face; axis: mm · % across the solid under the cursor",
     /^[\d.]+ mm · [\d.]+%$/.test(edgeHud ?? "") && axisHud === "Y = 5 mm · 75% across Cube 1", { edgeHud, axisHud });
-  // Where two guides cross (like ~/untitled.y3d: 69.5 along one of them, so its 1 mm steps miss it): a snap point — a circle started a few pixels off it is centred on it
+  // Where two guides cross (like ~/untitled.yddd: 69.5 along one of them, so its 1 mm steps miss it): a snap point — a circle started a few pixels off it is centred on it
   {
     vp.setView("iso"); vp.fit(); await sleep(30);
     const g0 = app.doc.guides.length;
@@ -4809,14 +4809,14 @@ const SCENARIO_AUTOSNAP = String.raw`
   const offFree = vp.tc.translationSnap, offHint = document.getElementById("status-hint").textContent;
   window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: true, bubbles: true }));
   const offSnap = vp.tc.translationSnap;
-  expect("auto snap: off — the gizmo snaps only with Ctrl, the hint says so; remembered", offFree === null && offSnap === app.snap && /hold Ctrl to snap/.test(offHint) && localStorage.getItem("y3d.autoSnap") === "0", { offFree, offSnap, offHint });
+  expect("auto snap: off — the gizmo snaps only with Ctrl, the hint says so; remembered", offFree === null && offSnap === app.snap && /hold Ctrl to snap/.test(offHint) && localStorage.getItem("yddd.autoSnap") === "0", { offFree, offSnap, offHint });
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
   app.run("tool.rectangle"); await sleep(20);
   const offPlain = await move(false), offCtrl = await move(true);
   expect("auto snap: off — the Rectangle tool snaps to the corner only with Ctrl", !offPlain && offCtrl, { offPlain, offCtrl });
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
   // (the other scenarios run with it off; the user's setting comes back)
-  if (saved === null) localStorage.removeItem("y3d.autoSnap"); else localStorage.setItem("y3d.autoSnap", saved);
+  if (saved === null) localStorage.removeItem("yddd.autoSnap"); else localStorage.setItem("yddd.autoSnap", saved);
   app.setAutoSnap(false, false);
   app.doc.reset([]);
   const failed = checks.filter((c) => !c.ok);
@@ -4829,27 +4829,27 @@ const SCENARIO_AUTOSNAP = String.raw`
 const SCENARIO_RECENT = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel;
+  const app = window.ydddApp, K = window.ydddKernel;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
-  const dir = window.__smokeDir, a = dir + "/recent-a.y3d", b = dir + "/recent-b.y3d", gone = dir + "/recent-gone.y3d";
+  const dir = window.__smokeDir, a = dir + "/recent-a.yddd", b = dir + "/recent-b.yddd", gone = dir + "/recent-gone.yddd";
   app.doc.reset([app.doc.makeBody(K.makeBox(G, [0, 0, 0], 10, 20, 30), "Box A")]);
-  await window.y3d.writeFile(a, app.modelText());
+  await window.yddd.writeFile(a, app.modelText());
   app.doc.reset([app.doc.makeBody(K.makeBox(G, [0, 0, 0], 5, 5, 5), "Box B")]);
-  await window.y3d.writeFile(b, app.modelText());
-  for (const f of [gone, b, a]) await window.y3d.addRecent(f);
-  await window.y3d.addRecent(b); // (again: moves to the top, no duplicate)
-  const list = await window.y3d.recentFiles();
+  await window.yddd.writeFile(b, app.modelText());
+  for (const f of [gone, b, a]) await window.yddd.addRecent(f);
+  await window.yddd.addRecent(b); // (again: moves to the top, no duplicate)
+  const list = await window.yddd.recentFiles();
   expect("recent: newest first, no duplicates", list.slice(0, 3).join() === [b, a, gone].join(), list);
   app.doc.reset([]); app.doc.dirty = false;
   await app.openRecent(a);
   const opened = app.doc.bodies.map((x) => x.name).join();
-  const top = (await window.y3d.recentFiles())[0];
+  const top = (await window.yddd.recentFiles())[0];
   expect("recent: opening one loads it (and puts it first)", /^Box A/.test(opened) && app.doc.filePath === a && top === a, { opened, filePath: app.doc.filePath, top });
   app.doc.dirty = false;
   await app.openRecent(gone);
-  const after = await window.y3d.recentFiles();
+  const after = await window.yddd.recentFiles();
   expect("recent: a missing file is taken off the list, the model stays", !after.includes(gone) && /^Box A/.test(app.doc.bodies.map((x) => x.name).join()), after);
   app.doc.reset([]); app.doc.dirty = false;
   const failed = checks.filter((c) => !c.ok);
@@ -4862,12 +4862,12 @@ const SCENARIO_RECENT = String.raw`
 const SCENARIO_SKETCH = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
   const checks = [];
   const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
   // Beginner layout (a Pro layout left on in the test profile would change the panel / hints)
-  localStorage.removeItem("y3d.pro"); document.body.classList.remove("pro");
+  localStorage.removeItem("yddd.pro"); document.body.classList.remove("pro");
   for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
   document.getElementById("tutorial").hidden = true; document.body.classList.remove("tutorial-open");
   app.doc.dirty = false; app.doc.reset([]);
@@ -5295,7 +5295,7 @@ const SCENARIO_SKETCH = String.raw`
     const ellOff = ellBody ? Math.max(...Array.from({ length: 50 }, (_, i) => { const q = ellBody.shape.edges[0].pointAt(i / 50); return Math.abs(((q.x - 100) / 5) ** 2 + (q.y / 20) ** 2 - 1); })) : 1;
     expect("sketch: Scale gizmo — XY ring 150%, X square 2× wide only, Tab X 50% / Y 200%, Esc cancels; a circle: X / Y unevenly → an exact freeform ellipse", doubled === "-20,-10 60,-10 60,30 -20,30" && undone === "0,0 40,0 40,20 0,20" && live === 1.5 && k150 === "-10,-5 50,-5 50,25 -10,25" && x2 === "-40,-5 80,-5 80,25 -40,25" && dOk && tabbed === "-10,-20 50,-20 50,40 -10,40" && cancelled === tabbed && curves === true && Math.abs(circleR - 15) < 1e-6 && ellOk && ellPts === "105,0 100,20 95,0 100,-20 105,0" && made.length === 2 && ellEdge === "BSPLINE_CURVE" && ellOff < 1e-9 && Math.abs(ellArea - Math.PI * 100) < 0.1, { doubled, undone, live, k150, x2, tabbed, cancelled, curves, circleR, ellPts, n: made.length, ellEdge, ellOff, ellArea });
   }
-  // Tab (Y3D's exact values): a capsule drawn only with Tab dialogs; a rectangle; then the selection moved + scaled
+  // Tab (YDDD's exact values): a capsule drawn only with Tab dialogs; a rectangle; then the selection moved + scaled
   {
     const dialog = (vals) => { const d = document.getElementById("props-dlg"); if (!d) return false; const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => { if (q[i]) q[i].value = String(v); }); d.requestSubmit(); return true; };
     const tab = async (vals) => { await key("Tab"); await sleep(10); const ok = dialog(vals); await sleep(10); return ok; };
@@ -5357,14 +5357,14 @@ const SCENARIO_SKETCH = String.raw`
     const svg = document.querySelector("#recent-list .tb-btn svg");
     const noIcons = !svg || getComputedStyle(svg).display === "none";
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
-    const back = !document.body.classList.contains("pro") && localStorage.getItem("y3d.pro") === "0";
+    const back = !document.body.classList.contains("pro") && localStorage.getItem("yddd.pro") === "0";
     expect("pro layout: Ctrl+Shift+F1 → compact sketch panel, short hints, text-only Recent; Ctrl+Shift+P back", fullTip && pro && compact && /Enter: done/.test(sketchHint) && shortHint === "Solid mode: click to select" && noIcons && back, { fullTip, pro, compact, sketchHint, shortHint, noIcons, back });
     // The Pro tip comes once, with the 20th save
-    localStorage.setItem("y3d.saves", "18"); localStorage.removeItem("y3d.proTip");
+    localStorage.setItem("yddd.saves", "18"); localStorage.removeItem("yddd.proTip");
     const tips = () => [...document.querySelectorAll("#toasts .toast")].filter((t) => /Pro layout/.test(t.textContent)).length;
     const t0 = tips(); app.noteSaved(); const t19 = tips(); app.noteSaved(); const t20 = tips(); app.noteSaved(); const t21 = tips();
-    expect("pro layout: a one-time tip with the 20th save", t19 === t0 && t20 === t0 + 1 && t21 === t20 && localStorage.getItem("y3d.proTip") === "1", { t0, t19, t20, t21 });
-    for (const k of ["y3d.saves", "y3d.proTip", "y3d.pro"]) localStorage.removeItem(k);
+    expect("pro layout: a one-time tip with the 20th save", t19 === t0 && t20 === t0 + 1 && t21 === t20 && localStorage.getItem("yddd.proTip") === "1", { t0, t19, t20, t21 });
+    for (const k of ["yddd.saves", "yddd.proTip", "yddd.pro"]) localStorage.removeItem(k);
   }
   // The 3D corner view follows a moved / scaled outline (re-framed to keep it in view)
   {
@@ -5570,7 +5570,7 @@ const SCENARIO_SKETCH = String.raw`
 const SCENARIO_MESH = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
   const checks = [];
   const check = (label, ok, info) => checks.push({ label, ok: !!ok, info });
   const binary = (tris) => {
@@ -5678,7 +5678,7 @@ const SCENARIO_MESH = String.raw`
   const ascii = new TextEncoder().encode("solid a\n facet normal 0 0 1\n  outer loop\n   vertex 0 0 0\n   vertex 1 0 0\n   vertex 0 1 0\n  endloop\n endfacet\nendsolid a\n");
   check("parse ASCII STL", K.parseStl(ascii).triangleCount === 1);
 
-  // A real file (Y3D_SMOKE_STL), e.g. a 3D Benchy.
+  // A real file (YDDD_SMOKE_STL), e.g. a 3D Benchy.
   if (window.__smokeStl) {
     t0 = performance.now();
     const ids = app.importStlData(window.__smokeStl, "Real");
@@ -5709,7 +5709,7 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   const checks: { label: string; ok: boolean; got: unknown }[] = [];
   const expect = (label: string, ok: boolean, got: unknown) => checks.push({ label, ok, got });
   const at = await js<{ x: number; y: number }>(`(async () => {
-    const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+    const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
     // Esc until no tool is left (Measure: the 1st Esc only clears its result)
     for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
     app.doc.dirty = false; app.doc.reset([]);
@@ -5720,7 +5720,7 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
     const s = vp.toScreen(new vp.camera.position.constructor(0, 0, 10));
     return { x: Math.round(s.x), y: Math.round(s.y) };
   })()`);
-  const cam = () => js<{ p: number[]; d: number; sel: number }>(`(() => { const vp = window.y3dApp.viewport, c = vp.camera.position; return { p: c.toArray(), d: c.distanceTo(vp.controls.target), sel: window.y3dApp.selection.length }; })()`);
+  const cam = () => js<{ p: number[]; d: number; sel: number }>(`(() => { const vp = window.ydddApp.viewport, c = vp.camera.position; return { p: c.toArray(), d: c.distanceTo(vp.controls.target), sel: window.ydddApp.selection.length }; })()`);
   const send = async (e: Parameters<typeof win.webContents.sendInputEvent>[0]) => {
     win.webContents.sendInputEvent(e);
     await sleep(30);
@@ -5737,7 +5737,7 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   await send({ type: "mouseUp", x: at.x, y: at.y, button: "left", modifiers: ["alt"], clickCount: 1 });
   const altClick = await cam();
   // (the orbit moved the box on screen: click where it is now)
-  const now = await js<{ x: number; y: number }>(`(() => { const vp = window.y3dApp.viewport; const s = vp.toScreen(new vp.camera.position.constructor(0, 0, 10)); return { x: Math.round(s.x), y: Math.round(s.y) }; })()`);
+  const now = await js<{ x: number; y: number }>(`(() => { const vp = window.ydddApp.viewport; const s = vp.toScreen(new vp.camera.position.constructor(0, 0, 10)); return { x: Math.round(s.x), y: Math.round(s.y) }; })()`);
   await send({ type: "mouseMove", x: now.x, y: now.y });
   await send({ type: "mouseDown", x: now.x, y: now.y, button: "left", clickCount: 1 });
   await send({ type: "mouseUp", x: now.x, y: now.y, button: "left", clickCount: 1 });
@@ -5758,7 +5758,7 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   const dist = (a: number[], b: number[]) => Math.hypot(...a.map((v, k) => v - b[k]));
   expect("navigation: Ctrl + left drag doesn't pan; Ctrl + middle drag pans", dist(p1.p, p0.p) < 1e-9 && dist(p2.p, p1.p) > 1 && Math.abs(p2.d - p1.d) < 1e-6 * p1.d, { leftMoved: dist(p1.p, p0.p), middleMoved: dist(p2.p, p1.p) });
   // Shift + middle drag pans (the target moves with it); a plain middle drag orbits (the target stays put)
-  const tgt = () => js<number[]>(`window.y3dApp.viewport.controls.target.toArray()`);
+  const tgt = () => js<number[]>(`window.ydddApp.viewport.controls.target.toArray()`);
   const t2 = await tgt();
   await drag("middle", ["shift"], now.x + 200, now.y - 150);
   const p3 = await cam(), t3 = await tgt();
@@ -5770,7 +5770,7 @@ async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   const zoomed = await cam();
   expect("navigation: the wheel / two-finger slide zooms in", zoomed.d < clicked.d * 0.99, { before: clicked.d, after: zoomed.d });
   // The right panel: drag its left edge to resize it (remembered); double-click → default width
-  const side = () => js<{ w: number; saved: string | null; gx: number; gy: number; vw: number }>(`(() => { const s = document.getElementById("sidebar").getBoundingClientRect(), g = document.getElementById("sidebar-grip").getBoundingClientRect(); return { w: s.width, saved: localStorage.getItem("y3d.sidebarWidth"), gx: Math.round(g.left + g.width / 2), gy: Math.round(g.top + g.height / 2), vw: document.getElementById("viewport").getBoundingClientRect().width }; })()`);
+  const side = () => js<{ w: number; saved: string | null; gx: number; gy: number; vw: number }>(`(() => { const s = document.getElementById("sidebar").getBoundingClientRect(), g = document.getElementById("sidebar-grip").getBoundingClientRect(); return { w: s.width, saved: localStorage.getItem("yddd.sidebarWidth"), gx: Math.round(g.left + g.width / 2), gy: Math.round(g.top + g.height / 2), vw: document.getElementById("viewport").getBoundingClientRect().width }; })()`);
   const s0 = await side();
   await send({ type: "mouseMove", x: s0.gx, y: s0.gy });
   await send({ type: "mouseDown", x: s0.gx, y: s0.gy, button: "left", clickCount: 1 });
@@ -5803,9 +5803,9 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await writeFile(path.join(outDir, name), img.toPNG());
   };
   let report: unknown[] = [];
-  // Y3D_SMOKE_JITTER=1: a stray real mouse over the window (a move to a random spot every 50 ms) — the
+  // YDDD_SMOKE_JITTER=1: a stray real mouse over the window (a move to a random spot every 50 ms) — the
   // scenarios must pass all the same (see the real-input filter below); stopped for navigationChecks.
-  const jitter = process.env.Y3D_SMOKE_JITTER
+  const jitter = process.env.YDDD_SMOKE_JITTER
     ? setInterval(() => {
         const [w, h] = win.getContentSize();
         win.webContents.sendInputEvent({ type: "mouseMove", x: Math.floor(Math.random() * w), y: Math.floor(Math.random() * h) });
@@ -5817,8 +5817,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     // view — that shows it, and one behind the camera pans to it, all at the same zoom, so a check isn't
     // lost to a fixed point it can't see.
     await win.webContents.executeJavaScript(`(async () => {
-      for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100));
-      const vp = window.y3dApp.viewport, orbit = ${!!process.env.Y3D_SMOKE_ORBIT};
+      for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100));
+      const vp = window.ydddApp.viewport, orbit = ${!!process.env.YDDD_SMOKE_ORBIT};
       // (off screen is fine: the events go straight to the canvas and the tools follow the 3D ray —
       // and turning the view in the middle of a gesture, e.g. a box's height click, would break it)
       const seen = (v) => {
@@ -5839,8 +5839,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       };
       // (in orbit runs a sketch starts from a fitted view — its picks are a few px)
       if (orbit) {
-        const run = window.y3dApp.run.bind(window.y3dApp);
-        window.y3dApp.run = (cmd, ...rest) => { if (cmd === "tool.sketch") vp.fit(); return run(cmd, ...rest); };
+        const run = window.ydddApp.run.bind(window.ydddApp);
+        window.ydddApp.run = (cmd, ...rest) => { if (cmd === "tool.sketch") vp.fit(); return run(cmd, ...rest); };
       }
       // Look at v from the camera's direction d at the same distance — the same zoom (the scenarios' snap /
       // pick tolerances are a few px, so e.g. a radius 10 away must stay well apart from its centre).
@@ -5869,7 +5869,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
           let found = false;
           // (framing the bodies at the point — what the check works on — not every body left from earlier
           // checks, spread far apart: that would zoom out so far a few px are many mm)
-          const at = window.y3dApp.doc.bodies.filter((b) => {
+          const at = window.ydddApp.doc.bodies.filter((b) => {
             const [lo, hi] = b.shape.boundingBox.bounds, pad = 5 + 0.2 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
             return [0, 1, 2].every((k) => v.getComponent(k) >= lo[k] - pad && v.getComponent(k) <= hi[k] + pad);
           }).map((b) => b.id);
@@ -5886,13 +5886,13 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       };
       return 0;
     })()`, true);
-    // Y3D_SMOKE_ORBIT="az,el[,all]": every iso view (with ",all": every view) and the starting camera
+    // YDDD_SMOKE_ORBIT="az,el[,all]": every iso view (with ",all": every view) and the starting camera
     // turned az° about Z and tilted el° — the same checks seen from other angles.
-    if (process.env.Y3D_SMOKE_ORBIT) {
-      const [az, el, all] = process.env.Y3D_SMOKE_ORBIT.split(",");
+    if (process.env.YDDD_SMOKE_ORBIT) {
+      const [az, el, all] = process.env.YDDD_SMOKE_ORBIT.split(",");
       await win.webContents.executeJavaScript(`(async () => {
-        for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100));
-        const vp = window.y3dApp.viewport, az = ${Number(az) || 0} * Math.PI / 180, el = ${Number(el) || 0} * Math.PI / 180, all = ${all === "all"};
+        for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100));
+        const vp = window.ydddApp.viewport, az = ${Number(az) || 0} * Math.PI / 180, el = ${Number(el) || 0} * Math.PI / 180, all = ${all === "all"};
         const orbit = () => {
           const t = vp.controls.target, o = vp.camera.position.clone().sub(t), V = o.constructor;
           o.applyAxisAngle(new V(0, 0, 1), az);
@@ -5912,15 +5912,15 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     }
     // The scenarios were written for snapping only while Ctrl is held: Auto snap off (not remembered).
     // SCENARIO_AUTOSNAP checks Auto snap itself.
-    await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.setAutoSnap(false, false); return 0; })()`, true);
-    // Y3D_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
+    await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100)); window.ydddApp.setAutoSnap(false, false); return 0; })()`, true);
+    // YDDD_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
-    if (process.env.Y3D_SMOKE_ONLY === "holes") {
+    if (process.env.YDDD_SMOKE_ONLY === "holes") {
       // (while working on it: just this scenario)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_HOLES, true));
       // A screenshot of the dialog and its ring on a plate's hole
       await win.webContents.executeJavaScript(`(async () => {
-        const app = window.y3dApp, K = window.y3dKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+        const app = window.ydddApp, K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
         const plate = app.doc.makeBody(K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 60, 40, 10), [K.makeCylinder(G, [0, 0, -1], 8, 12)]), "Plate");
         app.doc.commit([plate], "plate"); app.viewport.setView("iso"); app.viewport.fit(); await new Promise((r) => setTimeout(r, 100));
         const e = app.doc.get(plate.id).shape.edges.find((e) => e.geomType === "CIRCLE" && Math.abs(e.pointAt(0).z - 10) < 1e-6);
@@ -5932,25 +5932,25 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
-    if (process.env.Y3D_SMOKE_HALF) {
-      await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.doc.reset([]); return 0; })()`, true);
+    if (process.env.YDDD_SMOKE_HALF) {
+      await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100)); window.ydddApp.doc.reset([]); return 0; })()`, true);
     } else {
       // Scenarios 1–3 check an op's result straight after app.applyOp(): with the background kernel ready,
       // Fillet / Chamfer / Shell / heavy booleans apply only when its job is back. They run on this thread
       // (as before the worker starts); the background path has its own checks ("background kernel: …", in SCENARIO_TEXT).
-      await win.webContents.executeJavaScript(`(async () => { const k = window.y3dApp.bgKernel; for (let i = 0; i < 300 && !k.ready; i++) await new Promise((r) => setTimeout(r, 50)); k.ready = false; return 0; })()`, true);
+      await win.webContents.executeJavaScript(`(async () => { const k = window.ydddApp.bgKernel; for (let i = 0; i < 300 && !k.ready; i++) await new Promise((r) => setTimeout(r, 50)); k.ready = false; return 0; })()`, true);
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO, true));
       await shot("1-fillet-preview.png");
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_2, true));
       await shot("2-final.png");
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_3, true));
       await shot("3-complex.png");
-      await win.webContents.executeJavaScript(`window.y3dApp.bgKernel.ready = true; 0`, true);
+      await win.webContents.executeJavaScript(`window.ydddApp.bgKernel.ready = true; 0`, true);
     }
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_STL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_STEP, true));
-    if (process.env.Y3D_SMOKE_STL) {
-      const b64 = (await readFile(process.env.Y3D_SMOKE_STL)).toString("base64");
+    if (process.env.YDDD_SMOKE_STL) {
+      const b64 = (await readFile(process.env.YDDD_SMOKE_STL)).toString("base64");
       await win.webContents.executeJavaScript(`window.__smokeStl = Uint8Array.from(atob("${b64}"), (c) => c.charCodeAt(0)); 0`, true);
     }
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MESH, true));
@@ -5982,7 +5982,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       // The File menu shows the list (built in the main process).
       const sub = Menu.getApplicationMenu()?.items.find((i) => i.label === "&File")?.submenu?.items.find((i) => i.label === "Open Recent")?.submenu?.items ?? [];
       const labels = sub.map((i) => i.label);
-      const ok = labels[0]?.startsWith("recent-a.y3d") && labels[1]?.startsWith("recent-b.y3d") && labels.includes("Clear Recent") && !labels.some((l) => l.startsWith("recent-gone"));
+      const ok = labels[0]?.startsWith("recent-a.yddd") && labels[1]?.startsWith("recent-b.yddd") && labels.includes("Clear Recent") && !labels.some((l) => l.startsWith("recent-gone"));
       if (!ok) console.error("recent menu failed: " + JSON.stringify(labels));
       report.push({ label: "open recent menu", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Open Recent lists the files, newest first, + Clear Recent", ok, got: labels }] });
       if (!ok) errors.push("recent menu failed");
@@ -5990,10 +5990,10 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     {
       // Edit → Clear All Guides: the menu item runs the command (all guide lines gone, one undo step).
       const mi = Menu.getApplicationMenu()?.items.find((i) => i.label === "&Edit")?.submenu?.items.find((i) => i.label === "Clear All Guides");
-      await win.webContents.executeJavaScript(`(() => { const a = window.y3dApp; a.doc.reset([]); a.doc.setGuides([{ a: [0, 0, 0], b: [10, 0, 0] }, { a: [0, 0, 0], b: [0, 10, 0] }], "guides"); return 0; })()`, true);
+      await win.webContents.executeJavaScript(`(() => { const a = window.ydddApp; a.doc.reset([]); a.doc.setGuides([{ a: [0, 0, 0], b: [10, 0, 0] }, { a: [0, 0, 0], b: [0, 10, 0] }], "guides"); return 0; })()`, true);
       mi?.click();
       await new Promise((r) => setTimeout(r, 100));
-      const left: [number, number] = await win.webContents.executeJavaScript(`(() => { const a = window.y3dApp, n = a.doc.guides.length; a.run("edit.undo"); const back = a.doc.guides.length; a.doc.reset([]); return [n, back]; })()`, true);
+      const left: [number, number] = await win.webContents.executeJavaScript(`(() => { const a = window.ydddApp, n = a.doc.guides.length; a.run("edit.undo"); const back = a.doc.guides.length; a.doc.reset([]); return [n, back]; })()`, true);
       const ok = !!mi && left[0] === 0 && left[1] === 2;
       if (!ok) errors.push("clear guides menu failed: " + JSON.stringify({ found: !!mi, left }));
       const clr = Menu.getApplicationMenu()?.items.find((i) => i.label === "&View")?.submenu?.items.find((i) => i.label === "Clear Recent Tools");
@@ -6007,19 +6007,19 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       await new Promise((r) => setTimeout(r, 100));
       const got = await win.webContents.executeJavaScript(`(async () => {
         const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-        const app = window.y3dApp, vp = app.viewport, V = vp.camera.position.constructor;
+        const app = window.ydddApp, vp = app.viewport, V = vp.camera.position.constructor;
         const ev = (type, p) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
         const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
         const field = () => document.querySelector("#props-dlg label span")?.textContent;
         const dialog = (vals) => { const d = document.getElementById("props-dlg"); const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => (q[i].value = String(v))); d.requestSubmit(); };
         const size = (b) => { const [a, c] = b.shape.boundingBox.bounds; return [0, 1, 2].map((k) => Math.round((c[k] - a[k]) * 1000) / 1000); };
-        const was = localStorage.getItem("y3d.circleSize");
+        const was = localStorage.getItem("yddd.circleSize");
         app.doc.reset([]); app.run("mode.body"); app.run("view.top"); vp.fit(); await sleep(30);
         const dlg = document.getElementById("props-dlg");
         const seg = dlg ? [...dlg.querySelectorAll(".seg button")] : [];
         const startR = seg.length === 2 && seg[0].classList.contains("primary") && !seg[1].classList.contains("primary");
         seg[1]?.click();
-        const switched = seg[1]?.classList.contains("primary") && !seg[0].classList.contains("primary") && localStorage.getItem("y3d.circleSize") === "d";
+        const switched = seg[1]?.classList.contains("primary") && !seg[0].classList.contains("primary") && localStorage.getItem("yddd.circleSize") === "d";
         dlg?.requestSubmit(); await sleep(20);
         const out = { found: !!dlg, startR, switched, closed: !document.getElementById("props-dlg") };
         const make = async (cmd, vals) => {
@@ -6032,9 +6032,9 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
         out.cylD = await make("tool.cylinder", [20, 10]);
         out.sphD = await make("tool.sphere", [20]);
         out.cirD = await make("tool.circle", [20]);
-        localStorage.setItem("y3d.circleSize", "r");
+        localStorage.setItem("yddd.circleSize", "r");
         out.cylR = await make("tool.cylinder", [20, 10]);
-        if (was === null) localStorage.removeItem("y3d.circleSize"); else localStorage.setItem("y3d.circleSize", was);
+        if (was === null) localStorage.removeItem("yddd.circleSize"); else localStorage.setItem("yddd.circleSize", was);
         app.doc.reset([]);
         return out;
       })()`, true);

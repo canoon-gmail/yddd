@@ -1,7 +1,7 @@
 /** API exposed by src/main/preload.ts. */
 type FileFilter = { name: string; extensions: string[] };
 
-interface Y3DApi {
+interface YDDDApi {
   saveFile(req: { title: string; defaultPath: string; filters: FileFilter[]; data: string | Uint8Array }): Promise<string | null>;
   writeFile(filePath: string, data: string | Uint8Array): Promise<string>;
   openFile(req: { title: string; filters: FileFilter[]; binary: boolean }): Promise<{ path: string; data: string | Uint8Array } | null>;
@@ -28,5 +28,5 @@ interface Y3DApi {
 }
 
 interface Window {
-  y3d: Y3DApi;
+  yddd: YDDDApi;
 }

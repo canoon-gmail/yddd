@@ -2,7 +2,7 @@
  * Opt-in benchmarks, not loaded during normal use. Each prints a report and quits.
  * - Snapping:  N=2000 npm run bench — loads the stress scene, times object-snap queries and draw-tool pointer moves.
  * - Modelling: npm run bench:ops — times kernel operations (boolean, fillet / chamfer / shell, stretch, array)
- *   and meshing their results for display; Y3D_BENCH_FILE=model.y3d also times opening that model.
+ *   and meshing their results for display; YDDD_BENCH_FILE=model.yddd also times opening that model.
  */
 import type { BrowserWindow } from "electron";
 import { app } from "electron";
@@ -11,8 +11,8 @@ import * as path from "node:path";
 const SCENARIO = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  for (let i = 0; i < 600 && !(window.y3dApp && window.y3dApp.doc.bodies.length); i++) await sleep(100);
-  const app = window.y3dApp;
+  for (let i = 0; i < 600 && !(window.ydddApp && window.ydddApp.doc.bodies.length); i++) await sleep(100);
+  const app = window.ydddApp;
   if (!app) throw new Error("app did not start");
   await sleep(500);
   const vp = app.viewport, canvas = vp.canvas;
@@ -41,8 +41,8 @@ const SCENARIO = String.raw`
 /** Modelling operations, timed in the kernel (median of a few runs, after a warm-up). */
 const OPS = String.raw`
 (async () => {
-  for (let i = 0; i < 600 && !(window.y3dApp && window.y3dKernel); i++) await new Promise((r) => setTimeout(r, 100));
-  const app = window.y3dApp, K = window.y3dKernel;
+  for (let i = 0; i < 600 && !(window.ydddApp && window.ydddKernel); i++) await new Promise((r) => setTimeout(r, 100));
+  const app = window.ydddApp, K = window.ydddKernel;
   if (!app || !K) throw new Error("app did not start");
   const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
   const rows = [];
@@ -106,10 +106,10 @@ const OPS = String.raw`
   if (dome) bench("display", "mesh: stretched dome", () => K.tessellate(dome), 3, false);
   if (rounded) bench("display", "mesh: rounded box", () => K.tessellate(rounded), 5, false);
 
-  // A real model (Y3D_BENCH_FILE)
+  // A real model (YDDD_BENCH_FILE)
   const file = window.__benchFile;
   if (file) {
-    const text = await window.y3d.readFile(file);
+    const text = await window.yddd.readFile(file);
     if (!text) rows.push({ group: "file", name: file, error: "could not read" });
     else {
       bench("file", "open " + file.split("/").pop() + " (parse only; meshed when drawn)", () => app.loadModel(text, null), 3, false);
@@ -201,8 +201,8 @@ const OPS = String.raw`
 
 export async function runBench(win: BrowserWindow): Promise<void> {
   try {
-    if (process.env.Y3D_BENCH === "ops") {
-      const file = process.env.Y3D_BENCH_FILE ? path.resolve(process.env.Y3D_BENCH_FILE) : "";
+    if (process.env.YDDD_BENCH === "ops") {
+      const file = process.env.YDDD_BENCH_FILE ? path.resolve(process.env.YDDD_BENCH_FILE) : "";
       await win.webContents.executeJavaScript(`window.__benchFile = ${JSON.stringify(file)}; 0`, true);
       const res = await win.webContents.executeJavaScript(OPS, true);
       for (const r of res.rows) {

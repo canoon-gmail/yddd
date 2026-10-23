@@ -1,7 +1,8 @@
 /**
- * Y3D application controller: wires the document, viewport, tools,
+ * YDDD application controller: wires the document, viewport, tools,
  * operation panel, outliner, file I/O, keyboard shortcuts and native menu.
  */
+import "./migrate";
 import "./style.css";
 import * as THREE from "three";
 import {
@@ -307,8 +308,8 @@ function extrudedFrom<T extends Body>(made: T, face: Body): T {
 }
 
 /** The Text tool's last font (a built-in one's key or a system font's file; "" = Noto Sans), localStorage. */
-const TEXT_FONT_KEY = "y3d.textFont";
-/** The fonts that come with Y3D, first in the Text tool's Font list; the first one is the default. */
+const TEXT_FONT_KEY = "yddd.textFont";
+/** The fonts that come with YDDD, first in the Text tool's Font list; the first one is the default. */
 const BUILT_IN_FAMILY = (family: string) => `${family} (built in)`;
 
 /** Longest text a Text group's name shows (in quotes), the rest cut short with "…". */
@@ -328,7 +329,7 @@ interface SavedStep {
   arrays?: ArrayRecord[];
 }
 
-/** The undo history part of a .y3d file. */
+/** The undo history part of a .yddd file. */
 interface SavedHistory {
   ids: number[];
   dims?: Dimension[];
@@ -480,18 +481,18 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
 const SKETCH_COMMANDS = new Set(["view.fit", "view.fitSelection", "view.xray", "view.pro", "help.shortcuts"]);
 
 /** localStorage: Pro layout on ("1"); saves so far; the Pro tip was shown (or not needed). */
-const PRO_KEY = "y3d.pro", SAVES_KEY = "y3d.saves", PRO_TIP_KEY = "y3d.proTip";
+const PRO_KEY = "yddd.pro", SAVES_KEY = "yddd.saves", PRO_TIP_KEY = "yddd.proTip";
 /** The right panel's width: localStorage key and limits (px). */
-const SIDEBAR_KEY = "y3d.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
+const SIDEBAR_KEY = "yddd.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
 /** The Pro layout tip comes with this save. */
 const PRO_TIP_SAVES = 20;
 /** localStorage: Auto snap off ("0"); on by default. */
-const AUTO_SNAP_KEY = "y3d.autoSnap";
+const AUTO_SNAP_KEY = "yddd.autoSnap";
 /** More guides than this from one Guide tool run are grouped (Bodies panel). */
 const GUIDE_GROUP_MIN = 4;
 
 /** The Snap step (status bar), remembered for next time. */
-const SNAP_STEP_KEY = "y3d.snapStep";
+const SNAP_STEP_KEY = "yddd.snapStep";
 
 /** Edge mode's pointer: the arrow with a small "E" by it. */
 const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
@@ -569,15 +570,15 @@ const RECENT_MAX = 10;
 /** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
 const FACE_EDGE_PICK_PX = 14;
 /** v2: the strip saved before "tool.line" became "tool.divideFace" is dropped (see loadRecent). */
-const RECENT_KEY = "y3d.recentCmds.v2";
-const RECENT_KEY_OLD = "y3d.recentCmds";
+const RECENT_KEY = "yddd.recentCmds.v2";
+const RECENT_KEY_OLD = "yddd.recentCmds";
 /** The strip's commands, least recently used first (which slot a new command takes over). */
-const RECENT_USE_KEY = "y3d.recentUse";
+const RECENT_USE_KEY = "yddd.recentUse";
 /** Largest STL (triangles) imported as editable solids; bigger ones stay meshes. */
 const STL_SOLID_MAX = 20000;
 
 /** Last STL export quality (localStorage). */
-const STL_QUALITY_KEY = "y3d.stlQuality";
+const STL_QUALITY_KEY = "yddd.stlQuality";
 
 function loadRecent(): string[] {
   localStorage.removeItem(RECENT_KEY_OLD);
@@ -695,7 +696,7 @@ class App implements ToolHost {
 
     this.doc.onChange(() => this.onDocChange());
     this.doc.onChange(() => this.scheduleAutosave());
-    window.y3d?.onMenu((cmd) => (cmd.startsWith(OPEN_RECENT) ? void this.openRecent(cmd.slice(OPEN_RECENT.length)) : this.run(cmd)));
+    window.yddd?.onMenu((cmd) => (cmd.startsWith(OPEN_RECENT) ? void this.openRecent(cmd.slice(OPEN_RECENT.length)) : this.run(cmd)));
     // Unsaved-changes prompt on close is handled by the main process (see setDirty);
     // a beforeunload handler would silently block closing in Electron.
 
@@ -1077,7 +1078,7 @@ class App implements ToolHost {
       // Drag onto another button to reorder: drops above or below it (the line shows which).
       b.draggable = true;
       b.addEventListener("dragstart", (e) => {
-        e.dataTransfer!.setData("text/y3d-recent", cmd);
+        e.dataTransfer!.setData("text/yddd-recent", cmd);
         e.dataTransfer!.effectAllowed = "move";
         b.classList.add("dragging");
       });
@@ -1087,7 +1088,7 @@ class App implements ToolHost {
         return e.clientY > r.top + r.height / 2;
       };
       b.addEventListener("dragover", (e) => {
-        if (!e.dataTransfer?.types.includes("text/y3d-recent")) return;
+        if (!e.dataTransfer?.types.includes("text/yddd-recent")) return;
         e.preventDefault();
         b.classList.toggle("drop-before", !below(e));
         b.classList.toggle("drop-after", below(e));
@@ -1096,7 +1097,7 @@ class App implements ToolHost {
       b.addEventListener("drop", (e) => {
         e.preventDefault();
         b.classList.remove("drop-before", "drop-after");
-        const moved = e.dataTransfer!.getData("text/y3d-recent");
+        const moved = e.dataTransfer!.getData("text/yddd-recent");
         if (moved) this.moveRecent(moved, cmd, below(e));
       });
       box.appendChild(b);
@@ -1190,7 +1191,7 @@ class App implements ToolHost {
       case "file.saveAs": void this.fileSave(true); return;
       case "file.saveAndClose":
         void this.fileSave(false).then(() => {
-          if (!this.doc.dirty) window.y3d.closeNow();
+          if (!this.doc.dirty) window.yddd.closeNow();
         });
         return;
       case "file.importStep": void this.fileImportStep(); return;
@@ -3993,8 +3994,8 @@ class App implements ToolHost {
       if (!textFontReady()) await loadTextFont();
       if (!file || textFontReady(file)) return true;
       if (file.startsWith("builtin:")) return false; // (all loaded with the default)
-      if (!(await (this.textFonts ??= window.y3d.listFonts().catch(() => []))).some((f) => f.file === file)) return false;
-      const data = await window.y3d.readFont(file);
+      if (!(await (this.textFonts ??= window.yddd.listFonts().catch(() => []))).some((f) => f.file === file)) return false;
+      const data = await window.yddd.readFont(file);
       if (!data) return false;
       await loadTextFont(file, data);
       return textFontReady(file);
@@ -4057,7 +4058,7 @@ class App implements ToolHost {
       }
     }
     // The fonts to choose from: the built-in one, then the system's (by family, each with its styles: Regular first)
-    this.textFonts ??= window.y3d.listFonts().catch(() => []);
+    this.textFonts ??= window.yddd.listFonts().catch(() => []);
     const families = new Map<string, { style: string; file: string }[]>();
     for (const f of BUILT_IN_FONTS) families.set(BUILT_IN_FAMILY(f.family), [...(families.get(BUILT_IN_FAMILY(f.family)) ?? []), { style: f.style, file: f.key }]);
     for (const f of [...(await this.textFonts)].sort((a, b) => a.family.localeCompare(b.family))) {
@@ -5545,9 +5546,9 @@ class App implements ToolHost {
 
   private updateTitle(): void {
     const name = this.doc.filePath ? this.doc.filePath.split(/[\\/]/).pop() : "Untitled";
-    window.y3d?.setTitle(`${name}${this.doc.dirty ? " •" : ""} — Y3D`);
-    window.y3d?.setDirty(this.doc.dirty && (this.doc.bodies.length > 0 || this.doc.filePath !== null));
-    document.title = `${name} — Y3D`;
+    window.yddd?.setTitle(`${name}${this.doc.dirty ? " •" : ""} — YDDD`);
+    window.yddd?.setDirty(this.doc.dirty && (this.doc.bodies.length > 0 || this.doc.filePath !== null));
+    document.title = `${name} — YDDD`;
   }
 
   // ================================================================ UI rendering
@@ -6096,7 +6097,7 @@ class App implements ToolHost {
     const panel = $("tutorial"), { def, step: n } = this.tut, total = def.steps.length;
     const steps = def.steps.map((st, i) => `<li class="${i < n ? "done" : i === n ? "current" : ""}"><b>${st.title}</b><div>${st.how}</div></li>`).join("");
     panel.innerHTML = `<div class="head"><h2>${def.title}</h2><button data-act="close" title="Close">×</button></div>
-      <p>Follow each step with the keys shown, or press <b>Do step</b> to see y3d do it (<kbd>Ctrl</kbd>+<kbd>Z</kbd> takes it back).</p>
+      <p>Follow each step with the keys shown, or press <b>Do step</b> to see yddd do it (<kbd>Ctrl</kbd>+<kbd>Z</kbd> takes it back).</p>
       <ol>${steps}</ol>
       <div class="actions"><button class="btn" data-act="back" ${n ? "" : "disabled"}>◀ Back</button>
       <button class="btn" data-act="all" ${n < total ? "" : "disabled"}>Do all</button>
@@ -6224,7 +6225,7 @@ class App implements ToolHost {
 
   private async confirmDiscard(): Promise<boolean> {
     if (!this.doc.dirty || !this.doc.bodies.length) return true;
-    return window.y3d ? window.y3d.confirm("You have unsaved changes. Discard them?") : confirm("Discard unsaved changes?");
+    return window.yddd ? window.yddd.confirm("You have unsaved changes. Discard them?") : confirm("Discard unsaved changes?");
   }
 
   private async fileNew(): Promise<void> {
@@ -6239,13 +6240,13 @@ class App implements ToolHost {
 
   private async fileOpen(): Promise<void> {
     if (!(await this.confirmDiscard())) return;
-    const file = await window.y3d.openFile({ title: "Open model", filters: [{ name: "Y3D model", extensions: ["y3d"] }], binary: false });
+    const file = await window.yddd.openFile({ title: "Open model", filters: [{ name: "YDDD model", extensions: ["yddd", "y3d"] }], binary: false });
     if (!file) return;
     try {
       this.loadModel(file.data as string, file.path);
       this.toast(`Opened ${file.path.split(/[\\/]/).pop()}`);
       this.dropRecovery();
-      void window.y3d.addRecent(file.path);
+      void window.yddd.addRecent(file.path);
     } catch (e) {
       this.fail(e);
     }
@@ -6255,16 +6256,16 @@ class App implements ToolHost {
   async openRecent(filePath: string): Promise<void> {
     if (!(await this.confirmDiscard())) return;
     const name = filePath.split(/[\\/]/).pop();
-    const text = await window.y3d.readFile(filePath);
+    const text = await window.yddd.readFile(filePath);
     if (text === null) {
-      void window.y3d.removeRecent(filePath);
+      void window.yddd.removeRecent(filePath);
       return this.toast(`${name} is no longer there (moved or deleted) — taken off the recent list`, "error");
     }
     try {
       this.loadModel(text, filePath);
       this.toast(`Opened ${name}`);
       this.dropRecovery();
-      void window.y3d.addRecent(filePath);
+      void window.yddd.addRecent(filePath);
     } catch (e) {
       this.fail(e);
     }
@@ -6283,9 +6284,9 @@ class App implements ToolHost {
   }
 
   /**
-   * The model as a .y3d file (JSON with one B-rep per body), with its undo / redo history: the last
+   * The model as a .yddd file (JSON with one B-rep per body), with its undo / redo history: the last
    * SAVED_HISTORY steps, each body and shape stored once (a step lists the bodies it had). Older
-   * Y3D versions read the model and ignore the history.
+   * YDDD versions read the model and ignore the history.
    */
   private modelText(): string {
     const cur = this.doc.bodies;
@@ -6321,7 +6322,7 @@ class App implements ToolHost {
     };
     const undo = keep(h.undo), redo = keep(h.redo);
     return JSON.stringify({
-      format: "y3d",
+      format: "yddd",
       version: 1,
       units: "mm",
       bodies: cur.map((b) => ({
@@ -6344,7 +6345,7 @@ class App implements ToolHost {
     });
   }
 
-  /** Replace the document with a .y3d file's contents (throws if it isn't one). */
+  /** Replace the document with a .yddd file's contents (throws if it isn't one). */
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
       format: string;
@@ -6354,7 +6355,7 @@ class App implements ToolHost {
       arrays?: ArrayRecord[];
       history?: SavedHistory;
     };
-    if (json.format !== "y3d") throw new Error("not a Y3D file");
+    if (json.format !== "yddd" && json.format !== "y3d") throw new Error("not a YDDD file");
     const geom = (kind: string | undefined, text: string): BodyGeom => {
       if (kind === "mesh") return { kind: "mesh", shape: TriMesh.fromBase64(text) };
       const shape = deserialize(text);
@@ -6407,17 +6408,17 @@ class App implements ToolHost {
     const data = this.modelText();
     let path = this.doc.filePath;
     if (saveAs || !path) {
-      path = await window.y3d.saveFile({ title: "Save model", defaultPath: "untitled.y3d", filters: [{ name: "Y3D model", extensions: ["y3d"] }], data });
+      path = await window.yddd.saveFile({ title: "Save model", defaultPath: "untitled.yddd", filters: [{ name: "YDDD model", extensions: ["yddd"] }], data });
       if (!path) return;
     } else {
-      await window.y3d.writeFile(path, data);
+      await window.yddd.writeFile(path, data);
     }
     this.doc.filePath = path;
     this.doc.dirty = false;
     this.updateTitle();
     this.toast(`Saved ${path.split(/[\\/]/).pop()}`);
     this.dropRecovery();
-    void window.y3d.addRecent(path);
+    void window.yddd.addRecent(path);
     this.noteSaved();
   }
 
@@ -6434,7 +6435,7 @@ class App implements ToolHost {
    * first one), so a crash loses a few seconds at most; it is offered on the next start.
    */
   private scheduleAutosave(): void {
-    if (!window.y3d?.writeRecovery) return;
+    if (!window.yddd?.writeRecovery) return;
     if (!this.unsavedSince) this.unsavedSince = performance.now();
     clearTimeout(this.autosaveTimer);
     const wait = Math.max(0, Math.min(5000, this.unsavedSince + 30000 - performance.now()));
@@ -6455,7 +6456,7 @@ class App implements ToolHost {
       return;
     }
     try {
-      await window.y3d.writeRecovery({ savedAt: Date.now(), filePath: this.doc.filePath, data: this.modelText() });
+      await window.yddd.writeRecovery({ savedAt: Date.now(), filePath: this.doc.filePath, data: this.modelText() });
       this.autosavedVersion = version;
     } catch (e) {
       console.warn("autosave failed", e);
@@ -6467,19 +6468,19 @@ class App implements ToolHost {
     clearTimeout(this.autosaveTimer);
     this.unsavedSince = 0;
     this.autosavedVersion = this.doc.version;
-    void window.y3d?.clearRecovery?.();
+    void window.yddd?.clearRecovery?.();
   }
 
   /** On start: offer unsaved work autosaved before a crash (or a forced quit). */
   async offerRecovery(): Promise<void> {
-    const rec = await window.y3d?.readRecovery?.();
+    const rec = await window.yddd?.readRecovery?.();
     if (!rec) return;
     const when = new Date(rec.savedAt);
     const time = when.toDateString() === new Date().toDateString() ? when.toLocaleTimeString() : when.toLocaleString();
     const name = rec.filePath ? rec.filePath.split(/[\\/]/).pop() : "an unsaved model";
-    const choice = await window.y3d.ask({
+    const choice = await window.yddd.ask({
       message: "Recover unsaved work?",
-      detail: `Y3D closed unexpectedly. Changes to ${name}, autosaved at ${time}, can be recovered.`,
+      detail: `YDDD closed unexpectedly. Changes to ${name}, autosaved at ${time}, can be recovered.`,
       buttons: ["Recover", "Discard"],
     });
     if (choice !== 0) return this.dropRecovery();
@@ -6516,7 +6517,7 @@ class App implements ToolHost {
   }
 
   private async fileImportStep(): Promise<void> {
-    const file = await window.y3d.openFile({ title: "Import STEP", filters: [{ name: "STEP", extensions: ["step", "stp"] }], binary: true });
+    const file = await window.yddd.openFile({ title: "Import STEP", filters: [{ name: "STEP", extensions: ["step", "stp"] }], binary: true });
     if (!file) return;
     try {
       // Read in the background kernel (with the display meshes): the app stays live while a big file loads
@@ -6538,7 +6539,7 @@ class App implements ToolHost {
    * faces takes minutes and gives a solid too heavy to edit anyway.
    */
   private async fileImportStl(): Promise<void> {
-    const file = await window.y3d.openFile({ title: "Import STL", filters: [{ name: "STL", extensions: ["stl"] }], binary: true });
+    const file = await window.yddd.openFile({ title: "Import STL", filters: [{ name: "STL", extensions: ["stl"] }], binary: true });
     if (file) this.importStlData(file.data as Uint8Array, file.path.split(/[\\/]/).pop()!.replace(/\.stl$/i, ""));
   }
 
@@ -6715,7 +6716,7 @@ class App implements ToolHost {
         // STEP holds only solids: say so before writing a file that silently lacks the meshes.
         const names = bodies.filter((b) => b.kind === "mesh").map((b) => `"${b.name}"`).join(", ");
         const buttons = solids.length ? ["Export STEP without meshes", "Export STL instead", "Cancel"] : ["Export STL instead", "Cancel"];
-        const choice = await window.y3d.ask({
+        const choice = await window.yddd.ask({
           message: solids.length ? `STEP will not include ${meshes === 1 ? "the STL mesh" : `${meshes} STL meshes`}` : "STEP can't export STL meshes",
           detail: `${names} ${meshes === 1 ? "is a mesh" : "are meshes"} (imported STL). STEP files hold only solids, so ${meshes === 1 ? "it" : "they"} would be left out.\n\nExport STL keeps the solids and the meshes together in one file.`,
           buttons,
@@ -6754,8 +6755,8 @@ class App implements ToolHost {
           : kind === "3mf" ? await write3mf(bodies.map((b) => ({ name: b.name, mesh: meshForExport(b.shape as Solid | TriMesh, quality!) })))
           : await exportStl(shapes as (Solid | TriMesh)[], quality!);
       }
-      const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.y3d$/, "") ?? "model";
-      const path = await window.y3d.saveFile({
+      const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.yddd$/, "") ?? "model";
+      const path = await window.yddd.saveFile({
         title: `Export ${kind.toUpperCase()}`,
         defaultPath: `${base}.${kind}`,
         filters: kind === "step" ? [{ name: "STEP", extensions: ["step", "stp"] }] : kind === "3mf" ? [{ name: "3MF", extensions: ["3mf"] }] : [{ name: "STL", extensions: ["stl"] }],
@@ -6775,8 +6776,8 @@ async function boot(): Promise<void> {
   try {
     await initKernel();
     const app = new App();
-    (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

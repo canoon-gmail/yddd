@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 type FileFilter = { name: string; extensions: string[] };
 
-contextBridge.exposeInMainWorld("y3d", {
+contextBridge.exposeInMainWorld("yddd", {
   saveFile: (req: { title: string; defaultPath: string; filters: FileFilter[]; data: string | Uint8Array }) =>
     ipcRenderer.invoke("save-file", req) as Promise<string | null>,
   writeFile: (filePath: string, data: string | Uint8Array) =>

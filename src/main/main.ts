@@ -6,8 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const RENDERER_DIR = path.join(__dirname, "..", "renderer");
-// Smoke runs keep their own settings / storage: they can run next to the user's open Y3D and leave its settings alone.
-if (process.env.Y3D_SMOKE) app.setPath("userData", path.join(process.env.Y3D_SMOKE, "user-data"));
+// Smoke runs keep their own settings / storage: they can run next to the user's open YDDD and leave its settings alone.
+if (process.env.YDDD_SMOKE) app.setPath("userData", path.join(process.env.YDDD_SMOKE, "user-data"));
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
 
 // A privileged custom scheme lets the renderer fetch() the OpenCascade .wasm
@@ -56,7 +56,7 @@ const RECENT_MAX = 10;
 let recent: string[] = [];
 
 function recentFile(): string {
-  return process.env.Y3D_SMOKE ? path.join(process.env.Y3D_SMOKE, "recent.json") : path.join(app.getPath("userData"), "recent.json");
+  return process.env.YDDD_SMOKE ? path.join(process.env.YDDD_SMOKE, "recent.json") : path.join(app.getPath("userData"), "recent.json");
 }
 
 function loadRecent(): void {
@@ -74,7 +74,7 @@ function setRecent(list: string[]): void {
   buildMenu();
 }
 
-/** "name.y3d   ~/folder" for the menu ("&" doubled: it marks a mnemonic). */
+/** "name.yddd   ~/folder" for the menu ("&" doubled: it marks a mnemonic). */
 function recentLabel(file: string): string {
   const home = os.homedir();
   const dir = path.dirname(file);
@@ -257,7 +257,7 @@ function registerIpc(): void {
 
   ipcMain.handle("ask", async (_e, req: { message: string; detail?: string; buttons: string[] }) => {
     if (!win) return -1;
-    if (process.env.Y3D_SMOKE) return 0; // unattended: take the first (default) answer
+    if (process.env.YDDD_SMOKE) return 0; // unattended: take the first (default) answer
     const res = await dialog.showMessageBox(win, { type: "question", message: req.message, detail: req.detail, buttons: req.buttons, defaultId: 0, cancelId: req.buttons.length - 1 });
     return res.response;
   });
@@ -295,7 +295,7 @@ let crashed = false;
 
 /** Where unsaved work is autosaved (a smoke run uses its own, so it never touches the user's). */
 function recoveryFile(): string {
-  return process.env.Y3D_SMOKE ? path.join(process.env.Y3D_SMOKE, "recovery.y3d") : path.join(app.getPath("userData"), "recovery.y3d");
+  return process.env.YDDD_SMOKE ? path.join(process.env.YDDD_SMOKE, "recovery.yddd") : path.join(app.getPath("userData"), "recovery.yddd");
 }
 
 async function clearRecovery(): Promise<void> {
@@ -330,7 +330,7 @@ async function createWindow(): Promise<void> {
     minWidth: 900,
     minHeight: 600,
     backgroundColor: "#1e1f22",
-    title: "Y3D",
+    title: "YDDD",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -364,24 +364,25 @@ async function createWindow(): Promise<void> {
         }, 3000);
       }, 100);
     };
-    if (process.env.Y3D_SMOKE) return restart(); // unattended
+    if (process.env.YDDD_SMOKE) return restart(); // unattended
     void dialog
       .showMessageBox(win, {
         type: "error",
-        message: "Y3D stopped working and will restart.",
+        message: "YDDD stopped working and will restart.",
         detail: `Reason: ${details.reason}. Your unsaved work up to the last autosave (a few seconds before) will be offered when it restarts.`,
         buttons: ["Restart"],
       })
       .then(restart);
   });
-  // Y3D_STRESS=N: renderer populates the scene with N test solids on startup.
-  const q = process.env.Y3D_STRESS ? `?stress=${encodeURIComponent(process.env.Y3D_STRESS)}` : "";
+  // YDDD_STRESS=N: renderer populates the scene with N test solids on startup.
+  const q = process.env.YDDD_STRESS ? `?stress=${encodeURIComponent(process.env.YDDD_STRESS)}` : "";
   if (DEV_URL) await win.loadURL(DEV_URL + q);
+  // The page stays at app://y3d (the app's old name): its origin keys the saved settings (localStorage).
   else await win.loadURL("app://y3d/index.html" + q);
-  if (process.env.Y3D_SMOKE) {
+  if (process.env.YDDD_SMOKE) {
     const { runSmoke } = await import("./smoke.js");
-    await runSmoke(win, process.env.Y3D_SMOKE);
-  } else if (process.env.Y3D_BENCH) {
+    await runSmoke(win, process.env.YDDD_SMOKE);
+  } else if (process.env.YDDD_BENCH) {
     const { runBench } = await import("./bench.js");
     await runBench(win);
   }
@@ -389,7 +390,7 @@ async function createWindow(): Promise<void> {
 
 app.whenReady().then(async () => {
   // A smoke run starts clean (a leftover recovery file would stop it with the Recover question).
-  if (process.env.Y3D_SMOKE) await clearRecovery();
+  if (process.env.YDDD_SMOKE) await clearRecovery();
   registerAppProtocol();
   registerIpc();
   loadRecent();

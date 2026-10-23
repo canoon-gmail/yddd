@@ -627,7 +627,7 @@ export class SketchTool implements Tool {
 
   /** Load a picture to trace (replacing one): centred in the view, most of its height. */
   private async loadPicture(): Promise<void> {
-    const file = await window.y3d.openFile({ title: "Picture to trace", filters: [{ name: "Pictures", extensions: Object.keys(PICTURE_TYPES) }], binary: true });
+    const file = await window.yddd.openFile({ title: "Picture to trace", filters: [{ name: "Pictures", extensions: Object.keys(PICTURE_TYPES) }], binary: true });
     if (!file) return;
     try {
       await this.pictureFromBytes(file.data as Uint8Array<ArrayBuffer>, file.path.split(".").pop()!.toLowerCase());
@@ -1723,7 +1723,7 @@ export class SketchTool implements Tool {
   }
 
   /**
-   * Tab: exact values for what is being drawn (Y3D's Tab), filled in from the preview — the first point
+   * Tab: exact values for what is being drawn (YDDD's Tab), filled in from the preview — the first point
    * (X, Y), a line (length, angle), an arc (radius, angle; a first arc: its end, then its radius), a
    * rectangle (width, height), a circle (radius), or the selection (ΔX, ΔY, scale %, rotate °).
    */

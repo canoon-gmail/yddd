@@ -27,7 +27,7 @@ const num = (v: number) => {
 };
 
 /**
- * Where the plate's middle is (mm): a slicer's plate has (0, 0) at a corner, y3d's models sit round (0, 0) — the
+ * Where the plate's middle is (mm): a slicer's plate has (0, 0) at a corner, yddd's models sit round (0, 0) — the
  * whole lot is moved there together, its bottom at z 0 (256 × 256: Bambu X1 / P1 / A1; others: Arrange in the slicer).
  */
 export const PLATE_CENTRE: [number, number] = [128, 128];
@@ -46,7 +46,7 @@ function modelXml(objects: ThreeMfObject[]): string {
   const place = `1 0 0 0 1 0 0 0 1 ${shift.map(num).join(" ")}`;
   const parts: string[] = [
     `<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">`,
-    `<metadata name="Application">Y3D</metadata><resources>`,
+    `<metadata name="Application">YDDD</metadata><resources>`,
   ];
   objects.forEach((o, i) => {
     parts.push(`<object id="${i + 1}" type="model" name="${xmlText(o.name)}"><mesh><vertices>`);

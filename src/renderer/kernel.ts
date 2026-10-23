@@ -125,7 +125,7 @@ export class TriMesh {
     return new TriMesh(out);
   }
 
-  /** Positions as base64 (little-endian float32) for the .y3d file; cached, the mesh never changes. */
+  /** Positions as base64 (little-endian float32) for the .yddd file; cached, the mesh never changes. */
   toBase64(): string {
     if (this.b64 === null) {
       const bytes = new Uint8Array(this.positions.buffer, this.positions.byteOffset, this.positions.byteLength);
@@ -429,7 +429,7 @@ function extrusionStandIn(face: Face): Face | null {
 }
 
 /**
- * BRepMesh options for display meshes (flags of y3d's ReplicadMeshExtractor.extractWith): its
+ * BRepMesh options for display meshes (flags of yddd's ReplicadMeshExtractor.extractWith): its
  * defaults — surface control on (refine inside curved faces until within the tolerance), internal
  * vertices on. (Surface control off looks cheap but isn't close: 2.5 mm off on a pushed oval's
  * side, 6 mm on a stretched dome.)
@@ -719,7 +719,7 @@ export interface TextOptions {
   font?: string;
 }
 
-/** The fonts that come with Y3D (vendor/fonts): `key` is the name they're loaded under ("" = the default). */
+/** The fonts that come with YDDD (vendor/fonts): `key` is the name they're loaded under ("" = the default). */
 export const BUILT_IN_FONTS: { family: string; style: string; key: string; url: string }[] = [
   { family: "Noto Sans", style: "Regular", key: "", url: notoSans },
   { family: "Noto Sans", style: "Bold", key: "builtin:NotoSans-Bold", url: notoSansBold },
@@ -4216,7 +4216,7 @@ export async function exportStl(shapes: (Solid | TriMesh)[], quality: StlQuality
   const nSolid = solidStl ? new DataView(solidStl.buffer).getUint32(80, true) : 0;
   const n = nSolid + meshes.reduce((k, m) => k + m.triangleCount, 0);
   const out = new Uint8Array(84 + 50 * n), dv = new DataView(out.buffer);
-  out.set(new TextEncoder().encode("Y3D binary STL"));
+  out.set(new TextEncoder().encode("YDDD binary STL"));
   dv.setUint32(80, n, true);
   if (solidStl) out.set(solidStl.subarray(84, 84 + 50 * nSolid), 84);
   let o = 84 + 50 * nSolid;
@@ -4322,7 +4322,7 @@ export function importStl(data: Uint8Array): { solids: Solid[]; open: number } {
   const binary = data.length >= 84 && data.length === 84 + 50 * new DataView(data.buffer, data.byteOffset).getUint32(80, true) &&
     !new TextDecoder("latin1").decode(data.subarray(0, 400)).includes("facet");
   if (binary) (data = data.slice())[0] = 0xff;
-  const file = `/y3d-import-${Date.now()}.stl`;
+  const file = `/yddd-import-${Date.now()}.stl`;
   oc.FS.writeFile(file, data);
   try {
     const read = keep(new oc.TopoDS_Shape());

@@ -10,7 +10,7 @@ export type TutCtx = Map<string, number>;
 
 export interface TutStep {
   title: string;
-  /** What to do in y3d (HTML: keys in <kbd>). */
+  /** What to do in yddd (HTML: keys in <kbd>). */
   how: string;
   /** Do the step on `doc` (one commit, named `label`). Throws if the bodies it needs are gone. */
   run(doc: Doc, ctx: TutCtx, label: string): void;

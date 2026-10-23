@@ -1,4 +1,4 @@
-# Y3D
+# YDDD
 
 A simple, easy 3D CAD app for Linux: draw a shape, push and pull it, and get
 exact sizes — no history tree or settings to learn first. Under the hood it is
@@ -12,7 +12,7 @@ geometry kernel. Units are millimetres, Z is up.
 npm install
 npm start        # type-check, build and launch
 npm run dev      # Vite dev server with hot reload + Electron
-npm run smoke    # automated end-to-end test, screenshots in /tmp/y3d-smoke
+npm run smoke    # automated end-to-end test, screenshots in /tmp/yddd-smoke
 npm run smoke:half  # the same without scenarios 1–3 (about half the time)
 npm run start:stress          # launch with 2000 test solids (N=5000 npm run start:stress for more)
 ```
@@ -33,7 +33,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
 | Transform | Move / Rotate gizmo (snaps to grid / 5°), Duplicate, **Mirror** (**M**: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side, touching it; *Join* makes a solid and its copy one, e.g. a half dome → a ball), Delete |
 | History | Unlimited-ish undo / redo (200 steps) |
-| Files | Save/Open native `.y3d` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL / **3MF** (for slicers: Bambu Studio, PrusaSlicer, Cura — one named object per body, closed meshes, mm) |
+| Files | Save/Open native `.yddd` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL / **3MF** (for slicers: Bambu Studio, PrusaSlicer, Cura — one named object per body, closed meshes, mm) |
 
 Press **F1** in the app for all shortcuts.
 
@@ -50,8 +50,8 @@ Press **F1** in the app for all shortcuts.
 
 ```
 src/main/main.ts        Electron main: app:// protocol (serves wasm), menu, file dialogs
-src/main/preload.ts     Safe IPC bridge (window.y3d)
-src/main/smoke.ts       Opt-in E2E test (Y3D_SMOKE=<dir>)
+src/main/preload.ts     Safe IPC bridge (window.yddd)
+src/main/smoke.ts       Opt-in E2E test (YDDD_SMOKE=<dir>)
 src/renderer/kernel.ts  The only module that talks to OpenCascade/replicad
 src/renderer/kernel.worker.ts  A second OpenCascade in a Web Worker for slow ops (Fillet / Chamfer, Shell, heavy booleans, STEP import, STEP / STL / 3MF export), results meshed there too: the app stays live, Esc / Stop ends them
 src/renderer/kernelWorker.ts   The app's end of it (jobs → promises, cancel = end the worker and start a fresh one)
