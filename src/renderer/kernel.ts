@@ -386,7 +386,7 @@ const HEAVY_POLES = 400;
 /**
  * Coarser display-mesh settings for a heavy B-spline face — e.g. a profile swept along a long freeform path
  * (degree 6 × 9, 217 × 6 control points: 410 000 triangles, 6 s, at the usual settings for a 3 × 25 mm tube) —
- * to 0.4% of its size (that tube: 27 000 triangles, 0.25 s); null for any other face. Only what is drawn: the
+ * to 0.8% of its size (that tube: 12 000 triangles, 0.12 s); null for any other face. Only what is drawn: the
  * solid, STEP and the STL / 3MF quality stay as they are.
  */
 function heavyMeshOpts(f: Face, opts: { tolerance: number; angularTolerance: number }): { tolerance: number; angularTolerance: number } | null {
@@ -406,7 +406,7 @@ function heavyMeshOpts(f: Face, opts: { tolerance: number; angularTolerance: num
   const ends = f.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
   const span = (k: number) => Math.max(...ends.map((p) => p[k])) - Math.min(...ends.map((p) => p[k]));
   const size = Math.hypot(span(0), span(1), span(2)) || 1;
-  const tolerance = Math.max(opts.tolerance, size * 4e-3);
+  const tolerance = Math.max(opts.tolerance, size * 8e-3);
   return tolerance > opts.tolerance ? { tolerance, angularTolerance: Math.max(opts.angularTolerance, 0.5) } : null;
 }
 
