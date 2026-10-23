@@ -3301,6 +3301,62 @@ function outlinePoints(face: Face): V3[] {
   return face.edges.flatMap((e) => [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1].map((t) => e.pointAt(t).toTuple() as V3));
 }
 
+/**
+ * A flat face that can be pulled to a point (cone / pyramid): a full circle, or straight edges only, with no
+ * holes. Its centre (the circle's, else the area's middle), outward normal and outline: the circle, or the
+ * corners in order round the face. Null for any other face.
+ */
+export function pointCenter(shape: Shape, faceId: number): { center: V3; normal: V3; circle?: number; corners?: V3[] } | null {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE" || face.clone().innerWires().length) return null;
+  const normal = norm3(face.normalAt().toTuple() as V3), edges = face.clone().outerWire().edges;
+  if (edges.length === 1 && edges[0].geomType === "CIRCLE") {
+    const c = circleOfEdge(shape, edges[0].hashCode);
+    return c && Math.hypot(...sub3(edges[0].startPoint.toTuple() as V3, edges[0].endPoint.toTuple() as V3)) < 1e-7 ? { center: c.center, normal, circle: c.r } : null;
+  }
+  if (edges.length < 3 || edges.some((e) => e.geomType !== "LINE")) return null;
+  // (the corners in order: each edge starts where the last one ended)
+  const near = (p: V3, q: V3) => Math.hypot(...sub3(p, q)) < 1e-6;
+  const ends = edges.map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
+  const corners: V3[] = [ends[0][0]];
+  let at = ends[0][1];
+  const left = ends.slice(1);
+  while (left.length) {
+    const k = left.findIndex(([a, b]) => near(a, at) || near(b, at));
+    if (k < 0) return null;
+    const [a, b] = left.splice(k, 1)[0];
+    corners.push(at);
+    at = near(a, at) ? b : a;
+  }
+  return { center: face.center.toTuple() as V3, normal, corners };
+}
+
+/**
+ * The solid between a flat face (see pointCenter) and a point `h` out along its normal from its centre: a cone
+ * (a circle) or a pyramid (straight edges). `top` > 0 (a fraction of the face, < 1) cuts it off there flat instead.
+ */
+export function pullToPoint(shape: Shape, faceId: number, h: number, top = 0): Solid {
+  const p = pointCenter(shape, faceId);
+  if (!p) throw new Error("Pull to a point: only a flat circle or a flat face with straight edges (no holes)");
+  if (Math.abs(h) < 1e-9) throw new Error("height must not be 0");
+  if (!(top >= 0 && top < 1)) throw new Error("top size must be 0 or more and under 100%");
+  if (p.circle) {
+    const z = p.normal, ref: V3 = Math.abs(z[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
+    return makeCone({ origin: p.center, x: norm3(cross3(ref, z)), y: [0, 0, 0], z }, p.center, p.circle, p.circle * top, h);
+  }
+  const P = p.corners!, n = P.length;
+  const T = P.map((q) => [0, 1, 2].map((k) => p.center[k] + h * p.normal[k] + top * (q[k] - p.center[k])) as V3);
+  const faces = [makeFace(polyWire(P))];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    faces.push(makeFace(polyWire(top > 0 ? [P[i], P[j], T[j], T[i]] : [P[i], P[j], T[i]])));
+  }
+  if (top > 0) faces.push(makeFace(polyWire(T)));
+  const solid = makeSolid(faces).simplify() as Solid;
+  if (!isValidShape(solid) || Math.abs(solidVolume(solid)) < 1e-9) throw new Error("Pull to a point: the result is not a valid solid");
+  return solid;
+}
+
 /** The straight edges of a flat face (their ends), e.g. as revolve axes. */
 export function faceLineEdges(shape: Shape, faceId: number): [V3, V3][] {
   const face = findFace(shape, faceId);

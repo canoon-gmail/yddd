@@ -1523,6 +1523,25 @@ export class Viewport {
   }
   private pivotDots: THREE.Points | null = null;
 
+  /** The centre dot of a selected flat face (G on it pulls the face to a point), or none with null: brighter hovered / selected. */
+  showCenterDot(p: THREE.Vector3 | null, look: "shown" | "hover" | "selected" = "shown"): void {
+    if (this.centerDot) {
+      this.scene.remove(this.centerDot);
+      this.centerDot.geometry.dispose();
+      (this.centerDot.material as THREE.Material).dispose();
+      this.centerDot = null;
+    }
+    if (p) {
+      const { color, size } = { shown: { color: 0xffffff, size: 9 }, hover: { color: 0x7fd0ff, size: 13 }, selected: { color: 0xffcc33, size: 13 } }[look];
+      const m = new THREE.PointsMaterial({ color, size, sizeAttenuation: false, depthTest: false, transparent: true });
+      this.centerDot = new THREE.Points(new THREE.BufferGeometry().setFromPoints([p]), m);
+      this.centerDot.renderOrder = 29;
+      this.scene.add(this.centerDot);
+    }
+    this.requestRender();
+  }
+  private centerDot: THREE.Points | null = null;
+
   /** Show (or hide with null) the object-snap marker. */
   showSnapMarker(snap: { point: THREE.Vector3; kind: SnapKind } | null): void {
     if (!this.snapMarker) {

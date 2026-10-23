@@ -2382,6 +2382,97 @@ const SCENARIO_CONE = String.raw`
 })()
 `;
 
+/** A flat face's centre dot + G: pull the face to a point — a cone, a pyramid, a flat top, onto / into a solid. */
+const SCENARIO_POINT = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, vp = app.viewport, K = window.ydddKernel, V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  const clickAt = (p) => { const s = vp.toScreen(new V(...p)); for (const t of ["pointermove", "pointerdown", "pointerup"]) vp.canvas.dispatchEvent(new PointerEvent(t, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel input[data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); } };
+  const vol = (b) => K.solidVolume(b.shape);
+  const near = (a, b) => Math.abs(a - b) < 1e-6 * Math.max(1, Math.abs(b));
+  const dotAt = () => app.centerDot && app.centerDot.at.map((v) => Math.round(v * 1000) / 1000).join();
+  // Pull the selected thing's centre dot: click the dot, G, set the fields, apply
+  const pull = async (h, top = 0) => {
+    clickAt(app.centerDot.at); await sleep(20);
+    const picked = app.selPoint && app.selection.length === 0;
+    app.chord = null; // (not G G: the last pull's G was a moment ago)
+    key("g", "KeyG"); await sleep(30);
+    const title = app.op ? app.op.spec.title : null;
+    opValue("h", h); opValue("top", top); await sleep(30);
+    const err = document.querySelector("#op-panel .op-error")?.textContent || "";
+    app.applyOp(); await sleep(50);
+    if (app.op) key("Escape", "Escape");
+    return { picked, title, err };
+  };
+  try {
+    app.doc.reset([]); app.run("mode.body"); app.run("view.iso"); vp.fit(); await sleep(30);
+    // A circle face → a cone
+    const circle = app.doc.makeBody(K.makeCircleFace(G, [0, 0, 0], 10), "Circle", "face");
+    app.doc.commit([circle], "circle"); vp.fit(); await sleep(30);
+    app.setSelection([{ kind: "body", body: circle.id, id: 0 }]); await sleep(10);
+    expect("point: a selected circle face shows its centre dot", dotAt() === "0,0,0", dotAt());
+    if (!app.centerDot) return [{ label: "pull a face to a point", passed: 0, total: 1, checks }];
+    const c = await pull(30);
+    const cone = app.doc.bodies[0];
+    expect("point: click the dot (the face lets go), G → Pull to a point; 30 → a cone (volume π·10²·30/3, one cone face, valid, named Cone)",
+      c.picked && /Pull to a point/.test(c.title) && app.doc.bodies.length === 1 && cone.kind === "solid" && /^Cone/.test(cone.name) && near(vol(cone), Math.PI * 100 * 30 / 3)
+        && cone.shape.faces.filter((f) => f.geomType === "CONE").length === 1 && K.isValidShape(cone.shape), { ...c, n: app.doc.bodies.length, name: cone.name, kind: cone.kind, v: vol(cone) });
+    // A rectangle face, top 50% → a flat-topped pyramid
+    app.doc.reset([]);
+    const rect = app.doc.makeBody(K.makeRectFace(G, [0, 0, 0], 20, 10), "Rectangle", "face");
+    app.doc.commit([rect], "rect"); vp.fit(); await sleep(30);
+    app.setSelection([{ kind: "body", body: rect.id, id: 0 }]); await sleep(10);
+    const fr = await pull(10, 50);
+    const frustum = app.doc.bodies[0];
+    expect("point: a rectangle, Top size 50% → a flat-topped pyramid (10/3·(200 + 50 + √(200·50)), 6 faces, Pyramid)",
+      /^Pyramid/.test(frustum.name) && near(vol(frustum), 10 / 3 * (200 + 50 + 100)) && frustum.shape.faces.length === 6 && K.isValidShape(frustum.shape), { ...fr, name: frustum.name, v: vol(frustum), faces: frustum.shape.faces.length });
+    // A box's top face: out → a roof on it (one solid); into it → a pyramid-shaped pocket
+    app.doc.reset([]);
+    const box = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 10), "Box");
+    app.doc.commit([box], "box"); vp.fit(); await sleep(30);
+    app.run("mode.face");
+    const topFace = () => app.doc.bodies[0].shape.faces.find((f) => f.geomType === "PLANE" && Math.abs(f.center.z - 10) < 1e-6 && Math.abs(f.normalAt().z - 1) < 1e-6);
+    app.setSelection([{ kind: "face", body: box.id, id: topFace().hashCode }]); await sleep(10);
+    expect("point: a box's top face shows the dot in its middle", dotAt() === "0,0,10", dotAt());
+    await pull(6);
+    const roofed = app.doc.bodies[0];
+    expect("point: out of the box's top (6) → added to the box: one solid, 4000 + 20²·6/3", app.doc.bodies.length === 1 && near(vol(roofed), 4000 + 800) && K.isValidShape(roofed.shape), { n: app.doc.bodies.length, v: vol(roofed) });
+    app.run("edit.undo"); await sleep(20);
+    app.run("mode.face");
+    app.setSelection([{ kind: "face", body: app.doc.bodies[0].id, id: topFace().hashCode }]); await sleep(10);
+    const pk = await pull(-6);
+    expect("point: into the top (-6) → a pyramid pocket cut out: 4000 − 800", near(vol(app.doc.bodies[0]), 3200) && K.isValidShape(app.doc.bodies[0].shape), { ...pk, v: vol(app.doc.bodies[0]) });
+    // No dot: a curved face, two faces; Esc lets the point go
+    app.doc.reset([]);
+    const cyl = app.doc.makeBody(K.makeCylinder(G, [0, 0, 0], 5, 10), "Cylinder");
+    app.doc.commit([cyl], "cyl"); await sleep(20);
+    app.run("mode.face");
+    const side = cyl.shape.faces.find((f) => f.geomType === "CYLINDRE"), cap = cyl.shape.faces.find((f) => f.geomType === "PLANE" && f.center.z > 5);
+    app.setSelection([{ kind: "face", body: cyl.id, id: side.hashCode }]); await sleep(10);
+    const sideDot = app.centerDot;
+    app.setSelection([{ kind: "face", body: cyl.id, id: side.hashCode }, { kind: "face", body: cyl.id, id: cap.hashCode }]); await sleep(10);
+    const twoDot = app.centerDot;
+    app.setSelection([{ kind: "face", body: cyl.id, id: cap.hashCode }]); await sleep(10);
+    clickAt(app.centerDot.at); await sleep(20);
+    const sel = app.selPoint;
+    key("Escape", "Escape"); await sleep(10);
+    expect("point: no dot on a curved face or with two faces; a cylinder's top has one; Esc lets the point go",
+      !sideDot && !twoDot && sel && !app.selPoint && !app.centerDot, { sideDot, twoDot, sel, after: app.selPoint });
+  } catch (e) {
+    expect("point: no errors", false, String(e && e.stack || e));
+  }
+  app.doc.reset([]); app.run("mode.body");
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("point scenario failed: " + JSON.stringify(failed));
+  return [{ label: "pull a face to a point", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Measure (=): hovering a corner, an edge, faces and a circle shows their sizes in the HUD. */
 const SCENARIO_MEASURE = String.raw`
 (async () => {
@@ -6007,6 +6098,29 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100)); window.ydddApp.setAutoSnap(false, false); return 0; })()`, true);
     // YDDD_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
+    if (process.env.YDDD_SMOKE_ONLY === "point") {
+      // (while working on it: just the cone / pull-to-a-point scenarios)
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
+      // Screenshots: a box's top face selected (its centre dot), then G on the dot (the pyramid preview, its panel)
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.ydddApp, K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+        const box = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 40, 20), "Box");
+        app.doc.commit([box], "box"); app.viewport.setView("iso"); app.viewport.fit(); app.run("mode.face");
+        const top = box.shape.faces.find((f) => f.geomType === "PLANE" && Math.abs(f.center.z - 20) < 1e-6);
+        app.setSelection([{ kind: "face", body: box.id, id: top.hashCode }]);
+        await new Promise((r) => setTimeout(r, 300)); return 0;
+      })()`, true);
+      await shot("point-dot.png");
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.ydddApp; app.selPoint = true; app.setSelection([]); app.run("xf.move");
+        await new Promise((r) => setTimeout(r, 300)); return 0;
+      })()`, true);
+      await shot("point-pull.png");
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "holes") {
       // (while working on it: just this scenario)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_HOLES, true));
@@ -6141,6 +6255,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("7b-array.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PRINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);
