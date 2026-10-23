@@ -3333,13 +3333,14 @@ export function pointCenter(shape: Shape, faceId: number): { center: V3; normal:
 
 /**
  * The solid between a flat face (see pointCenter) and a point `h` out along its normal from its centre: a cone
- * (a circle) or a pyramid (straight edges). `top` > 0 (a fraction of the face, < 1) cuts it off there flat instead.
+ * (a circle) or a pyramid (straight edges). `top` > 0 (× the face's size) ends it there in a flat top instead —
+ * over 1 it widens (e.g. a planter flaring out).
  */
 export function pullToPoint(shape: Shape, faceId: number, h: number, top = 0): Solid {
   const p = pointCenter(shape, faceId);
   if (!p) throw new Error("Pull to a point: only a flat circle or a flat face with straight edges (no holes)");
   if (Math.abs(h) < 1e-9) throw new Error("height must not be 0");
-  if (!(top >= 0 && top < 1)) throw new Error("top size must be 0 or more and under 100%");
+  if (!(top >= 0)) throw new Error("top size must be 0 or more");
   if (p.circle) {
     const z = p.normal, ref: V3 = Math.abs(z[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
     return makeCone({ origin: p.center, x: norm3(cross3(ref, z)), y: [0, 0, 0], z }, p.center, p.circle, p.circle * top, h);

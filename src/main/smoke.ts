@@ -2070,7 +2070,7 @@ const SCENARIO_HOUSE = String.raw`
   document.querySelectorAll("#toasts .toast").forEach((t) => t.remove()); // (older ones would expire mid-way and upset the count)
   app.run("help.house"); await sleep(30);
   const panel = document.getElementById("tutorial");
-  const titles = [...panel.querySelectorAll("li b:first-child")].map((b) => b.textContent);
+  const titles = [...panel.querySelectorAll("li > b:first-child")].map((b) => b.textContent);
   const total = titles.length;
   expect("house: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "House" && total === 12, titles);
   const before = toasts().length, vols = {};
@@ -2130,9 +2130,9 @@ const SCENARIO_PLANTER = String.raw`
   document.querySelectorAll("#toasts .toast").forEach((t) => t.remove()); // (older ones would expire mid-way and upset the count)
   app.run("help.planter"); await sleep(30);
   const panel = document.getElementById("tutorial");
-  const titles = [...panel.querySelectorAll("li b:first-child")].map((b) => b.textContent);
+  const titles = [...panel.querySelectorAll("li > b:first-child")].map((b) => b.textContent);
   const total = titles.length;
-  expect("planter: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Planter" && total === 7, titles);
+  expect("planter: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Planter" && total === 4, titles);
   const before = toasts().length, vols = {}, faces = {};
   for (let i = 0; i < total; i++) {
     await press("do");
@@ -2151,10 +2151,10 @@ const SCENARIO_PLANTER = String.raw`
     // Hollow: the cavity is a frustum from z 30 to 450, its sides 2 × 30 / cos(taper) narrower than the outside's
     const w = 2 * 30 * Math.hypot(450, 40) / 450, side = (z) => 220 + 80 * z / 450 - w, a = side(450), b = side(30);
     const shelled = frustum - 420 / 3 * (a * a + b * b + a * b), hole = Math.PI * 15 * 15 * 30;
-    const v = vols, ok = Math.abs(v["Taper the right"] - frustum) < 1e-3 && faces["Taper the right"] === 6 && Math.abs(v["Hollow it"] - shelled) < 1e-2 && Math.abs(v["Hollow it"] - v["Drainage hole"] - hole) < 1e-2;
+    const v = vols, ok = Math.abs(v["Flare it up"] - frustum) < 1e-3 && faces["Flare it up"] === 6 && Math.abs(v["Hollow it"] - shelled) < 1e-2 && Math.abs(v["Hollow it"] - v["Drainage hole"] - hole) < 1e-2;
     expect("planter: 300 top, 220 bottom, 450 high; frustum, hollow (30 walls, open top), 30 mm hole through the floor",
       [lo.map(r), hi.map(r)].join() === "-150,-150,0,150,150,450" && ok,
-      { lo: lo.map(r), hi: hi.map(r), tapered: v["Taper the right"], frustum, faces: faces["Taper the right"], hollow: v["Hollow it"], shelled, hole: v["Hollow it"] - v["Drainage hole"], wantHole: hole });
+      { lo: lo.map(r), hi: hi.map(r), tapered: v["Flare it up"], frustum, faces: faces["Flare it up"], hollow: v["Hollow it"], shelled, hole: v["Hollow it"] - v["Drainage hole"], wantHole: hole });
   }
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("planter scenario failed: " + JSON.stringify(failed));
@@ -2430,8 +2430,17 @@ const SCENARIO_POINT = String.raw`
     app.setSelection([{ kind: "body", body: rect.id, id: 0 }]); await sleep(10);
     const fr = await pull(10, 50);
     const frustum = app.doc.bodies[0];
-    expect("point: a rectangle, Top size 50% → a flat-topped pyramid (10/3·(200 + 50 + √(200·50)), 6 faces, Pyramid)",
-      /^Pyramid/.test(frustum.name) && near(vol(frustum), 10 / 3 * (200 + 50 + 100)) && frustum.shape.faces.length === 6 && K.isValidShape(frustum.shape), { ...fr, name: frustum.name, v: vol(frustum), faces: frustum.shape.faces.length });
+    expect("point: a rectangle, Top size 50% → a flat-topped pyramid (10/3·(200 + 50 + √(200·50)), 6 faces, named Block: not a point)",
+      /^Block/.test(frustum.name) && near(vol(frustum), 10 / 3 * (200 + 50 + 100)) && frustum.shape.faces.length === 6 && K.isValidShape(frustum.shape), { ...fr, name: frustum.name, v: vol(frustum), faces: frustum.shape.faces.length });
+    // The planter's way: a 220 square, Height 450, Top size "300mm" → widens to 300 at the top
+    app.doc.reset([]);
+    const base = app.doc.makeBody(K.makeRectFace(G, [0, 0, 0], 220, 220), "Rectangle", "face");
+    app.doc.commit([base], "base"); vp.fit(); await sleep(30);
+    app.setSelection([{ kind: "body", body: base.id, id: 0 }]); await sleep(10);
+    const fl = await pull(450, "300mm");
+    const flared = app.doc.bodies[0], fb = flared.shape.boundingBox.bounds.map((q) => q.map((v) => Math.round(v * 1000) / 1000));
+    expect("point: Top size 300mm on a 220 square, height 450 → it widens: 300 × 300 at the top, frustum volume, named Block",
+      !fl.err && flared.name === "Block 1" && fb.join() === "-150,-150,0,150,150,450" && near(vol(flared), 450 / 3 * (300 * 300 + 220 * 220 + 300 * 220)), { ...fl, name: flared.name, fb, v: vol(flared) });
     // A box's top face: out → a roof on it (one solid); into it → a pyramid-shaped pocket
     app.doc.reset([]);
     const box = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 10), "Box");

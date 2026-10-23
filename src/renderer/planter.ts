@@ -1,60 +1,38 @@
 /**
  * Help → Planter: a tapered square planter — 300 square at the top, 220 at the bottom, 450 high —
- * hollow with an open top and a drainage hole (see tutorials.ts).
+ * hollow with an open top and a drainage hole (see tutorials.ts). The taper: a 220 square pulled up by its
+ * centre dot with a 300 mm top.
  */
-import { booleanOp, edgeBetween, makeBox, makeCylinder, moveEdges, shellSolid, type Frame, type Solid, type V3 } from "./kernel";
-import type { Doc } from "./document";
-import { GROUND, addSolid, faceWith, replaceShape as replace, roleBody as body, type TutCtx, type Tutorial } from "./tutorials";
+import { booleanOp, makeCylinder, makeRectFace, pullToPoint, shellSolid, type Frame, type Solid } from "./kernel";
+import type { Body } from "./document";
+import { GROUND, faceWith, replaceShape as replace, roleBody as body, type Tutorial } from "./tutorials";
 
 /** The bottom face's frame (looking up from below): outward normal −Z. */
 const BOTTOM: Frame = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, -1, 0], z: [0, 0, -1] };
 
 // Sizes (mm), centred on the origin.
 const TOP = 300, BASE = 220, HEIGHT = 450, WALL = 30, HOLE_R = 15;
-const IN = (TOP - BASE) / 2;
-const T = TOP / 2, B = BASE / 2;
-
-/** Move one bottom edge (from a to b, where it is now) by v. */
-function moveBottomEdge(doc: Doc, ctx: TutCtx, a: V3, b: V3, v: V3, label: string): void {
-  const p = body(doc, ctx, "planter");
-  const e = edgeBetween(p.shape, a, b);
-  if (e === null) throw new Error("That bottom edge isn't where this step expects — go Back or start again");
-  replace(doc, p.id, moveEdges(p.shape as Solid, new Set([e]), v), label);
-}
-
-/** "G, drag it a little inward, Tab: …" for one bottom edge. */
-const how = (side: string, d: string) =>
-  `<kbd>3</kbd> (Edge mode), click the <b>${side}</b> bottom edge, <kbd>G</kbd> and drag the gizmo a little inward, then <kbd>Tab</kbd> (it shows that drag): ${d} → Move — exactly ${IN} in, whatever you dragged.`;
 
 export const PLANTER: Tutorial = {
   title: "Planter",
   steps: [
     {
-      title: "Block",
-      how: `<kbd>B</kbd> <kbd>B</kbd> (Box), hover the grid, <kbd>Tab</kbd>: Width <b>${TOP}</b>, Depth <b>${TOP}</b>, Height <b>${HEIGHT}</b> → Create.`,
+      title: "Base",
+      how: `<kbd>A</kbd> (Rectangle), hover the grid at the middle, <kbd>Tab</kbd>: Width <b>${BASE}</b>, Depth <b>${BASE}</b> → Create: a flat ${BASE} square, the planter's bottom.`,
       run(doc, ctx, label) {
-        addSolid(doc, ctx, "planter", makeBox(GROUND, [0, 0, 0], TOP, TOP, HEIGHT), "Planter", label);
+        const b = doc.makeBody(makeRectFace(GROUND, [0, 0, 0], BASE, BASE), "Planter", "face");
+        ctx.set("planter", b.id);
+        doc.commit([...doc.bodies, b], label);
       },
     },
     {
-      title: "Taper the front",
-      how: how("front", `ΔX <b>0</b>, ΔY <b>${IN}</b>, ΔZ <b>0</b>`) + " The front leans in; it stays one flat face.",
-      run: (doc, ctx, label) => moveBottomEdge(doc, ctx, [-T, -T, 0], [T, -T, 0], [0, IN, 0], label),
-    },
-    {
-      title: "Taper the back",
-      how: how("back", `ΔX <b>0</b>, ΔY <b>-${IN}</b>, ΔZ <b>0</b>`),
-      run: (doc, ctx, label) => moveBottomEdge(doc, ctx, [-T, T, 0], [T, T, 0], [0, -IN, 0], label),
-    },
-    {
-      title: "Taper the left",
-      how: how("left", `ΔX <b>${IN}</b>, ΔY <b>0</b>, ΔZ <b>0</b>`),
-      run: (doc, ctx, label) => moveBottomEdge(doc, ctx, [-T, -B, 0], [-T, B, 0], [IN, 0, 0], label),
-    },
-    {
-      title: "Taper the right",
-      how: how("right", `ΔX <b>-${IN}</b>, ΔY <b>0</b>, ΔZ <b>0</b>`) + ` The bottom is now ${BASE} × ${BASE}.`,
-      run: (doc, ctx, label) => moveBottomEdge(doc, ctx, [T, -B, 0], [T, B, 0], [-IN, 0, 0], label),
+      title: "Flare it up",
+      how: `The square is still selected, with a white dot in its middle: click the <b>dot</b>, <kbd>G</kbd> — in the panel Height <b>${HEIGHT}</b>, Top size <b>${TOP}mm</b> → Enter. It becomes a solid ${HEIGHT} high that widens to ${TOP} × ${TOP} at the top: all four sides lean out at once.`,
+      run(doc, ctx, label) {
+        const p = body(doc, ctx, "planter");
+        const solid = pullToPoint(p.shape, p.shape.faces[0].hashCode, HEIGHT, TOP / BASE);
+        doc.commit(doc.bodies.map((b) => (b.id === p.id ? ({ ...b, kind: "solid", shape: solid } as Body) : b)), label);
+      },
     },
     {
       title: "Hollow it",

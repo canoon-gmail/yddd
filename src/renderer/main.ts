@@ -143,7 +143,7 @@ import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
 import { SketchTool, type SketchFrame } from "./sketch";
-import { byDiameter, CIRCLE_SIZE_KEY } from "./format";
+import { byDiameter, circleSize, CIRCLE_SIZE_KEY } from "./format";
 import type { TutCtx, Tutorial } from "./tutorials";
 
 /** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
@@ -4453,19 +4453,21 @@ class App implements ToolHost {
     if (!body || !p) return this.dropDot();
     const faceId = dot.face;
     const size = p.circle ?? Math.max(...p.corners!.map((c) => Math.hypot(c[0] - p.center[0], c[1] - p.center[1], c[2] - p.center[2])));
-    const name = p.circle ? "Cone" : "Pyramid";
+    // (Top size in mm: the circle's radius / diameter, as set — else the longest side)
+    const side = p.circle ? circleSize.shown(p.circle) : Math.max(...p.corners!.map((c, i, all) => Math.hypot(...[0, 1, 2].map((k) => all[(i + 1) % all.length][k] - c[k]))));
     const isFace = body.kind === "face";
     this.startOp({
-      title: `Pull to a point → ${name.toLowerCase()}`,
+      title: `Pull to a point → ${p.circle ? "cone" : "pyramid"}`,
       label: "Pull to a point",
-      note: isFace ? undefined : "Out of the solid: added to it · into it (a minus height): cut out of it",
+      note: `Top size: 0 a point · a % or mm (${p.circle ? `its ${circleSize.word}` : "its longest side"}, ${fmt(side)} mm now) a flat top — over 100% it widens${isFace ? "" : " · out of the solid: added to it · into it (a minus height): cut out of it"}`,
       fields: [
         { key: "h", label: "Height (mm)", value: +Math.max(1, Math.round(size)).toFixed(0), step: 1 },
-        { key: "top", label: "Top size (%) — 0: a point", value: 0, step: 10, min: 0 },
+        { key: "top", label: "Top size (% or mm)", value: 0, step: 10, min: 0, mm: side },
       ],
       compute: ({ h, top }) => {
         const piece = pullToPoint(body.shape, faceId, h, top / 100);
         if (isFace) {
+          const name = p.circle ? "Cone" : top > 0 ? "Block" : "Pyramid";
           return {
             ghost: new Map([[body.id, piece]]),
             commit: () => {
