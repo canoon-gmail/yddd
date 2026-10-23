@@ -5144,7 +5144,7 @@ class App implements ToolHost {
         // The selection's centre: how far round it goes (and, with Turn off, where each copy moves to).
         const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
         for (const id of ids) {
-          const [p, q] = this.doc.get(id)!.shape.boundingBox.bounds;
+          const [p, q] = boundsOf(this.doc.get(id)!.shape); // (remembered: slow on curved shapes, asked on every change)
           for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], q[k]); }
         }
         const c = new THREE.Vector3((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
@@ -5156,15 +5156,22 @@ class App implements ToolHost {
           const to = rel.clone().applyAxisAngle(u, THREE.MathUtils.degToRad(deg)).add(o).sub(c);
           return translateShape(shape, to.toArray() as V3);
         };
-        const ghost = new Map<number, Shape>();
+        // The preview: each object's mesh on screen turned / moved there (nothing built or meshed — instant even for
+        // many heavy objects); the copies themselves are built on Apply.
+        const matrixOf = (k: number): THREE.Matrix4 => {
+          const deg = step * k;
+          if (!turn) return new THREE.Matrix4().makeTranslation(rel.clone().applyAxisAngle(u, THREE.MathUtils.degToRad(deg)).add(o).sub(c));
+          // (about the axis through `o`: there, turn, back)
+          return new THREE.Matrix4().makeTranslation(o).multiply(new THREE.Matrix4().makeRotationAxis(u, THREE.MathUtils.degToRad(deg))).multiply(new THREE.Matrix4().makeTranslation(o.clone().negate()));
+        };
+        const preview: { id: number; matrix: THREE.Matrix4 }[] = [];
         for (let k = 1; k < count; k++) {
-          ids.forEach((id, j) => {
-            const b = this.doc.get(id)!;
-            if (b.kind === "solid" || b.kind === "face") ghost.set(-(k * ids.length + j), place(b.shape, k) as Shape);
-          });
+          const m = matrixOf(k);
+          for (const id of ids) preview.push({ id, matrix: m });
         }
         return {
-          ghost,
+          ghost: new Map(),
+          placed: preview,
           // Changing a circular copy: its old copies make way for the new ones.
           hide: edit ? [...edit.copies] : [],
           commit: () => {
@@ -5186,7 +5193,7 @@ class App implements ToolHost {
                 axis: { origin: [...ax.origin] as V3, dir: [...ax.dir] as V3 },
                 name: ai === CIRCLE ? "Circle edge" : axes[ai].name.replace(/^As before: /, ""),
                 angle, turn: turn ? 1 : 0, centre: c.toArray() as V3,
-                boxes: ids.map((id) => this.doc.get(id)!.shape.boundingBox.bounds),
+                boxes: ids.map((id) => boundsOf(this.doc.get(id)!.shape)),
               },
             };
             const arrays = [...this.doc.arrays.filter((r) => r !== edit), made];
@@ -5218,7 +5225,7 @@ class App implements ToolHost {
     const DIRS = ["+X", "−X", "+Y", "−Y", "+Z", "−Z"];
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     for (const id of ids) {
-      const [p, q] = this.doc.get(id)!.shape.boundingBox.bounds;
+      const [p, q] = boundsOf(this.doc.get(id)!.shape);
       for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], q[k]); }
     }
     const c = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2) as V3, ext = [0, 1, 2].map((k) => hi[k] - lo[k]);
@@ -5390,7 +5397,10 @@ class App implements ToolHost {
   private circularShift(rec: ArrayRecord): V3 | null {
     const boxes = rec.circular!.boxes;
     if (boxes.length < rec.sources.length) return null;
-    const now = rec.sources.map((id) => this.doc.get(id)?.shape.boundingBox.bounds);
+    const now = rec.sources.map((id) => {
+      const b = this.doc.get(id);
+      return b && boundsOf(b.shape); // (remembered: asked often, e.g. by the Bodies panel)
+    });
     if (now.some((b) => !b)) return null;
     const shift = [0, 1, 2].map((k) => now[0]![0][k] - boxes[0][0][k]) as V3;
     const tol = 1e-6 * (1 + Math.hypot(...boxes[0][1]) + Math.hypot(...shift) + Math.hypot(...rec.circular!.axis.origin));
@@ -5528,7 +5538,7 @@ class App implements ToolHost {
       if (known) return known;
       const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
       for (const id of edit ? rec!.sources : ids) {
-        const [a, b] = boundsOf(this.doc.get(id)!.shape as Shape);
+        const [a, b] = boundsOf(this.doc.get(id)!.shape);
         for (let i = 0; i < 3; i++) {
           lo[i] = Math.min(lo[i], a[i]);
           hi[i] = Math.max(hi[i], b[i]);

@@ -2689,6 +2689,24 @@ const SCENARIO_ARRAYFAST = String.raw`
     app.applyOp(); await sleep(50);
     const fresh = app.doc.bodies.filter((b) => !before.has(b.shape)), remeshed = fresh.filter((b) => vp.meshMs.has(b.shape)).length;
     expect("array fast: changed to 8 — its new copies reuse the ball's triangles (none meshed)", app.doc.bodies.length === 8 && fresh.length >= 2 && remeshed === 0, { bodies: app.doc.bodies.length, fresh: fresh.length, remeshed });
+    // Circular copy: the same — the preview turns the ball's mesh (nothing built), Apply reuses its triangles
+    if (app.op) app.cancelOp();
+    app.doc.reset([]); app.run("mode.body");
+    const b2 = app.doc.makeBody(K.makeSphereAt([20, 0, 10], 5), "Ball");
+    app.doc.commit([b2], "ball"); vp.fit(); await sleep(30);
+    app.setSelection([{ kind: "body", body: b2.id, id: 0 }]);
+    app.run("edit.circular"); await sleep(50);
+    const axisSel = document.querySelector("#op-panel select[data-key=axis]");
+    const zi = axisSel ? [...axisSel.options].findIndex((o) => /^Z axis/.test(o.textContent)) : -1;
+    opValue("axis", zi); opValue("n", 4); opValue("angle", 360); opValue("turn", 1); await sleep(150);
+    const cr = app.op && app.op.result, cp = cr && cr.placed ? cr.placed : [];
+    // (where each copy's centre goes: the ball's centre through its matrix)
+    const at = cp.map((q) => { const e = q.matrix.elements; return [20 * e[0] + 10 * e[8] + e[12], 20 * e[1] + 10 * e[9] + e[13]].map((v) => Math.round(v)).join(" "); });
+    expect("circular fast: 4 round Z — the preview is the ball's mesh turned 3 times (at 90°, 180°, 270°), no shapes built", cr && cr.ghost.size === 0 && at.join() === "0 20,-20 0,0 -20", { ghosts: cr && cr.ghost.size, at, zi });
+    const before2 = new Set(app.doc.bodies.map((b) => b.shape));
+    app.applyOp(); await sleep(50);
+    const made2 = app.doc.bodies.filter((b) => !before2.has(b.shape)), remeshed2 = made2.filter((b) => vp.meshMs.has(b.shape)).length;
+    expect("circular fast: applied — 4 balls, the 3 copies reuse the ball's triangles (none meshed)", app.doc.bodies.length === 4 && made2.length === 3 && remeshed2 === 0, { bodies: app.doc.bodies.length, made: made2.length, remeshed2 });
   } catch (e) {
     expect("array fast: no errors", false, String(e && e.stack || e));
   }
