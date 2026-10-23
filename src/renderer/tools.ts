@@ -30,6 +30,7 @@ import {
   type Shape,
   type V3,
 } from "./kernel";
+import { circleSize } from "./format";
 
 export interface ToolHost {
   viewport: Viewport;
@@ -486,7 +487,7 @@ export class CylinderTool extends DrawTool {
     const n = this.name;
     return [
       `${n}: click the center (on the grid or on a planar face)`,
-      `${n}: click to set the radius — or type radius + Enter`,
+      `${n}: click to set the ${circleSize.word} — or type ${circleSize.word} + Enter`,
       `${n}: move to set the height and click — or type height + Enter`,
     ];
   }
@@ -543,7 +544,7 @@ export class CylinderTool extends DrawTool {
     const v = values[0];
     if (!v) return;
     if (this.stage === 1) {
-      this.r = Math.abs(v);
+      this.r = circleSize.radius(Math.abs(v));
       if (this.faceMode) {
         this.buildFace();
         return;
@@ -558,14 +559,14 @@ export class CylinderTool extends DrawTool {
   }
 
   protected props(): PropField[] {
-    const f: PropField[] = [{ label: "Radius", value: +this.r.toFixed(4), min: 0 }];
+    const f: PropField[] = [{ label: circleSize.label, value: +circleSize.shown(this.r).toFixed(4), min: 0 }];
     if (!this.faceMode) f.push({ label: "Height", value: +this.h.toFixed(4) });
     return f;
   }
 
   protected applyProps([r, h]: number[]): void {
-    if (!(r > 0)) return this.host.fail("radius must be > 0");
-    this.r = r;
+    if (!(r > 0)) return this.host.fail(`${circleSize.word} must be > 0`);
+    this.r = circleSize.radius(r);
     if (this.faceMode) return this.buildFace();
     if (!h) return this.host.fail("height must not be 0");
     this.h = h;
@@ -585,14 +586,14 @@ export class CylinderTool extends DrawTool {
     const objs: THREE.Object3D[] = [this.outline(pts), this.cursor(this.center())];
     if (this.r > 0) objs.push(this.frame.place(new THREE.Mesh(new THREE.CircleGeometry(this.r, 64), this.host.viewport.mats.previewFill), this.center()));
     this.host.viewport.setOverlay(objs);
-    this.host.hud(`R ${fmt(this.r)} mm`, pts[0]);
+    this.host.hud(`${circleSize.tag} ${fmt(circleSize.shown(this.r))} mm`, pts[0]);
   }
 
   private drawCylinder(): void {
     const geo = new THREE.CylinderGeometry(this.r, this.r, Math.max(Math.abs(this.h), 1e-3), 64);
     const c = this.center().addScaledVector(this.frame.z, this.h / 2);
     this.host.viewport.setOverlay([this.frame.place(this.solidPreview(geo), c, "xz-cyl")]);
-    this.host.hud(`R ${fmt(this.r)} × H ${fmt(this.h)} mm`, this.center().addScaledVector(this.frame.z, this.h));
+    this.host.hud(`${circleSize.tag} ${fmt(circleSize.shown(this.r))} × H ${fmt(this.h)} mm`, this.center().addScaledVector(this.frame.z, this.h));
   }
 
   private build(): void {
@@ -613,10 +614,9 @@ export class CylinderTool extends DrawTool {
 
 export class SphereTool extends DrawTool {
   readonly name = "Sphere";
-  protected readonly hints = [
-    "Sphere: click the center (on the grid or on a planar face)",
-    "Sphere: click to set the radius — or type radius + Enter",
-  ];
+  protected get hints(): string[] {
+    return ["Sphere: click the center (on the grid or on a planar face)", `Sphere: click to set the ${circleSize.word} — or type ${circleSize.word} + Enter`];
+  }
   private c = new THREE.Vector3();
   private cu = 0;
   private cv = 0;
@@ -654,18 +654,18 @@ export class SphereTool extends DrawTool {
 
   protected applyTyped(values: number[]): void {
     if (this.stage === 1 && values[0]) {
-      this.r = Math.abs(values[0]);
+      this.r = circleSize.radius(Math.abs(values[0]));
       this.build();
     }
   }
 
   protected props(): PropField[] {
-    return [{ label: "Radius", value: +this.r.toFixed(4), min: 0 }];
+    return [{ label: circleSize.label, value: +circleSize.shown(this.r).toFixed(4), min: 0 }];
   }
 
   protected applyProps([r]: number[]): void {
-    if (!(r > 0)) return this.host.fail("radius must be > 0");
-    this.r = r;
+    if (!(r > 0)) return this.host.fail(`${circleSize.word} must be > 0`);
+    this.r = circleSize.radius(r);
     this.build();
   }
 
@@ -674,7 +674,7 @@ export class SphereTool extends DrawTool {
     const preview = this.solidPreview(geo);
     preview.position.copy(this.c);
     this.host.viewport.setOverlay([preview, this.cursor(this.c)]);
-    this.host.hud(`R ${fmt(this.r)} mm`, this.c.clone().addScaledVector(this.frame.x, this.r));
+    this.host.hud(`${circleSize.tag} ${fmt(circleSize.shown(this.r))} mm`, this.c.clone().addScaledVector(this.frame.x, this.r));
   }
 
   private build(): void {
@@ -1061,10 +1061,10 @@ export class PointMoveTool implements Tool {
     private host: ToolHost,
     private ids: number[],
     private onDone: (d: V3) => void,
-    /** Clicking a mark (no drag) hands it over, e.g. to show the move gizmo there — or a point on a round edge, with its circle's turned axes. */
+    /** Clicking a mark (no drag) hands it over, e.g. to show the move gizmo there — or a point on a round / slanted edge, with its turned axes. */
     private onPick?: (p: V3, frame?: GizmoFrame) => void,
-    /** The point on a round edge under the cursor and its circle's axes (Z along its axis, X to its centre), if any. */
-    private roundEdgeAt?: (e: PointerEvent) => { point: V3; frame: GizmoFrame } | null,
+    /** The point on a round / slanted edge under the cursor and its turned axes (Z along the circle's axis / the edge), if any. */
+    private slideEdgeAt?: (e: PointerEvent) => { point: V3; frame: GizmoFrame } | null,
   ) {
     this.exclude = new Set(ids);
   }
@@ -1096,7 +1096,7 @@ export class PointMoveTool implements Tool {
   private updateHint(): void {
     const base = this.base
       ? `Move: drop on a blue centre mark (centre to centre) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
-      : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.roundEdgeAt ? " · click a round edge: the gizmo turned to its circle (Z along its axis)" : ""}`;
+      : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.slideEdgeAt ? " · click a round or slanted edge: the gizmo turned to it (Z along its axis / the edge)" : ""}`;
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -1121,7 +1121,7 @@ export class PointMoveTool implements Tool {
     if (!this.base) {
       this.refreshPivots();
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
-      const round = pv ? null : this.roundEdgeAt?.(e);
+      const round = pv ? null : this.slideEdgeAt?.(e);
       vp.showSnapMarker(pv ?? (round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null));
       return;
     }
@@ -1148,8 +1148,8 @@ export class PointMoveTool implements Tool {
     if (!this.base) {
       const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
       if (!pv) {
-        // A round edge: the gizmo there, turned to its circle.
-        const round = this.onPick ? this.roundEdgeAt?.(e) : null;
+        // A round / slanted edge: the gizmo there, turned to it.
+        const round = this.onPick ? this.slideEdgeAt?.(e) : null;
         if (round) return this.onPick!(round.point, round.frame);
         this.host.hint("Move: start from a blue mark (corner / edge midpoint / centre) · Esc cancel");
         return;

@@ -2521,6 +2521,12 @@ export function edgeEnds(shape: Shape, edgeId: number): [V3, V3] | null {
   return e ? [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] : null;
 }
 
+/** End points of a straight edge; null for any other edge. */
+export function lineOfEdge(shape: Shape, edgeId: number): [V3, V3] | null {
+  const e = shape.edges.find((x) => x.hashCode === edgeId);
+  return e && e.geomType === "LINE" ? [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] : null;
+}
+
 /** Centre, axis (unit, either way round) and radius of a circle / arc edge; null for any other edge. */
 export function circleOfEdge(shape: Shape, edgeId: number): { center: V3; normal: V3; r: number } | null {
   const e = shape.edges.find((x) => x.hashCode === edgeId);

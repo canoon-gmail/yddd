@@ -4475,6 +4475,46 @@ const SCENARIO_CUTAXIS = String.raw`
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
       const after = { xf: !!app.xf, line: !!vp.xfAxis };
       expect("plain G: a click on a round edge turns the gizmo to its circle (rod still selected); Esc: back to normal, no axis line", gTurned && !after.xf && !after.line, { before, gTurned, after });
+      // Plain G on a slanted straight edge (a box turned 30° about Z): the gizmo turned along the edge, the
+      // dashed line on it, Tab "Along the axis" 5 → the cube moved exactly 5 along it; an edge along X / Y / Z: no turn
+      {
+        const d = [Math.cos(Math.PI / 6), Math.sin(Math.PI / 6), 0], BC = [0, 8100, 0];
+        const wedge = app.doc.makeBody(K.rotateShape(K.makeBox(G, BC, 40, 20, 10), 30, BC, [0, 0, 1]), "Turned box");
+        const cube = app.doc.makeBody(K.makeBox(G, [0, 8140, 0], 6, 6, 6), "Cube");
+        app.doc.commit([...app.doc.bodies, wedge, cube], "turned box and cube");
+        app.setSelection([{ kind: "body", body: wedge.id, id: 0 }, { kind: "body", body: cube.id, id: 0 }]);
+        app.run("view.fitSelection"); await sleep(700);
+        app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+        app.run("xf.move"); await sleep(20);
+        const top = app.doc.get(wedge.id).shape.edges.find((e) => {
+          const a = e.startPoint, b = e.endPoint, l = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+          return e.geomType === "LINE" && a.z > 9.99 && b.z > 9.99 && Math.abs(Math.abs(((b.x - a.x) * d[0] + (b.y - a.y) * d[1]) / l) - 1) < 1e-6 && (a.y + b.y) / 2 < BC[1];
+        });
+        const m = top.pointAt(0.5);
+        pe("pointermove", [m.x, m.y, m.z], 0); pe("pointerdown", [m.x, m.y, m.z], 1); pe("pointerup", [m.x, m.y, m.z], 0); await sleep(30);
+        const sz = app.xf?.frame?.z, sTurned = !!sz && Math.abs(Math.abs(sz[0] * d[0] + sz[1] * d[1] + sz[2] * d[2]) - 1) < 1e-6 && vp.tc.space === "local";
+        const onEdge = !!vp.xfAxis && (() => { const p = vp.xfAxis.geometry.attributes.position, a = new V().fromBufferAttribute(p, 0), b = new V().fromBufferAttribute(p, 1); return Math.abs(Math.abs(b.clone().sub(a).normalize().dot(new V(...d))) - 1) < 1e-6 && Math.abs(a.z - 10) < 1e-6; })();
+        const c0 = app.doc.get(cube.id).shape.boundingBox.center;
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", code: "Tab", bubbles: true, cancelable: true })); await sleep(20);
+        const dlg = document.getElementById("props-dlg"), ins = dlg ? [...dlg.querySelectorAll("input")] : [];
+        const labels = dlg ? [...dlg.querySelectorAll("label")].map((l) => l.textContent) : [];
+        if (ins[0]) ins[0].value = "5";
+        dlg?.requestSubmit(); await sleep(30);
+        const c1 = app.doc.get(cube.id).shape.boundingBox.center, mv = [c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]];
+        const exact = sz && mv.every((x, i) => Math.abs(x - 5 * sz[i]) < 1e-6) && Math.abs(Math.hypot(...mv) - 5) < 1e-6;
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+        // (the cube's own top edge along X: the plain gizmo stays)
+        app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
+        app.run("xf.move"); await sleep(20);
+        const ce = app.doc.get(cube.id).shape.edges.find((e) => { const a = e.startPoint, b = e.endPoint; return a.z > 5.99 && b.z > 5.99 && Math.abs(a.y - b.y) < 1e-9 && a.y < c1[1]; });
+        const cm = ce.pointAt(0.5);
+        pe("pointermove", [cm.x, cm.y, cm.z], 0); pe("pointerdown", [cm.x, cm.y, cm.z], 1); pe("pointerup", [cm.x, cm.y, cm.z], 0); await sleep(30);
+        const axisEdgeTurned = !!app.xf?.frame;
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+        expect("plain G on a slanted straight edge: gizmo turned along it (dashed line on the edge), Tab 5 → moved exactly 5 along it; an edge along X: not turned",
+          sTurned && onEdge && labels[0] === "Along the axis (mm)" && exact && !axisEdgeTurned, { sz, sTurned, onEdge, labels, mv, axisEdgeTurned });
+        app.setSelection([]);
+      }
       // The Snap step is remembered for next time (as Auto is)
       const sel = document.getElementById("snap-select");
       sel.value = "0.5"; sel.dispatchEvent(new Event("change"));
@@ -5936,6 +5976,52 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       const clr = Menu.getApplicationMenu()?.items.find((i) => i.label === "&View")?.submenu?.items.find((i) => i.label === "Clear Recent Tools");
       if (!clr) errors.push("View → Clear Recent Tools missing");
       report.push({ label: "clear guides menu", passed: ok ? 1 : 0, total: 1, checks: [{ label: "Edit → Clear All Guides removes every guide line; Undo brings them back", ok, got: { found: !!mi, left } }] });
+    }
+    {
+      // File → Settings…: the Radius | Diameter switch; with Diameter, Cylinder / Sphere / Circle take (and show) the diameter.
+      const mi = Menu.getApplicationMenu()?.items.find((i) => i.label === "&File")?.submenu?.items.find((i) => i.label === "Settings…");
+      mi?.click();
+      await new Promise((r) => setTimeout(r, 100));
+      const got = await win.webContents.executeJavaScript(`(async () => {
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const app = window.y3dApp, vp = app.viewport, V = vp.camera.position.constructor;
+        const ev = (type, p) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+        const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+        const field = () => document.querySelector("#props-dlg label span")?.textContent;
+        const dialog = (vals) => { const d = document.getElementById("props-dlg"); const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => (q[i].value = String(v))); d.requestSubmit(); };
+        const size = (b) => { const [a, c] = b.shape.boundingBox.bounds; return [0, 1, 2].map((k) => Math.round((c[k] - a[k]) * 1000) / 1000); };
+        const was = localStorage.getItem("y3d.circleSize");
+        app.doc.reset([]); app.run("mode.body"); app.run("view.top"); vp.fit(); await sleep(30);
+        const dlg = document.getElementById("props-dlg");
+        const seg = dlg ? [...dlg.querySelectorAll(".seg button")] : [];
+        const startR = seg.length === 2 && seg[0].classList.contains("primary") && !seg[1].classList.contains("primary");
+        seg[1]?.click();
+        const switched = seg[1]?.classList.contains("primary") && !seg[0].classList.contains("primary") && localStorage.getItem("y3d.circleSize") === "d";
+        dlg?.requestSubmit(); await sleep(20);
+        const out = { found: !!dlg, startR, switched, closed: !document.getElementById("props-dlg") };
+        const make = async (cmd, vals) => {
+          app.run(cmd); ev("pointermove", [0, 0, 0]); key("Tab", "Tab"); await sleep(20);
+          const label = field(); dialog(vals); await sleep(50);
+          const b = app.doc.bodies[app.doc.bodies.length - 1];
+          key("Escape", "Escape"); await sleep(10);
+          return { label, size: b && size(b) };
+        };
+        out.cylD = await make("tool.cylinder", [20, 10]);
+        out.sphD = await make("tool.sphere", [20]);
+        out.cirD = await make("tool.circle", [20]);
+        localStorage.setItem("y3d.circleSize", "r");
+        out.cylR = await make("tool.cylinder", [20, 10]);
+        if (was === null) localStorage.removeItem("y3d.circleSize"); else localStorage.setItem("y3d.circleSize", was);
+        app.doc.reset([]);
+        return out;
+      })()`, true);
+      const ok = !!mi && got.found && got.startR && got.switched && got.closed
+        && got.cylD.label === "Diameter" && got.cylD.size?.join() === "20,20,10"
+        && got.sphD.label === "Diameter" && got.sphD.size?.join() === "20,20,20"
+        && got.cirD.label === "Diameter" && got.cirD.size?.slice(0, 2).join() === "20,20"
+        && got.cylR.label === "Radius" && got.cylR.size?.join() === "40,40,10";
+      if (!ok) errors.push("settings circle size failed: " + JSON.stringify({ found: !!mi, got }));
+      report.push({ label: "settings: radius / diameter", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Settings… Radius | Diameter switch (Radius by default); Diameter: Cylinder / Sphere / Circle Tab dialogs ask for the diameter (20 → 20 across); Radius: 20 → 40 across", ok, got }] });
     }
     await shot("7b-array.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));

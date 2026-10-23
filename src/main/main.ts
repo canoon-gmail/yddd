@@ -117,6 +117,8 @@ function buildMenu(): void {
         item("Export STL…", "file.exportStl", "CmdOrCtrl+Shift+E"),
         item("Export 3MF… (Bambu Studio, PrusaSlicer, Cura)", "file.export3mf"),
         { type: "separator" },
+        item("Settings…", "file.settings"),
+        { type: "separator" },
         { role: "quit" },
       ],
     },

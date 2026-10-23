@@ -83,6 +83,7 @@ import {
   fillRounds,
   holeAt,
   circleOfEdge,
+  lineOfEdge,
   fillHoles,
   resizeHoles,
   type HoleLoop,
@@ -133,6 +134,7 @@ import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
 import { SketchTool, type SketchFrame } from "./sketch";
+import { byDiameter, CIRCLE_SIZE_KEY } from "./format";
 import type { TutCtx, Tutorial } from "./tutorials";
 
 /** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
@@ -632,7 +634,7 @@ class App implements ToolHost {
   /** The background kernel (a second OpenCascade in a worker) for slow operations: see kernelWorker.ts. */
   private bgKernel = new KernelWorker();
   /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
-  /** The move / rotate gizmo session; `frame`: a move along turned axes (G G on a round edge: Z along its circle's axis). */
+  /** The move / rotate gizmo session; `frame`: a move along turned axes (G / G G on a round or slanted edge: Z along its circle's axis / along the edge). */
   private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; frame?: GizmoFrame; edges?: SelItem[]; guide?: number } | null = null;
   /** Latest edge-move drag offset waiting for its (once per frame) preview. */
   private edgePreview: V3 | null = null;
@@ -1196,6 +1198,7 @@ class App implements ToolHost {
       case "file.exportStep": void this.fileExport("step"); return;
       case "file.exportStl": void this.fileExport("stl"); return;
       case "file.export3mf": void this.fileExport("3mf"); return;
+      case "file.settings": return this.settingsDialog();
 
       case "help.shortcuts": return this.toggleHelp();
       case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
@@ -1276,9 +1279,9 @@ class App implements ToolHost {
       this.hint("Guide line selected · G moves it · Del removes it");
       return;
     }
-    // Moving solids (G): a click on a round edge turns the gizmo to its circle — slide along its axis.
+    // Moving solids (G): a click on a round / slanted edge turns the gizmo to it — slide along its axis / the edge.
     if (this.xf?.mode === "translate" && this.xf.ids.length && !this.xf.edges && this.xf.guide === undefined && !e.shiftKey && !e.ctrlKey) {
-      const round = this.roundEdgeAt(e);
+      const round = this.slideEdgeAt(e);
       if (round) return this.startTransform("translate", true, round.point, round.frame);
     }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
@@ -1541,9 +1544,9 @@ class App implements ToolHost {
       this.viewport.canvas.style.cursor = "pointer";
       return;
     }
-    // Moving solids (G): a round edge under the cursor shows a mark — a click turns the gizmo to it.
+    // Moving solids (G): a round / slanted edge under the cursor shows a mark — a click turns the gizmo to it.
     if (this.xf?.mode === "translate" && this.xf.ids.length && !this.xf.edges && this.xf.guide === undefined) {
-      const round = this.roundEdgeAt(e);
+      const round = this.slideEdgeAt(e);
       this.viewport.showSnapMarker(round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null);
     }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
@@ -3791,7 +3794,7 @@ class App implements ToolHost {
     };
     this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r), pivot, frame ? (d) => this.hint(turnedHint(d)) : undefined, frame);
     this.renderToolbarState();
-    this.hint(frame ? turnedHint([0, 0, 0]) : `${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")})${mode === "translate" ? " · click a round edge: slide along its axis" : ""} · Tab: type exact values · Enter/Esc: done`);
+    this.hint(frame ? turnedHint([0, 0, 0]) : `${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")})${mode === "translate" ? " · click a round or slanted edge: slide along its axis / the edge" : ""} · Tab: type exact values · Enter/Esc: done`);
   }
 
   /** G with edges selected: drag them with the gizmo, reshaping their (flat-faced) solids. */
@@ -4418,18 +4421,37 @@ class App implements ToolHost {
           this.startTransform("translate", false, [...p] as V3, frame);
           if (!frame) this.hint(`Move: drag the gizmo from the picked mark (${this.viewport.snapTip("grid / points")}) · Tab: exact values · Enter/Esc: done`);
         },
-        (e) => this.roundEdgeAt(e)).start(),
+        (e) => this.slideEdgeAt(e)).start(),
     );
   }
 
   /**
-   * G G: the point on a round edge (circle / arc, any solid) under the cursor, and that circle's
-   * axes for the move gizmo — Z along its axis (the way facing the eye), X to its centre.
+   * G / G G: the edge under the cursor to slide along, and the turned axes for the move gizmo (Z the
+   * way to slide). A round edge (circle / arc, any solid): Z along its axis (the way facing the eye),
+   * X to its centre. A slanted straight edge: Z along the edge (an edge along X / Y / Z: none — the
+   * plain gizmo slides that way already).
    */
-  private roundEdgeAt(e: PointerEvent): { point: V3; frame: GizmoFrame } | null {
+  private slideEdgeAt(e: PointerEvent): { point: V3; frame: GizmoFrame } | null {
     const hit = this.viewport.pick(e.clientX, e.clientY, "edge");
     const b = hit?.kind === "edge" ? this.doc.get(hit.body) : null;
     if (!hit || !b || !isBrep(b)) return null;
+    const line = lineOfEdge(b.shape, hit.id);
+    if (line) {
+      const A = new THREE.Vector3(...line[0]), z = new THREE.Vector3(...line[1]).sub(A);
+      if (z.lengthSq() < 1e-12) return null;
+      z.normalize();
+      const big = Math.max(...z.toArray().map(Math.abs));
+      if (big > 1 - 1e-6) return null; // (along X / Y / Z)
+      if (z.toArray().find((n) => Math.abs(n) === big)! < 0) z.negate(); // (its main way positive)
+      const point = A.clone().addScaledVector(z, hit.point.clone().sub(A).dot(z));
+      // X across the screen, Y towards the eye
+      const eye = this.viewport.camera.position.clone().sub(point);
+      const x = z.clone().cross(eye);
+      if (x.lengthSq() < 1e-12) x.copy(Math.abs(z.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0)).cross(z);
+      x.normalize();
+      const y = z.clone().cross(x);
+      return { point: point.toArray() as V3, frame: { x: x.toArray() as V3, y: y.toArray() as V3, z: z.toArray() as V3, toAxis: 0 } };
+    }
     const c = circleOfEdge(b.shape, hit.id);
     if (!c) return null;
     const C = new THREE.Vector3(...c.center), z = new THREE.Vector3(...c.normal);
@@ -4614,11 +4636,11 @@ class App implements ToolHost {
       }, "Rotate");
       return;
     }
-    // A turned gizmo (G G on a round edge): typed along its axes — Z along the circle's axis.
+    // A turned gizmo (a round / slanted edge): typed along its axes — Z along the circle's axis / the edge.
     const frame = this.xf.frame;
     const world = (n: number[]): V3 => (frame ? [0, 1, 2].map((k) => frame.x[k] * n[0] + frame.y[k] * n[1] + frame.z[k] * n[2]) : [n[0], n[1], n[2]]) as V3;
     const moveFields = (v: V3) => frame
-      ? [{ label: "Along the axis (mm)", value: r3(v[2]) }, { label: "Off the axis: X (to centre)", value: r3(v[0]), more: true }, { label: "Off the axis: Y (across)", value: r3(v[1]), more: true }]
+      ? [{ label: "Along the axis (mm)", value: r3(v[2]) }, { label: frame.toAxis ? "Off the axis: X (to centre)" : "Off the axis: X", value: r3(v[0]), more: true }, { label: "Off the axis: Y (across)", value: r3(v[1]), more: true }]
       : [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }];
     // (the dialog's order back to X, Y, Z)
     const typed = (n: number[]): number[] => (frame ? [n[1], n[2], n[0]] : n);
@@ -4678,7 +4700,7 @@ class App implements ToolHost {
     this.placing = null;
     if (wasGuide) this.showGuides(); // drop any unapplied preview
     this.viewport.stopTransform();
-    this.viewport.showSnapMarker(null); // (a round edge's mark, see processHover)
+    this.viewport.showSnapMarker(null); // (a round / slanted edge's mark, see processHover)
     this.refreshSelection();
   }
 
@@ -6172,13 +6194,13 @@ class App implements ToolHost {
       ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
-      ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line), the blue arrow in mm steps, Tab: the distance along it"],
+      ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line) — or a slanted straight edge: slide along it, the blue arrow in mm steps, Tab: the distance along it"],
       ["S", `Scale selected objects about their bottom centre: drag the ring for Scale % or the red / green / blue boxes for X / Y / Z % (${this.viewport.autoSnap ? "snaps, Ctrl: free" : "Ctrl snaps"}; per-axis works on curved shapes too)`],
       ["S with hole rims selected", "Resize hole / pin: Edge mode, click the rim of a round hole or pin (Shift+click more), S — type the new diameter (holes of different sizes: how much bigger, e.g. 0.2 for a looser fit) or drag the ring on the rim; a hole grows into the solid, a pin out of it · any other hole (rectangle, slot, a sketched shape): click one edge of its rim, S — Bigger by (mm): every wall moves out by half of it, corners stay sharp"],
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
-      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) → slide along its axis, as with G"],
+      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
       ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
@@ -6552,6 +6574,39 @@ class App implements ToolHost {
       this.fail(e);
       return [];
     }
+  }
+
+  /** File → Settings: a Radius | Diameter switch for circles, cylinders and spheres. Saved at once (localStorage). */
+  private settingsDialog(): void {
+    document.getElementById("props-dlg")?.remove();
+    const dlg = document.createElement("form");
+    dlg.id = "props-dlg";
+    dlg.innerHTML =
+      `<h4>Settings</h4>` +
+      `<div class="seg-row"><span>Circles, cylinders, spheres</span><span class="seg"><button type="button" class="btn" data-v="r">Radius</button><button type="button" class="btn" data-v="d">Diameter</button></span></div>` +
+      `<div class="op-buttons"><button type="submit" class="btn primary">Done</button></div>`;
+    const seg = [...dlg.querySelectorAll<HTMLButtonElement>(".seg button")];
+    const show = () => seg.forEach((b) => b.classList.toggle("primary", (b.dataset.v === "d") === byDiameter()));
+    for (const b of seg)
+      b.addEventListener("click", () => {
+        localStorage.setItem(CIRCLE_SIZE_KEY, b.dataset.v!);
+        show();
+      });
+    const close = () => {
+      dlg.remove();
+      $("viewport").focus?.();
+    };
+    dlg.addEventListener("submit", (e) => {
+      e.preventDefault();
+      close();
+    });
+    dlg.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Escape") close();
+    });
+    $("viewport").appendChild(dlg);
+    show();
+    dlg.querySelector<HTMLButtonElement>("button[type=submit]")!.focus();
   }
 
   /**

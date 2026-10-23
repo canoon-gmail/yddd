@@ -191,6 +191,11 @@ kbd {
 #props-dlg label.stl-preset { justify-content: flex-start; gap: 8px; margin: 4px 0; cursor: pointer; }
 #props-dlg label.stl-preset input { width: auto; }
 #props-dlg label.stl-preset small { color: var(--muted, #8a8f98); }
+#props-dlg .seg-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 6px 0; }
+#props-dlg .seg { display: inline-flex; }
+#props-dlg .seg .btn { border-radius: 0; }
+#props-dlg .seg .btn:first-child { border-radius: 4px 0 0 4px; }
+#props-dlg .seg .btn:last-child { border-radius: 0 4px 4px 0; margin-left: -1px; }
 #props-dlg .stl-estimate { margin-top: 6px; color: var(--accent-2); font-variant-numeric: tabular-nums; }
 #op-panel {
   position: absolute; top: 12px; left: 12px; width: 240px; padding: 10px 12px;

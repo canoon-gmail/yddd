@@ -19,7 +19,7 @@
 import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
 import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
-import { num } from "./format";
+import { circleSize, num } from "./format";
 import { ICONS } from "./icons";
 
 /** A point in the sketch plane: [u, v] along the frame's x / y. */
@@ -1650,7 +1650,7 @@ export class SketchTool implements Tool {
   }
 
   /**
-   * Typed numbers + Enter: line length (or dx,dy); rectangle w,h (or wxh); circle radius; arc radius; x,y for
+   * Typed numbers + Enter: line length (or dx,dy); rectangle w,h (or wxh); circle radius (or diameter: File → Settings); arc radius; x,y for
    * a first point.
    */
   private applyTyped(): void {
@@ -1691,7 +1691,7 @@ export class SketchTool implements Tool {
     const c = this.cursor;
     if ((this.mode === "rect" || this.mode === "circle") && this.anchor) {
       const a = this.anchor;
-      if (this.mode === "circle") return vals[0] > 0 ? this.click([a[0] + vals[0], a[1]]) : this.update();
+      if (this.mode === "circle") return vals[0] > 0 ? this.click([a[0] + circleSize.radius(vals[0]), a[1]]) : this.update();
       const [w, h = w] = vals;
       const sx = c && c[0] < a[0] ? -1 : 1, sy = c && c[1] < a[1] ? -1 : 1;
       return this.click([a[0] + sx * Math.abs(w), a[1] + sy * Math.abs(h)]);
@@ -1784,7 +1784,7 @@ export class SketchTool implements Tool {
       if (!this.anchor && c) this.click(c); // (anchored where the cursor is)
       const a = this.anchor;
       if (!a) return this.host.hint("Sketch: move the cursor over the sketch, then press Tab");
-      if (this.mode === "circle") return ask("Circle", [{ label: "Radius (mm)", value: c ? dist(c, a) : 10, min: 0 }], ([r]) => (r > 0 ? this.click([a[0] + r, a[1]]) : undefined));
+      if (this.mode === "circle") return ask("Circle", [{ label: `${circleSize.label} (mm)`, value: circleSize.shown(c ? dist(c, a) : 10), min: 0 }], ([r]) => (r > 0 ? this.click([a[0] + circleSize.radius(r), a[1]]) : undefined));
       const sx = c && c[0] < a[0] ? -1 : 1, sy = c && c[1] < a[1] ? -1 : 1;
       return ask("Rectangle", [{ label: "Width (mm)", value: c ? Math.abs(c[0] - a[0]) : 20, min: 0 }, { label: "Height (mm)", value: c ? Math.abs(c[1] - a[1]) : 10, min: 0 }], ([w, h]) =>
         w > 0 && h > 0 ? this.click([a[0] + sx * w, a[1] + sy * h]) : this.host.toast("Width and height must be greater than 0", "error"));
@@ -2028,7 +2028,7 @@ export class SketchTool implements Tool {
         } else {
           lines(loopPolygon({ kind: "circle", c: a, r: dist(a, c) }), this.mats.rubber, true);
           lines([a, c], this.mats.rubber);
-          hud = `R ${num(dist(a, c))} mm`;
+          hud = `${circleSize.tag} ${num(circleSize.shown(dist(a, c)))} mm`;
         }
       } else if (from && this.mode === "line") {
         lines([from, c], this.mats.rubber);
@@ -2182,7 +2182,7 @@ export class SketchTool implements Tool {
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
         : this.path.length ? "Click the arc's end (it bends on from the last segment) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it · L: back to lines" : this.arcEnd ? "Click a point the arc passes through (near a half circle it snaps to one) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it" : "Click the arc's end point · type a radius + Enter to fix it",
       rect: this.anchor ? "Click the opposite corner · type width,height (or 23x30) + Enter" : "Click the first corner",
-      circle: this.anchor ? "Click a point on the circle · type the radius + Enter" : "Click the centre",
+      circle: this.anchor ? `Click a point on the circle · type the ${circleSize.word} + Enter` : "Click the centre",
       picture: !this.pic ? "No picture — click the picture icon (bottom left) to load one"
         : ["Drag the picture to move it · its corner: the square scales, the ring rotates · type a % + Enter to scale it · Match: click a point on the picture · click off the picture: back to drawing", "Match: click a 2nd point on the picture", "Match: click where the 1st point belongs (on the model / sketch)", "Match: click where the 2nd point belongs"][this.picPts.length]
           + " · the menu by the thumbnail (bottom left): scale, rotate, transparency · thumbnail again: done · Del: remove it · L A R C: draw",
