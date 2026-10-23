@@ -512,6 +512,18 @@ export function makeSphereAt(center: V3, r: number): Solid {
 }
 
 /**
+ * Cone on the frame's plane: base radius `r1` at `center`, top radius `r2` (0: a sharp tip; > 0: a cut-off
+ * cone) at signed height `h`. (No cone primitive in the wasm build: its side profile, revolved a full turn.)
+ */
+export function makeCone(frame: Frame, center: V3, r1: number, r2: number, h: number): Solid {
+  if (!(r1 > 0) || r2 < 0 || Math.abs(h) < 1e-9) throw new Error("Cone: radius must be > 0 and height not 0");
+  const up = h >= 0 ? frame.z : neg(frame.z), H = Math.abs(h);
+  const at = (rad: number, ax: number): V3 => [0, 1, 2].map((k) => center[k] + rad * frame.x[k] + ax * up[k]) as V3;
+  const profile = r2 > 1e-9 ? [at(0, 0), at(r1, 0), at(r2, H), at(0, H)] : [at(0, 0), at(r1, 0), at(0, H)];
+  return revolution(makePolygon(profile), center, up, 360) as Solid;
+}
+
+/**
  * Regular polygon prism: `sides` corners on a circle of radius `r` (circumradius)
  * centered at `center`, first corner at `angleDeg` measured in the frame's
  * plane from frame.x toward frame.y, extruded by signed `h`.

@@ -17,6 +17,7 @@ import {
   makeBox,
   makeCylinder,
   makeSphereAt,
+  makeCone,
   makePolygonPrism,
   makeRectFace,
   makeCircleFace,
@@ -607,6 +608,130 @@ export class CylinderTool extends DrawTool {
     const c = this.center();
     const r = this.r;
     this.emit(() => makeCircleFace(this.frame.toKernel(), [c.x, c.y, c.z], r), "Circle", "face");
+  }
+}
+
+// ------------------------------------------------------------------ Cone
+
+/** Cone solid: base centre, base size, height — a sharp tip, or a flat top (cut-off cone) with a top size > 0. */
+export class ConeTool extends DrawTool {
+  readonly name = "Cone";
+  protected get hints(): string[] {
+    const w = circleSize.word;
+    return [
+      "Cone: click the centre of its base (on the grid or on a planar face)",
+      `Cone: click to set the base ${w} — or type ${w} + Enter`,
+      `Cone: move to set the height and click (a sharp tip) — or type height + Enter, or height,top ${w} + Enter (a flat top)`,
+    ];
+  }
+  private cu = 0;
+  private cv = 0;
+  private r = 0;
+  private top = 0;
+  private h = 0;
+
+  move(e: PointerEvent): void {
+    this.last = e;
+    const step = this.host.snapStep(e);
+    if (this.stage === 0) {
+      this.frame = this.frameUnder(e);
+      const p = this.hit(e, step);
+      if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
+    } else if (this.stage === 1) {
+      const p = this.hit(e, 0);
+      if (!p) return;
+      this.r = this.sv(Math.hypot(p.u - this.cu, p.v - this.cv), step);
+      this.drawBase();
+    } else {
+      const h = this.height(e, this.center());
+      if (h === null) return;
+      this.h = this.sv(h, step);
+      this.drawCone();
+    }
+  }
+
+  down(e: PointerEvent): void {
+    if (this.stage === 0) {
+      const p = this.hit(e, this.host.snapStep(e));
+      if (!p) return;
+      this.cu = p.u;
+      this.cv = p.v;
+      this.r = 0;
+      this.stage = 1;
+    } else if (this.stage === 1) {
+      if (this.r < 1e-6) return;
+      this.stage = 2;
+      this.h = 0;
+    } else {
+      if (Math.abs(this.h) < 1e-6) return;
+      this.build();
+      return;
+    }
+    this.updateHint();
+  }
+
+  protected applyTyped([v, top]: number[]): void {
+    if (!v) return;
+    if (this.stage === 1) {
+      this.r = circleSize.radius(Math.abs(v));
+      this.stage = 2;
+      this.h = 0;
+      this.drawBase();
+    } else if (this.stage === 2) {
+      if (top !== undefined && !(top >= 0)) return this.host.fail(`top ${circleSize.word} must be 0 or more`);
+      this.h = v;
+      this.top = top ? circleSize.radius(top) : 0;
+      this.build();
+    }
+  }
+
+  protected props(): PropField[] {
+    return [
+      { label: circleSize.label, value: +circleSize.shown(this.r).toFixed(4), min: 0 },
+      { label: `Top ${circleSize.word} (0: a sharp tip)`, value: +circleSize.shown(this.top).toFixed(4), min: 0 },
+      { label: "Height", value: +this.h.toFixed(4) },
+    ];
+  }
+
+  protected applyProps([r, top, h]: number[]): void {
+    if (!(r > 0)) return this.host.fail(`${circleSize.word} must be > 0`);
+    if (!(top >= 0)) return this.host.fail(`top ${circleSize.word} must be 0 or more`);
+    if (!h) return this.host.fail("height must not be 0");
+    this.r = circleSize.radius(r);
+    this.top = circleSize.radius(top);
+    this.h = h;
+    this.build();
+  }
+
+  private center(): THREE.Vector3 {
+    return this.frame.point(this.cu, this.cv);
+  }
+
+  private drawBase(): void {
+    const pts: THREE.Vector3[] = [];
+    for (let i = 0; i < 64; i++) {
+      const a = (i / 64) * Math.PI * 2;
+      pts.push(this.frame.point(this.cu + Math.cos(a) * this.r, this.cv + Math.sin(a) * this.r));
+    }
+    const objs: THREE.Object3D[] = [this.outline(pts), this.cursor(this.center())];
+    if (this.r > 0) objs.push(this.frame.place(new THREE.Mesh(new THREE.CircleGeometry(this.r, 64), this.host.viewport.mats.previewFill), this.center()));
+    this.host.viewport.setOverlay(objs);
+    this.host.hud(`${circleSize.tag} ${fmt(circleSize.shown(this.r))} mm`, pts[0]);
+  }
+
+  private drawCone(): void {
+    // (the geometry's +Y end is the top only when the cone goes up the face normal)
+    const up = this.h >= 0;
+    const geo = new THREE.CylinderGeometry(up ? this.top : this.r, up ? this.r : this.top, Math.max(Math.abs(this.h), 1e-3), 64);
+    const c = this.center().addScaledVector(this.frame.z, this.h / 2);
+    this.host.viewport.setOverlay([this.frame.place(this.solidPreview(geo), c, "xz-cyl")]);
+    this.host.hud(`${circleSize.tag} ${fmt(circleSize.shown(this.r))} × H ${fmt(this.h)} mm`, this.center().addScaledVector(this.frame.z, this.h));
+  }
+
+  private build(): void {
+    const c = this.center();
+    const { r, top, h } = this;
+    this.emit(() => makeCone(this.frame.toKernel(), [c.x, c.y, c.z], r, top, h), "Cone");
   }
 }
 

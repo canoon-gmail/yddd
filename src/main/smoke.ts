@@ -2322,6 +2322,66 @@ const SCENARIO_PRINT = String.raw`
 })()
 `;
 
+/** Cone (B O): a sharp tip, a flat top (Tab: top size), downwards, typed height,top; exact volumes, prints clean. */
+const SCENARIO_CONE = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, vp = app.viewport, K = window.ydddKernel, V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const ev = (type, p) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  const dialog = (vals) => { const d = document.getElementById("props-dlg"); const q = [...d.querySelectorAll("input")]; vals.forEach((v, i) => (q[i].value = String(v))); d.requestSubmit(); };
+  const box = (b) => { const [a, c] = b.shape.boundingBox.bounds; return [...a, ...c].map((v) => Math.round(v * 1000) / 1000); };
+  const was = localStorage.getItem("yddd.circleSize");
+  localStorage.setItem("yddd.circleSize", "r");
+  app.doc.reset([]); app.run("mode.body"); app.run("view.top"); vp.fit(); await sleep(30);
+  // B then O (the solid chord) starts the Cone tool
+  key("b", "KeyB"); await sleep(10); key("o", "KeyO"); await sleep(10);
+  expect("cone: B O starts the Cone tool", app.tool && app.tool.name === "Cone", app.tool && app.tool.name);
+  key("Escape", "Escape"); await sleep(10);
+  const make = async (vals) => {
+    app.run("tool.cone"); ev("pointermove", [0, 0, 0]); key("Tab", "Tab"); await sleep(20);
+    const labels = [...document.querySelectorAll("#props-dlg label span")].map((s) => s.textContent);
+    dialog(vals); await sleep(50);
+    const b = app.doc.bodies[app.doc.bodies.length - 1];
+    key("Escape", "Escape"); await sleep(10);
+    return { b, labels };
+  };
+  const PI = Math.PI;
+  const sharp = await make([10, 0, 30]);
+  const sv = K.solidVolume(sharp.b.shape), cones = sharp.b.shape.faces.filter((f) => f.geomType === "CONE").length;
+  expect("cone: Tab asks Radius / Top radius / Height; 10, 0, 30 → a sharp cone (volume π·10²·30/3, 20×20×30, one cone face + the base, valid)",
+    sharp.labels.length === 3 && /^Top radius/.test(sharp.labels[1]) && sharp.b.name === "Cone 1" && Math.abs(sv - PI * 100 * 30 / 3) < 1e-6
+      && box(sharp.b).join() === "-10,-10,0,10,10,30" && cones === 1 && sharp.b.shape.faces.length === 2 && K.isValidShape(sharp.b.shape),
+    { labels: sharp.labels, name: sharp.b.name, sv, box: box(sharp.b), cones, faces: sharp.b.shape.faces.length });
+  const cut = await make([10, 4, 20]);
+  const cv = K.solidVolume(cut.b.shape);
+  expect("cone: top radius 4 → a flat-topped cone (volume π·20/3·(10² + 10·4 + 4²), 3 faces)",
+    Math.abs(cv - PI * 20 / 3 * (100 + 40 + 16)) < 1e-6 && cut.b.shape.faces.length === 3 && K.isValidShape(cut.b.shape), { cv, faces: cut.b.shape.faces.length });
+  const down = await make([5, 0, -15]);
+  expect("cone: a negative height points it down (base on the plane, tip at z = -15)", box(down.b).join() === "-5,-5,-15,5,5,0", box(down.b));
+  // Typed: radius + Enter, then height,top + Enter
+  app.run("tool.cone"); ev("pointermove", [50, 0, 0]); ev("pointerdown", [50, 0, 0]); await sleep(10);
+  for (const k of "8") key(k, "Digit" + k); key("Enter", "Enter"); await sleep(10);
+  for (const k of "12,3") key(k, k === "," ? "Comma" : "Digit" + k); key("Enter", "Enter"); await sleep(50);
+  const typed = app.doc.bodies[app.doc.bodies.length - 1];
+  key("Escape", "Escape"); await sleep(10);
+  const tv = K.solidVolume(typed.shape);
+  expect("cone: typed 8 Enter, 12,3 Enter → base radius 8, height 12, top radius 3", typed !== down.b && Math.abs(tv - PI * 12 / 3 * (64 + 24 + 9)) < 1e-6 && box(typed).join() === "42,-8,0,58,8,12", { tv, box: box(typed) });
+  // Diameter setting: the fields ask for diameters
+  localStorage.setItem("yddd.circleSize", "d");
+  const dia = await make([20, 0, 10]);
+  expect("cone: with Diameter set, Tab asks Diameter / Top diameter (20 → 20 across)", dia.labels[0] === "Diameter" && /^Top diameter/.test(dia.labels[1]) && box(dia.b).slice(0, 2).join() === "-10,-10", { labels: dia.labels, box: box(dia.b) });
+  expect("cone: cones pass the print check", app.printProblems(app.doc.bodies).length === 0, app.printProblems(app.doc.bodies).map((p) => p.why));
+  if (was === null) localStorage.removeItem("yddd.circleSize"); else localStorage.setItem("yddd.circleSize", was);
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("cone scenario failed: " + JSON.stringify(failed));
+  return [{ label: "cone tool", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Measure (=): hovering a corner, an edge, faces and a circle shows their sizes in the HUD. */
 const SCENARIO_MEASURE = String.raw`
 (async () => {
@@ -6080,6 +6140,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     }
     await shot("7b-array.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PRINT, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);
