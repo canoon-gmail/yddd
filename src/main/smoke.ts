@@ -2554,6 +2554,77 @@ const SCENARIO_TIP = String.raw`
 })()
 `;
 
+/** Sketch Spline (Shift+A / its button): a smooth curve through clicked points — open (a path) or closed (a face); drag its points in Select; K brings them back. */
+const SCENARIO_SPLINE = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  localStorage.removeItem("yddd.pro"); document.body.classList.remove("pro");
+  for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  app.doc.reset([]); app.run("mode.body"); app.setSelection([]); vp.setView("top"); await sleep(30);
+  const key = async (k, extra = {}) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra })); await sleep(10); };
+  const pe = (t, p) => { const sc = window.__see(new V(p[0], p[1], 0)); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+  const click = async (p) => { pe("pointermove", p); pe("pointerdown", p); pe("pointerup", p); await sleep(450); }; // (apart: not double-clicks)
+  const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6;
+  const collinear = (a, m, b) => Math.abs((m[0] - a[0]) * (b[1] - m[1]) - (m[1] - a[1]) * (b[0] - m[0])) < 1e-6;
+  try {
+    await key("k", { code: "KeyK" }); await sleep(50);
+    const T = () => app.tool;
+    // Fit the area we draw in
+    vp.fit(); await sleep(30);
+    await key("A", { shiftKey: true, code: "KeyA" });
+    const btn = document.querySelector("#sketch-panel button[data-mode=spline]");
+    expect("spline: Shift+A in the sketch → Spline; its button (Spline Shift+A) lit", T() && T().mode === "spline" && btn && /Spline/.test(btn.textContent) && /Shift\+A/.test(btn.textContent) && btn.classList.contains("primary"), { mode: T() && T().mode, btn: btn && btn.textContent });
+    // Open: 4 points, Enter → a path through all of them, smooth at each
+    const open = [[0, 0], [20, 10], [40, 0], [60, 10]];
+    for (const p of open) await click(p);
+    await key("Enter");
+    const o = T().opens[0], g = o && o[0];
+    const thruOk = g && g.kind === "spline" && g.thru.length === 4 && open.every((p, i) => near(g.pts[4 * i], p));
+    const smooth = g && [1, 2].every((i) => collinear(g.pts[4 * i - 1], g.pts[4 * i], g.pts[4 * i + 1]));
+    expect("spline: 4 clicks + Enter → an open path through every point, smooth at each (no corners)", T().opens.length === 1 && o.length === 1 && thruOk && smooth, { opens: T().opens.length, thru: g && g.thru, smooth });
+    // Closed: 4 points, then the start point
+    const ring = [[0, 30], [20, 50], [0, 70], [-20, 50]];
+    for (const p of ring) await click(p);
+    await click(ring[0]);
+    const l = T().loops[0], lg = l && l.segs && l.segs[0];
+    expect("spline: back on the start point → a closed outline (smooth all round, start included)",
+      T().loops.length === 1 && lg && lg.kind === "spline" && lg.closed && near(lg.a, lg.b) && collinear(lg.pts[lg.pts.length - 2], lg.pts[0], lg.pts[1]) && T().first === null, { loops: T().loops.length, closed: lg && lg.closed });
+    // Select it, drag its point (20,50) → (30,50); undo puts it back
+    await key("Escape");
+    await click([20, 50]);
+    const handles = T().splineHandles().length;
+    pe("pointermove", [20, 50]); pe("pointerdown", [20, 50]); pe("pointermove", [25, 50]); pe("pointermove", [30, 50]); pe("pointerup", [30, 50]); await sleep(20);
+    const moved = T().loops[0].segs[0];
+    const dragOk = moved.thru && near(moved.thru[1], [30, 50]) && near(moved.pts[4], [30, 50]) && near(moved.thru[0], [0, 30]);
+    await key("z", { ctrlKey: true });
+    const back = T().loops[0].segs[0];
+    expect("spline: selected, its 4 points show; drag one → the curve runs through the new place; Ctrl+Z puts it back",
+      T().mode === "select" && handles === 4 && dragOk && near(back.thru[1], [20, 50]), { mode: T().mode, handles, moved: moved.thru, back: back.thru });
+    // Done → a flat face (the closed one) and a path (the open one)
+    document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(50);
+    const face = app.doc.bodies.find((b) => b.kind === "face"), path = app.doc.bodies.find((b) => b.kind === "path");
+    const solid = face && K.extrudeFace(face.shape, face.shape.faces[0].hashCode, 10);
+    expect("spline: Done → a flat face (pushes into a valid solid) and a path", !app.tool && face && path && solid && K.isValidShape(solid) && K.solidVolume(solid) > 100, { tool: app.tool && app.tool.name, kinds: app.doc.bodies.map((b) => b.kind) });
+    // K on the face again: its curve comes back as a Spline, points to drag
+    app.setSelection([{ kind: "body", body: face.id, id: 0 }]);
+    await key("k", { code: "KeyK" }); await sleep(50);
+    const again = T() && T().loops[0] && T().loops[0].segs && T().loops[0].segs[0];
+    expect("spline: K on its face → back in the sketch as a Spline (its 4 points again, to drag)", again && again.thru && again.thru.length === 4 && again.closed && ring.every((p) => again.thru.some((q) => near(p, q))), again && again.thru);
+    document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); await sleep(20);
+  } catch (e) {
+    expect("spline: no errors", false, String(e && e.stack || e));
+  }
+  for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  app.doc.reset([]); app.run("mode.body"); app.run("view.iso");
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("spline scenario failed: " + JSON.stringify(failed));
+  return [{ label: "sketch spline", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Measure (=): hovering a corner, an edge, faces and a circle shows their sizes in the HUD. */
 const SCENARIO_MEASURE = String.raw`
 (async () => {
@@ -6189,6 +6260,28 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100)); window.ydddApp.setAutoSnap(false, false); return 0; })()`, true);
     // YDDD_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
+    if (process.env.YDDD_SMOKE_ONLY === "spline") {
+      // (while working on it: just the sketch spline scenario)
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
+      // A screenshot: a closed and an open Spline in a sketch, the closed one selected (its points to drag)
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.ydddApp, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const key = async (k, extra = {}) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra })); await sleep(10); };
+        const pe = (t, p) => { const sc = window.__see(new V(p[0], p[1], 0)); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+        const click = async (p) => { pe("pointermove", p); pe("pointerdown", p); pe("pointerup", p); await sleep(450); };
+        app.setSelection([]); await key("k", { code: "KeyK" }); await sleep(50);
+        await key("A", { shiftKey: true, code: "KeyA" });
+        for (const p of [[-30, -20], [-20, -8], [-8, -25], [5, -10], [18, -20]]) await click(p);
+        await key("Enter");
+        for (const p of [[0, 0], [15, 8], [8, 20], [-10, 18], [-12, 5], [0, 0]]) await click(p);
+        await key("Escape"); await click([15, 8]); pe("pointermove", [8, 20]);
+        await sleep(300); return 0;
+      })()`, true);
+      await shot("spline.png");
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "point") {
       // (while working on it: just the cone / pull-to-a-point scenarios)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
@@ -6369,6 +6462,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TIP, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);
