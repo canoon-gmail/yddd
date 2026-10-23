@@ -4272,6 +4272,19 @@ export function meshForExport(shape: Solid | TriMesh, quality: StlQuality): Inde
   return { positions: Float32Array.from(pos), triangles: Uint32Array.from(tri) };
 }
 
+/** Edges of a welded mesh not shared by exactly two triangles: 0 for a closed (watertight) mesh, else its gaps. */
+export function openEdgeCount(m: IndexedMesh): number {
+  const uses = new Map<number, number>(), n = m.positions.length / 3, T = m.triangles;
+  for (let t = 0; t < T.length; t += 3)
+    for (let k = 0; k < 3; k++) {
+      const a = T[t + k], b = T[t + ((k + 1) % 3)], key = Math.min(a, b) * n + Math.max(a, b);
+      uses.set(key, (uses.get(key) ?? 0) + 1);
+    }
+  let open = 0;
+  for (const c of uses.values()) if (c !== 2) open++;
+  return open;
+}
+
 /** Number of triangles an STL export at this quality would have (meshes count as they are). */
 export function stlTriangleCount(shapes: (Solid | TriMesh)[], quality: StlQuality): number {
   let n = 0;

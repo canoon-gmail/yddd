@@ -2290,6 +2290,38 @@ const SCENARIO_CABLE = String.raw`
 })()
 `;
 
+/** Export only what prints: flat faces never (STEP too); solids that aren't closed and meshes with gaps are named first. */
+const SCENARIO_PRINT = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  app.doc.reset([]);
+  const q = { tolerance: 0.05, angle: 10 };
+  const ball = K.parseStl(new Uint8Array(await K.exportStl([K.makeSphereAt([0, 0, 10], 10)], q)));
+  const torn = new ball.constructor(ball.positions.slice(0, -9)); // (one triangle gone: a gap of 3 edges)
+  const box = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 10), "Box");
+  const closed = app.doc.makeBody(ball, "Ball", "mesh"), open = app.doc.makeBody(torn, "Torn", "mesh");
+  const sheet = app.doc.makeBody(K.makeRectFace(G, [50, 0, 0], 10, 10), "Sheet", "solid"); // (a "solid" that is only a surface)
+  const face = app.doc.makeBody(K.makeRectFace(G, [80, 0, 0], 10, 10), "Rect", "face");
+  app.doc.commit([box, closed, open, sheet, face], "print bodies");
+  const found = app.printProblems(app.doc.bodies).map((p) => [p.body.name, p.why]);
+  expect("print check: a box and a closed mesh pass; a mesh with a missing triangle (3 open edges) and a \"solid\" that is only a surface are named; flat faces aren't checked",
+    found.length === 2 && found[0][0] === "Torn 1" && /3 open edges/.test(found[0][1]) && found[1][0] === "Sheet 1" && /not a closed solid/.test(found[1][1]), found);
+  // A flat face alone: not even STEP takes it
+  app.run("mode.body"); app.setSelection([{ kind: "body", body: face.id, id: 0 }]);
+  await app.fileExport("step"); await sleep(20);
+  const toasts = [...document.querySelectorAll("#toasts .toast")].map((t) => t.textContent).slice(-2);
+  expect("print check: STEP skips flat faces too — a face alone: nothing to export", /STEP skips flat faces/.test(toasts[0] ?? "") && /Nothing to export/.test(toasts[1] ?? ""), toasts);
+  app.setSelection([]); app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("print scenario failed: " + JSON.stringify(failed));
+  return [{ label: "print check at export", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Measure (=): hovering a corner, an edge, faces and a circle shows their sizes in the HUD. */
 const SCENARIO_MEASURE = String.raw`
 (async () => {
@@ -6047,6 +6079,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       report.push({ label: "settings: radius / diameter", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Settings… Radius | Diameter switch (Radius by default); Diameter: Cylinder / Sphere / Circle Tab dialogs ask for the diameter (20 → 20 across); Radius: 20 → 40 across", ok, got }] });
     }
     await shot("7b-array.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PRINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);

@@ -109,6 +109,7 @@ import {
   sketchPath,
   solidPieces,
   solidVolume,
+  openEdgeCount,
   shapesTouch,
   type Frame,
   type BodyKind,
@@ -6697,6 +6698,21 @@ class App implements ToolHost {
     });
   }
 
+  /** Bodies that would print badly: a solid that isn't closed or that OpenCascade finds broken, a mesh with gaps. */
+  private printProblems(bodies: Body[]): { body: Body; why: string }[] {
+    const out: { body: Body; why: string }[] = [];
+    for (const b of bodies) {
+      if (b.kind === "mesh") {
+        const open = openEdgeCount(meshForExport(b.shape, { tolerance: 0.02, angle: 8 }));
+        if (open) out.push({ body: b, why: `not closed — ${open} open edge${open === 1 ? "" : "s"} (gaps in the mesh)` });
+      } else if (b.kind === "solid") {
+        if (!solidPieces(b.shape).length) out.push({ body: b, why: "not a closed solid (an open surface)" });
+        else if (!isValidShape(b.shape)) out.push({ body: b, why: "not a valid solid (OpenCascade finds it broken)" });
+      }
+    }
+    return out;
+  }
+
   private async fileExport(kind: "step" | "stl" | "3mf"): Promise<void> {
     const ids = this.selectedBodyIds();
     let bodies = ids.length ? this.doc.bodies.filter((b) => ids.includes(b.id)) : this.doc.bodies.filter((b) => !this.hidden.has(b.id));
@@ -6704,12 +6720,12 @@ class App implements ToolHost {
       this.toast(`${kind.toUpperCase()} skips paths (open lines from a sketch) — they have no surface`);
       bodies = bodies.filter((b) => b.kind !== "path");
     }
-    if (kind !== "step") {
-      // Solids and meshes go into one file (a slicer handles touching / overlapping parts).
-      const printable = bodies.filter((b) => b.kind !== "face");
-      if (printable.length < bodies.length) this.toast(`${kind.toUpperCase()} skips flat faces (no volume) — exporting solids and meshes only`);
-      bodies = printable;
-    } else {
+    // Only what has a volume, in every format: flat faces are left out.
+    const withVolume = bodies.filter((b) => b.kind !== "face");
+    if (withVolume.length < bodies.length) this.toast(`${kind.toUpperCase()} skips flat faces (no volume) — exporting solids${kind === "step" ? "" : " and meshes"} only`);
+    bodies = withVolume;
+    // (STL / 3MF: solids and meshes in one file — a slicer handles touching / overlapping parts)
+    if (kind === "step") {
       const solids = bodies.filter((b) => b.kind !== "mesh");
       const meshes = bodies.length - solids.length;
       if (meshes) {
@@ -6730,6 +6746,21 @@ class App implements ToolHost {
     if (!bodies.length) {
       this.toast("Nothing to export", "error");
       return;
+    }
+    // Solids OpenCascade finds broken or open, meshes with gaps: say so first (Cancel selects them).
+    const problems = this.printProblems(bodies);
+    if (problems.length) {
+      const one = problems.length === 1;
+      const choice = await window.yddd.ask({
+        message: one ? `"${problems[0].body.name}" may not print` : `${problems.length} objects may not print`,
+        detail: `${problems.map((p) => `"${p.body.name}": ${p.why}`).join("\n")}\n\nA slicer may refuse ${one ? "it" : "them"} or print ${one ? "it" : "them"} wrong.`,
+        buttons: ["Export anyway", "Cancel"],
+      });
+      if (choice !== 0) {
+        this.setMode("body");
+        this.setSelection(problems.map((p) => ({ kind: "body", body: p.body.id, id: 0 })));
+        return;
+      }
     }
     const shapes = bodies.map((b) => b.shape);
     let quality: StlQuality | null = { tolerance: 0.02, angle: 8 };
