@@ -128,7 +128,7 @@ import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
 import { write3mf } from "./threemf";
-import { JobCancelled, KernelWorker } from "./kernelWorker";
+import { JobCancelled, KernelWorker, solidFrom, type JobShape, type KernelJob } from "./kernelWorker";
 import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
@@ -1566,7 +1566,10 @@ class App implements ToolHost {
 
   private bindKeys(): void {
     window.addEventListener("keydown", (e) => {
-      if (this.busyNow) return e.preventDefault(); // (a slow step is about to run: see runBusy)
+      if (this.busyNow) {
+        if (e.key === "Escape") this.busyStop?.(); // (a background kernel job stops; a main-thread one can't)
+        return e.preventDefault(); // (a slow step is about to run: see runBusy)
+      }
       const target = e.target as HTMLElement;
       const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
       // A chord's second key also counts in the op panel its first key opened (S → Scale's field has focus).
@@ -2364,7 +2367,7 @@ class App implements ToolHost {
           let brep = breps.get(shape);
           if (brep === undefined) breps.set(shape, (brep = serializeShape(shape)));
           const res = await this.bgKernel.run({ op: "round", kind, brep, edges: edges ? [...edges].map((h) => all.indexOf(h)).filter((i) => i >= 0) : null, size: r });
-          got.set(id, { shape: deserialize(res.brep) as Solid, skipped: res.skipped.length, asked: res.asked, largest: res.largest });
+          got.set(id, { shape: solidFrom(res), skipped: res.skipped.length, asked: res.asked, largest: res.largest }); // (meshed there too)
         }
         return outcome(got, r);
       },
@@ -2393,6 +2396,7 @@ class App implements ToolHost {
       return;
     }
     const ids = new Set(faces.map((f) => f.id));
+    let brep: string | undefined;
     this.startOp({
       title: "Shell",
       label: "Shell",
@@ -2400,6 +2404,14 @@ class App implements ToolHost {
       compute: ({ t }) => {
         if (t <= 0) throw new Error("thickness must be greater than 0");
         return this.replaceOutcome(new Map([[bodyId, shellSolid(this.solidOf(bodyId, "Shell"), ids, t)]]), "Shell");
+      },
+      // In the background kernel: the solid as BREP text (once), the open faces by place in its face list
+      computeAsync: async ({ t }) => {
+        if (t <= 0) throw new Error("thickness must be greater than 0");
+        const shape = this.solidOf(bodyId, "Shell"), all = shape.faces.map((f) => f.hashCode);
+        brep ??= serializeShape(shape);
+        const res = await this.bgKernel.run({ op: "shell", brep, faces: [...ids].map((h) => all.indexOf(h)).filter((i) => i >= 0), thickness: t });
+        return this.replaceOutcome(new Map([[bodyId, solidFrom(res)]]), "Shell");
       },
       remember: ({ t }) => (this.defaults.shell = t),
     });
@@ -3527,11 +3539,13 @@ class App implements ToolHost {
       return;
     }
     const [targetId, ...toolIds] = ids;
-    this.runBusy(this.heavyBoolean(ids), `${label} of ${ids.length} solids…`, () => {
+    const heavy = this.heavyBoolean(ids);
+    this.runBusy(heavy, `${label} of ${ids.length} solids…`, async () => {
       let made: number[] | null;
       try {
-        made = this.applyBoolean(op, targetId, toolIds, label);
+        made = await this.applyBoolean(op, targetId, toolIds, label, false, heavy);
       } catch (err) {
+        if (err instanceof JobCancelled) return this.toast(`${label} stopped — nothing changed`);
         return this.fail(err);
       }
       if (!made) return;
@@ -3542,6 +3556,8 @@ class App implements ToolHost {
 
   /** A slow step is about to run behind the busy dialog (keys and clicks wait: see runBusy). */
   private busyNow = false;
+  /** The busy dialog's Stop (Esc): set while a step that can be stopped runs. */
+  private busyStop: (() => void) | null = null;
 
   /**
    * Run `work` — `heavy`: behind a busy dialog painted first, so the app is seen working rather than
@@ -3557,7 +3573,15 @@ class App implements ToolHost {
     this.busyNow = true;
     const el = document.createElement("div");
     el.id = "busy";
-    el.innerHTML = `<div class="busy-box"><div class="spinner"></div><div class="busy-text">${escapeHtml(text)}</div><div class="busy-tip">It can't be stopped part-way — Ctrl+Z undoes it afterwards</div></div>`;
+    // (the background kernel's jobs can be stopped: Stop ends whatever it's doing — nothing changes)
+    const stoppable = this.bgKernel.ready;
+    el.innerHTML = `<div class="busy-box"><div class="spinner"></div><div class="busy-text">${escapeHtml(text)}</div>` +
+      (stoppable ? `<div class="busy-tip">Stop ends it — nothing changes</div><button type="button" class="btn busy-stop">Stop</button>` : `<div class="busy-tip">It can't be stopped part-way — Ctrl+Z undoes it afterwards</div>`) +
+      `</div>`;
+    // Stop / Esc: the job ends now — or, not started yet (the dialog is painted first), doesn't start
+    let stopped = false;
+    this.busyStop = stoppable ? () => ((stopped = true), this.bgKernel.cancel()) : null;
+    el.querySelector(".busy-stop")?.addEventListener("click", () => this.busyStop?.());
     document.body.appendChild(el);
     const painted = () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)));
     const say = (t: string) => {
@@ -3567,10 +3591,12 @@ class App implements ToolHost {
     // (after the next paint: the dialog is on screen before the kernel takes over)
     void painted().then(async () => {
       try {
+        if (stopped) return this.toast("Stopped — nothing changed");
         await work(say);
       } finally {
         el.remove();
         this.busyNow = false;
+        this.busyStop = null;
       }
     });
   }
@@ -3595,10 +3621,14 @@ class App implements ToolHost {
    * if a union would leave solids that don't touch in one body. Throws on failure.
    */
   /** `keep`: the tool solids stay (Subtract with "Keep the clicked solid"). */
-  private applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string, keep = false): number[] | null {
+  private async applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string, keep = false, background = false): Promise<number[] | null> {
     const target = this.doc.get(targetId)!;
     const tools = toolIds.map((id) => this.doc.get(id)!);
-    const result = booleanOp(op, this.solidOf(targetId, label), toolIds.map((id) => this.solidOf(id, label)));
+    // A heavy one (`background`) in the background kernel: the app stays live, the busy dialog's Stop ends it
+    const result = background && this.bgKernel.ready
+      ? solidFrom(await this.bgKernel.run({ op: "boolean", kind: op, target: serializeShape(this.solidOf(targetId, label)), tools: toolIds.map((id) => serializeShape(this.solidOf(id, label))) }))
+      : booleanOp(op, this.solidOf(targetId, label), toolIds.map((id) => this.solidOf(id, label)));
+    if (!this.doc.get(targetId) || toolIds.some((id) => !this.doc.get(id))) return null; // (gone meanwhile)
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
     const pieces = solidPieces(result);
     if (op === "union" && pieces.length > 1) {
@@ -3683,17 +3713,19 @@ class App implements ToolHost {
         this.toast(`Booleans work on solids — "${face.name}" is a flat face. Push/Pull it first.`, "error");
         return;
       }
-      this.runBusy(this.heavyBoolean([targetId, ...ids]), `${label === "Subtract" ? "Subtracting" : label === "Union" ? "Joining" : "Intersecting"} ${ids.length} solid${ids.length > 1 ? "s" : ""}…`, () => {
+      const heavy = this.heavyBoolean([targetId, ...ids]);
+      this.runBusy(heavy, `${label === "Subtract" ? "Subtracting" : label === "Union" ? "Joining" : "Intersecting"} ${ids.length} solid${ids.length > 1 ? "s" : ""}…`, async () => {
         try {
           const tools = ids.map((id) => this.doc.get(id)!);
           const records = this.doc.arrays.filter((r) => [...r.sources, ...r.copies].some((id) => ids.includes(id)));
-          if (this.applyBoolean(op, targetId, ids, label, op === "subtract" && keep)) {
+          if (await this.applyBoolean(op, targetId, ids, label, op === "subtract" && keep, heavy)) {
             if (op === "subtract") usedRecords.push(...records.filter((r) => !usedRecords.includes(r)));
             count += ids.length;
             if (op === "subtract") used.push(...tools);
           }
         } catch (err) {
-          this.fail(err);
+          if (err instanceof JobCancelled) this.toast(`${label} stopped — nothing changed`);
+          else this.fail(err);
         }
         show(null);
         this.hint(msg());
@@ -6464,7 +6496,9 @@ class App implements ToolHost {
     const file = await window.y3d.openFile({ title: "Import STEP", filters: [{ name: "STEP", extensions: ["step", "stp"] }], binary: true });
     if (!file) return;
     try {
-      const shapes = await importStep(file.data as Uint8Array);
+      // Read in the background kernel (with the display meshes): the app stays live while a big file loads
+      const data = file.data as Uint8Array;
+      const shapes = this.bgKernel.ready ? (this.toast("Reading the STEP file…"), (await this.bgKernel.run({ op: "importStep", data })).solids.map(solidFrom)) : await importStep(data);
       const base = file.path.split(/[\\/]/).pop()!.replace(/\.(step|stp)$/i, "");
       const bodies = shapes.map((s) => this.doc.makeBody(s, base));
       this.doc.commit([...this.doc.bodies, ...bodies], "Import STEP");
@@ -6648,10 +6682,22 @@ class App implements ToolHost {
       if (!quality) return;
     }
     try {
-      const buf =
-        kind === "step" ? await exportStep(shapes.filter(notMesh).map((shape, i) => ({ shape, name: bodies[i].name })))
-        : kind === "3mf" ? await write3mf(bodies.map((b) => ({ name: b.name, mesh: meshForExport(b.shape as Solid | TriMesh, quality!) })))
-        : await exportStl(shapes as (Solid | TriMesh)[], quality!);
+      let buf: ArrayBuffer | Uint8Array;
+      if (this.bgKernel.ready) {
+        // Written in the background kernel: the app stays live meanwhile (a fine STL of a big model takes a while)
+        const item = (b: Body): JobShape => (b.kind === "mesh" ? { mesh: b.shape.positions } : { brep: serializeShape(b.shape as Shape) });
+        const job: KernelJob =
+          kind === "step" ? { op: "exportStep", items: bodies.map((b) => ({ brep: serializeShape(b.shape as Shape), name: b.name })) }
+          : kind === "3mf" ? { op: "export3mf", items: bodies.map((b) => ({ ...item(b), name: b.name })), quality: quality! }
+          : { op: "exportStl", items: bodies.map(item), quality: quality! };
+        this.toast(`Exporting ${kind.toUpperCase()}…`);
+        buf = (await this.bgKernel.run(job)).data;
+      } else {
+        buf =
+          kind === "step" ? await exportStep(shapes.filter(notMesh).map((shape, i) => ({ shape, name: bodies[i].name })))
+          : kind === "3mf" ? await write3mf(bodies.map((b) => ({ name: b.name, mesh: meshForExport(b.shape as Solid | TriMesh, quality!) })))
+          : await exportStl(shapes as (Solid | TriMesh)[], quality!);
+      }
       const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.y3d$/, "") ?? "model";
       const path = await window.y3d.saveFile({
         title: `Export ${kind.toUpperCase()}`,

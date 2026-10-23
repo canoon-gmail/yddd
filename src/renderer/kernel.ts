@@ -325,6 +325,8 @@ export interface Tessellation {
 export const BUSY_FACES = 30;
 
 export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
+  const given = meshedElsewhere.get(shape);
+  if (given) return given;
   // Size from points along the edges (a bounding box of B-spline faces is slow to compute — tens
   // of ms); midpoints too, for a whole circle whose one edge starts and ends at the same point.
   const ends = shape.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
@@ -344,6 +346,31 @@ export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   // (OpenCascade would mesh it all again, stand-ins' faces too): from the edges alone then.
   const edgeLines = whole ? shape.meshEdges(opts) : (makeCompound(shape.edges) as unknown as Shape).meshEdges(opts);
   return { faces: mesh, edges: withoutSeams(edgeLines, seamEdgeIds(shape)) };
+}
+
+/** Display meshes made in the background kernel for shapes read back here (see takeMesh): tessellate uses them. */
+const meshedElsewhere = new WeakMap<object, Tessellation>();
+
+/**
+ * The display mesh (full quality) with its faces and edges by place in `shape.faces` / `shape.edges` instead of by
+ * id — ids differ between the two kernels; places don't for a shape read from the same BREP text.
+ */
+export function meshByPlace(shape: Shape): Tessellation {
+  const t = tessellate(shape);
+  const fi = new Map(shape.faces.map((f, i) => [f.hashCode, i])), ei = new Map(shape.edges.map((e, i) => [e.hashCode, i]));
+  return {
+    faces: { ...t.faces, faceGroups: t.faces.faceGroups.map((g) => ({ ...g, faceId: fi.get(g.faceId) ?? -1 })) },
+    edges: { ...t.edges, edgeGroups: t.edges.edgeGroups.map((g) => ({ ...g, edgeId: ei.get(g.edgeId) ?? -1 })) },
+  };
+}
+
+/** Give `shape` (read here from the background kernel's BREP text) the display mesh it made (meshByPlace). */
+export function takeMesh(shape: Shape, byPlace: Tessellation): void {
+  const faces = shape.faces, edges = shape.edges;
+  meshedElsewhere.set(shape, {
+    faces: { ...byPlace.faces, faceGroups: byPlace.faces.faceGroups.map((g) => ({ ...g, faceId: faces[g.faceId]?.hashCode ?? -1 })) },
+    edges: { ...byPlace.edges, edgeGroups: byPlace.edges.edgeGroups.map((g) => ({ ...g, edgeId: edges[g.edgeId]?.hashCode ?? -1 })) },
+  });
 }
 
 /**

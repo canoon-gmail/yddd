@@ -2804,6 +2804,10 @@ const SCENARIO_TEXT = String.raw`
       const took = performance.now() - t0;
       clearInterval(tick);
       const shown = !!(app.op && app.op.result);
+      // its display mesh came from the background kernel: every face / edge group names one of this shape's faces / edges
+      const res0 = app.op && app.op.result && [...app.op.result.ghost.values()][0], tm = res0 && K.tessellate(res0);
+      const fIds = res0 ? new Set(res0.faces.map((f) => f.hashCode)) : new Set(), eIds = res0 ? new Set(res0.edges.map((e) => e.hashCode)) : new Set();
+      const idsOk = !!tm && tm.faces.faceGroups.length === fIds.size && tm.faces.faceGroups.every((g) => fIds.has(g.faceId)) && tm.edges.edgeGroups.every((g) => eIds.has(g.edgeId));
       // Esc while it works: stopped, panel closed, the model as it was; the background kernel back after
       opValue("r", 0.6);
       for (let i = 0; i < 50 && !app.op?.job; i++) await sleep(20);
@@ -2811,9 +2815,52 @@ const SCENARIO_TEXT = String.raw`
       key("Escape", "Escape"); await sleep(50);
       const closed = !app.op, unchanged = app.doc.bodies.length === 1 && app.doc.bodies[0].shape === plate;
       for (let i = 0; i < 300 && !app.bgKernel.ready; i++) await sleep(50);
-      expect("background kernel: loaded; its fillet = this one (3 edges by place); a heavy fillet (49 holes) shown, this thread never stalling half that long (the result's meshing still here); Esc stops it (model unchanged), it comes back",
-        ready && same && /Working/.test(working) && shown && gap < took / 2 && busy && closed && unchanged && app.bgKernel.ready,
-        { ready, same, working, took: Math.round(took), gap: Math.round(gap), ticks, shown, busy, closed, unchanged, readyAgain: app.bgKernel.ready });
+      expect("background kernel: loaded; its fillet = this one (3 edges by place); a heavy fillet (49 holes) shown — meshed there too, its faces / edges this shape's — this thread never stalling 150 ms; Esc stops it (model unchanged), it comes back",
+        ready && same && /Working/.test(working) && shown && idsOk && gap < 150 && busy && closed && unchanged && app.bgKernel.ready,
+        { ready, same, working, took: Math.round(took), gap: Math.round(gap), ticks, shown, idsOk, busy, closed, unchanged, readyAgain: app.bgKernel.ready });
+    }
+    // Background kernel, more: Shell through the panel; a heavy Subtract (7 solids: the busy dialog, with Stop) = the same
+    // here; Esc stops one (nothing changes); exports written there = the same files; a STEP read there = the same solid
+    {
+      for (let i = 0; i < 300 && !app.bgKernel.ready; i++) await sleep(50);
+      const settle = async () => { for (let i = 0; i < 300 && (app.op?.job || app.op?.wanted); i++) await sleep(20); };
+      app.doc.reset([]);
+      const cube = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 20), "Cube");
+      app.doc.commit([cube], "cube"); vp.fit(); app.run("mode.face");
+      const topF = cube.shape.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] > 0.99).hashCode;
+      app.setSelection([{ kind: "face", body: cube.id, id: topF }]); app.run("op.shell"); await sleep(30);
+      opValue("t", 2); await sleep(150); await settle();
+      app.applyOp(); await sleep(100);
+      const shellV = K.solidVolume(app.doc.bodies[0].shape);
+      // heavy Subtract: a block and 6 pegs
+      app.doc.reset([]); app.run("mode.body");
+      const mk = () => { const blk = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 70, 20, 10), "Block"); const pegs = [0, 1, 2, 3, 4, 5].map((i) => app.doc.makeBody(K.makeCylinder(G, [-25 + 10 * i, 0, 0], 3, 10), "Peg")); return [blk, ...pegs]; };
+      let parts = mk(); app.doc.commit(parts, "pegs");
+      const want = K.solidVolume(K.booleanOp("subtract", parts[0].shape, parts.slice(1).map((b) => b.shape)));
+      app.setSelection(parts.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      app.run("bool.subtract");
+      const stopBtn = !!document.querySelector("#busy .busy-stop");
+      for (let i = 0; i < 300 && document.getElementById("busy"); i++) await sleep(20);
+      const subV = app.doc.bodies.length === 1 ? K.solidVolume(app.doc.bodies[0].shape) : -1;
+      // again, Esc right away: stopped, the 7 solids as they were
+      app.doc.reset([]); parts = mk(); app.doc.commit(parts, "pegs");
+      app.setSelection(parts.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      app.run("bool.subtract");
+      key("Escape", "Escape");
+      for (let i = 0; i < 300 && document.getElementById("busy"); i++) await sleep(20);
+      const stoppedKept = app.doc.bodies.length === 7;
+      for (let i = 0; i < 300 && !app.bgKernel.ready; i++) await sleep(50);
+      // exports there = here; a STEP read there = the solid
+      const q = { tolerance: 0.02, angle: 8 }, solid = parts[0].shape;
+      const stlHere = new Uint8Array(await K.exportStl([solid], q)), stlThere = (await app.bgKernel.run({ op: "exportStl", items: [{ brep: K.serializeShape(solid) }], quality: q })).data;
+      const mfHere = await K.write3mf([{ name: "Block", mesh: K.meshForExport(solid, q) }]), mfThere = (await app.bgKernel.run({ op: "export3mf", items: [{ brep: K.serializeShape(solid), name: "Block" }], quality: q })).data;
+      const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+      const step = (await app.bgKernel.run({ op: "exportStep", items: [{ brep: K.serializeShape(solid), name: "Block" }] })).data;
+      const back = (await app.bgKernel.run({ op: "importStep", data: step })).solids;
+      const backV = back.length === 1 ? K.solidVolume(K.deserialize(back[0].brep)) : -1;
+      expect("background kernel: Shell (top open, 2) through the panel = 20³ − 16²·18; a 7-solid Subtract there (busy dialog with Stop) = here; Esc stops one, the 7 kept; STL / 3MF there = here byte for byte; its STEP read back = the solid",
+        Math.abs(shellV - (8000 - 16 * 16 * 18)) < 1e-6 && stopBtn && Math.abs(subV - want) < 1e-6 && stoppedKept && same(stlHere, stlThere) && same(mfHere, mfThere) && Math.abs(backV - K.solidVolume(solid)) < 1e-6,
+        { shellV: r(shellV), stopBtn, subV: r(subV), want: r(want), stoppedKept, stl: [stlHere.length, stlThere.length], mf: [mfHere.length, mfThere.length], backV: r(backV) });
     }
     // Fillet that can't do every edge: a 40 × 40 × 4 plate, all edges R 5 → its 4 corners rounded, the 8 edges round
     // the 4 mm faces left sharp, the panel says so (orange) and offers the largest R that does all; that button → no
@@ -3367,7 +3414,7 @@ const SCENARIO_ARRAY = String.raw`
     head?.click();
     // (36 solids at once: a busy dialog is put up first, the cut runs after the next paint)
     const busy = !!document.getElementById("busy"), stillThere = app.doc.bodies.length === nb;
-    const typed = (key("Escape", "Escape"), !!app.tool); // (keys wait while it's up)
+    const typed = (key("x", "KeyX"), !!app.tool); // (keys wait while it's up — X / Delete deletes nothing; Esc would stop it: see "background kernel")
     for (let i = 0; i < 100 && document.getElementById("busy"); i++) await sleep(20);
     const ms = performance.now() - t0, gone = !document.getElementById("busy");
     const cut = app.doc.get(plate.id);
