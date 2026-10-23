@@ -4933,7 +4933,8 @@ class App implements ToolHost {
     if (rims) return this.deleteRounds(rims);
     const holes = this.selectedHoles();
     if (holes) return this.deleteHoles(holes);
-    const ids = new Set(this.selection.filter((s) => s.kind === "body").map((s) => s.body));
+    // (a path's line picked in Edge mode: the path — it is only its lines)
+    const ids = new Set(this.selection.filter((s) => s.kind === "body" || (s.kind === "edge" && this.doc.get(s.body)?.kind === "path")).map((s) => s.body));
     if (!ids.size) {
       this.toast("Delete: select objects (Solid mode, key 1) — or the rims of round holes / pins (Edge mode) to fill them", "error");
       return;

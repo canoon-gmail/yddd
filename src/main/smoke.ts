@@ -2608,6 +2608,16 @@ const SCENARIO_SPLINE = String.raw`
     const face = app.doc.bodies.find((b) => b.kind === "face"), path = app.doc.bodies.find((b) => b.kind === "path");
     const solid = face && K.extrudeFace(face.shape, face.shape.faces[0].hashCode, 10);
     expect("spline: Done → a flat face (pushes into a valid solid) and a path", !app.tool && face && path && solid && K.isValidShape(solid) && K.solidVolume(solid) > 100, { tool: app.tool && app.tool.name, kinds: app.doc.bodies.map((b) => b.kind) });
+    // Edge mode (3): a click on the path picks its line — Del still deletes the path; undo brings it back
+    const pathId = path.id, mid = path.shape.edges[0].pointAt(0.5).toTuple();
+    app.run("mode.edge"); app.setSelection([]);
+    pe("pointermove", mid); pe("pointerdown", mid); pe("pointerup", mid); await sleep(30);
+    const picked = app.selection.length === 1 && app.selection[0].kind === "edge" && app.selection[0].body === pathId;
+    await key("Delete", { code: "Delete" });
+    const gone = !app.doc.get(pathId) && app.doc.bodies.length === 1;
+    app.run("edit.undo"); await sleep(20);
+    expect("spline: Edge mode, click the path (its line), Del → the path is deleted; undo brings it back", picked && gone && !!app.doc.get(pathId), { picked, gone, back: !!app.doc.get(pathId) });
+    app.run("mode.body");
     // K on the face again: its curve comes back as a Spline, points to drag
     app.setSelection([{ kind: "body", body: face.id, id: 0 }]);
     await key("k", { code: "KeyK" }); await sleep(50);
@@ -6263,6 +6273,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     if (process.env.YDDD_SMOKE_ONLY === "spline") {
       // (while working on it: just the sketch spline scenario)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
+      if (process.env.YDDD_SMOKE_EXP) console.log("SMOKE_EXP " + JSON.stringify(await win.webContents.executeJavaScript(await readFile(process.env.YDDD_SMOKE_EXP, "utf8"), true)));
       // A screenshot: a closed and an open Spline in a sketch, the closed one selected (its points to drag)
       await win.webContents.executeJavaScript(`(async () => {
         const app = window.ydddApp, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
