@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, type MenuItemConstructorOptions } from "electron";
+import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -204,6 +205,25 @@ function registerIpc(): void {
   ipcMain.handle("read-file", async (_e, filePath: string) => {
     try {
       return await readFile(filePath, "utf8");
+    } catch {
+      return null;
+    }
+  });
+
+  // Text tool fonts: the system's TrueType / OpenType files (fontconfig), and reading one of them.
+  let fontFiles = new Set<string>();
+  ipcMain.handle("fonts-list", () => new Promise<{ family: string; style: string; file: string }[]>((resolve) => {
+    execFile("fc-list", ["--format", "%{family[0]}\t%{style[0]}\t%{file}\n"], { maxBuffer: 16 << 20 }, (err, out) => {
+      if (err) return resolve([]);
+      const fonts = out.split("\n").map((l) => l.split("\t")).filter((f) => f.length === 3 && /\.(ttf|otf)$/i.test(f[2])).map(([family, style, file]) => ({ family, style, file }));
+      fontFiles = new Set(fonts.map((f) => f.file));
+      resolve(fonts);
+    });
+  }));
+  ipcMain.handle("font-read", async (_e, file: string) => {
+    if (!fontFiles.has(file)) return null; // (only the listed fonts)
+    try {
+      return new Uint8Array(await readFile(file));
     } catch {
       return null;
     }

@@ -1773,8 +1773,9 @@ export class Viewport {
    * Instant push/pull drag preview: each body's display mesh with the given faces shifted (by
    * face id → offset) and the matching vertices of their neighbours shifted along, so side faces
    * stretch to follow. Approximate (no boolean): the exact preview follows once the drag pauses.
+   * `extrude`: flat face objects shown pushed out by that offset (see addGhostPrism).
    */
-  showGhostDeformed(moves: Map<number, Map<number, V3>>): void {
+  showGhostDeformed(moves: Map<number, Map<number, V3>>, extrude: Map<number, V3> = new Map()): void {
     this.clearGhost();
     const key = (a: ArrayLike<number>, i: number) => `${Math.round(a[i] * 1e3)},${Math.round(a[i + 1] * 1e3)},${Math.round(a[i + 2] * 1e3)}`;
     for (const [id, faces] of moves) {
@@ -1822,7 +1823,52 @@ export class Viewport {
       v.group.visible = false;
       this.markDirty(id);
     }
+    for (const [id, d] of extrude) this.addGhostPrism(id, d);
     this.requestRender();
+  }
+
+  /**
+   * A flat face object's display mesh drawn as the solid Push/Pull would make (instant: no kernel): the face, a copy
+   * moved by `d`, and walls along its outline between them.
+   */
+  private addGhostPrism(id: number, d: V3): void {
+    const v = this.views.get(id);
+    if (!v) return;
+    const P = v.mesh.geometry.attributes.position.array as Float32Array;
+    const I = v.mesh.geometry.index!.array as ArrayLike<number>;
+    const E = v.edgePos, nv = P.length / 3, ne = E.length / 6;
+    const pos = new Float32Array(P.length * 2 + ne * 12);
+    pos.set(P, 0);
+    for (let i = 0; i < P.length; i += 3) for (let k = 0; k < 3; k++) pos[P.length + i + k] = P[i + k] + d[k];
+    const idx: number[] = [];
+    for (let i = 0; i < I.length; i += 3) idx.push(I[i], I[i + 2], I[i + 1], I[i] + nv, I[i + 1] + nv, I[i + 2] + nv); // (the start face turned over)
+    // Walls: a quad per outline segment (corners not shared: flat shaded; double-sided, so any winding will do)
+    let o = P.length * 2;
+    for (let s = 0; s < ne; s++) {
+      const a = s * 6, b = a + 3, base = o / 3;
+      for (const [src, up] of [[a, 0], [b, 0], [b, 1], [a, 1]] as const) for (let k = 0; k < 3; k++) pos[o++] = E[src + k] + (up ? d[k] : 0);
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geom.setIndex(idx);
+    geom.computeVertexNormals();
+    const mat = this.mats.faces[0]; // (looks like the solid it will be)
+    const group = new THREE.Group();
+    group.add(new THREE.Mesh(geom, mat));
+    if (E.length >= 6) {
+      const lines = new Float32Array(E.length * 2);
+      lines.set(E, 0);
+      for (let i = 0; i < E.length; i += 3) for (let k = 0; k < 3; k++) lines[E.length + i + k] = E[i + k] + d[k];
+      const eg = new LineSegmentsGeometry();
+      eg.setPositions(lines);
+      const l = new LineSegments2(eg, this.mats.edge);
+      l.raycast = () => {};
+      group.add(l);
+    }
+    this.ghostRoot.add(group);
+    v.group.visible = false;
+    this.markDirty(id);
   }
 
   clearGhost(): void {

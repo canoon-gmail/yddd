@@ -1,7 +1,7 @@
 /**
  * Interactive drawing tools.
  *   Solid tools: Box / Cylinder / Sphere create closed 3D solids.
- *   Face tools:  Rectangle / Circle / Polygon create flat planar faces, which
+ *   Face tools:  Rectangle / Circle / Polygon / Text create flat planar faces, which
  *                Push/Pull then extrudes into a new solid.
  *
  * Every tool draws on the ground plane, or on the planar face under the
@@ -21,6 +21,9 @@ import {
   makeRectFace,
   makeCircleFace,
   makePolygonFace,
+  makeTextFaces,
+  tessellate,
+  type TextOptions,
   type BodyKind,
   type RefEdge,
   type Frame,
@@ -876,6 +879,159 @@ export class PolygonTool extends DrawTool {
     const deg = THREE.MathUtils.radToDeg(this.a);
     this.emit(() => makePolygonFace(this.frame.toKernel(), [c.x, c.y, c.z], r, sides, deg), "Polygon", "face");
   }
+}
+
+// ------------------------------------------------------------------ Text
+
+/** The Text tool's settings (its panel; kept for the next text). */
+export interface TextSettings extends TextOptions {
+  text: string;
+}
+
+/**
+ * Flat Text faces: click where the text starts (its baseline, on the grid or on a planar face) — the
+ * panel (`onPlaced`) sets the text, font, size, alignment and spacing, shown live; Enter / Create adds one face
+ * per letter outline (`done`). A click elsewhere moves the text there.
+ */
+export class TextTool extends DrawTool {
+  readonly name = "Text";
+  static settings: TextSettings = { text: "Text", height: 10, align: "left", lineSpacing: 1, letterSpacing: 0, font: "" };
+  protected readonly hints = [
+    "Text: click where it starts (on the grid or on a planar face)",
+    "Text: type in the panel · click elsewhere to move it · Enter / Create adds it",
+  ];
+  private at = new THREE.Vector3();
+  private faces: Shape[] = [];
+  private error = "";
+
+  constructor(host: ToolHost, private readonly onPlaced: () => void, private readonly done: (faces: Shape[], s: TextSettings) => void) {
+    super(host);
+  }
+
+  get placed(): boolean {
+    return this.stage === 1;
+  }
+
+  /** Clicked somewhere else since placeAt. */
+  moved = false;
+
+  /** Start already placed (editing a text): on `frame`, its first baseline starting at frame.origin. */
+  placeAt(frame: Frame): this {
+    this.frame = PlaneFrame.from(frame);
+    this.at = this.frame.origin.clone();
+    this.stage = 1;
+    this.updateHint();
+    this.redraw();
+    this.onPlaced();
+    return this;
+  }
+
+  /** The plane the text is on, its origin where it starts (the TextRecord's frame). */
+  placement(): Frame {
+    return { ...this.frame.toKernel(), origin: [this.at.x, this.at.y, this.at.z] };
+  }
+
+  /** Why the text can't be made (e.g. a letter the font hasn't got), "" if it can. */
+  get problem(): string {
+    return this.error;
+  }
+
+  move(e: PointerEvent): void {
+    this.last = e;
+    if (this.stage === 1) return;
+    this.frame = upright(this.frameUnder(e));
+    const p = this.hit(e, this.host.snapStep(e));
+    if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
+  }
+
+  down(e: PointerEvent): void {
+    const frame = upright(this.frameUnder(e));
+    const prev = this.frame;
+    this.frame = frame;
+    const p = this.hit(e, this.host.snapStep(e));
+    if (!p) return void (this.frame = prev);
+    this.at = this.frame.point(p.u, p.v);
+    const first = this.stage === 0;
+    if (!first) this.moved = true;
+    this.stage = 1;
+    this.updateHint();
+    this.redraw();
+    if (first) this.onPlaced();
+  }
+
+  /** The panel changed a setting: redraw the text. */
+  set(s: Partial<TextSettings>): void {
+    TextTool.settings = { ...TextTool.settings, ...s };
+    if (this.stage === 1) this.redraw();
+  }
+
+  /** Add the text (one face per letter outline). */
+  create(): void {
+    if (this.stage !== 1) return this.host.hint("Text: click where it starts first");
+    if (this.error) return this.host.fail(this.error);
+    if (!this.faces.length) return this.host.toast("Text: type some letters first", "error");
+    const faces = this.faces;
+    this.faces = [];
+    this.done(faces, TextTool.settings);
+  }
+
+  private redraw(): void {
+    const vp = this.host.viewport;
+    const s = TextTool.settings;
+    try {
+      this.faces = makeTextFaces(this.frame.toKernel(), [this.at.x, this.at.y, this.at.z], s.text, s);
+      this.error = "";
+    } catch (err) {
+      this.faces = [];
+      this.error = err instanceof Error ? err.message : String(err);
+    }
+    const pos: number[] = [], idx: number[] = [], seg: number[] = [];
+    for (const f of this.faces) {
+      const t = tessellate(f, true), o = pos.length / 3;
+      pos.push(...t.faces.vertices);
+      idx.push(...t.faces.triangles.map((k) => k + o));
+      seg.push(...t.edges.lines);
+    }
+    // (lifted a hair off the plane, so a text on a solid's face shows over it)
+    const lift = this.frame.z.clone().multiplyScalar(vp.worldPerPixel(this.at) * 0.5);
+    const tris = new THREE.BufferGeometry();
+    tris.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    tris.setIndex(idx);
+    tris.translate(lift.x, lift.y, lift.z);
+    const lines = new THREE.BufferGeometry();
+    lines.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
+    lines.translate(lift.x, lift.y, lift.z);
+    vp.setOverlay([new THREE.Mesh(tris, vp.mats.previewFill), new THREE.LineSegments(lines, vp.mats.previewLine), this.cursor(this.at)]);
+  }
+
+  key(e: KeyboardEvent): boolean {
+    if (e.key === "Enter" && this.stage === 1) {
+      this.create();
+      return true;
+    }
+    if (e.key === "Tab") return true; // (the panel has the settings)
+    return false;
+  }
+
+  protected props(): PropField[] {
+    return [];
+  }
+  protected applyProps(): void {}
+  protected applyTyped(): void {}
+}
+
+/**
+ * The frame turned so text reads upright: on a wall, y points up and x along it; on a level plane
+ * (or one leaning back), x runs along +X as far as it can.
+ */
+function upright(f: PlaneFrame): PlaneFrame {
+  const up = new THREE.Vector3(0, 0, 1);
+  if (Math.abs(f.z.z) <= 0.9) {
+    const y = up.addScaledVector(f.z, -f.z.z).normalize();
+    return new PlaneFrame(f.origin, y.clone().cross(f.z), y, f.z);
+  }
+  const x = new THREE.Vector3(1, 0, 0).addScaledVector(f.z, -f.z.x).normalize();
+  return new PlaneFrame(f.origin, x, f.z.clone().cross(x), f.z);
 }
 
 // ------------------------------------------------------------------ Move by points

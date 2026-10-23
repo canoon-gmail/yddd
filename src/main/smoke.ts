@@ -2513,6 +2513,182 @@ const SCENARIO_MEASURE = String.raw`
 `;
 
 /** Array copy (Shift+D on objects): a circle face on a box (like ~/untitled.y3d) → a row of copies, gap edge to edge. */
+/** Text (T): flat letter faces — a capital H the height tall, from the baseline — one group; P pushes them all; upright on a wall. */
+const SCENARIO_TEXT = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.y3dApp, K = window.y3dKernel, vp = app.viewport;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const key = (k, code, o = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true, ...o }));
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event(i.tagName === "SELECT" ? "change" : "input", { bubbles: true })); } };
+  const r = (n) => +n.toFixed(3);
+  try {
+    await K.loadTextFont();
+    const T0 = { height: 10, align: "left", lineSpacing: 1 };
+    const hi = K.makeTextFaces(G, [0, 0, 0], "Hi", T0), hb = hi[0].boundingBox.bounds;
+    const o = K.makeTextFaces(G, [0, 0, 0], "o", T0), two = K.makeTextFaces(G, [0, 0, 0], "H\nH", T0);
+    const ctr = K.makeTextFaces(G, [0, 0, 0], "H", { ...T0, align: "center" })[0].boundingBox.bounds;
+    expect("text: \"Hi\" → 3 faces (H, the i's stem and dot), H from the baseline up 10 mm, flat; o has a hole; 2 lines → 2 faces; centred H about x 0; spaces → none",
+      hi.length === 3 && Math.abs(hb[0][1]) < 0.01 && Math.abs(hb[1][1] - 10) < 0.01 && Math.abs(hb[0][2]) < 1e-6 && Math.abs(hb[1][2]) < 1e-6 &&
+        o.length === 1 && o[0].wires.length === 2 && two.length === 2 && Math.abs(ctr[0][0] + ctr[1][0]) < 0.1 && K.makeTextFaces(G, [0, 0, 0], "  ", T0).length === 0,
+      { n: hi.length, hb: hb.map((p) => p.map(r)), o: o.length && o[0].wires.length, two: two.length, ctr: ctr.map((p) => r(p[0])) });
+    // Built-in fonts: Noto Serif Bold's H is 10 mm too; Thai in Noto Sans comes from Noto Sans Thai, Latin in Noto Sans Thai from Noto Sans
+    const top = (fs) => Math.max(...fs.map((f) => f.boundingBox.bounds[1][1]));
+    const serifH = K.makeTextFaces(G, [0, 0, 0], "H", { ...T0, font: "builtin:NotoSerif-Bold" });
+    const latin = K.makeTextFaces(G, [0, 0, 0], "Bird", T0), mixed = K.makeTextFaces(G, [0, 0, 0], "Bird บ้าน", T0);
+    const thaiAB = K.makeTextFaces(G, [0, 0, 0], "AB ก", { ...T0, font: "builtin:NotoSansThai-Regular" });
+    const right = (fs) => Math.max(...fs.map((f) => f.boundingBox.bounds[1][0]));
+    expect("text: built-in fonts — Noto Serif Bold H 10 mm; \"Bird บ้าน\" (Noto Sans) has its Thai letters too; \"AB ก\" in Noto Sans Thai has its A, B (from Noto Sans) and ก",
+      serifH.length === 1 && Math.abs(top(serifH) - 10) < 0.01 && mixed.length >= latin.length + 4 && right(mixed) > right(latin) + 10 && thaiAB.length === 3 && K.BUILT_IN_FONTS.length === 6,
+      { serif: serifH.length && r(top(serifH)), latin: latin.length, mixed: mixed.length, wMixed: r(right(mixed)), wLatin: r(right(latin)), thaiAB: thaiAB.length });
+    // Letter spacing: each next letter that much further along; centred text stays centred
+    const xs = (sp, align = "left") => K.makeTextFaces(G, [0, 0, 0], "HH", { ...T0, align, letterSpacing: sp }).map((f) => f.boundingBox.bounds);
+    const h0 = xs(0), h2 = xs(2), hn = xs(-1), c2 = xs(2, "center");
+    expect("text: letter spacing 2 mm → the 2nd H 2 mm further along (−1 → 1 mm closer), the 1st stays; centred: still about x 0",
+      Math.abs(h2[1][0][0] - h0[1][0][0] - 2) < 1e-6 && Math.abs(hn[1][0][0] - h0[1][0][0] + 1) < 1e-6 && Math.abs(h2[0][0][0] - h0[0][0][0]) < 1e-6 && Math.abs(c2[0][0][0] + c2[1][1][0]) < 0.1,
+      { h0: h0.map((b) => r(b[0][0])), h2: h2.map((b) => r(b[0][0])), hn: hn.map((b) => r(b[0][0])), c2: [r(c2[0][0][0]), r(c2[1][1][0])] });
+    const see = (p) => window.__see(new (vp.camera.position.constructor)(p[0], p[1], p[2]));
+    const tap = (p) => { const s = see(p); for (const t of ["pointermove", "pointerdown", "pointerup"]) vp.canvas.dispatchEvent(new PointerEvent(t, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+    const typeText = async (text) => {
+      const ta = document.querySelector("#tool-panel textarea");
+      if (!ta) return false;
+      ta.value = text; ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })); await sleep(50);
+      return true;
+    };
+    app.doc.reset([]); vp.setView("top"); vp.fit(); await sleep(50);
+    key("t", "KeyT"); await sleep(200);
+    const tool = app.tool && app.tool.name;
+    tap([0, 0, 0]); await sleep(50);
+    const typed = await typeText("Hi");
+    const made = app.doc.bodies, groups = [...new Set(made.map((b) => b.group))];
+    expect("text: T, a click on the ground, \"Hi\" + Enter → 3 face objects in one new group named Text \"Hi\", all selected",
+      tool === "Text" && typed && made.length === 3 && made.every((b) => b.kind === "face") && groups.join() === 'Text "Hi"' && app.selection.length === 3,
+      { tool, typed, n: made.length, groups, sel: app.selection.length });
+    key("p", "KeyP"); await sleep(50); opValue("d", 2); await sleep(300);
+    // The drag preview: the letters drawn as prisms from their display meshes (instant) — as tall as the real ones
+    const fast = app.op.spec.fastDrag({ d: 2 }), gl = [1e9, 1e9, 1e9], gh = [-1e9, -1e9, -1e9];
+    vp.ghostRoot.traverse((m) => { if (!m.isMesh) return; m.geometry.computeBoundingBox(); const b = m.geometry.boundingBox; [b.min.x, b.min.y, b.min.z].forEach((x, k) => (gl[k] = Math.min(gl[k], x))); [b.max.x, b.max.y, b.max.z].forEach((x, k) => (gh[k] = Math.max(gh[k], x))); });
+    const want = made.map((b) => b.shape.boundingBox.bounds);
+    const span = (k, f, i) => f(...want.map((w) => w[i][k]));
+    expect("text: P's drag preview for the 3 letters is instant (prisms, no kernel) and the size of the real solids (z 0 – 2)",
+      fast && [0, 1].every((k) => Math.abs(gl[k] - span(k, Math.min, 0)) < 1e-3 && Math.abs(gh[k] - span(k, Math.max, 1)) < 1e-3) && Math.abs(gl[2]) < 1e-3 && Math.abs(gh[2] - 2) < 1e-3,
+      { fast, gl: gl.map(r), gh: gh.map(r) });
+    app.applyOp(); await sleep(50);
+    const solids = app.doc.bodies, zs = solids.map((b) => b.shape.boundingBox.bounds.map((p) => r(p[2])).join(" "));
+    expect("text: P pushes all 3 letters 2 mm up → 3 valid solids (z 0 – 2), still in Text \"Hi\"",
+      solids.length === 3 && solids.every((b) => b.kind === "solid" && b.group === 'Text "Hi"' && K.isValidShape(b.shape)) && zs.every((z) => z === "0 2"),
+      { n: solids.length, kinds: solids.map((b) => b.kind), groups: solids.map((b) => b.group), zs });
+    // Font: DejaVu Sans Bold from the system's fonts → the text redrawn in it (wider H), remembered for the next text
+    app.setSelection([]); key("t", "KeyT"); await sleep(200); tap([0, 80, 0]); await sleep(50);
+    const pick = async (k, label) => { const sel = document.querySelector("#tool-panel [data-k=" + k + "]"); const o = sel && [...sel.options].find((x) => x.textContent === label); if (o) { sel.value = o.value; sel.dispatchEvent(new Event("change", { bubbles: true })); } await sleep(300); return !!o; };
+    const fams = document.querySelectorAll("#tool-panel [data-k=family] option").length;
+    const picked = (await pick("family", "DejaVu Sans")) && (await pick("font", "Bold"));
+    const font = app.tool && app.tool.constructor.settings.font;
+    await typeText("H");
+    const dv = app.doc.bodies.at(-1).shape.boundingBox.bounds, dvW = dv[1][0] - dv[0][0], nW = hb[1][0] - hb[0][0];
+    app.setSelection([]); key("t", "KeyT"); await sleep(200); tap([0, 120, 0]); await sleep(50);
+    const kept = [document.querySelector("#tool-panel [data-k=family]").value, document.querySelector("#tool-panel [data-k=font]").selectedOptions[0]?.textContent].join(" ");
+    await pick("family", "Noto Sans (built in)"); key("Escape", "Escape"); await sleep(20);
+    expect("text font: DejaVu Sans Bold chosen from the system's fonts → the H made in it (wider than Noto Sans', still 10 mm tall); the next text starts with it",
+      fams > 10 && picked && /DejaVuSans-Bold\.ttf$/.test(font) && dvW > nW + 0.5 && Math.abs(dv[1][1] - 80 - 10) < 0.01 && kept === "DejaVu Sans Bold",
+      { fams, picked, font, dvW: r(dvW), nW: r(nW), top: r(dv[1][1]), kept });
+    // A long text: the name cut short; the same words again: a number after it
+    const nameOf = async (text) => { app.setSelection([]); key("t", "KeyT"); await sleep(200); tap([0, 40, 0]); await sleep(50); await typeText(text); return app.doc.bodies.at(-1).group; };
+    const long = await nameOf("I love my cat\nand my dog"), again = await nameOf("I love my cat\nand my dog");
+    expect("text: group names — a long text cut short (lines joined), the same words again → a 2 after it",
+      long === 'Text "I love my cat a…"' && again === 'Text "I love my cat a…" 2', { long, again });
+    // S on a text group: only the ring and one Scale % (no X / Y / Z stretching) — evenly, so the letters keep their shape
+    app.setSelection(app.doc.bodies.filter((b) => b.group === 'Text "Hi"').map((b) => ({ kind: "body", body: b.id, id: 0 })));
+    const before = app.doc.bodies.filter((b) => b.group === 'Text "Hi"').map((b) => b.shape.boundingBox.bounds);
+    key("s", "KeyS"); await sleep(50);
+    const keys = [...document.querySelectorAll("#op-panel [data-key]")].map((i) => i.dataset.key).join();
+    const drags = [].concat(app.op.spec.drag || []).map((d) => d.look).join();
+    opValue("s", 200); await sleep(200); app.applyOp(); await sleep(50);
+    const after = app.doc.bodies.filter((b) => b.group === 'Text "Hi"').map((b) => b.shape.boundingBox.bounds);
+    const ext = (bs, k) => Math.max(...bs.map((b) => b[1][k])) - Math.min(...bs.map((b) => b[0][k]));
+    expect("text: S on a text group → only Scale % and the ring (no X / Y / Z); 200% → twice as wide, tall and thick",
+      keys === "s,center" && drags === "ring" && [0, 1, 2].every((k) => Math.abs(ext(after, k) - 2 * ext(before, k)) < 1e-3),
+      { keys, drags, before: [0, 1, 2].map((k) => r(ext(before, k))), after: [0, 1, 2].map((k) => r(ext(after, k))) });
+    // Edit (T with a letter selected): the pushed (2 mm) and scaled (200%) "Hi" — the panel as made, 20 mm tall
+    // now; "Hey" → 3 new solids where it was, as thick (4 mm), the group renamed; one undo brings "Hi" back
+    const hiNow = app.doc.bodies.filter((b) => b.group === 'Text "Hi"'), hiBox = hiNow.map((b) => b.shape.boundingBox.bounds);
+    // (T with it selected starts a new text — editing is the pencil by its group in the Bodies panel)
+    app.setSelection([{ kind: "body", body: hiNow[0].id, id: 0 }]);
+    key("t", "KeyT"); await sleep(200);
+    const tNew = app.tool && app.tool.name === "Text" && !app.tool.placed && !document.querySelector("#tool-panel");
+    key("Escape", "Escape"); await sleep(20);
+    const pen = [...document.querySelectorAll(".ol-group")].find((g) => g.dataset.group === 'Text "Hi"')?.querySelector(".ol-edit");
+    pen?.click(); await sleep(300);
+    const title = document.querySelector("#tool-panel h4")?.textContent, shown = document.querySelector("#tool-panel textarea")?.value;
+    const hShown = document.querySelector("#tool-panel [data-k=height]")?.value;
+    await typeText("Hey");
+    const hey = app.doc.bodies.filter((b) => b.group === 'Text "Hey"'), heyBox = hey.map((b) => b.shape.boundingBox.bounds);
+    const near = (a, b) => Math.abs(a - b) < 1e-3;
+    expect("text edit: T with a text selected starts a new one; the pencil by its group (pushed, scaled) → \"Edit text\" with \"Hi\", 20 mm; \"Hey\" → 3 solids in its place (H where the H was, z 0 – 4), group Text \"Hey\"",
+      tNew && !!pen && title === "Edit text" && shown === "Hi" && hShown === "20" && hey.length === 3 && hey.every((b) => b.kind === "solid" && K.isValidShape(b.shape) && b.text && b.text.text === "Hey") &&
+        !app.doc.bodies.some((b) => b.group === 'Text "Hi"') && [0, 1, 2].every((k) => near(heyBox[0][0][k], hiBox[0][0][k]) && near(heyBox[0][1][k], hiBox[0][1][k])) && heyBox.every((b) => near(b[0][2], 0) && near(b[1][2], 4)),
+      { tNew, pen: !!pen, title, shown, hShown, n: hey.length, H: heyBox[0] && heyBox[0].map((p) => p.map(r)), was: hiBox[0].map((p) => p.map(r)) });
+    app.run("edit.undo"); await sleep(20);
+    const back = app.doc.bodies.filter((b) => b.group === 'Text "Hi"').length, heyLeft = app.doc.bodies.filter((b) => b.group === 'Text "Hey"').length;
+    expect("text edit: one undo → the \"Hi\" letters back", back === 3 && heyLeft === 0, { back, heyLeft });
+    // Flat text turned 30° about Z and moved, then saved and opened again: T finds it where it is; "HI" → its H on the old H
+    {
+      app.doc.reset([]);
+      const rec = { text: "Hi", font: "", height: 8, align: "left", letterSpacing: 0, lineSpacing: 1, frame: { ...G, origin: [0, 0, 0] } };
+      const moved = K.makeTextFaces(G, [0, 0, 0], "Hi", rec).map((f) => K.translateShape(K.rotateShape(f, 30, [0, 0, 0], [0, 0, 1]), [15, -7, 3]));
+      app.doc.commit(moved.map((f) => ({ ...app.doc.makeBody(f, "Text", "face"), group: 'Text "Hi"', text: rec })), "turned text");
+      app.loadModel(app.modelText(), null); await sleep(50);
+      const H0 = app.doc.bodies[0].shape.boundingBox.bounds;
+      await sleep(100);
+      [...document.querySelectorAll(".ol-group")].find((g) => g.dataset.group === 'Text "Hi"')?.querySelector(".ol-edit")?.click(); await sleep(300);
+      await typeText("HI");
+      const now = app.doc.bodies, H1 = now[0] && now[0].shape.boundingBox.bounds, rc = now[0] && now[0].text;
+      expect("text edit: turned 30° + moved, saved and reopened → the pencil edits it in place (\"HI\": its H exactly on the old H, flat, still facing up; the record turned too)",
+        now.length === 2 && now.every((b) => b.kind === "face") && [0, 1, 2].every((k) => near(H1[0][k], H0[0][k]) && near(H1[1][k], H0[1][k])) && near(rc.frame.x[0], Math.cos(Math.PI / 6)) && near(rc.frame.z[2], 1) && now[0].shape.normalAt().toTuple()[2] > 0.999,
+        { n: now.length, H1: H1 && H1.map((p) => p.map(r)), H0: H0.map((p) => p.map(r)), x: rc && rc.frame.x.map(r) });
+    }
+    // The pencil goes grey (saying why) once a letter is cut in two; undo → usable again
+    {
+      app.doc.reset([]);
+      const rec = { text: "Hi", font: "", height: 8, align: "left", letterSpacing: 0, lineSpacing: 1, frame: { ...G, origin: [0, 0, 0] } };
+      const letters = K.makeTextFaces(G, [0, 0, 0], "Hi", rec).map((f) => K.extrudeFace(f, f.faces[0].hashCode, 2));
+      app.doc.commit(letters.map((sh) => ({ ...app.doc.makeBody(sh, "Text", "solid"), group: 'Text "Hi"', text: rec })), "pushed text"); await sleep(400);
+      const pen = () => [...document.querySelectorAll(".ol-group")].find((g) => g.dataset.group === 'Text "Hi"')?.querySelector(".ol-edit");
+      const okBefore = pen() && !pen().classList.contains("off");
+      const h = app.doc.bodies[0], cut = K.splitByPlane(h.shape, [2, 0, 0], [1, 0, 0]);
+      app.doc.commit([{ ...h, shape: cut.above }, { ...app.doc.makeBody(cut.below, "Text", "solid"), group: h.group, text: h.text }, ...app.doc.bodies.slice(1)], "cut H"); await sleep(400);
+      const offAfter = pen()?.classList.contains("off"), why = pen()?.title;
+      app.run("edit.undo"); await sleep(400);
+      const okAgain = pen() && !pen().classList.contains("off");
+      expect("text edit: the pencil is usable on a pushed text; its H cut in two → grey, saying the letters were changed; undo → usable again",
+        okBefore && offAfter && /changed/.test(why || "") && okAgain, { okBefore, offAfter, why, okAgain });
+    }
+    // On a box's front wall (y = −5), seen from the front: the H stands up the wall, facing out
+    app.doc.reset([]);
+    const wall = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 10, 20), "Box");
+    app.doc.commit([wall], "box"); vp.setView("front"); vp.fit(); await sleep(50);
+    key("t", "KeyT"); await sleep(200);
+    tap([-15, -5, 5]); await sleep(50);
+    await typeText("H");
+    const hf = app.doc.bodies.find((b) => b.kind === "face"), wb = hf && hf.shape.boundingBox.bounds;
+    const nrm = hf && hf.shape.normalAt().toTuple();
+    expect("text on a wall: the H lies on the box's front face (y −5), upright from z 5 to 15, starting by x −15, facing out (−Y)",
+      hf && Math.abs(wb[0][1] + 5) < 1e-6 && Math.abs(wb[1][1] + 5) < 1e-6 && Math.abs(wb[0][2] - 5) < 0.01 && Math.abs(wb[1][2] - 15) < 0.01 && wb[0][0] > -15 && wb[0][0] < -13 && nrm[1] < -0.999,
+      { wb: wb && wb.map((p) => p.map(r)), nrm: nrm && nrm.map(r) });
+  } catch (e) {
+    expect("text threw", false, String(e && e.stack || e));
+  }
+  if (app.tool) key("Escape", "Escape");
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("text scenario failed: " + JSON.stringify(failed));
+  return [{ label: "text", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 const SCENARIO_ARRAY = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -5464,6 +5640,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));
     await shot("7-measure.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ARRAY, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TEXT, true));
     await win.webContents.executeJavaScript(`window.__smokeDir = ${JSON.stringify(outDir)}; 0`, true);
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GROUPS, true));
     await shot("7c-groups.png");

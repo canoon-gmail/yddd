@@ -41,11 +41,28 @@ export interface Dimension {
   readonly r?: number;
 }
 
+/**
+ * How a Text tool letter was made, so its text can be edited again (T with the text selected): the settings and
+ * the plane it was written on (`origin` on the first line's baseline). Each letter of the text carries the same one.
+ */
+export interface TextRecord {
+  readonly text: string;
+  /** A built-in font's key or a system font's file; "" = Noto Sans. */
+  readonly font: string;
+  readonly height: number;
+  readonly align: "left" | "center" | "right";
+  readonly letterSpacing: number;
+  readonly lineSpacing: number;
+  readonly frame: { readonly origin: V3; readonly x: V3; readonly y: V3; readonly z: V3 };
+}
+
 interface BodyBase {
   readonly id: number;
   readonly name: string;
   /** Group it belongs to (by name; one level, shown together in the Bodies panel). */
   readonly group?: string;
+  /** A Text tool letter (flat, or pushed into a solid): how it was made. */
+  readonly text?: TextRecord;
 }
 
 /** "solid" = closed 3D body, "face" = flat planar face (extrude it with Push/Pull). */
@@ -296,7 +313,7 @@ export class Doc {
    * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
    * is an index into `bodies` (as saved in a file), turned into that body's new id.
    */
-  reset(bodies: (BodyGeom & { name: string; group?: string })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = []): void {
+  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = []): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;

@@ -22,6 +22,8 @@ export const ICONS: Record<string, string> = {
   rectangle: svg(`<rect x="3.5" y="6.5" width="17" height="11" rx="1" ${FILL}/><circle cx="3.5" cy="6.5" r="1.6" ${DOT}/><circle cx="20.5" cy="17.5" r="1.6" ${DOT}/>`),
   circle: svg(`<circle cx="12" cy="12" r="7.5" ${FILL}/><circle cx="12" cy="12" r="1.6" ${DOT}/><path d="M12 12l5.3-5.3" ${SOFT}/>`),
   polygon: svg(`<path d="M12 3l7.8 4.5v9L12 21l-7.8-4.5v-9z" ${FILL}/><circle cx="12" cy="3" r="1.5" ${DOT}/><circle cx="19.8" cy="7.5" r="1.5" ${DOT}/><circle cx="4.2" cy="7.5" r="1.5" ${DOT}/>`),
+  edit: svg(`<path d="M4 20l1-4.5L15.5 5a2.1 2.1 0 013 3L8 18.5z" ${FILL}/><path d="M13.5 7l3 3"/>`),
+  text: svg(`<path d="M5 5h14M12 5v14M9 19h6"/><path d="M5 5v2.5M19 5v2.5" ${SOFT}/>`),
   sketch: svg(`<path d="M3 16l9-4 9 4-9 5z" ${SOFT}/><path d="M7.5 15.5l4.5-2 4.5 2-4.5 2.2z" ${FILL}/><path d="M14 11l4.5-7 2.5 2.5-7 4.5z" ${FILL}/><circle cx="12" cy="13.5" r="1.3" ${DOT}/>`),
   turnView: svg(`<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 3v4h-4"/><rect x="9" y="9" width="6" height="6" rx="0.8" ${FILL}/>`),
   picture: svg(`<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6" ${FILL}/><path d="M3 16.5l5-4.5 4 3.5 3-2.5 6 4.5V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" ${FILL}/>`),

@@ -7,6 +7,9 @@ interface Y3DApi {
   openFile(req: { title: string; filters: FileFilter[]; binary: boolean }): Promise<{ path: string; data: string | Uint8Array } | null>;
   /** A text file's contents; null if it can't be read (moved, deleted...). */
   readFile(filePath: string): Promise<string | null>;
+  /** The system's TrueType / OpenType fonts (for Text), and one's file contents (null: not listed / unreadable). */
+  listFonts(): Promise<{ family: string; style: string; file: string }[]>;
+  readFont(file: string): Promise<Uint8Array | null>;
   /** File → Open Recent: put a model first in the list / take it out / the list (newest first). */
   addRecent(filePath: string): Promise<void>;
   removeRecent(filePath: string): Promise<void>;

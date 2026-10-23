@@ -114,6 +114,9 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-array { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; display: flex; }
 .ol-array svg { width: 16px; height: 16px; }
 .ol-array.off { color: var(--muted); opacity: 0.45; }
+.ol-edit { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; display: flex; }
+.ol-edit svg { width: 14px; height: 14px; }
+.ol-edit.off { color: var(--muted); opacity: 0.45; }
 .ol-dup { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; }
 .ol-dup:hover { color: var(--accent); }
 .ol-dup svg { width: 14px; height: 14px; }
@@ -371,3 +374,11 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 }
 #view-menu button:hover { background: var(--panel-2); }
 #view-menu kbd { opacity: 0.6; }
+#tool-panel .tp-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+#tool-panel textarea, #tool-panel .tp-field input, #tool-panel .tp-field select {
+  padding: 3px 6px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+}
+#tool-panel textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 44px; }
+#tool-panel .tp-field input, #tool-panel .tp-field select { width: 110px; box-sizing: border-box; }
+#tool-panel textarea:focus, #tool-panel .tp-field input:focus, #tool-panel .tp-field select:focus { outline: none; border-color: var(--accent); }
+#tool-panel .tp-error { color: var(--danger); font-size: 12px; margin-top: 4px; }

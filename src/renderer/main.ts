@@ -21,6 +21,13 @@ import {
   isEdgeLoop,
   MOVE_EDGE_REFUSED,
   errorMessage,
+  loadTextFont,
+  makeTextFaces,
+  textPlacement,
+  textLetters,
+  type TextPlacement,
+  BUILT_IN_FONTS,
+  textFontReady,
   filletEdges,
   filletDragAxis,
   chamferEdges,
@@ -108,9 +115,9 @@ import {
   movedIds,
   parseStl,
 } from "./kernel";
-import { Doc, isBrep, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type Guide, type HistoryEntry, type ShapeBody } from "./document";
+import { Doc, isBrep, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type Guide, type HistoryEntry, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, PolygonTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
@@ -263,19 +270,32 @@ interface OpChoice {
   title?: string;
 }
 
+/** A copy of a Text tool letter is one too (its text can be edited, see TextRecord). */
+function withTextOf<T extends Body>(made: T, from: Body): T {
+  return from.text ? { ...made, text: from.text } : made;
+}
+
 /** A new body made from `from` (extruded, cut off, split off...) goes in the same group. */
 function inGroupOf<T extends Body>(made: T, from: Body): T {
   return from.group ? { ...made, group: from.group } : made;
 }
 
 /** Names flat faces get automatically ("Circle 3", "Face 1"...): a solid pushed from one is called "Solid N" instead. */
-const AUTO_FACE_NAME = /^(Rectangle|Circle|Polygon|Face|Sketch|Ring)( \d+)?$/;
+const AUTO_FACE_NAME = /^(Rectangle|Circle|Polygon|Text|Face|Sketch|Ring)( \d+)?$/;
 
 /** The solid a flat face object was pushed / pulled into: its group, and the name the user gave it. */
 function extrudedFrom<T extends Body>(made: T, face: Body): T {
   const named = AUTO_FACE_NAME.test(face.name) ? made : { ...made, name: face.name };
-  return inGroupOf(named, face);
+  return withTextOf(inGroupOf(named, face), face);
 }
+
+/** The Text tool's last font (a built-in one's key or a system font's file; "" = Noto Sans), localStorage. */
+const TEXT_FONT_KEY = "y3d.textFont";
+/** The fonts that come with Y3D, first in the Text tool's Font list; the first one is the default. */
+const BUILT_IN_FAMILY = (family: string) => `${family} (built in)`;
+
+/** Longest text a Text group's name shows (in quotes), the rest cut short with "…". */
+const TEXT_NAME_MAX = 16;
 
 /** Undo steps a saved file keeps (and redo steps): reopened, Undo goes back that far. */
 const SAVED_HISTORY = 50;
@@ -296,7 +316,7 @@ interface SavedHistory {
   ids: number[];
   dims?: Dimension[];
   arrays?: ArrayRecord[];
-  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; s: number }[];
+  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; s: number }[];
   shapes: string[];
   undo: SavedStep[];
   redo: SavedStep[];
@@ -362,6 +382,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "A" },
       { cmd: "tool.circle", icon: "circle", label: "Circle", key: "A C" },
       { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "A P" },
+      { cmd: "tool.text", icon: "text", label: "Text", key: "T · A T" },
       { cmd: "tool.sketch", icon: "sketch", label: "Sketch", key: "K" },
     ],
   },
@@ -468,6 +489,7 @@ const KEYMAP: Record<string, string> = {
   "3": "mode.edge",
   b: "tool.box",
   a: "tool.rectangle",
+  t: "tool.text",
   k: "tool.sketch",
   p: "op.pushpull",
   Space: "op.pushpull",
@@ -510,11 +532,11 @@ const KEYMAP: Record<string, string> = {
 
 /**
  * Two-key chords: the first key starts its tool at once; a second key within CHORD_MS switches tool.
- * B B box · B C cylinder · B S sphere — A rectangle · A C circle · A P polygon — G G move from point.
+ * B B box · B C cylinder · B S sphere — A rectangle · A C circle · A P polygon · A T text — G G move from point.
  */
 const CHORDS: Record<string, Record<string, string>> = {
   b: { b: "tool.box", c: "tool.cylinder", s: "tool.sphere" },
-  a: { a: "tool.rectangle", r: "tool.rectangle", c: "tool.circle", p: "tool.polygon" },
+  a: { a: "tool.rectangle", r: "tool.rectangle", c: "tool.circle", p: "tool.polygon", t: "tool.text" },
   g: { g: "xf.moveFrom" },
 };
 /** Pro layout only: S W sweep (S starts Scale, W switches) · R E revolve (R starts Rotate, E switches). */
@@ -1065,6 +1087,7 @@ class App implements ToolHost {
       case "tool.rectangle": return this.startTool(new BoxTool(this, true).start());
       case "tool.circle": return this.startTool(new CylinderTool(this, true).start());
       case "tool.polygon": return this.startTool(new PolygonTool(this, true).start());
+      case "tool.text": return void this.startText();
       case "tool.sketch": return this.startSketch();
 
       case "op.pushpull": return this.opPushPull();
@@ -2007,6 +2030,7 @@ class App implements ToolHost {
           };
         },
         remember: () => {},
+        fastDrag: ({ d }) => !!axis && this.dragPushPull(new Map(), d, new Map([[bodyId, axis.normal]])),
         drag,
       });
       return;
@@ -2069,6 +2093,12 @@ class App implements ToolHost {
     if (!fb) return;
     const axis = faceAxis(fb.shape, fb.kind === "face" ? fb.shape.faces[0].hashCode : first.id);
     const drag = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
+    // Which way each flat face object goes (its normal, as extrudeFace): for the instant drag preview
+    const flatDirs = new Map<number, V3>();
+    for (const b of flats) {
+      const a = faceAxis(b.shape, b.shape.faces[0].hashCode);
+      if (a) flatDirs.set(b.id, a.normal);
+    }
     this.startOp({
       title: `Push / Pull (${n} faces)`,
       label: "Push/Pull",
@@ -2092,7 +2122,7 @@ class App implements ToolHost {
         };
       },
       remember: () => {},
-      fastDrag: ({ d }) => !flats.length && this.dragPushPull(perSolid, d),
+      fastDrag: ({ d }) => flatDirs.size === flats.length && this.dragPushPull(perSolid, d, flatDirs),
       drag,
     });
   }
@@ -2100,8 +2130,11 @@ class App implements ToolHost {
   /** Faces moved by a push/pull, per body (cached per op: the document doesn't change while it is open). */
   private ppMoves = new Map<string, Map<number, V3>>();
 
-  /** Instant push/pull drag preview: shift the faces (and the fillets they carry) in the display meshes. */
-  private dragPushPull(perBody: Map<number, number[]>, d: number): boolean {
+  /**
+   * Instant push/pull drag preview: shift the faces (and the fillets they carry) in the display meshes; flat face
+   * objects (`flats`: id → normal) drawn as the prisms they'd make.
+   */
+  private dragPushPull(perBody: Map<number, number[]>, d: number, flats: Map<number, V3> = new Map()): boolean {
     const moves = new Map<number, Map<number, V3>>();
     try {
       for (const [id, faces] of perBody) {
@@ -2117,7 +2150,7 @@ class App implements ToolHost {
     } catch {
       return false;
     }
-    this.viewport.showGhostDeformed(moves);
+    this.viewport.showGhostDeformed(moves, new Map([...flats].map(([id, n]) => [id, [n[0] * d, n[1] * d, n[2] * d] as V3])));
     return true;
   }
 
@@ -2539,6 +2572,8 @@ class App implements ToolHost {
       }
     }
     const size = [0, 1, 2].map((i) => hi[i] - lo[i]);
+    // Text (its letters, flat or pushed) keeps its shape: only the ring, scaling evenly
+    const text = ids.every((id) => !!this.doc.get(id)!.text);
     // About the bottom centre (the base stays put); "From the centre" (Shift while dragging the ring): about the middle.
     const base: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
     const centre: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
@@ -2550,7 +2585,7 @@ class App implements ToolHost {
     const len = Math.hypot(...diag);
     const drags: OpDrag[] = [];
     const axes = [["x", "#e5484d"], ["y", "#30a46c"], ["z", "#3e8bff"]] as const;
-    axes.forEach(([key, color], i) => {
+    if (!text) axes.forEach(([key, color], i) => {
       const ext = hi[i] - base[i];
       if (ext < 1e-9) return; // flat along this axis
       const dir: V3 = [0, 0, 0];
@@ -2565,15 +2600,18 @@ class App implements ToolHost {
     this.startOp({
       title: "Scale",
       label: "Scale",
+      ...(text ? { note: "Text scales evenly — the letters keep their shape" } : {}),
       fields: [
         // (a typed size: "+10mm" / "60mm"... — X / Y / Z along that axis, Scale on the longest side)
         { key: "s", label: "Scale (% or ±mm)", value: 100, step: 5, min: 0, mm: Math.max(...size) },
-        { key: "x", label: "X (% or ±mm)", value: 100, step: 5, min: 0, mm: size[0] },
-        { key: "y", label: "Y (% or ±mm)", value: 100, step: 5, min: 0, mm: size[1] },
-        { key: "z", label: "Z (% or ±mm)", value: 100, step: 5, min: 0, mm: size[2] },
+        ...(text ? [] : [
+          { key: "x", label: "X (% or ±mm)", value: 100, step: 5, min: 0, mm: size[0] },
+          { key: "y", label: "Y (% or ±mm)", value: 100, step: 5, min: 0, mm: size[1] },
+          { key: "z", label: "Z (% or ±mm)", value: 100, step: 5, min: 0, mm: size[2] },
+        ]),
         { key: "center", label: "From the centre (Shift while dragging the ring)", value: 0, type: "checkbox" },
       ],
-      compute: ({ s, x, y, z, center }) => {
+      compute: ({ s, x = 100, y = 100, z = 100, center }) => {
         const pivot = center ? centre : base;
         const f: V3 = [pct(s) * pct(x), pct(s) * pct(y), pct(s) * pct(z)];
         if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
@@ -3613,6 +3651,223 @@ class App implements ToolHost {
     this.startTool(new MeasureTool(this, shapeOf, (item) => this.viewport.setHighlight(this.selection, item), () => this.endTool(), dims).start());
   }
 
+  /** The system's fonts for Text (asked for once). */
+  private textFonts: Promise<{ family: string; style: string; file: string }[]> | null = null;
+
+  /** Load a Text font (the built-in ones first; a system font's file once); false if it can't be read or used. */
+  private async useTextFont(file: string): Promise<boolean> {
+    try {
+      if (!textFontReady()) await loadTextFont();
+      if (!file || textFontReady(file)) return true;
+      if (file.startsWith("builtin:")) return false; // (all loaded with the default)
+      if (!(await (this.textFonts ??= window.y3d.listFonts().catch(() => []))).some((f) => f.file === file)) return false;
+      const data = await window.y3d.readFont(file);
+      if (!data) return false;
+      await loadTextFont(file, data);
+      return textFontReady(file);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Can a Text group's text still be edited (its pencil in the Bodies panel)? null: yes; a string: why not (cut,
+   * filleted, its font missing...); undefined: being checked — in the background (its letters are made again and
+   * compared, tens of ms; the font may need loading), the panel redrawn when it's known. Kept until its letters change.
+   */
+  private textEditable(group: string, members: readonly Body[]): string | null | undefined {
+    const letters = members.filter((b) => b.text);
+    const known = this.textChecks.get(group);
+    if (known && known.letters.length === letters.length && known.letters.every((b, i) => b === letters[i])) return known.why;
+    const entry: { letters: readonly Body[]; why: string | null | undefined } = { letters, why: undefined };
+    this.textChecks.set(group, entry);
+    void (async () => {
+      await new Promise((r) => setTimeout(r, 0)); // (after this panel update)
+      const src = letters[0].text!;
+      let why: string | null = null;
+      if (letters.some((b) => JSON.stringify(b.text) !== JSON.stringify(src))) why = "This group holds letters of more than one text";
+      else if (!(await this.useTextFont(src.font))) why = `Its font isn't on this computer (${src.font.split("/").pop()}) — the text can't be edited`;
+      else if (!textPlacement(src, letters.map((b) => b.shape as Shape))) why = "Its letters were changed since (cut, filleted, some deleted...) — the text can't be edited";
+      if (this.textChecks.get(group) !== entry) return;
+      entry.why = why;
+      if (why) this.renderOutliner();
+    })();
+    return undefined;
+  }
+  private textChecks = new Map<string, { letters: readonly Body[]; why: string | null | undefined }>();
+
+  /**
+   * The text T edits: a Text tool text's letters selected (one or all; flat or pushed) — all its letters (same
+   * text, same group), in order. Null: nothing like that selected.
+   */
+  private textToEdit(): { letters: Body[]; src: TextRecord } | null {
+    const picked = [...new Set(this.selection.map((s) => s.body))].map((id) => this.doc.get(id));
+    const first = picked[0];
+    if (!first?.text || picked.some((b) => !b?.text)) return null;
+    const key = JSON.stringify(first.text);
+    if (picked.some((b) => JSON.stringify(b!.text) !== key || b!.group !== first.group)) return null;
+    return { letters: this.doc.bodies.filter((b) => b.group === first.group && JSON.stringify(b.text) === key), src: first.text };
+  }
+
+  /**
+   * Text (T, A T): click where it starts, then type it in the panel (shown live) — Enter / Create adds a
+   * flat face per letter outline, as one new group named after the words (Text "I love…"). `editMode` (the pencil
+   * by a Text group in the Bodies panel, the text selected): edit it — the panel as it was made, the text where it
+   * is now (moved, turned, scaled, pushed...); Done replaces its letters (pushed ones pushed as far again).
+   */
+  private async startText(editMode = false): Promise<void> {
+    if (!textFontReady()) {
+      try {
+        await loadTextFont();
+      } catch (e) {
+        return this.toast(`Text: the font couldn't be loaded — ${errorMessage(e)}`, "error");
+      }
+    }
+    // The fonts to choose from: the built-in one, then the system's (by family, each with its styles: Regular first)
+    this.textFonts ??= window.y3d.listFonts().catch(() => []);
+    const families = new Map<string, { style: string; file: string }[]>();
+    for (const f of BUILT_IN_FONTS) families.set(BUILT_IN_FAMILY(f.family), [...(families.get(BUILT_IN_FAMILY(f.family)) ?? []), { style: f.style, file: f.key }]);
+    for (const f of [...(await this.textFonts)].sort((a, b) => a.family.localeCompare(b.family))) {
+      if (!families.has(f.family)) families.set(f.family, []);
+      families.get(f.family)!.push({ style: f.style, file: f.file });
+    }
+    const regular = (st: string) => (/^(regular|book|normal|roman)$/i.test(st) ? 0 : /^medium$/i.test(st) ? 1 : 2);
+    for (const styles of families.values()) styles.sort((a, b) => regular(a.style) - regular(b.style) || a.style.localeCompare(b.style));
+    const familyOf = (file: string) => [...families].find(([, st]) => st.some((x) => x.file === file))?.[0];
+    const useFont = (file: string) => this.useTextFont(file);
+    // Editing a text: where its letters are now
+    const edit = editMode ? this.textToEdit() : null;
+    if (editMode && !edit) return this.toast("Edit text: this group holds letters of more than one text — select one text's letters", "error");
+    let place: TextPlacement | null = null;
+    // (editing a text leaves the settings for the next new one as they were)
+    const forNew = TextTool.settings;
+    if (edit) {
+      const src = edit.src;
+      if (!(await useFont(src.font))) return this.toast(`Edit text: its font isn't on this computer (${src.font.split("/").pop()}) — the text can't be made again`, "error");
+      place = textPlacement(src, edit.letters.map((b) => b.shape as Shape));
+      if (!place) return this.toast("Edit text: its letters were changed since (cut, filleted, some deleted...) — it can't be edited", "error");
+      const k = place.scale, mm = (v: number) => +(v * k).toFixed(4);
+      TextTool.settings = { text: src.text, font: src.font, height: mm(src.height), align: src.align, letterSpacing: mm(src.letterSpacing), lineSpacing: src.lineSpacing };
+    }
+    // The last font used (if it's still there)
+    const last = localStorage.getItem(TEXT_FONT_KEY) ?? "";
+    if (!edit && TextTool.settings.font === "" && last && familyOf(last) && (await useFont(last))) TextTool.settings = { ...TextTool.settings, font: last };
+    if (TextTool.settings.font && !familyOf(TextTool.settings.font)) TextTool.settings = { ...TextTool.settings, font: "" };
+    let panel: ReturnType<App["toolPanel"]> | null = null;
+    const tool: TextTool = new TextTool(this, () => {
+      panel = this.toolPanel(edit ? "Edit text" : "Text", { label: edit ? "Done ⏎" : "Create ⏎", primary: true }, () => tool.create());
+      const s = TextTool.settings;
+      const fam = familyOf(s.font ?? "") ?? BUILT_IN_FAMILY(BUILT_IN_FONTS[0].family);
+      const opts = (items: [string, string][], sel: string) => items.map(([v, label]) => `<option value="${escapeHtml(v)}"${v === sel ? " selected" : ""}>${escapeHtml(label)}</option>`).join("");
+      const styleOpts = (family: string) => opts(families.get(family)!.map((x) => [x.file, x.style]), s.font ?? "");
+      const align = (["left", "center", "right"] as const).map((a) => `<option value="${a}"${s.align === a ? " selected" : ""}>${a[0].toUpperCase() + a.slice(1)}</option>`).join("");
+      panel.set(
+        `<textarea data-k="text" rows="2" spellcheck="false">${escapeHtml(s.text)}</textarea>` +
+          `<label class="tp-field">Font<select data-k="family">${opts([...families.keys()].map((f) => [f, f]), fam)}</select></label>` +
+          `<label class="tp-field">Style<select data-k="font">${styleOpts(fam)}</select></label>` +
+          `<label class="tp-field">Height (mm)<input data-k="height" type="number" min="0" step="1" value="${s.height}"></label>` +
+          `<label class="tp-field">Align<select data-k="align">${align}</select></label>` +
+          `<label class="tp-field">Letter spacing (mm)<input data-k="letterSpacing" type="number" step="0.1" value="${s.letterSpacing ?? 0}"></label>` +
+          `<label class="tp-field">Line spacing<input data-k="lineSpacing" type="number" min="0.1" step="0.1" value="${s.lineSpacing}"></label>` +
+          `<div class="tp-error"></div>` +
+          (isPro() ? "" : `<div class="tp-tip">Height: a capital letter. Shift+Enter: a new line. Click elsewhere to move the text.</div>`),
+      );
+      const body = panel.body, err = body.querySelector<HTMLElement>(".tp-error")!;
+      const update = () => {
+        const v = (k: string) => body.querySelector<HTMLInputElement>(`[data-k="${k}"]`)!.value;
+        const num = (k: string, d: number) => (Number.isFinite(parseFloat(v(k))) ? parseFloat(v(k)) : d);
+        tool.set({ text: v("text"), height: num("height", 0), align: v("align") as TextSettings["align"], letterSpacing: num("letterSpacing", 0), lineSpacing: num("lineSpacing", 1) });
+        err.textContent = tool.problem;
+      };
+      body.addEventListener("input", (e) => {
+        if (!(e.target as HTMLElement).closest("[data-k=family], [data-k=font]")) update();
+      });
+      // A font chosen: loaded (the first time), then the text redrawn in it; one that can't be used: back to the one before
+      const famSel = body.querySelector<HTMLSelectElement>("[data-k=family]")!, styleSel = body.querySelector<HTMLSelectElement>("[data-k=font]")!;
+      const setFont = async (file: string) => {
+        const before = TextTool.settings.font ?? "";
+        err.textContent = "Loading the font…";
+        if (await useFont(file)) {
+          tool.set({ font: file });
+          if (!edit) localStorage.setItem(TEXT_FONT_KEY, file);
+          err.textContent = tool.problem;
+        } else {
+          famSel.value = familyOf(before) ?? BUILT_IN_FAMILY(BUILT_IN_FONTS[0].family);
+          styleSel.innerHTML = styleOpts(famSel.value);
+          styleSel.value = before;
+          err.textContent = "This font can't be used for text (opentype.js can't read it) — choose another";
+        }
+      };
+      famSel.addEventListener("change", () => {
+        styleSel.innerHTML = opts(families.get(famSel.value)!.map((x) => [x.file, x.style]), "");
+        void setFont(styleSel.value);
+      });
+      styleSel.addEventListener("change", () => void setFont(styleSel.value));
+      body.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          tool.create();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          this.endTool();
+        }
+      });
+      const text = body.querySelector<HTMLTextAreaElement>("textarea")!;
+      text.focus();
+      text.select();
+      update();
+    }, (faces, s) => {
+      const record: TextRecord = { text: s.text, font: s.font ?? "", height: s.height, align: s.align, letterSpacing: s.letterSpacing ?? 0, lineSpacing: s.lineSpacing, frame: tool.placement() };
+      // Named after its words: Text "I love you", longer ones cut short (Text "I love my cat a…")
+      const words = s.text.trim().replace(/\s+/g, " ");
+      const named = `Text "${words.length > TEXT_NAME_MAX ? words.slice(0, TEXT_NAME_MAX - 1).trimEnd() + "…" : words}"`;
+      if (edit && place) {
+        // The new letters replace the old ones where they were (in the list too); pushed ones pushed as far again
+        let shapes: Shape[];
+        try {
+          shapes = textLetters({ ...record }, place.push, !tool.moved && place.flip);
+        } catch (e) {
+          return this.fail(e);
+        }
+        this.endTool();
+        const old = new Set(edit.letters.map((b) => b.id)), oldGroup = edit.letters[0].group;
+        // (the group is renamed after the new words — unless it was given a name of its own, or holds other things too)
+        const ownName = oldGroup !== undefined && (!oldGroup.startsWith('Text "') || this.doc.bodies.some((b) => b.group === oldGroup && !old.has(b.id)));
+        const group = ownName ? oldGroup : oldGroup === undefined ? undefined : named === oldGroup.replace(/ \d+$/, "") ? oldGroup : this.uniqueGroupName(named);
+        const made = shapes.map((sh) => ({ ...this.doc.makeBody(sh, "Text", place!.push === null ? "face" : "solid"), ...(group ? { group } : {}), text: record }));
+        const at = this.doc.bodies.findIndex((b) => old.has(b.id));
+        const rest = this.doc.bodies.filter((b) => !old.has(b.id));
+        this.doc.commit([...rest.slice(0, at), ...made, ...rest.slice(at)], "Edit text");
+        this.setMode("body");
+        this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
+        this.toast(`Text changed${group ? ` — ${group}` : ""}`);
+        return;
+      }
+      this.endTool();
+      const group = this.uniqueGroupName(named);
+      const made = faces.map((f) => ({ ...this.doc.makeBody(f, "Text", "face"), group, text: record }));
+      this.doc.commit([...this.doc.bodies, ...made], "Create text");
+      this.setMode("body");
+      this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
+      this.toast(`${group}: ${made.length} face${made.length > 1 ? "s" : ""} — press P to push/pull them · the pencil by it in the Bodies panel edits it`);
+    });
+    const dispose = tool.dispose.bind(tool);
+    tool.dispose = () => {
+      dispose();
+      panel?.remove();
+      if (edit) {
+        this.viewport.clearGhost();
+        TextTool.settings = forNew;
+      }
+    };
+    this.startTool(tool.start());
+    if (edit && place) {
+      // (its letters hidden while it's being edited: the preview shows the new ones)
+      this.viewport.showGhost(new Map(), edit.letters.map((b) => b.id));
+      tool.placeAt(place.frame);
+    }
+  }
+
   /**
    * Sketch (K) on the selected flat face (or flat face object) — a curved face: on the plane touching
    * it under the cursor (or at its middle) — or, with nothing like that selected, on the ground. Done adds the closed outlines as flat faces.
@@ -4230,7 +4485,7 @@ class App implements ToolHost {
     }
     const copies = ids.map((id) => {
       const b = this.doc.get(id)!;
-      return this.doc.makeBody(cloneShape(b.shape), b.name.replace(/\s+\d+$/, ""), b.kind);
+      return withTextOf(this.doc.makeBody(cloneShape(b.shape), b.name.replace(/\s+\d+$/, ""), b.kind), b);
     });
     // A whole group selected: its copies are a new group of their own ("Circular 1" → "Circular 2"), and
     // an array / circular copy's record goes with them (the copy can be changed from its icon too).
@@ -4365,7 +4620,7 @@ class App implements ToolHost {
             for (let k = 1; k < count; k++) {
               copies.push(...ids.map((id) => {
                 const b = this.doc.get(id)!;
-                return this.doc.makeBody(place(cloneShape(b.shape), k), copyName(b), b.kind);
+                return withTextOf(this.doc.makeBody(place(cloneShape(b.shape), k), copyName(b), b.kind), b);
               }));
             }
             // The ring is a group: the originals' own group if they share one, else a new "Circular N".
@@ -4473,7 +4728,7 @@ class App implements ToolHost {
             const groups = this.copyGroupNames(ids);
             const joinedShapes = new Map(got.filter((g) => g.joined).map((g) => [g.b.id, g.joined!]));
             const copies = got.filter((g) => !g.joined).map(({ b, image }) => {
-              const m = this.doc.makeBody(image, copyName(b), b.kind), g = groups.get(b.group ?? "");
+              const m = withTextOf(this.doc.makeBody(image, copyName(b), b.kind), b), g = groups.get(b.group ?? "");
               return g ? { ...m, group: g } : m;
             });
             this.doc.commit([...this.doc.bodies.map((b) => (joinedShapes.has(b.id) ? withShape(b, joinedShapes.get(b.id)!) : b)), ...copies], `Mirror ${DIRS[dir]}`);
@@ -4876,7 +5131,7 @@ class App implements ToolHost {
             for (let k = 1; k <= n; k++) {
               copies.push(...src.map((x) => {
                 const b = this.doc.get(x.id)!;
-                return this.doc.makeBody(translateShape(cloneShape(x.shape), along(axis, offsets[k])), copyName(b), b.kind);
+                return withTextOf(this.doc.makeBody(translateShape(cloneShape(x.shape), along(axis, offsets[k])), copyName(b), b.kind), b);
               }));
             }
             // The row is a group: the originals' own group if they share one (a second array → a grid), else a new "Array N".
@@ -5138,6 +5393,13 @@ class App implements ToolHost {
             return this.renderOutliner();
           }
           if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick(ms.map((b) => b.id)); // (Union / Subtract... waiting for solids)
+          if (t.closest(".ol-edit.off")) return this.toast(t.closest<HTMLElement>(".ol-edit")!.title, "error");
+          if (t.closest(".ol-edit")) {
+            // The pencil on a Text group: edit its text
+            this.setMode("body");
+            this.setSelection(ms.filter((b) => b.text).map((b) => ({ kind: "body", body: b.id, id: 0 })));
+            return void this.startText(true);
+          }
           if (t.closest(".ol-dup")) {
             // The copy icon: select the whole group and duplicate it (a new group, moved with the gizmo)
             this.setMode("body");
@@ -5261,7 +5523,10 @@ class App implements ToolHost {
       const arrBtn = arr === null ? "" : typeof arr === "string"
         ? `<button class="ol-array off" title="${escapeHtml(arr)}">${arrIcon}</button>`
         : `<button class="ol-array" title="${round ? `Circular copy (${arr.n} round)` : `Array copy (${arr.n} in a row)`}: click to change it">${arrIcon}</button>`;
-      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+      // Made by the Text tool: a pencil to edit its text (dimmed, saying why, once it can't be)
+      const why = ms.some((x) => x.text) ? this.textEditable(g, ms) : null;
+      const editBtn = !ms.some((x) => x.text) ? "" : why ? `<button class="ol-edit off" title="${escapeHtml(why)}">${ICONS.edit}</button>` : `<button class="ol-edit" title="Edit the text">${ICONS.edit}</button>`;
+      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${editBtn}${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
       if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
       head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
       head.classList.toggle("hidden", allHidden);
@@ -5364,7 +5629,7 @@ class App implements ToolHost {
     const tip = (html: string) => `<div class="tip">${html}</div>`;
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
-        tip(`Solids: <kbd>B</kbd> <kbd>B</kbd> box · <kbd>B</kbd> <kbd>C</kbd> cylinder · <kbd>B</kbd> <kbd>S</kbd> sphere<br>Faces: <kbd>A</kbd> <kbd>A</kbd> rectangle · <kbd>A</kbd> <kbd>C</kbd> circle · <kbd>A</kbd> <kbd>P</kbd> polygon → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
+        tip(`Solids: <kbd>B</kbd> <kbd>B</kbd> box · <kbd>B</kbd> <kbd>C</kbd> cylinder · <kbd>B</kbd> <kbd>S</kbd> sphere<br>Faces: <kbd>A</kbd> <kbd>A</kbd> rectangle · <kbd>A</kbd> <kbd>C</kbd> circle · <kbd>A</kbd> <kbd>P</kbd> polygon · <kbd>T</kbd> text → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
       return;
     }
     const kind = sel[0].kind;
@@ -5551,6 +5816,7 @@ class App implements ToolHost {
       ["Bodies panel: Shift+click · Ctrl+click", "Select all the rows from the last clicked one to this one (Ctrl+Shift: add them) · add / remove one"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
+      ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai, come from the built-in ones), height (a capital letter, mm), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
       ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Done replaces them, Cancel keeps them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
@@ -5673,7 +5939,7 @@ class App implements ToolHost {
     // History: body / shape references — negative: the model's own bodies[-r - 1]; else the history's lists.
     const bodyRef = new Map<Body, number>(cur.map((b, i) => [b, -(i + 1)]));
     const shapeRef = new Map<object, number>(cur.map((b, i) => [b.shape, -(i + 1)]));
-    const pool: { id: number; name: string; kind: string; group?: string; s: number }[] = [];
+    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; s: number }[] = [];
     const shapes: string[] = [];
     let size = 0;
     const refBody = (b: Body): number => {
@@ -5687,7 +5953,7 @@ class App implements ToolHost {
         shapeRef.set(b.shape, sr);
       }
       r = pool.length;
-      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), s: sr });
+      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), s: sr });
       bodyRef.set(b, r);
       return r;
     };
@@ -5706,6 +5972,7 @@ class App implements ToolHost {
       bodies: cur.map((b) => ({
         ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: this.geomText(b) } : { name: b.name, kind: b.kind, brep: this.geomText(b) }),
         ...(b.group ? { group: b.group } : {}),
+        ...(b.text ? { text: b.text } : {}),
       })),
       guides: this.doc.guides,
       // A linked dimension's body as its index in `bodies` (ids are renumbered on open).
@@ -5726,7 +5993,7 @@ class App implements ToolHost {
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
       format: string;
-      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string }[];
+      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord }[];
       guides?: Guide[];
       dimensions?: Dimension[];
       arrays?: ArrayRecord[];
@@ -5739,9 +6006,9 @@ class App implements ToolHost {
       if (kind === "path") return { kind: "path", shape: shape as unknown as Wire };
       return { kind: kind === "face" || kind === "solid" ? kind : kindOf(shape), shape };
     };
-    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string } => {
+    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord } => {
       const group = typeof b.group === "string" && b.group ? { group: b.group } : {};
-      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group };
+      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}) };
     });
     this.endInteractions();
     this.selection = [];
@@ -5759,7 +6026,7 @@ class App implements ToolHost {
             const p = h.bodies[r];
             let shape = p.s < 0 ? current[-p.s - 1].shape : shapeOf.get(p.s);
             if (!shape) shapeOf.set(p.s, (shape = geom(p.kind, h.shapes[p.s]).shape));
-            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}) } as Body;
+            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}) } as Body;
             made.set(r, b);
           }
           return b;
@@ -6104,7 +6371,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

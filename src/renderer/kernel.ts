@@ -12,12 +12,21 @@
  */
 import opencascade from "../../vendor/occt/y3d_occt.js";
 import wasmUrl from "../../vendor/occt/y3d_occt.wasm?url";
+import notoSans from "../../vendor/fonts/NotoSans-Regular.ttf?url";
+import notoSansBold from "../../vendor/fonts/NotoSans-Bold.ttf?url";
+import notoSerif from "../../vendor/fonts/NotoSerif-Regular.ttf?url";
+import notoSerifBold from "../../vendor/fonts/NotoSerif-Bold.ttf?url";
+import notoThai from "../../vendor/fonts/NotoSansThai-Regular.ttf?url";
+import notoThaiBold from "../../vendor/fonts/NotoSansThai-Bold.ttf?url";
 import {
   setOC,
   Plane,
   Vector,
   drawRoundedRectangle,
   drawPolysides,
+  loadFont,
+  getFont,
+  textBlueprints,
   makeSphere,
   makeCylinder as occCylinder,
   makeCircle,
@@ -665,6 +674,227 @@ export function makeCircleFace(frame: Frame, center: V3, r: number): Face {
 export function makePolygonFace(frame: Frame, center: V3, r: number, sides: number, angleDeg: number): Face {
   // drawPolysides puts its first corner at +90°.
   return orientFace((drawPolysides(r, sides).rotate(angleDeg - 90, [0, 0]).sketchOnPlane(facePlane(frame, center)) as Sketch).face(), frame);
+}
+
+// ---------------------------------------------------------------- text
+
+export type TextAlign = "left" | "center" | "right";
+
+export interface TextOptions {
+  /** Height of a capital letter (H), mm. */
+  height: number;
+  align: TextAlign;
+  /** Line spacing, × the font's own line height. */
+  lineSpacing: number;
+  /** Extra space between letters, mm (negative: closer). */
+  letterSpacing?: number;
+  /** A font loaded with loadTextFont (its name: a built-in one's key or a font file); "" / none: Noto Sans. */
+  font?: string;
+}
+
+/** The fonts that come with Y3D (vendor/fonts): `key` is the name they're loaded under ("" = the default). */
+export const BUILT_IN_FONTS: { family: string; style: string; key: string; url: string }[] = [
+  { family: "Noto Sans", style: "Regular", key: "", url: notoSans },
+  { family: "Noto Sans", style: "Bold", key: "builtin:NotoSans-Bold", url: notoSansBold },
+  { family: "Noto Serif", style: "Regular", key: "builtin:NotoSerif-Regular", url: notoSerif },
+  { family: "Noto Serif", style: "Bold", key: "builtin:NotoSerif-Bold", url: notoSerifBold },
+  { family: "Noto Sans Thai", style: "Regular", key: "builtin:NotoSansThai-Regular", url: notoThai },
+  { family: "Noto Sans Thai", style: "Bold", key: "builtin:NotoSansThai-Bold", url: notoThaiBold },
+];
+
+/**
+ * Load a font for Text under `name` — a font file's contents, or a built-in one's key. The built-in fonts
+ * (the default, and the fallbacks for letters a font hasn't got) are all loaded first.
+ */
+export async function loadTextFont(name?: string, data?: Uint8Array): Promise<void> {
+  if (!getFont()) await loadFont(notoSans);
+  for (const f of BUILT_IN_FONTS) if (f.key && !getFont(f.key)) await loadFont(f.url, f.key);
+  if (name && data && !getFont(name)) await loadFont(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer, name);
+}
+
+export function textFontReady(name?: string): boolean {
+  return !!getFont(name || "default") && BUILT_IN_FONTS.every((f) => !!getFont(f.key || "default"));
+}
+
+type OtFont = NonNullable<ReturnType<typeof getFont>>;
+
+/**
+ * Split a line into runs, each in one font: the chosen one, or — for letters it hasn't got — the built-in
+ * Noto Sans, then Noto Sans Thai (bold ones for a bold font). So Thai shows in any font, and Latin in the Thai one.
+ */
+function fontRuns(line: string, family: string, font: OtFont): { text: string; family: string }[] {
+  const os2 = font.tables.os2 as { usWeightClass?: number } | undefined;
+  const bold = (os2?.usWeightClass ?? 400) >= 600;
+  const fallbacks = [bold ? "builtin:NotoSans-Bold" : "default", bold ? "builtin:NotoSansThai-Bold" : "builtin:NotoSansThai-Regular"];
+  const runs: { text: string; family: string }[] = [];
+  for (const ch of line) {
+    const has = (f: string) => {
+      const ft = getFont(f);
+      return !!ft && ft.charToGlyph(ch).index > 0;
+    };
+    const fam = /\s/.test(ch) || has(family) ? family : (fallbacks.find(has) ?? family);
+    const last = runs[runs.length - 1];
+    if (last && last.family === fam) last.text += ch;
+    else runs.push({ text: ch, family: fam });
+  }
+  return runs;
+}
+
+/**
+ * Flat faces of `text` (one per letter outline, with its holes: o, A, B...) on the frame's plane. `anchor` is
+ * on the first line's baseline — its start (left), middle (center) or end (right); more lines go down frame.y.
+ * Empty / spaces only → [].
+ */
+export function makeTextFaces(frame: Frame, anchor: V3, text: string, o: TextOptions): Face[] {
+  const family = o.font || "default";
+  const font = getFont(family);
+  if (!font) throw new Error("the text font isn't loaded yet");
+  if (!(o.height > 0)) throw new Error("text height must be > 0");
+  const em = font.unitsPerEm;
+  // Capital height: the font's own H (not every font states it — older OS/2 tables have no sCapHeight)
+  const h = font.charToGlyph("H"), hTop = h.index ? h.getBoundingBox().y2 : 0;
+  const cap = hTop > 0 ? hTop : (font.tables.os2 as { sCapHeight?: number } | undefined)?.sCapHeight || em * 0.7;
+  // (one size for every run: a fallback font's letters keep their own proportions to its em)
+  const size = (o.height * em) / cap;
+  const lineH = ((font.ascender - font.descender) / em) * size * (o.lineSpacing || 1);
+  const plane = facePlane(frame, anchor);
+  const gap = o.letterSpacing || 0;
+  const opts = { kerning: true, letterSpacing: gap / size }; // (opentype.js: a fraction of the font size)
+  // textBlueprints draws with font.getPath(text, x, y, size) — no options: these are passed in for these calls.
+  type GetPath = (t: string, x: number, y: number, s: number, op?: object) => unknown;
+  const patched: { getPath: GetPath }[] = [];
+  const patch = (f: OtFont) => {
+    const own = f as unknown as { getPath: GetPath };
+    if (patched.includes(own)) return;
+    const proto = own.getPath;
+    own.getPath = (t, x, y, s) => proto.call(f, t, x, y, s, opts);
+    patched.push(own);
+  };
+  const faces: Face[] = [];
+  try {
+    text.split(/\r?\n/).forEach((line, k) => {
+      if (!line.trim()) return;
+      const runs = fontRuns(line, family, font).map((r) => ({ ...r, w: getFont(r.family)!.getAdvanceWidth(r.text, size, opts) }));
+      const w = runs.reduce((a, r) => a + r.w, 0) - gap; // (no gap after the last letter)
+      let x = o.align === "center" ? -w / 2 : o.align === "right" ? -w : 0;
+      for (const r of runs) {
+        if (r.text.trim()) {
+          patch(getFont(r.family)!);
+          const bp = textBlueprints(r.text, { fontSize: size, fontFamily: r.family }).translate(x, -k * lineH);
+          for (const sk of bp.sketchOnPlane(plane).sketches) faces.push(orientFace(sk.face(), frame));
+        }
+        x += r.w;
+      }
+    });
+  } finally {
+    for (const own of patched) delete (own as Partial<typeof own>).getPath; // (back to the prototype's)
+  }
+  return faces;
+}
+
+/** A text as the Text tool made it: its settings, and the plane it was written on (`origin` on the first baseline). */
+export interface TextSource extends TextOptions {
+  text: string;
+  frame: Frame;
+}
+
+/** Where a text's letters are now (see textPlacement). */
+export interface TextPlacement {
+  /** The plane they're on now (origin on the first baseline; x along it, y up the letters). */
+  frame: Frame;
+  /** How much bigger than they were made. */
+  scale: number;
+  /** Pushed into solids: how far, along frame.z (negative: the other way); flat letters: null. */
+  push: number | null;
+  /** Flat letters facing −frame.z (turned over by a mirror). */
+  flip: boolean;
+}
+
+/**
+ * Where the letters of a text are now — moved, turned, scaled evenly, mirrored or pushed into solids (all
+ * the same way) since `src` made them: its letters made again, and the move that puts each one's edges on the
+ * current ones' (edges keep their order through those). Null if they don't line up: letters deleted, cut,
+ * filleted... or the font is missing.
+ */
+export function textPlacement(src: TextSource, letters: Shape[]): TextPlacement | null {
+  if (!letters.length) return null;
+  const flat = letters.every(isFaceShape), solid = letters.every((l) => !isFaceShape(l));
+  if (!flat && !solid) return null;
+  let made: Face[];
+  try {
+    made = makeTextFaces(src.frame, src.frame.origin, src.text, src);
+  } catch {
+    return null;
+  }
+  if (made.length !== letters.length) return null;
+  // Pushed letters: compared with the made ones pushed 1 mm (the fit then finds how far they really went).
+  const refs: Shape[] = solid ? made.map((f) => extrudeFace(f, f.hashCode, 1)) : made;
+  const P: V3[] = [], Q: V3[] = [];
+  const mids = (sh: Shape) => sh.edges.map((e) => e.pointAt(0.5).toTuple() as V3);
+  for (let i = 0; i < refs.length; i++) {
+    const p = mids(refs[i]), q = mids(letters[i]);
+    if (p.length !== q.length) return null;
+    P.push(...p);
+    Q.push(...q);
+  }
+  if (flat) {
+    // Flat letters lie in one plane: points off it (along the normals, scaled alike) fix the rest of the move.
+    const areaOf = (fs: Shape[]) => fs.reduce((a, f) => a + measureArea(f), 0);
+    const s = Math.sqrt(areaOf(letters) / areaOf(refs));
+    const nNow = norm3((letters[0] as Face).normalAt().toTuple() as V3), n0 = src.frame.z, L = src.height;
+    const k = P.length;
+    for (let i = 0; i < k; i++) {
+      P.push([P[i][0] + n0[0] * L, P[i][1] + n0[1] * L, P[i][2] + n0[2] * L]);
+      Q.push([Q[i][0] + nNow[0] * L * s, Q[i][1] + nNow[1] * L * s, Q[i][2] + nNow[2] * L * s]);
+    }
+  }
+  const fit = fitAffine(P, Q);
+  if (!fit) return null;
+  const { A, t } = fit;
+  const map = (p: V3): V3 => [0, 1, 2].map((i) => A[i * 3] * p[0] + A[i * 3 + 1] * p[1] + A[i * 3 + 2] * p[2] + t[i]) as V3;
+  const lin = (v: V3): V3 => [0, 1, 2].map((i) => A[i * 3] * v[0] + A[i * 3 + 1] * v[1] + A[i * 3 + 2] * v[2]) as V3;
+  const size = Math.max(...[0, 1, 2].map((k) => Math.max(...Q.map((q) => q[k])) - Math.min(...Q.map((q) => q[k]))));
+  if (P.some((p, i) => Math.hypot(...map(p).map((x, k) => x - Q[i][k])) > 1e-4 + 1e-5 * size)) return null;
+  const ax = lin(src.frame.x), ay = lin(src.frame.y);
+  const x = norm3(ax), yRaw = [0, 1, 2].map((k) => ay[k] - dot3(ay, x) * x[k]) as V3, y = norm3(yRaw), z = cross3(x, y);
+  const scale = (Math.hypot(...ax) + Math.hypot(...ay)) / 2;
+  const frame: Frame = { origin: map(src.frame.origin), x, y, z };
+  if (solid) return { frame, scale, push: dot3(lin(src.frame.z), z), flip: false };
+  return { frame, scale, push: null, flip: dot3(norm3((letters[0] as Face).normalAt().toTuple() as V3), z) < 0 };
+}
+
+/** The affine map q ≈ A·p + t (A row by row) that fits the point pairs best (least squares); null if they're too few / flat. */
+function fitAffine(P: V3[], Q: V3[]): { A: number[]; t: V3 } | null {
+  const n = P.length;
+  if (n < 4) return null;
+  const mean = (X: V3[]) => [0, 1, 2].map((k) => X.reduce((a, p) => a + p[k], 0) / n) as V3;
+  const pm = mean(P), qm = mean(Q);
+  // C = Σ dp·dpᵀ, B = Σ dq·dpᵀ; A = B·C⁻¹
+  const C = new Array(9).fill(0), B = new Array(9).fill(0);
+  for (let i = 0; i < n; i++) {
+    const dp = [0, 1, 2].map((k) => P[i][k] - pm[k]), dq = [0, 1, 2].map((k) => Q[i][k] - qm[k]);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      C[r * 3 + c] += dp[r] * dp[c];
+      B[r * 3 + c] += dq[r] * dp[c];
+    }
+  }
+  const det = C[0] * (C[4] * C[8] - C[5] * C[7]) - C[1] * (C[3] * C[8] - C[5] * C[6]) + C[2] * (C[3] * C[7] - C[4] * C[6]);
+  const tr = C[0] + C[4] + C[8];
+  if (!(Math.abs(det) > 1e-12 * tr * tr * tr)) return null;
+  const inv = [
+    C[4] * C[8] - C[5] * C[7], C[2] * C[7] - C[1] * C[8], C[1] * C[5] - C[2] * C[4],
+    C[5] * C[6] - C[3] * C[8], C[0] * C[8] - C[2] * C[6], C[2] * C[3] - C[0] * C[5],
+    C[3] * C[7] - C[4] * C[6], C[1] * C[6] - C[0] * C[7], C[0] * C[4] - C[1] * C[3],
+  ].map((v) => v / det);
+  const A = [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) => B[r * 3] * inv[c] + B[r * 3 + 1] * inv[3 + c] + B[r * 3 + 2] * inv[6 + c]));
+  const t = [0, 1, 2].map((r) => qm[r] - (A[r * 3] * pm[0] + A[r * 3 + 1] * pm[1] + A[r * 3 + 2] * pm[2])) as V3;
+  return { A, t };
+}
+
+/** A text's letters as textPlacement found them: flat (turned over if `flip`), or pushed `push` along frame.z. */
+export function textLetters(src: TextSource, push: number | null, flip: boolean): Shape[] {
+  const faces = makeTextFaces(src.frame, src.frame.origin, src.text, src).map((f) => (flip ? f.flipOrientation() : f));
+  return push === null ? faces : faces.map((f) => extrudeFace(f, f.hashCode, push));
 }
 
 /**
