@@ -48,6 +48,9 @@ import {
   kindOf,
   faceAxis,
   planarFaceFrame,
+  sketchOfShape,
+  type SketchLoop,
+  type SketchSeg,
   tangentFaceFrame,
   faceInfo,
   faceRefEdges,
@@ -113,7 +116,7 @@ import { CABLE_STORAGE_BOX } from "./cablebox";
 import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
-import { SketchTool } from "./sketch";
+import { SketchTool, type SketchFrame } from "./sketch";
 import type { TutCtx, Tutorial } from "./tutorials";
 
 /** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
@@ -3611,6 +3614,9 @@ class App implements ToolHost {
    * it under the cursor (or at its middle) — or, with nothing like that selected, on the ground. Done adds the closed outlines as flat faces.
    */
   private startSketch(): void {
+    // Face objects / paths selected (whole objects): edit them in the sketch.
+    const objs = this.selection.map((x) => (x.kind === "body" ? this.doc.get(x.body) : undefined));
+    if (objs.length && objs.every((b) => b?.kind === "face" || b?.kind === "path")) return this.editInSketch([...new Set(objs as Body[])]);
     let frame = { origin: new THREE.Vector3(), x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
     let center = new THREE.Vector3(), what = "the ground";
     const s = this.selection.length === 1 ? this.selection[0] : null;
@@ -3652,6 +3658,70 @@ class App implements ToolHost {
     });
     this.startTool(tool.start());
     if (curved) this.toast("Curved face: the sketch is on the flat plane touching it at that point — what you draw stays flat, it doesn't follow the curve");
+  }
+
+  /**
+   * K with face objects / paths selected: the sketch opens on their plane with them in it, to edit
+   * (however they were moved / rotated since). Done replaces them (one undo step); Cancel keeps them.
+   */
+  private editInSketch(bodies: Body[]): void {
+    const names = bodies.map((b) => `"${b.name}"`).join(", ");
+    // Points along every edge: the plane they share, and the middle to look at.
+    const pts: THREE.Vector3[] = [];
+    for (const b of bodies) for (const e of (b.shape as Shape | Wire).edges) for (const t of [0, 0.25, 0.5, 0.75, 1]) pts.push(new THREE.Vector3(...(e.pointAt(t).toTuple() as V3)));
+    const box = new THREE.Box3().setFromPoints(pts), size = box.getSize(new THREE.Vector3()).length();
+    const tol = 1e-6 * Math.max(1, size);
+    const v = (t: V3) => new THREE.Vector3(...t);
+    let frame: SketchFrame | null = null;
+    const face = bodies.find((b) => b.kind === "face") as ShapeBody | undefined;
+    if (face) {
+      const f = planarFaceFrame(face.shape, face.shape.faces[0].hashCode);
+      if (!f) return this.toast(`Sketch: "${face.name}" isn't flat — it can't be edited in the sketch`, "error");
+      frame = { origin: v(f.origin), x: v(f.x), y: v(f.y), z: v(f.z) };
+      // A side face's frame has x up the wall: turned a quarter so y is up (as K on a side face)
+      if (Math.abs(frame.z.z) <= 0.9) frame = { ...frame, x: frame.y.clone().negate(), y: frame.x };
+    } else {
+      // Paths only: the plane they lie in — flat ones: level at their height; one straight line: the upright plane through it.
+      const p0 = pts[0], far = pts.reduce((a, p) => (p.distanceTo(p0) > a.distanceTo(p0) ? p : a), p0);
+      const u = far.clone().sub(p0).normalize();
+      const off = pts.reduce((a, p) => { const d = p.clone().sub(p0); d.addScaledVector(u, -d.dot(u)); return d.length() > a.length() ? d : a; }, new THREE.Vector3());
+      const level = pts.every((p) => Math.abs(p.z - p0.z) < tol);
+      const z = level ? new THREE.Vector3(0, 0, 1) : off.length() > tol ? u.clone().cross(off).normalize() : Math.abs(u.z) < 0.999 ? u.clone().cross(new THREE.Vector3(0, 0, 1)).normalize() : new THREE.Vector3(0, -1, 0);
+      if (z.z < -1e-9 || (Math.abs(z.z) < 1e-9 && z.y > 1e-9)) z.negate(); // (facing up / toward the front)
+      const x = Math.abs(z.z) > 0.999 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1).cross(z).normalize();
+      frame = { origin: level ? new THREE.Vector3(0, 0, p0.z) : p0.clone(), x, y: z.clone().cross(x), z };
+    }
+    const fz = frame.z, fo = frame.origin;
+    if (pts.some((p) => Math.abs(p.clone().sub(fo).dot(fz)) > tol * 10)) {
+      return this.toast(`Sketch: ${names} aren't on one flat plane — select ones that lie on the same plane`, "error");
+    }
+    const loops: SketchLoop[] = [], opens: SketchSeg[][] = [];
+    try {
+      for (const b of bodies) {
+        const got = sketchOfShape(b.shape as Shape | Wire, b.name);
+        loops.push(...got.loops);
+        opens.push(...got.opens);
+      }
+    } catch (e) {
+      return this.toast(errorMessage(e), "error");
+    }
+    const ids = new Set(bodies.map((b) => b.id));
+    const group = bodies.every((b) => b.group && b.group === bodies[0].group) ? bodies[0].group : undefined;
+    this.endInteractions();
+    this.setSelection([]);
+    const tool = new SketchTool(this, frame, box.getCenter(new THREE.Vector3()), names, (faces, paths) => {
+      this.endTool();
+      const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))].map((m) => (group ? { ...m, group } : m));
+      this.doc.commit([...this.doc.bodies.filter((b) => !ids.has(b.id)), ...made], "Edit in sketch");
+      this.setMode("body");
+      this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
+      const n = (k: number, what: string) => (k ? `${k} ${what}${k > 1 ? "s" : ""}` : "");
+      this.toast(made.length ? `${names} replaced by ${[n(faces.length, "face"), n(paths.length, "path")].filter(Boolean).join(" and ")} from the sketch` : `${names} removed — the sketch was left empty`);
+    }, () => {
+      this.endTool();
+      this.toast(`Sketch cancelled — ${names} unchanged`);
+    });
+    this.startTool(tool.load(loops, opens).start());
   }
 
   /** Guide line tool; with an edge given (edge + Shift+D) it starts from that edge. */
@@ -5372,7 +5442,7 @@ class App implements ToolHost {
       ["Bodies panel: Shift+click · Ctrl+click", "Select all the rows from the last clicked one to this one (Ctrl+Shift: add them) · add / remove one"],
       ["B B · B C · B S", "Draw solid Box · Cylinder · Sphere (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
-      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
+      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Done replaces them, Cancel keeps them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · R rectangle · C circle · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],

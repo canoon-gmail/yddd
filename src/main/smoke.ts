@@ -4974,6 +4974,49 @@ const SCENARIO_SKETCH = String.raw`
         name === "Sketch" && middle && Math.abs(middle.n[2]) < 1e-6 && Math.abs(middle.d - 10) < 1e-6 && /doesn't follow the curve/.test(said),
       { under, expected: [Math.cos(a), Math.sin(a)].map((x) => +x.toFixed(3)), middle, name, said });
   }
+  // Edit in the sketch: select face objects / paths, K → they're in the sketch on their plane (however moved or
+  // rotated); Done replaces them (one undo step); Cancel keeps them; not on one plane → refused
+  {
+    const esc = async () => { for (let k = 0; k < 3 && app.tool; k++) await key("Escape"); };
+    await esc(); app.doc.reset([]);
+    const rect = app.doc.makeBody(K.makeRectFace(G, [300, 0, 0], 20, 10), "Rect", "face");
+    const circ = app.doc.makeBody(K.makeCircleFace(G, [340, 0, 0], 5), "Circle", "face");
+    const oval = app.doc.makeBody(K.scaleShape(K.makeCircleFace(G, [380, 0, 0], 5), [2, 1, 1], [380, 0, 0]), "Oval", "face"); // (a freeform curve)
+    const L = K.rotateShape(K.sketchPath([{ kind: "line", a: [300, 20, 0], b: [320, 20, 0] }, { kind: "arc", a: [320, 20, 0], m: [325, 25, 0], b: [320, 30, 0] }]), -15, [300, 20, 0], [0, 0, 1]);
+    const path = app.doc.makeBody(L, "Path", "path");
+    const len = (w) => w.edges.reduce((s, e) => s + e.length, 0);
+    app.doc.commit([rect, circ, oval, path], "faces + path");
+    const n0 = app.doc.bodies.length;
+    app.run("mode.body"); app.setSelection([rect, circ, oval, path].map((b) => ({ kind: "body", body: b.id, id: 0 })));
+    await key("k"); await sleep(30);
+    const t = app.tool;
+    const loaded = t && t.name === "Sketch" ? { loops: t.loops.map((l) => l.kind === "circle" ? "circle" : l.segs.map((g) => g.kind).join("+")), opens: t.opens.map((o) => o.map((g) => g.kind).join("+")) } : null;
+    document.querySelector("#sketch-panel button[data-act=done]")?.click(); await sleep(30);
+    const made = app.doc.bodies, faces = made.filter((b) => b.kind === "face"), paths = made.filter((b) => b.kind === "path");
+    const areas = faces.map(area).sort((a, b) => a - b);
+    const want = [Math.PI * 25, 200, area(oval)].sort((a, b) => a - b); // (the oval: as the stretched circle was)
+    const sameLen = paths.length === 1 && Math.abs(len(paths[0].shape) - len(L)) < 1e-6;
+    const gone = [rect, circ, oval, path].every((b) => !app.doc.get(b.id));
+    app.run("edit.undo"); await sleep(20);
+    const back = [rect, circ, oval, path].every((b) => app.doc.get(b.id)) && app.doc.bodies.length === n0;
+    expect("sketch: select 3 face objects + a path (turned −15°), K → in the sketch (rectangle, circle, freeform oval, line + arc); Done replaces them, same areas / length; one undo brings them back",
+      loaded && JSON.stringify(loaded.loops.slice().sort()) === JSON.stringify(["circle", "line+line+line+line", "spline"].sort()) && JSON.stringify(loaded.opens) === JSON.stringify(["line+arc"]) &&
+        faces.length === 3 && areas.every((a, i) => Math.abs(a - want[i]) < 1e-3) && sameLen && gone && back, { loaded, areas, want, ideal: Math.PI * 50, ovalEdge: oval.shape.edges.map((e) => e.geomType), sameLen, gone, back });
+    // A path stood up (turned 90° about X): the sketch opens on its upright plane; Cancel keeps it
+    await esc();
+    const up = app.doc.makeBody(K.rotateShape(K.sketchPath([{ kind: "line", a: [0, 50, 0], b: [10, 50, 0] }, { kind: "line", a: [10, 50, 0], b: [10, 60, 0] }]), 90, [0, 50, 0], [1, 0, 0]), "Up", "path");
+    app.doc.commit([...app.doc.bodies, up], "upright path");
+    app.setSelection([{ kind: "body", body: up.id, id: 0 }]);
+    await key("k"); await sleep(30);
+    const upT = app.tool && app.tool.name === "Sketch" ? { opens: app.tool.opens.length, z: app.tool.frame.z.toArray().map((n) => +n.toFixed(6)) } : null;
+    document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); await sleep(30);
+    expect("sketch: K on a stood-up path → its upright plane (normal along Y); Cancel keeps it", upT && upT.opens === 1 && Math.abs(Math.abs(upT.z[1]) - 1) < 1e-6 && !app.tool && !!app.doc.get(up.id), upT);
+    // A ground face with the stood-up path: not on one plane → refused, no sketch
+    app.setSelection([{ kind: "body", body: rect.id, id: 0 }, { kind: "body", body: up.id, id: 0 }]);
+    await key("k"); await sleep(30);
+    const toast = [...document.querySelectorAll(".toast")].map((x) => x.textContent).pop() ?? "";
+    expect("sketch: a ground face + a stood-up path → refused (not on one plane)", !app.tool && /one flat plane/.test(toast), { tool: app.tool && app.tool.name, toast });
+  }
   // Left open for the screenshot (cancelled afterwards), on a fresh model with just the box: a slot
   // drawn on the box top, a circle, a line on the way lined up with the slot's end (dashed guide)
   app.doc.reset([]);

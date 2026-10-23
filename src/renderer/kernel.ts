@@ -511,7 +511,7 @@ function orientFace(face: Face, frame: Frame): Face {
 export type SketchLoop =
   | { kind: "path"; segs: ({ kind: "line"; a: V3; b: V3 } | { kind: "arc"; a: V3; m: V3; b: V3 } | { kind: "spline"; pts: V3[]; w: number[] })[] }
   | { kind: "circle"; c: V3; r: number };
-type SketchSeg = Extract<SketchLoop, { kind: "path" }>["segs"][number];
+export type SketchSeg = Extract<SketchLoop, { kind: "path" }>["segs"][number];
 
 /** A sketch freeform curve as one B-spline edge (degree 2, rational). */
 function sketchSplineEdge(pts: V3[], w: number[]): Edge {
@@ -542,6 +542,84 @@ const sketchEdge = (g: SketchSeg): Edge => (g.kind === "line" ? makeLine(g.a, g.
 /** An open sketch path (lines / arcs / freeform curves end to end) as a wire. */
 export function sketchPath(segs: SketchSeg[]): Wire {
   return assembleWire(segs.map(sketchEdge));
+}
+
+/**
+ * Back into the sketch (select face objects / paths, K): a face's outlines (outer and holes) or a path's
+ * edges as sketch outlines / open paths, in 3D — lines, arcs, whole circles, and freeform curves as the
+ * sketch's degree-2 rational pieces. Throws on a curve the sketch can't hold (e.g. a degree-3 spline).
+ */
+export function sketchOfShape(shape: Shape | Wire, name: string): { loops: SketchLoop[]; opens: SketchSeg[][] } {
+  const loops: SketchLoop[] = [], opens: SketchSeg[][] = [];
+  const wires = shape instanceof Wire ? [shape] : (shape as Shape).wires;
+  for (const w of wires) {
+    const edges = w.edges;
+    // A whole circle: one closed circle edge.
+    if (edges.length === 1 && edges[0].geomType === "CIRCLE" && near3(edges[0].startPoint.toTuple() as V3, edges[0].endPoint.toTuple() as V3)) {
+      const e = edges[0], [p0, p1, p2] = [0, 1 / 3, 2 / 3].map((t) => e.pointAt(t).toTuple() as V3);
+      const c = circumcentre(p0, p1, p2);
+      loops.push({ kind: "circle", c, r: Math.hypot(...sub3(p0, c)) });
+      continue;
+    }
+    // Edges end to end (in wire order or not), each turned to run on from the last.
+    const segs: SketchSeg[] = [];
+    const left = edges.map((e) => sketchSegsOfEdge(e, name));
+    let end: V3 | null = null;
+    while (left.length) {
+      let i = end ? left.findIndex((g) => near3(segStart(g[0]), end!) || near3(segEnd(g[g.length - 1]), end!)) : 0;
+      if (i < 0) i = 0; // (not connected: start a new run — shouldn't happen in one wire)
+      let g = left.splice(i, 1)[0];
+      if (end && !near3(segStart(g[0]), end)) g = g.map(revSketchSeg).reverse();
+      segs.push(...g);
+      end = segEnd(g[g.length - 1]);
+    }
+    const closed = segs.length > 0 && near3(segStart(segs[0]), segEnd(segs[segs.length - 1]));
+    if (closed) loops.push({ kind: "path", segs });
+    else opens.push(segs);
+  }
+  return { loops, opens };
+}
+
+const near3 = (a: V3, b: V3) => Math.hypot(...sub3(a, b)) < 1e-6;
+const segStart = (g: SketchSeg): V3 => (g.kind === "spline" ? g.pts[0] : g.a);
+const segEnd = (g: SketchSeg): V3 => (g.kind === "spline" ? g.pts[g.pts.length - 1] : g.b);
+const revSketchSeg = (g: SketchSeg): SketchSeg =>
+  g.kind === "line" ? { kind: "line", a: g.b, b: g.a } : g.kind === "arc" ? { kind: "arc", a: g.b, m: g.m, b: g.a } : { kind: "spline", pts: [...g.pts].reverse(), w: [...g.w].reverse() };
+
+/** Centre of the circle through three points. */
+function circumcentre(a: V3, b: V3, c: V3): V3 {
+  const ab = sub3(b, a), ac = sub3(c, a), n = cross3(ab, ac), n2 = dot3(n, n);
+  const t = add3(cross3(n, ab).map((k) => k * dot3(ac, ac)) as V3, cross3(ac, n).map((k) => k * dot3(ab, ab)) as V3);
+  return add3(a, t.map((k) => k / (2 * n2)) as V3);
+}
+
+/** One edge as sketch segments (a degree-1 spline: its straight pieces). */
+function sketchSegsOfEdge(e: Edge, name: string): SketchSeg[] {
+  const a = e.startPoint.toTuple() as V3, b = e.endPoint.toTuple() as V3;
+  if (e.geomType === "LINE") return [{ kind: "line", a, b }];
+  if (e.geomType === "CIRCLE") return [{ kind: "arc", a, m: e.pointAt(0.5).toTuple() as V3, b }];
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0);
+    const bs = keep(oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true)) as never));
+    if (bs.IsPeriodic()) bs.SetNotPeriodic();
+    const pole = (i: number): V3 => {
+      const p = keep(bs.Pole(i));
+      return [p.X(), p.Y(), p.Z()];
+    };
+    const deg = bs.Degree();
+    if (deg === 1) return Array.from({ length: bs.NbPoles() - 1 }, (_, i) => ({ kind: "line", a: pole(i + 1), b: pole(i + 2) }) as SketchSeg);
+    if (deg !== 2) throw new Error(`Sketch: "${name}" has a freeform curve the sketch can't edit (degree ${deg})`);
+    // Pieces end to end: every inside knot twice (2n + 1 control points, every 2nd one on the curve).
+    for (let i = 2; i < bs.NbKnots(); i++) if (bs.Multiplicity(i) < 2) bs.IncreaseMultiplicity(i, 2);
+    const n = bs.NbPoles();
+    const pts = Array.from({ length: n }, (_, i) => pole(i + 1));
+    const w = Array.from({ length: n }, (_, i) => bs.Weight(i + 1));
+    return [{ kind: "spline", pts, w }];
+  } finally {
+    tmp.forEach((o) => o.delete());
+  }
 }
 
 /**

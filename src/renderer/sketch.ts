@@ -18,7 +18,7 @@
  */
 import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
-import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type V3, type Wire } from "./kernel";
+import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
 import { num } from "./format";
 import { ICONS } from "./icons";
 
@@ -759,6 +759,24 @@ export class SketchTool implements Tool {
     this.host.viewport.showSnapMarker(null);
     this.host.toast(`Picture matched — scaled ${num((len(db) / len(da)) * 100)}%`);
     this.update();
+  }
+
+  /**
+   * Existing outlines / paths (in 3D, on the sketch's plane) to edit: they start out in the sketch
+   * (not an undo step — Cancel leaves the originals as they were).
+   */
+  load(loops: SketchLoop[], opens: SketchSeg[][]): this {
+    const p2 = (p: V3): P => this.local(new THREE.Vector3(...p));
+    const seg = (g: SketchSeg): Seg => {
+      if (g.kind === "line") return { kind: "line", a: p2(g.a), b: p2(g.b) };
+      if (g.kind === "arc") return { kind: "arc", a: p2(g.a), m: p2(g.m), b: p2(g.b) };
+      const pts = g.pts.map(p2);
+      return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w };
+    };
+    for (const l of loops) this.loops.push(l.kind === "circle" ? { kind: "circle", c: p2(l.c), r: l.r } : { kind: "path", segs: l.segs.map(seg) });
+    for (const segs of opens) this.opens.push(segs.map(seg));
+    this.version++;
+    return this;
   }
 
   start(): this {
