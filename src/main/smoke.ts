@@ -2618,6 +2618,20 @@ const SCENARIO_SPLINE = String.raw`
     app.run("edit.undo"); await sleep(20);
     expect("spline: Edge mode, click the path (its line), Del → the path is deleted; undo brings it back", picked && gone && !!app.doc.get(pathId), { picked, gone, back: !!app.doc.get(pathId) });
     app.run("mode.body");
+    // A circle swept along a long Spline (12 points): its heavy tube face is drawn coarser — quick, not 400 000 triangles
+    {
+      const q = Array.from({ length: 12 }, (_, i) => [i * 4, (i % 2 ? 6 : -6) + i, 0]);
+      const nq = q.length, add = (u, v) => u.map((x, i) => x + v[i]), sub = (u, v) => u.map((x, i) => x - v[i]), mul = (u, k) => u.map((x) => x * k);
+      const tan = (i) => (i === 0 ? sub(q[1], q[0]) : i === nq - 1 ? sub(q[nq - 1], q[nq - 2]) : mul(sub(q[i + 1], q[i - 1]), 0.5));
+      const pts = [q[0]];
+      for (let i = 0; i + 1 < nq; i++) { const A = add(q[i], mul(tan(i), 0.25)), B = sub(q[i + 1], mul(tan(i + 1), 0.25)); pts.push(A, mul(add(A, B), 0.5), B, q[i + 1]); }
+      const wire = K.sketchPath([{ kind: "spline", pts, w: pts.map(() => 1) }]);
+      const disc = K.makeCircleFace({ origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }, [0, 40, 0], 1.5);
+      const tube = K.sweepFace(disc, disc.faces[0].hashCode, wire, true, false, 0);
+      const t0 = performance.now(), mesh = K.tessellate(tube), ms = performance.now() - t0, tris = mesh.faces.triangles.length / 3;
+      expect("spline: a circle swept along a 12-point Spline — valid, drawn in well under a second (its heavy face coarser: under 100 000 triangles)",
+        K.isValidShape(tube) && ms < 1500 && tris < 100000, { ms: Math.round(ms), tris, valid: K.isValidShape(tube) });
+    }
     // K on the face again: its curve comes back as a Spline, points to drag
     app.setSelection([{ kind: "body", body: face.id, id: 0 }]);
     await key("k", { code: "KeyK" }); await sleep(50);
@@ -6273,7 +6287,13 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     if (process.env.YDDD_SMOKE_ONLY === "spline") {
       // (while working on it: just the sketch spline scenario)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
-      if (process.env.YDDD_SMOKE_EXP) console.log("SMOKE_EXP " + JSON.stringify(await win.webContents.executeJavaScript(await readFile(process.env.YDDD_SMOKE_EXP, "utf8"), true)));
+      if (process.env.YDDD_SMOKE_EXP) {
+        // (an experiment script: its result, a screenshot of where it left the app)
+        console.log("SMOKE_EXP " + JSON.stringify(await win.webContents.executeJavaScript(await readFile(process.env.YDDD_SMOKE_EXP, "utf8"), true)));
+        await shot("exp.png");
+        app.exit(0);
+        return;
+      }
       // A screenshot: a closed and an open Spline in a sketch, the closed one selected (its points to drag)
       await win.webContents.executeJavaScript(`(async () => {
         const app = window.ydddApp, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas, sleep = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -380,13 +380,45 @@ export function takeMesh(shape: Shape, byPlace: Tessellation): void {
  * against 400 — 170 ms, against 10), just as close. Display only: the face keeps its id. A
  * trimmed one (e.g. with a hole) is meshed as it is. `whole` false: meshed in parts.
  */
+/** A B-spline face with more control points than this is heavy to mesh (see heavyMeshOpts). */
+const HEAVY_POLES = 400;
+
+/**
+ * Coarser display-mesh settings for a heavy B-spline face — e.g. a profile swept along a long freeform path
+ * (degree 6 × 9, 217 × 6 control points: 410 000 triangles, 6 s, at the usual settings for a 3 × 25 mm tube) —
+ * to 0.4% of its size (that tube: 27 000 triangles, 0.25 s); null for any other face. Only what is drawn: the
+ * solid, STEP and the STL / 3MF quality stay as they are.
+ */
+function heavyMeshOpts(f: Face, opts: { tolerance: number; angularTolerance: number }): { tolerance: number; angularTolerance: number } | null {
+  if (f.geomType !== "BSPLINE_SURFACE") return null;
+  let poles = 0;
+  const ad = new oc.BRepAdaptor_Surface(f.wrapped, true);
+  try {
+    const bs = ad.BSpline();
+    poles = bs.NbUPoles() * bs.NbVPoles();
+    bs.delete();
+  } catch {
+    return null;
+  } finally {
+    ad.delete();
+  }
+  if (poles <= HEAVY_POLES) return null;
+  const ends = f.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
+  const span = (k: number) => Math.max(...ends.map((p) => p[k])) - Math.min(...ends.map((p) => p[k]));
+  const size = Math.hypot(span(0), span(1), span(2)) || 1;
+  const tolerance = Math.max(opts.tolerance, size * 4e-3);
+  return tolerance > opts.tolerance ? { tolerance, angularTolerance: Math.max(opts.angularTolerance, 0.5) } : null;
+}
+
 function meshFaces(shape: Shape, opts: { tolerance: number; angularTolerance: number }): { mesh: ShapeMesh; whole: boolean } {
   const faces = shape.faces;
   const stand = faces.map((f) => (f.geomType === "EXTRUSION_SURFACE" ? extrusionStandIn(f) : null));
-  if (!stand.some(Boolean)) return { mesh: extractMesh(shape.wrapped, opts), whole: true };
-  const rest = faces.filter((_, i) => !stand[i]);
+  const heavy = faces.map((f, i) => (stand[i] ? null : heavyMeshOpts(f, opts)));
+  if (!stand.some(Boolean) && !heavy.some(Boolean)) return { mesh: extractMesh(shape.wrapped, opts), whole: true };
+  const rest = faces.filter((_, i) => !stand[i] && !heavy[i]);
   const parts: { mesh: ShapeMesh; id?: number }[] = rest.length ? [{ mesh: extractMesh((makeCompound(rest) as unknown as Shape).wrapped, opts) }] : [];
   stand.forEach((f, i) => f && parts.push({ mesh: extractMesh(f.wrapped, opts), id: faces[i].hashCode }));
+  heavy.forEach((o, i) => o && parts.push({ mesh: extractMesh(faces[i].wrapped, o), id: faces[i].hashCode }));
   const out: ShapeMesh = { vertices: [], normals: [], triangles: [], faceGroups: [] };
   for (const { mesh, id } of parts) {
     const v0 = out.vertices.length / 3, t0 = out.triangles.length;
