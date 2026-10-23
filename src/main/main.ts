@@ -115,6 +115,7 @@ function buildMenu(): void {
         item("Import STL…", "file.importStl"),
         item("Export STEP…", "file.exportStep", "CmdOrCtrl+E"),
         item("Export STL…", "file.exportStl", "CmdOrCtrl+Shift+E"),
+        item("Export 3MF… (Bambu Studio, PrusaSlicer, Cura)", "file.export3mf"),
         { type: "separator" },
         { role: "quit" },
       ],

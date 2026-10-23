@@ -4202,6 +4202,43 @@ export async function exportStl(shapes: (Solid | TriMesh)[], quality: StlQuality
   return out.buffer;
 }
 
+/**
+ * A body as one indexed triangle mesh for 3MF: `positions` 3 floats per vertex, `triangles` 3 indices each,
+ * counter-clockwise seen from outside. Corners shared by neighbouring faces are merged (same point to 1e-6 mm),
+ * so a solid's mesh is closed — slicers check that ("non-manifold edges"); triangles squashed to a line are dropped.
+ */
+export interface IndexedMesh {
+  positions: Float32Array;
+  triangles: Uint32Array;
+}
+
+export function meshForExport(shape: Solid | TriMesh, quality: StlQuality): IndexedMesh {
+  let P: ArrayLike<number>, T: ArrayLike<number> | null;
+  if (isMesh(shape)) [P, T] = [shape.positions, null];
+  else {
+    const m = deepCopy(shape).mesh({ tolerance: quality.tolerance, angularTolerance: (quality.angle * Math.PI) / 180 });
+    [P, T] = [m.vertices, m.triangles];
+  }
+  const corners = T ? T.length : P.length / 3;
+  const at = (k: number) => (T ? T[k] : k); // (the k-th triangle corner's vertex in P)
+  const index = new Map<string, number>(), pos: number[] = [], tri: number[] = [];
+  const key = (v: number) => Math.round(v * 1e6);
+  const vertex = (i: number): number => {
+    const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2], k = `${key(x)},${key(y)},${key(z)}`;
+    let n = index.get(k);
+    if (n === undefined) {
+      index.set(k, (n = pos.length / 3));
+      pos.push(x, y, z);
+    }
+    return n;
+  };
+  for (let c = 0; c < corners; c += 3) {
+    const a = vertex(at(c)), b = vertex(at(c + 1)), d = vertex(at(c + 2));
+    if (a !== b && b !== d && a !== d) tri.push(a, b, d);
+  }
+  return { positions: Float32Array.from(pos), triangles: Uint32Array.from(tri) };
+}
+
 /** Number of triangles an STL export at this quality would have (meshes count as they are). */
 export function stlTriangleCount(shapes: (Solid | TriMesh)[], quality: StlQuality): number {
   let n = 0;

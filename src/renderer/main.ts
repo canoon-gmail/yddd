@@ -45,6 +45,7 @@ import {
   deserialize,
   exportStep,
   exportStl,
+  meshForExport,
   stlTriangleCount,
   type StlQuality,
   importStep,
@@ -125,6 +126,7 @@ import { BoxTool, CylinderTool, SphereTool, PolygonTool, TextTool, PointMoveTool
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
+import { write3mf } from "./threemf";
 import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
@@ -1181,6 +1183,7 @@ class App implements ToolHost {
       case "file.importStl": void this.fileImportStl(); return;
       case "file.exportStep": void this.fileExport("step"); return;
       case "file.exportStl": void this.fileExport("stl"); return;
+      case "file.export3mf": void this.fileExport("3mf"); return;
 
       case "help.shortcuts": return this.toggleHelp();
       case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
@@ -6420,7 +6423,7 @@ class App implements ToolHost {
    * STL quality before exporting: Draft / Normal / Fine presets or custom values, with the
    * resulting triangle count and file size. Remembers the last choice. Null if cancelled.
    */
-  private stlQualityDialog(solids: (Solid | TriMesh)[]): Promise<StlQuality | null> {
+  private stlQualityDialog(solids: (Solid | TriMesh)[], format = "STL"): Promise<StlQuality | null> {
     const PRESETS: { name: string; q: StlQuality; hint: string }[] = [
       { name: "Draft", q: { tolerance: 0.1, angle: 15 }, hint: "quick test prints, previews" },
       { name: "Normal", q: { tolerance: 0.02, angle: 8 }, hint: "most 3D printing" },
@@ -6439,7 +6442,7 @@ class App implements ToolHost {
       dlg.id = "props-dlg";
       dlg.noValidate = true;
       dlg.innerHTML =
-        `<h4>Export STL — quality</h4>` +
+        `<h4>Export ${format} — quality</h4>` +
         `<div class="stl-presets">${PRESETS.map((p, i) => `<label class="stl-preset"><input type="radio" name="preset" value="${i}"><span><b>${p.name}</b> <small>${p.q.tolerance} mm · ${p.q.angle}° — ${p.hint}</small></span></label>`).join("")}` +
         `<label class="stl-preset"><input type="radio" name="preset" value="custom"><span><b>Custom</b></span></label></div>` +
         `<label><span>Surface accuracy (mm)</span><input type="number" data-k="tolerance" step="0.005" min="0.0005"></label>` +
@@ -6502,17 +6505,17 @@ class App implements ToolHost {
     });
   }
 
-  private async fileExport(kind: "step" | "stl"): Promise<void> {
+  private async fileExport(kind: "step" | "stl" | "3mf"): Promise<void> {
     const ids = this.selectedBodyIds();
     let bodies = ids.length ? this.doc.bodies.filter((b) => ids.includes(b.id)) : this.doc.bodies.filter((b) => !this.hidden.has(b.id));
     if (bodies.some((b) => b.kind === "path")) {
       this.toast(`${kind.toUpperCase()} skips paths (open lines from a sketch) — they have no surface`);
       bodies = bodies.filter((b) => b.kind !== "path");
     }
-    if (kind === "stl") {
+    if (kind !== "step") {
       // Solids and meshes go into one file (a slicer handles touching / overlapping parts).
       const printable = bodies.filter((b) => b.kind !== "face");
-      if (printable.length < bodies.length) this.toast("STL skips flat faces (no volume) — exporting solids and meshes only");
+      if (printable.length < bodies.length) this.toast(`${kind.toUpperCase()} skips flat faces (no volume) — exporting solids and meshes only`);
       bodies = printable;
     } else {
       const solids = bodies.filter((b) => b.kind !== "mesh");
@@ -6538,18 +6541,21 @@ class App implements ToolHost {
     }
     const shapes = bodies.map((b) => b.shape);
     let quality: StlQuality | null = { tolerance: 0.02, angle: 8 };
-    if (kind === "stl" && shapes.some(notMesh)) {
+    if (kind !== "step" && shapes.some(notMesh)) {
       // Only solids are meshed at a chosen quality; meshes are written as they are.
-      quality = await this.stlQualityDialog(shapes as (Solid | TriMesh)[]);
+      quality = await this.stlQualityDialog(shapes as (Solid | TriMesh)[], kind.toUpperCase());
       if (!quality) return;
     }
     try {
-      const buf = kind === "step" ? await exportStep(shapes.filter(notMesh).map((shape, i) => ({ shape, name: bodies[i].name }))) : await exportStl(shapes as (Solid | TriMesh)[], quality!);
+      const buf =
+        kind === "step" ? await exportStep(shapes.filter(notMesh).map((shape, i) => ({ shape, name: bodies[i].name })))
+        : kind === "3mf" ? await write3mf(bodies.map((b) => ({ name: b.name, mesh: meshForExport(b.shape as Solid | TriMesh, quality!) })))
+        : await exportStl(shapes as (Solid | TriMesh)[], quality!);
       const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.y3d$/, "") ?? "model";
       const path = await window.y3d.saveFile({
         title: `Export ${kind.toUpperCase()}`,
         defaultPath: `${base}.${kind}`,
-        filters: kind === "step" ? [{ name: "STEP", extensions: ["step", "stp"] }] : [{ name: "STL", extensions: ["stl"] }],
+        filters: kind === "step" ? [{ name: "STEP", extensions: ["step", "stp"] }] : kind === "3mf" ? [{ name: "3MF", extensions: ["3mf"] }] : [{ name: "STL", extensions: ["stl"] }],
         data: new Uint8Array(buf),
       });
       if (path) this.toast(`Exported ${bodies.length} object(s) to ${path.split(/[\\/]/).pop()}`);
@@ -6567,7 +6573,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

@@ -2804,6 +2804,46 @@ const SCENARIO_TEXT = String.raw`
       let err = ""; try { K.roundSome("fillet", cube, new Set([e0]), 12); } catch (e) { err = String(e); }
       expect("fillet: one cube edge at R 12 → an error saying the largest that works", /can't round this edge at 12 mm — the largest that works is about 9\.\d/.test(err), err);
     }
+    // Export 3MF: each body an indexed mesh, closed (every edge in exactly 2 triangles, opposite ways) with the solid's
+    // volume; the file a valid ZIP (names, CRCs) holding one named object per body in mm — a solid and an STL mesh
+    {
+      const plate = K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 30, 20, 5), [K.makeCylinder(G, [5, 0, 0], 4, 5)]);
+      const q = { tolerance: 0.02, angle: 8 };
+      const closed = (m) => {
+        const dir = new Map();
+        const T = m.triangles;
+        for (let k = 0; k < T.length; k += 3) for (const [a, b] of [[T[k], T[k + 1]], [T[k + 1], T[k + 2]], [T[k + 2], T[k]]]) { const key = a + "," + b; dir.set(key, (dir.get(key) || 0) + 1); }
+        for (const [key, n] of dir) { const [a, b] = key.split(","); if (n !== 1 || dir.get(b + "," + a) !== 1) return false; }
+        return true;
+      };
+      const vol = (m) => { const P = m.positions, T = m.triangles; let v = 0; for (let k = 0; k < T.length; k += 3) { const [a, b, c] = [T[k], T[k + 1], T[k + 2]].map((i) => [P[i * 3], P[i * 3 + 1], P[i * 3 + 2]]); v += (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0])) / 6; } return v; };
+      const m1 = K.meshForExport(plate, q);
+      const stlMesh = K.parseStl(new Uint8Array(await K.exportStl([K.makeSphereAt([60, 0, 10], 10)], q))), m2 = K.meshForExport(stlMesh, q);
+      const file = await K.write3mf([{ name: "Plate & <hole>", mesh: m1 }, { name: "Ball", mesh: m2 }]);
+      // read it back: local headers, inflate, CRC
+      const dv = new DataView(file.buffer), files = {};
+      let o = 0, crcOk = true;
+      const crc = (d) => { let c = 0xffffffff; for (let i = 0; i < d.length; i++) { c ^= d[i]; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; } return (c ^ 0xffffffff) >>> 0; };
+      while (dv.getUint32(o, true) === 0x04034b50) {
+        const csize = dv.getUint32(o + 18, true), nlen = dv.getUint16(o + 26, true), name = new TextDecoder().decode(file.subarray(o + 30, o + 30 + nlen));
+        const packed = file.subarray(o + 30 + nlen, o + 30 + nlen + csize);
+        const data = new Uint8Array(await new Response(new Blob([packed]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
+        if (crc(data) !== dv.getUint32(o + 14, true)) crcOk = false;
+        files[name] = new TextDecoder().decode(data);
+        o += 30 + nlen + csize;
+      }
+      const model = files["3D/3dmodel.model"] || "";
+      const objs = [...model.matchAll(/<object id="(\d+)" type="model" name="([^"]*)"/g)].map((x) => x[2]);
+      const nv = (model.match(/<vertex /g) || []).length;
+      // both moved together onto the plate's middle (128, 128), bottom at z 0: plate x −15 … 70, y −10 … 10, z 0 … 20 → shift 100.5 (the ball's mesh just inside 70), 128, 0
+      const place = [...model.matchAll(/<item objectid="\d+" transform="([^"]*)"/g)].map((x) => x[1]);
+      expect("3MF: solid and STL mesh → closed meshes with the right volume; a valid ZIP (3 files, CRCs) with 2 named objects in mm, all vertices written, both moved together onto the plate's middle",
+        closed(m1) && Math.abs(vol(m1) - K.solidVolume(plate)) < 0.01 * K.solidVolume(plate) && closed(m2) && Math.abs(vol(m2) - (4 / 3) * Math.PI * 1000) < 0.02 * 4189 &&
+          crcOk && Object.keys(files).sort().join() === "3D/3dmodel.model,[Content_Types].xml,_rels/.rels" && /unit="millimeter"/.test(model) && objs.join("|") === "Plate &amp; &lt;hole&gt;|Ball" &&
+          nv === m1.positions.length / 3 + m2.positions.length / 3 && (model.match(/<item /g) || []).length === 2 && place.length === 2 && place.every((t) => { const v = t.split(" ").map(Number); return t.startsWith("1 0 0 0 1 0 0 0 1 ") && Math.abs(v[9] - 100.5) < 0.01 && v[10] === 128 && v[11] === 0; }),
+        { closed1: closed(m1), v1: r(vol(m1)), want1: r(K.solidVolume(plate)), closed2: closed(m2), v2: r(vol(m2)), crcOk, files: Object.keys(files), objs, nv, place });
+      window.__3mf = file;
+    }
     // On a box's front wall (y = −5), seen from the front: the H stands up the wall, facing out
     app.doc.reset([]);
     const wall = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 10, 20), "Box");

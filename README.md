@@ -33,7 +33,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
 | Transform | Move / Rotate gizmo (snaps to grid / 5°), Duplicate, **Mirror** (**M**: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side, touching it; *Join* makes a solid and its copy one, e.g. a half dome → a ball), Delete |
 | History | Unlimited-ish undo / redo (200 steps) |
-| Files | Save/Open native `.y3d` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL |
+| Files | Save/Open native `.y3d` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL / **3MF** (for slicers: Bambu Studio, PrusaSlicer, Cura — one named object per body, closed meshes, mm) |
 
 Press **F1** in the app for all shortcuts.
 
