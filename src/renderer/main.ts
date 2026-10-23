@@ -109,6 +109,8 @@ import {
   solidTips,
   roundTip,
   tipRadiusMax,
+  noteMoved,
+  boundsOf,
   type Tip,
   makeCircleFace,
   makeRectFace,
@@ -212,6 +214,11 @@ interface OpOutcome {
    * the exact result is then only built by `commit`, which may throw.
    */
   xform?: { ids: number[]; matrix: THREE.Matrix4 };
+  /**
+   * Instead of `ghost`: bodies on screen drawn through a matrix each (copies — an id may come several times;
+   * `replaces`: the body itself, moved), see Viewport.showGhostPlaced. Instant; `commit` builds the real ones.
+   */
+  placed?: { id: number; matrix: THREE.Matrix4; replaces?: boolean }[];
   /** Bodies the result removes: hidden while it is previewed. */
   hide?: number[];
   /** Hide the selected edges' highlight while previewed (they change with it, e.g. a resized hole's rim). */
@@ -2081,6 +2088,7 @@ class App implements ToolHost {
       }
     }
     if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
+    else if (result.placed) this.viewport.showGhostPlaced(result.placed, result.hide);
     else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
   }
 
@@ -5513,15 +5521,26 @@ class App implements ToolHost {
     /** What the row is made of: the selection, or (changing an array) its sources where they started. */
     const sourcesOf = (edit: boolean): { id: number; shape: Geom }[] =>
       edit ? rec!.sources.map((id) => ({ id, shape: back(id) })) : ids.map((id) => ({ id, shape: this.doc.get(id)!.shape }));
+    // (once per panel: a bounding box is slow on curved shapes — 84 swept tubes, seconds; the sources don't change meanwhile)
+    const boxes = new Map<boolean, { lo: number[]; hi: number[] }>();
     const bounds = (edit: boolean) => {
+      const known = boxes.get(edit);
+      if (known) return known;
       const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-      for (const { shape } of sourcesOf(edit)) {
-        const [a, b] = shape.boundingBox.bounds;
+      for (const id of edit ? rec!.sources : ids) {
+        const [a, b] = boundsOf(this.doc.get(id)!.shape as Shape);
         for (let i = 0; i < 3; i++) {
           lo[i] = Math.min(lo[i], a[i]);
           hi[i] = Math.max(hi[i], b[i]);
         }
       }
+      // (changing an array: its sources where they started — see back)
+      if (edit && Math.abs(rec!.offsets[0]) > 1e-12) {
+        const k = rec!.dir >> 1;
+        lo[k] -= rec!.offsets[0];
+        hi[k] -= rec!.offsets[0];
+      }
+      boxes.set(edit, { lo, hi });
       return { lo, hi };
     };
     const copyName = (b: Body) => b.name.replace(/\s+\d+$/, "");
@@ -5609,7 +5628,7 @@ class App implements ToolHost {
       },
       compute: (values) => {
         let { n: count, gap, dir, total, centre: alignCentre } = values;
-        const edit = editing(), src = sourcesOf(edit), ids = src.map((x) => x.id);
+        const edit = editing(), srcIds = edit ? rec!.sources : ids;
         const { lo, hi } = bounds(edit);
         const typed = { gap, total };
         if (!(count >= 2) || count !== Math.round(count)) throw new Error("Copies must be a whole number, 2 or more (the original counts)");
@@ -5657,20 +5676,25 @@ class App implements ToolHost {
         /** Where each source goes (k = 0) — changing an array, from where it started (it may have to move back). */
         const placed = (x: { id: number; shape: Geom }, d: number) => (Math.abs(d) > 1e-12 ? translateShape(x.shape, along(axis, d)) : x.shape);
         const sourceMoves = edit ? Math.abs(offsets[0] - rec!.offsets[0]) > 1e-9 || ((rec!.dir >> 1) !== axis && Math.abs(rec!.offsets[0]) > 1e-9) : moveOrig;
-        const ghost = new Map<number, Shape>();
+        // The preview: each source's mesh on screen moved there (nothing built or meshed — instant even for many
+        // heavy copies); the copies themselves are built on Apply. (Changing an array: from where its sources started.)
+        const shift = (d: number): V3 => {
+          const v = along(axis, d);
+          if (edit) v[rec!.dir >> 1] -= rec!.offsets[0];
+          return v;
+        };
+        const preview: { id: number; matrix: THREE.Matrix4; replaces?: boolean }[] = [];
         offsets.forEach((d, k) => {
           if (k === 0 && !sourceMoves) return;
-          src.forEach((x, j) => {
-            const b = this.doc.get(x.id)!;
-            // (the original's preview replaces it; copies are new: negative keys)
-            if (b.kind === "solid" || b.kind === "face") ghost.set(k === 0 ? x.id : -(k * src.length + j), placed(x, d) as Shape);
-          });
+          for (const id of srcIds) preview.push({ id, matrix: new THREE.Matrix4().makeTranslation(...shift(d)), replaces: k === 0 });
         });
         return {
-          ghost,
+          ghost: new Map(),
+          placed: preview,
           // Changing an array: its old copies make way for the new ones.
           hide: edit ? [...rec!.copies] : [],
           commit: () => {
+            const src = sourcesOf(edit);
             const copies: Body[] = [];
             for (let k = 1; k <= n; k++) {
               copies.push(...src.map((x) => {
@@ -5679,22 +5703,22 @@ class App implements ToolHost {
               }));
             }
             // The row is a group: the originals' own group if they share one (a second array → a grid), else a new "Array N".
-            const idSet = new Set(ids);
-            const groups = new Set(ids.map((id) => this.doc.get(id)!.group));
+            const idSet = new Set(srcIds);
+            const groups = new Set(srcIds.map((id) => this.doc.get(id)!.group));
             const group = edit ? rec!.group : groups.size === 1 && [...groups][0] ? [...groups][0]! : this.newGroupName("Array");
             const gone = new Set(edit ? rec!.copies : []);
             const bodies = this.doc.bodies
               .filter((b) => !gone.has(b.id))
-              .map((b) => (idSet.has(b.id) ? { ...(sourceMoves ? withShape(b, placed(src[ids.indexOf(b.id)], offsets[0])) : b), group } : b));
+              .map((b) => (idSet.has(b.id) ? { ...(sourceMoves ? withShape(b, placed(src[srcIds.indexOf(b.id)], offsets[0])) : b), group } : b));
             const made: ArrayRecord = {
-              group, sources: ids, copies: copies.map((b) => b.id), n: count, gap: typed.gap, total: typed.total, dir, centre: alignCentre, offsets,
+              group, sources: srcIds, copies: copies.map((b) => b.id), n: count, gap: typed.gap, total: typed.total, dir, centre: alignCentre, offsets,
               ...(total > 0 && span ? { span } : {}),
             };
             const arrays = [...this.doc.arrays.filter((r) => r !== rec || !edit), made];
             this.doc.commit([...bodies, ...copies.map((b) => ({ ...b, group }))], edit ? `Change ${group} ×${count}` : `Array copy ×${count}`, this.doc.guides, this.doc.dimensions, arrays);
             // The whole row stays selected: Array copy again (e.g. along Y) makes a grid.
             return {
-              select: [...ids, ...copies.map((b) => b.id)],
+              select: [...srcIds, ...copies.map((b) => b.id)],
               solidMode: true,
               then: () => {
                 // (Shift+R would move the whole selected row — not repeat this array)
@@ -5722,7 +5746,34 @@ class App implements ToolHost {
 
   // ================================================================ document changes
 
+  /** A file was just read (see loadModel): its array copies are linked to their sources before they're drawn. */
+  private justLoaded = false;
+
+  /**
+   * An opened file's array / circular copies, still where their array put them (checked), noted as moved copies of
+   * their sources: drawn with the sources' triangles, boxed from theirs — not meshed / measured one by one
+   * (84 copies of a swept tube: seconds).
+   */
+  private linkArrayCopies(): void {
+    for (const rec of this.doc.arrays) {
+      const shift = rec.circular ? this.circularShift(rec) : ([0, 0, 0] as V3);
+      if (!shift || (!rec.circular && !this.copiesInPlace(rec))) continue;
+      const S = rec.sources.length, { point } = this.arrayPlacement(rec, shift);
+      rec.copies.forEach((id, i) => {
+        const copy = this.doc.get(id), src = this.doc.get(rec.sources[i % S]), k = Math.floor(i / S) + 1;
+        if (!copy || !src || copy.kind === "mesh" || src.kind !== copy.kind) return;
+        // (p ↦ R·p + t from where the array puts three points)
+        const t = point([0, 0, 0], k), cols = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map((e) => point(e as V3, k).map((v, a) => v - t[a]));
+        noteMoved(copy.shape, src.shape, [0, 1, 2].flatMap((r) => [cols[0][r], cols[1][r], cols[2][r]]), t);
+      });
+    }
+  }
+
   private onDocChange(): void {
+    if (this.justLoaded) {
+      this.justLoaded = false;
+      this.linkArrayCopies();
+    }
     this.viewport.sync(this.doc.bodies);
     this.showGuides();
     this.showDimensions();
@@ -6549,6 +6600,7 @@ class App implements ToolHost {
       history?: SavedHistory;
     };
     if (json.format !== "yddd" && json.format !== "y3d") throw new Error("not a YDDD file");
+    this.justLoaded = true; // (cleared by the change it makes — see onDocChange)
     const geom = (kind: string | undefined, text: string): BodyGeom => {
       if (kind === "mesh") return { kind: "mesh", shape: TriMesh.fromBase64(text) };
       const shape = deserialize(text);

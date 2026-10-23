@@ -2654,6 +2654,52 @@ const SCENARIO_SPLINE = String.raw`
 })()
 `;
 
+/** Array copy stays quick with many heavy objects: the preview moves meshes on screen (builds nothing); reopened, the copies reuse their source's triangles. */
+const SCENARIO_ARRAYFAST = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, vp = app.viewport, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { if (i.type === "checkbox") i.checked = !!v; else i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); i.dispatchEvent(new Event("change", { bubbles: true })); } };
+  try {
+    app.doc.reset([]); app.run("mode.body");
+    const ball = app.doc.makeBody(K.makeSphereAt([0, 0, 10], 10), "Ball");
+    app.doc.commit([ball], "ball"); vp.fit(); await sleep(30);
+    app.setSelection([{ kind: "body", body: ball.id, id: 0 }]);
+    app.run("edit.array"); await sleep(50);
+    opValue("dir", 0); opValue("centre", 0); opValue("n", 6); opValue("gap", 5); await sleep(150);
+    const res = app.op && app.op.result;
+    const preview = { placed: res && res.placed ? res.placed.length : -1, ghosts: res ? res.ghost.size : -1, xs: res && res.placed ? res.placed.map((p) => Math.round(p.matrix.elements[12])) : [] };
+    expect("array fast: the preview is the ball's mesh moved 5 times (25 apart) — no shapes built for it", preview.placed === 5 && preview.ghosts === 0 && preview.xs.join() === "25,50,75,100,125", preview);
+    app.applyOp(); await sleep(50);
+    const n = app.doc.bodies.length;
+    // Save and open again: the copies are linked to the ball — only the ball is meshed
+    const text = app.modelText();
+    app.loadModel(text, null); await sleep(50);
+    const shapes = app.doc.bodies.map((b) => b.shape), meshed = shapes.filter((s) => vp.meshMs.has(s)).length;
+    expect("array fast: saved and opened again, 6 balls drawn — only the first one meshed, the 5 copies reuse its triangles", n === 6 && app.doc.bodies.length === 6 && meshed === 1, { n, bodies: app.doc.bodies.length, meshed });
+    // Changing the array (the whole group): applied without meshing anything again
+    const ids = app.doc.bodies.map((b) => b.id);
+    app.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
+    app.run("edit.arrayChange"); await sleep(50);
+    opValue("n", 8); await sleep(150);
+    const before = new Set(app.doc.bodies.map((b) => b.shape));
+    app.applyOp(); await sleep(50);
+    const fresh = app.doc.bodies.filter((b) => !before.has(b.shape)), remeshed = fresh.filter((b) => vp.meshMs.has(b.shape)).length;
+    expect("array fast: changed to 8 — its new copies reuse the ball's triangles (none meshed)", app.doc.bodies.length === 8 && fresh.length >= 2 && remeshed === 0, { bodies: app.doc.bodies.length, fresh: fresh.length, remeshed });
+  } catch (e) {
+    expect("array fast: no errors", false, String(e && e.stack || e));
+  }
+  if (app.op) app.cancelOp();
+  app.doc.reset([]); app.run("mode.body");
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("array fast scenario failed: " + JSON.stringify(failed));
+  return [{ label: "array copy speed", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Measure (=): hovering a corner, an edge, faces and a circle shows their sizes in the HUD. */
 const SCENARIO_MEASURE = String.raw`
 (async () => {
@@ -3399,7 +3445,7 @@ const SCENARIO_ARRAY = String.raw`
   const fields = [...panel.querySelectorAll("[data-key]")].map((i) => i.dataset.key);
   expect("array: the corner button on a circle opens Array copy (copies, gap, direction)", title === "Array copy" && fields.join() === "n,gap,total,dir,centre" && app.doc.bodies.length === n0, { title, fields });
   opValue("n", 5); opValue("gap", 5); await sleep(200);
-  const ghosts = app.op && app.op.result ? app.op.result.ghost.size : 0;
+  const ghosts = app.op && app.op.result ? (app.op.result.placed ?? []).length : 0;
   expect("array: Copies 5 (the original counts) → live preview of 4 new, nothing added yet", ghosts === 4 && app.doc.bodies.length === n0, { ghosts, bodies: app.doc.bodies.length });
   app.applyOp();
   const made = app.doc.bodies.slice(n0);
@@ -3439,12 +3485,18 @@ const SCENARIO_ARRAY = String.raw`
   const V = vp.camera.position.constructor;
   const val = (k) => panel.querySelector("[data-key=" + k + "]").value;
   const clickAt = async (p) => { const sc = window.__see(new V(p[0], p[1], p[2])); const e = new PointerEvent("pointermove", { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true }); app.op.spec.hover(e); app.op.spec.pick(e); await sleep(150); return [val("total"), r(+val("gap")), val("dir")]; };
-  const mid = (g, k) => { const [lo, hi] = g.boundingBox.bounds; return r((lo[k] + hi[k]) / 2); };
+  // (the preview: each source's mesh moved — its centre plus the move)
+  const mid = (g, k) => {
+    if (!g.matrix) { const [lo, hi] = g.boundingBox.bounds; return r((lo[k] + hi[k]) / 2); } // (a shape)
+    const [lo, hi] = app.doc.get(g.id).shape.boundingBox.bounds;
+    return r((lo[k] + hi[k]) / 2 + g.matrix.elements[12 + k]);
+  };
+  const placed = () => (app.op && app.op.result ? app.op.result.placed ?? [] : []);
   const byEdge = await clickAt([70, 0, 8.5]);
-  const ghostXs = app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 0)) : [];
+  const ghostXs = placed().map((g) => mid(g, 0));
   opValue("n", 3);
   const byPath = await clickAt([30, -90, 0]);
-  const ghostYs = app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 1)) : [];
+  const ghostYs = placed().map((g) => mid(g, 1));
   opValue("gap", 3); await sleep(150);
   const typed = [val("total"), val("gap")];
   expect("array: an edge / a path — the original + copies fill it, centred, equal gaps at the ends too; typing a gap turns it off",
@@ -3465,9 +3517,9 @@ const SCENARIO_ARRAY = String.raw`
   const remembered = panel.querySelector("[data-key=centre]").checked;
   opCheck("centre", false); opValue("dir", 1); opValue("n", 5);
   const offEdge = await clickAt([70, 0, 8.5]);
-  const offGhost = app.op.result ? [...app.op.result.ghost.keys()].includes(circle.id) : null;
+  const offGhost = app.op.result ? placed().some((g) => g.id === circle.id && g.replaces) : null;
   // Changing the gap after the edge click (mouse wheel, or typing) leaves the edge: the copies follow the gap
-  const ghostX = () => (app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 0)) : []);
+  const ghostX = () => placed().map((g) => mid(g, 0));
   const gapIn = panel.querySelector("[data-key=gap]");
   gapIn.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true })); await sleep(200);
   const wheeled = { total: val("total"), gap: val("gap"), xs: ghostX() };
@@ -3541,7 +3593,7 @@ const SCENARIO_ARRAY = String.raw`
     const where = marks().map((m) => { const b = m.getBoundingClientRect(); return [m.textContent, Math.round(b.left - vr.left), Math.round(b.top - vr.top), Math.round(vr.right - b.right), Math.round(vr.bottom - b.bottom)].join(" "); });
     const inView = marks().every((m) => { const b = m.getBoundingClientRect(); return b.left >= vr.left && b.right <= vr.right && b.top >= vr.top && b.bottom <= vr.bottom; });
     marks().find((m) => m.textContent === "−Y").click(); await sleep(200);
-    const picked = { dir: val("dir"), lit: marks().filter((m) => m.classList.contains("on")).map((m) => m.textContent).join(), ys: app.op.result ? [...app.op.result.ghost.values()].map((g) => mid(g, 1)).sort((p, q) => p - q).join() : "" };
+    const picked = { dir: val("dir"), lit: marks().filter((m) => m.classList.contains("on")).map((m) => m.textContent).join(), ys: placed().map((g) => mid(g, 1)).sort((p, q) => p - q).join() };
     panel.querySelector("[data-key=n]").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await sleep(20);
     expect("array: ±X / ±Y / ±Z marks round the objects (the direction's lit); a click on −Y picks it — the preview follows; gone after Esc",
       shown.labels === "+X,−X,+Y,−Y,+Z,−Z" && shown.lit === "+X" && inView && picked.dir === "3" && picked.lit === "−Y" && picked.ys === "-50,-25" && marks().length === 0,
@@ -3660,7 +3712,7 @@ const SCENARIO_ARRAY = String.raw`
     ol().querySelector(".ol-group[data-group='" + grp + "'] .ol-array")?.click(); await sleep(20);
     const opened = { props: /5 in a row/.test(props) && propsButtons === 0, title: title(), n: val("n"), gap: val("gap"), dir: val("dir") };
     opValue("n", 3); await sleep(200);
-    const pre = app.op.result ? { ghosts: app.op.result.ghost.size, hidden: app.op.result.hide.length } : null;
+    const pre = app.op.result ? { ghosts: placed().length, hidden: app.op.result.hide.length } : null;
     app.applyOp();
     const changed = { xs: xsOf(), group: members().length, label: app.doc.undoLabel };
     app.run("edit.undo"); const undone = xsOf();
@@ -6289,6 +6341,19 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100)); window.ydddApp.setAutoSnap(false, false); return 0; })()`, true);
     // YDDD_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
+    if (process.env.YDDD_SMOKE_ONLY === "array") {
+      // (while working on it: just the array scenarios)
+      for (const sc of [SCENARIO_ARRAY, SCENARIO_ARRAYFAST]) {
+        try {
+          report = report.concat(await win.webContents.executeJavaScript(sc, true));
+        } catch (e) {
+          errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+        }
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "spline") {
       // (while working on it: just the sketch spline scenario)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
@@ -6499,6 +6564,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ARRAYFAST, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);

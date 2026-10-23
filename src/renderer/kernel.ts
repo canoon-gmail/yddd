@@ -3962,6 +3962,33 @@ export function rigidSource(shape: Geom, shown: (s: Geom) => boolean): { from: G
   return null;
 }
 
+/**
+ * Note that `copy` is `from` moved (p ↦ R·p + t), unless it is noted already — e.g. an array's copies read back
+ * from a file (checked in place first): they then reuse `from`'s triangles and bounding box.
+ */
+export function noteMoved(copy: Geom, from: Geom, R: number[], t: V3): void {
+  if (copy !== from && !rigid.has(copy)) noteRigid(copy, from, R, t);
+}
+
+const boxCache = new WeakMap<object, [V3, V3]>();
+
+/**
+ * A shape's bounding box, remembered — a moved copy's from the one it was moved from (`boundingBox` on a curved
+ * shape can take tens of ms: an array of 84 swept tubes, seconds).
+ */
+export function boundsOf(shape: Shape): [V3, V3] {
+  const known = boxCache.get(shape);
+  if (known) return known;
+  const r = rigid.get(shape);
+  let box: [V3, V3];
+  if (r && !isMesh(r.from) && r.R.every((v, i) => Math.abs(v - (i % 4 === 0 ? 1 : 0)) < 1e-12)) {
+    const [a, b] = boundsOf(r.from as Shape);
+    box = [[a[0] + r.t[0], a[1] + r.t[1], a[2] + r.t[2]], [b[0] + r.t[0], b[1] + r.t[1], b[2] + r.t[2]]];
+  } else box = shape.boundingBox.bounds as [V3, V3];
+  boxCache.set(shape, box);
+  return box;
+}
+
 /** Faces' and edges' ids of `from` → those of `to`, a moved copy of it (same order); null if they don't line up. */
 export function movedIds(from: Geom, to: Geom): { faces: Map<number, number>; edges: Map<number, number> } | null {
   if (isMesh(from) || isMesh(to)) return null;

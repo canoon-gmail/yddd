@@ -518,7 +518,8 @@ export class Viewport {
    */
   private movedTessellation(body: Body, shown: Map<Geom, BodyView>): Tessellation | undefined {
     if (body.kind === "mesh") return undefined;
-    const src = rigidSource(body.shape, (s) => shown.has(s));
+    // (the same shape on screen — e.g. only its group or name changed: its own triangles again)
+    const src = shown.has(body.shape) ? { from: body.shape, R: [1, 0, 0, 0, 1, 0, 0, 0, 1], t: [0, 0, 0] as V3 } : rigidSource(body.shape, (s) => shown.has(s));
     const v = src && shown.get(src.from);
     if (!src || !v || v.body.kind === "mesh") return undefined;
     const ids = movedIds(src.from, body.shape);
@@ -1790,6 +1791,36 @@ export class Viewport {
       l.matrixAutoUpdate = false;
       l.matrix.copy(matrix);
       l.matrixWorldNeedsUpdate = true;
+    }
+    this.requestRender();
+  }
+
+  /**
+   * Preview copies of bodies on screen without building them: each `id`'s display mesh drawn through its own
+   * `matrix` (an id may come several times — e.g. an array's copies); `replaces`: the body itself is shown there
+   * instead (moved). `hide`: bodies hidden meanwhile. Instant: nothing is meshed.
+   */
+  showGhostPlaced(items: { id: number; matrix: THREE.Matrix4; replaces?: boolean }[], hide: readonly number[] = []): void {
+    this.clearGhost();
+    for (const id of hide) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      v.group.visible = false;
+      this.markDirty(id);
+    }
+    for (const { id, matrix, replaces } of items) {
+      const orig = this.views.get(id);
+      if (!orig) continue;
+      const g = orig.group.clone(); // shares geometry and materials with the body's view
+      g.userData.sharedGeometry = true;
+      g.matrixAutoUpdate = false;
+      g.matrix.copy(matrix);
+      g.visible = true;
+      this.ghostRoot.add(g);
+      if (replaces) {
+        orig.group.visible = false;
+        this.markDirty(id);
+      }
     }
     this.requestRender();
   }
