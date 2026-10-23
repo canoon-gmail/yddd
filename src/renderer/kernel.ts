@@ -3551,7 +3551,86 @@ export function profileOnPath(shape: Shape, faceId: number, path: Wire): boolean
 }
 
 /** Sweep a closed outline with its holes along `path` (holes swept the same way and cut out). */
-function sweepLoops(outer: Wire, holes: Wire[], path: Wire, round: boolean): Solid {
+/** How far (mm) the arcs a sweep runs along may stray from a freeform path (see arcSpine). */
+const ARC_SPINE_TOL = 0.01;
+
+/**
+ * A path for sweeping along: its freeform curves (a sketch Spline, a stretched arc…) as arcs end to end that meet
+ * smoothly (pairs of arcs fitted between points on the curve, halved until within ARC_SPINE_TOL of it); lines and
+ * circle arcs stay. Swept along arcs / lines, a profile gives exact tori / cylinders / planes — light to mesh and to
+ * read for a slicer — where along the curve itself OpenCascade builds one dense approximated surface (a 3 mm tube
+ * along a 24-piece Spline: 400 000+ triangles to show, a STEP file that freezes Bambu Studio at its best quality).
+ * The path as it is when a curve isn't flat (no plane to fit arcs in).
+ */
+function arcSpine(path: Wire): Wire {
+  if (path.edges.every((e) => e.geomType === "LINE" || e.geomType === "CIRCLE")) return path;
+  const edges: Edge[] = [];
+  for (const e of path.edges) {
+    if (e.geomType === "LINE" || e.geomType === "CIRCLE") {
+      edges.push(e);
+      continue;
+    }
+    const arcs = biarcs(e);
+    if (!arcs) return path;
+    edges.push(...arcs);
+  }
+  return assembleWire(edges);
+}
+
+/** A flat freeform edge as arcs / lines end to end (see arcSpine); null if it isn't flat or won't fit. */
+function biarcs(e: Edge): Edge[] | null {
+  const at = (t: number) => e.pointAt(t).toTuple() as V3, tan = (t: number) => norm3(e.tangentAt(t).toTuple() as V3);
+  // Its plane: the normal from the turning of its tangent (a straight edge would be a LINE already)
+  const samples = Array.from({ length: 33 }, (_, i) => i / 32);
+  const pts = samples.map(at);
+  let nrm: V3 | null = null;
+  for (let i = 1; i < pts.length - 1 && !nrm; i++) {
+    const c = cross3(sub3(pts[i], pts[0]), sub3(pts[pts.length - 1], pts[0]));
+    if (Math.hypot(...c) > 1e-9) nrm = norm3(c);
+  }
+  if (!nrm || pts.some((p) => Math.abs(dot3(sub3(p, pts[0]), nrm!)) > 1e-6)) return null;
+  const N = nrm;
+  const out: Edge[] = [];
+  /** An arc from A leaving along T, to B (a line when B is straight ahead), and how far `q` lies off it. */
+  const arc = (A: V3, T: V3, B: V3): { edge: () => Edge; off: (q: V3) => number } => {
+    const d = sub3(B, A), side = cross3(N, T), k = dot3(d, side), L2 = dot3(d, d);
+    if (Math.abs(k) < 1e-9 * Math.sqrt(L2)) {
+      const u = norm3(d);
+      return { edge: () => makeLine(A, B), off: (q) => Math.hypot(...cross3(sub3(q, A), u)) };
+    }
+    const r = L2 / (2 * k), C: V3 = [0, 1, 2].map((i) => A[i] + side[i] * r) as V3, R = Math.abs(r);
+    // (its middle: on the side of the chord the arc bulges to — beyond it for more than a half turn)
+    const mid: V3 = [0, 1, 2].map((i) => (A[i] + B[i]) / 2) as V3, toMid = sub3(mid, C), lm = Math.hypot(...toMid);
+    const dir = lm > 1e-12 ? norm3(toMid) : norm3(cross3(N, d));
+    const M: V3 = [0, 1, 2].map((i) => C[i] + dir[i] * R * (dot3(d, T) >= 0 ? 1 : -1)) as V3;
+    return { edge: () => makeThreePointArc(A, M, B), off: (q) => Math.abs(Math.hypot(...sub3(q, C)) - R) };
+  };
+  const fit = (t0: number, t1: number, depth: number): boolean => {
+    const P0 = at(t0), P1 = at(t1), T0 = tan(t0), T1 = tan(t1);
+    const v = sub3(P1, P0), t = [T0[0] + T1[0], T0[1] + T1[1], T0[2] + T1[2]] as V3, kk = dot3(T0, T1), vt = dot3(v, t), vv = dot3(v, v);
+    // Two arcs, as long as each other's tangent run d: P0 → J → P1 (J halfway between P0 + d·T0 and P1 − d·T1)
+    const d = 1 - kk < 1e-12 ? vv / (2 * vt) : (-vt + Math.sqrt(vt * vt + 2 * (1 - kk) * vv)) / (2 * (1 - kk));
+    if (Number.isFinite(d) && d > 0) {
+      const J: V3 = [0, 1, 2].map((i) => (P0[i] + d * T0[i] + P1[i] - d * T1[i]) / 2) as V3;
+      const a1 = arc(P0, T0, J), a2 = arc(P1, [-T1[0], -T1[1], -T1[2]], J);
+      // (the curve's points between: each against the arc on its side of J)
+      const ok = Array.from({ length: 9 }, (_, i) => t0 + ((t1 - t0) * (i + 1)) / 10).every((tm) => {
+        const q = at(tm);
+        return Math.min(a1.off(q), a2.off(q)) <= ARC_SPINE_TOL;
+      });
+      if (ok || depth >= 12) {
+        out.push(a1.edge(), a2.edge()); // (the 2nd runs P1 → J: the wire takes edges either way round)
+        return true;
+      }
+    } else if (depth >= 12) return false;
+    const tm = (t0 + t1) / 2;
+    return fit(t0, tm, depth + 1) && fit(tm, t1, depth + 1);
+  };
+  return fit(0, 1, 0) ? out : null;
+}
+
+function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean): Solid {
+  const path = arcSpine(spine);
   const sweep = (w: Wire) => genericSweep(w, path, { transitionMode: round ? "round" : "right" });
   let solid = sweep(outer);
   if (holes.length) solid = boolean("cut", solid, holes.map(sweep));
@@ -4571,3 +4650,4 @@ export function boundingSize(shape: Geom): V3 {
   const [[x0, y0, z0], [x1, y1, z1]] = shape.boundingBox.bounds;
   return [x1 - x0, y1 - y0, z1 - z0];
 }
+

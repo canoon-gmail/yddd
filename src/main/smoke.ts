@@ -2629,8 +2629,13 @@ const SCENARIO_SPLINE = String.raw`
       const disc = K.makeCircleFace({ origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }, [0, 40, 0], 1.5);
       const tube = K.sweepFace(disc, disc.faces[0].hashCode, wire, true, false, 0);
       const t0 = performance.now(), mesh = K.tessellate(tube), ms = performance.now() - t0, tris = mesh.faces.triangles.length / 3;
-      expect("spline: a circle swept along a 12-point Spline — valid, drawn in well under a second (its heavy face coarser: under 100 000 triangles)",
-        K.isValidShape(tube) && ms < 1500 && tris < 100000, { ms: Math.round(ms), tris, valid: K.isValidShape(tube) });
+      // (swept along arcs fitted to the curve: exact tori, ends flat; volume = the disc × the path's length)
+      const e = wire.edges[0];
+      let L = 0, prev = e.pointAt(0).toTuple();
+      for (let i = 1; i <= 4000; i++) { const p = e.pointAt(i / 4000).toTuple(); L += Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]); prev = p; }
+      const kinds = [...new Set(tube.faces.map((f) => f.geomType))].sort().join(), want = Math.PI * 1.5 * 1.5 * L, v = K.solidVolume(tube);
+      expect("spline: a circle swept along a 12-point Spline — exact tori (arcs fitted within 0.01 mm), volume = disc × path length (within 0.05%), valid, drawn quickly",
+        K.isValidShape(tube) && kinds === "PLANE,TORUS" && Math.abs(v - want) / want < 5e-4 && ms < 1500 && tris < 100000, { ms: Math.round(ms), tris, kinds, v, want, valid: K.isValidShape(tube) });
     }
     // K on the face again: its curve comes back as a Spline, points to drag
     app.setSelection([{ kind: "body", body: face.id, id: 0 }]);
