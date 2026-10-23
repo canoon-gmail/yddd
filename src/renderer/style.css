@@ -370,17 +370,17 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 @keyframes busy-in { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: none; } }
 
 /* ---------------------------------------------------------------- view menu (Shift+V) */
-#view-menu {
+#view-menu, .popup-menu {
   position: fixed; z-index: 60; min-width: 140px; padding: 4px;
   background: rgba(38, 40, 44, 0.98); border: 1px solid var(--border); border-radius: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
-#view-menu h5 { margin: 2px 8px 4px; font-size: 11px; color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.05em; }
-#view-menu button {
+#view-menu h5, .popup-menu h5 { margin: 2px 8px 4px; font-size: 11px; color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.05em; }
+#view-menu button, .popup-menu button {
   display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 12px;
   padding: 5px 8px; border: 0; border-radius: 4px; background: none; color: var(--text); font: inherit; cursor: pointer; text-align: left;
 }
-#view-menu button:hover { background: var(--panel-2); }
+#view-menu button:hover, .popup-menu button:hover { background: var(--panel-2); }
 #view-menu kbd { opacity: 0.6; }
 #tool-panel .tp-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 #tool-panel textarea, #tool-panel .tp-field input, #tool-panel .tp-field select {

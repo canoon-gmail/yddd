@@ -4092,16 +4092,26 @@ const SCENARIO_RECENTSTRIP = String.raw`
   expect("recent strip: drag a button onto another to reorder (line shows above / below), saved; later uses don't undo it",
     line1 && line2 && up[0] === "xf.scale" && up[1] === "tool.box" && down.indexOf("tool.box") === down.indexOf("op.fillet") + 1 && kept && strip().join() === down.join(),
     { line1, line2, up, down, kept });
-  // Right-click an icon removes it; View → Clear Recent Tools empties the strip
+  // Right-click: a menu — on an icon "Remove …" + "Clear recent", on the empty strip just "Clear recent"; View → Clear Recent Tools too
   const n0 = strip().length;
-  document.querySelector("#recent-list [data-cmd='op.cut']").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
-  const one = strip();
+  const menuAt = (el) => { el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 30, clientY: 300 })); const m = document.getElementById("popup-menu"); return m ? [...m.querySelectorAll("button")].map((b) => b.textContent) : null; };
+  const pickItem = (label) => { const b = [...document.querySelectorAll("#popup-menu button")].find((x) => x.textContent === label); b?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 })); };
+  const iconMenu = menuAt(document.querySelector("#recent-list [data-cmd='op.cut']"));
+  const stillAll = strip().length === n0; // (the menu alone changes nothing)
+  pickItem(iconMenu && iconMenu[0]);
+  const one = strip(), closed = !document.getElementById("popup-menu");
+  const emptyMenu = menuAt(document.getElementById("recent"));
+  pickItem("Clear recent");
+  const cleared = strip();
+  app.pushRecent("op.shell");
   app.run("view.clearRecent");
   const none = strip();
   const stored = JSON.parse(localStorage.getItem("yddd.recentCmds.v2") || "null");
   app.run("view.clearRecent"); // already empty: just says so
-  expect("recent strip: right-click removes one icon; View → Clear Recent Tools empties it (saved)",
-    one.length === n0 - 1 && !one.includes("op.cut") && none.length === 0 && Array.isArray(stored) && stored.length === 0, { n0, one, none, stored });
+  expect("recent strip: right-click an icon → menu (Remove it / Clear recent): Remove takes just that one off; on the empty strip → Clear recent empties it; View → Clear Recent Tools too (saved)",
+    iconMenu && iconMenu.length === 2 && /^Remove Cut/.test(iconMenu[0]) && iconMenu[1] === "Clear recent" && stillAll && one.length === n0 - 1 && !one.includes("op.cut") && closed
+      && emptyMenu && emptyMenu.join() === "Clear recent" && cleared.length === 0 && none.length === 0 && Array.isArray(stored) && stored.length === 0,
+    { n0, iconMenu, stillAll, one, closed, emptyMenu, cleared, none, stored });
   app.recent = saved.recent; app.recentUse = saved.use; app.renderRecent();
   localStorage.setItem("yddd.recentCmds.v2", JSON.stringify(saved.recent)); localStorage.setItem("yddd.recentUse", JSON.stringify(saved.use));
   const failed = checks.filter((c) => !c.ok);

@@ -699,6 +699,7 @@ class App implements ToolHost {
     this.buildToolbar();
     this.buildCornerTools();
     this.renderRecent();
+    $("recent").addEventListener("contextmenu", (e) => this.recentMenu(e));
     this.bindViewportEvents();
     this.bindKeys();
     this.bindStatusBar();
@@ -1056,6 +1057,51 @@ class App implements ToolHost {
     this.renderRecent();
   }
 
+  /** Right-click on the recent strip: a menu at the cursor — remove the tool clicked on (if any), clear them all. */
+  private recentMenu(e: MouseEvent): void {
+    e.preventDefault();
+    const cmd = ((e.target as HTMLElement).closest?.("#recent-list .tb-btn") as HTMLElement | null)?.dataset.cmd;
+    const items: { label: string; act: () => void }[] = [];
+    if (cmd) items.push({ label: `Remove ${RECENT_ITEMS.get(cmd)?.label ?? "it"}`, act: () => this.clearRecent(cmd) });
+    items.push({ label: "Clear recent", act: () => this.clearRecent() });
+    this.popupMenu("Recent", items, e.clientX, e.clientY);
+  }
+
+  /** A small pop-up menu at (x, y) (like the view menu): a click picks an item; a click elsewhere or a key closes it. */
+  private popupMenu(title: string, items: { label: string; act: () => void }[], x: number, y: number): void {
+    document.getElementById("popup-menu")?.remove();
+    const menu = document.createElement("div");
+    menu.id = "popup-menu";
+    menu.className = "popup-menu";
+    menu.innerHTML = `<h5>${title}</h5>` + items.map((it, i) => `<button data-i="${i}"><span>${it.label}</span></button>`).join("");
+    document.body.appendChild(menu);
+    const r = menu.getBoundingClientRect();
+    menu.style.left = `${Math.min(x, innerWidth - r.width - 4)}px`;
+    menu.style.top = `${Math.min(y, innerHeight - r.height - 4)}px`;
+    const close = () => {
+      menu.remove();
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Shift") return;
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    };
+    const onDown = (e: PointerEvent) => {
+      const b = (e.target as HTMLElement).closest?.("#popup-menu button") as HTMLElement | null;
+      if (b && e.button === 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+        items[Number(b.dataset.i)].act();
+      } else if (!menu.contains(e.target as Node)) close();
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onDown, true);
+  }
+
   /** Put `cmd` just above (or below) `target` in the strip (dragged there); saved. */
   private moveRecent(cmd: string, target: string, after: boolean): void {
     if (cmd === target || !this.recent.includes(cmd) || !this.recent.includes(target)) return;
@@ -1074,15 +1120,11 @@ class App implements ToolHost {
       const b = document.createElement("button");
       b.className = "tb-btn";
       b.dataset.cmd = cmd;
-      b.title = (it.key ? `${it.label} (${it.key})` : it.label) + " · drag to reorder · right-click to remove";
+      b.title = (it.key ? `${it.label} (${it.key})` : it.label) + " · drag to reorder · right-click: remove / clear";
       b.innerHTML = `${ICONS[it.icon]}<span>${it.label}</span>`;
       b.addEventListener("click", () => {
         b.blur();
         this.run(cmd); // (counts as a use; the slots don't move)
-      });
-      b.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        this.clearRecent(cmd);
       });
       // Drag onto another button to reorder: drops above or below it (the line shows which).
       b.draggable = true;
