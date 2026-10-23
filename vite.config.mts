@@ -13,6 +13,8 @@ export default defineConfig({
     target: "esnext",
     chunkSizeWarningLimit: 4000,
   },
+  // The background kernel (kernel.worker.ts) is a module worker: it imports the OpenCascade build.
+  worker: { format: "es" },
   // The Emscripten OpenCascade build must not be pre-bundled by esbuild.
   optimizeDeps: { exclude: ["replicad-opencascadejs"] },
   server: { port: 5733, strictPort: true },

@@ -53,6 +53,8 @@ src/main/main.ts        Electron main: app:// protocol (serves wasm), menu, file
 src/main/preload.ts     Safe IPC bridge (window.y3d)
 src/main/smoke.ts       Opt-in E2E test (Y3D_SMOKE=<dir>)
 src/renderer/kernel.ts  The only module that talks to OpenCascade/replicad
+src/renderer/kernel.worker.ts  A second OpenCascade in a Web Worker for slow ops (Fillet / Chamfer): the app stays live, Esc stops them
+src/renderer/kernelWorker.ts   The app's end of it (jobs → promises, cancel = end the worker and start a fresh one)
 src/renderer/document.ts Immutable body snapshots + undo/redo
 src/renderer/viewport.ts Three.js scene, tessellation display, picking, gizmo
 src/renderer/tools.ts   Interactive Box/Cylinder/Sphere drawing tools

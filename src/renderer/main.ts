@@ -30,6 +30,7 @@ import {
   textFontReady,
   filletEdges,
   roundSome,
+  type RoundResult,
   filletDragAxis,
   chamferEdges,
   pushPull,
@@ -127,6 +128,7 @@ import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
 import { write3mf } from "./threemf";
+import { JobCancelled, KernelWorker } from "./kernelWorker";
 import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { MeasureTool } from "./measure";
@@ -241,6 +243,11 @@ interface OpSpec {
   label: string;
   fields: OpField[];
   compute(values: Record<string, number>): OpOutcome;
+  /**
+   * The same worked out in the background kernel (kernelWorker.ts), used once it has loaded: the app stays live
+   * meanwhile and Esc stops it at once. `compute` stays for before that (and if it can't start).
+   */
+  computeAsync?(values: Record<string, number>): Promise<OpOutcome>;
   remember?(values: Record<string, number>): void;
   /** One or more drag handles (see OpDrag). */
   drag?: OpDrag | OpDrag[];
@@ -618,7 +625,12 @@ class App implements ToolHost {
     /** How long the last preview took (ms); slow previews are only redone once the drag pauses. */
     previewMs?: number;
     dragTimer?: number;
+    /** Its background job (computeAsync) under way, for the values `key`; `wanted`: the values changed meanwhile. */
+    job?: { key: string; done: Promise<void> };
+    wanted?: boolean;
   } | null = null;
+  /** The background kernel (a second OpenCascade in a worker) for slow operations: see kernelWorker.ts. */
+  private bgKernel = new KernelWorker();
   /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
   /** The move / rotate gizmo session; `frame`: a move along turned axes (G G on a round edge: Z along its circle's axis). */
   private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; frame?: GizmoFrame; edges?: SelItem[]; guide?: number } | null = null;
@@ -1906,51 +1918,112 @@ class App implements ToolHost {
     const err = op.inputs[0].closest("#op-panel")!.querySelector(".op-error")!;
     try {
       if (Object.values(values).some((v) => !Number.isFinite(v))) throw new Error("enter a number");
+      // Worked out in the background kernel: the app stays live; the newest values go next when this one's done
+      if (op.spec.computeAsync && this.bgKernel.ready) {
+        if (op.job) {
+          if (op.job.key !== key) op.wanted = true;
+          return null;
+        }
+        this.startOpJob(op, values, key, err);
+        return null;
+      }
       const t0 = performance.now();
       const result = op.spec.compute(values);
-      op.result = result;
-      op.key = key;
-      err.textContent = "";
-      err.classList.remove("waiting");
-      err.classList.toggle("warn", !!result.warn);
-      if (result.warn) {
-        err.textContent = result.warn.text;
-        const act = result.warn.action;
-        if (act) {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.className = "op-warn-act";
-          b.textContent = act.label;
-          b.addEventListener("click", () => {
-            for (const [k, v] of Object.entries(act.set)) {
-              const i = this.opPanel.querySelector<HTMLInputElement>(`[data-key="${k}"]`);
-              if (!i) continue;
-              i.value = fmt(v);
-              i.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-          });
-          err.append(" ", b);
-        }
-      }
-      if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
-      else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
+      this.showOpResult(op, result, key, err);
       op.previewMs = performance.now() - t0;
       return result;
     } catch (e) {
-      op.result = null;
-      op.key = "";
-      err.textContent = errorMessage(e);
-      err.classList.remove("warn");
-      err.classList.toggle("waiting", e instanceof OpWaiting);
-      this.viewport.clearGhost();
+      this.showOpError(op, e, err);
       return null;
     }
   }
 
+  /** Start the op's background job for these values; its result is shown when it comes (if the panel is still open). */
+  private startOpJob(op: NonNullable<App["op"]>, values: Record<string, number>, key: string, err: Element): void {
+    err.textContent = "Working… (Esc stops it)";
+    err.classList.remove("warn");
+    err.classList.add("waiting");
+    const t0 = performance.now();
+    const done: Promise<void> = op.spec.computeAsync!(values)
+      .then(
+        (result) => {
+          if (this.op !== op) return;
+          this.showOpResult(op, result, key, err);
+          op.previewMs = performance.now() - t0;
+        },
+        (e) => {
+          if (e instanceof JobCancelled || this.op !== op) return;
+          this.showOpError(op, e, err);
+        },
+      )
+      .finally(() => {
+        if (op.job?.done === done) op.job = undefined;
+        if (this.op === op && op.wanted) {
+          op.wanted = false;
+          this.previewOp();
+        }
+      });
+    op.job = { key, done };
+  }
+
+  /** A preview worked out: shown (ghost / transform), with its note if it's not quite as asked (`warn`). */
+  private showOpResult(op: NonNullable<App["op"]>, result: OpOutcome, key: string, err: Element): void {
+    op.result = result;
+    op.key = key;
+    err.textContent = "";
+    err.classList.remove("waiting");
+    err.classList.toggle("warn", !!result.warn);
+    if (result.warn) {
+      err.textContent = result.warn.text;
+      const act = result.warn.action;
+      if (act) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "op-warn-act";
+        b.textContent = act.label;
+        b.addEventListener("click", () => {
+          for (const [k, v] of Object.entries(act.set)) {
+            const i = this.opPanel.querySelector<HTMLInputElement>(`[data-key="${k}"]`);
+            if (!i) continue;
+            i.value = fmt(v);
+            i.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        });
+        err.append(" ", b);
+      }
+    }
+    if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
+    else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
+  }
+
+  private showOpError(op: NonNullable<App["op"]>, e: unknown, err: Element): void {
+    op.result = null;
+    op.key = "";
+    err.textContent = errorMessage(e);
+    err.classList.remove("warn");
+    err.classList.toggle("waiting", e instanceof OpWaiting);
+    this.viewport.clearGhost();
+  }
+
   private applyOp(): void {
+    void this.applyOpWhenReady();
+  }
+
+  /** Apply: a background op first waits for the preview of the values now in the panel. */
+  private async applyOpWhenReady(): Promise<void> {
     const op = this.op;
     if (!op) return;
     clearTimeout(op.timer);
+    while (op.spec.computeAsync && this.bgKernel.ready && this.op === op) {
+      const { key } = this.opValues();
+      if (op.key === key && op.result) break;
+      if (!op.job) {
+        this.previewOp();
+        if (!op.job) break; // (an error, shown in the panel)
+      }
+      await op.job.done;
+    }
+    if (this.op !== op) return;
     const result = this.previewOp();
     if (!result) return;
     op.spec.remember?.(this.opValues().values);
@@ -1980,6 +2053,7 @@ class App implements ToolHost {
 
   private closeOpPanel(): void {
     clearTimeout(this.op?.dragTimer);
+    if (this.op?.job) this.bgKernel.cancel(); // (stops what it's working on at once)
     this.op = null;
     this.hud(null);
     this.viewport.showSnapMarker(null);
@@ -2237,6 +2311,33 @@ class App implements ToolHost {
       }
       return axis ? { origin: axis.origin, dir: axis.dir, key: "r", min: 0.1, title: `Drag to change the ${isFillet ? "radius" : "distance"}` } : undefined;
     };
+    /** The body's solid and the edges asked for (null: all), or why not. */
+    const checked = (id: number, picked: Set<number> | null, which: number | undefined) => {
+      const { shape, w, edges } = edgesOf(id, picked, which);
+      if (edges && !edges.size) throw new Error(`"${this.doc.get(id)!.name}" has no ${w} edges`);
+      return { shape, edges };
+    };
+    /** The bodies' new shapes as the preview; edges it can't do at this size left sharp — the panel says so, with the largest size that does them all. */
+    const outcome = (got: Map<number, Pick<RoundResult, "shape" | "asked" | "largest"> & { skipped: number }>, r: number): OpOutcome => {
+      let skipped = 0, asked = 0, largest: number | null = null;
+      for (const g of got.values()) {
+        skipped += g.skipped;
+        asked += g.asked;
+        if (g.skipped && g.largest !== null) largest = Math.min(largest ?? Infinity, g.largest);
+      }
+      const done = this.replaceOutcome(new Map([...got].map(([id, g]) => [id, g.shape])), title);
+      if (!skipped) return done;
+      const what = isFillet ? "rounded" : "chamfered", unit = isFillet ? "R " : "";
+      return {
+        ...done,
+        warn: {
+          text: `${skipped} of ${asked} edge${asked > 1 ? "s" : ""} can't be ${what} at ${unit}${fmt(r)} — left sharp (Apply keeps the rest).${largest !== null ? ` All of them work up to about ${unit}${fmt(largest)}.` : ""}`,
+          ...(largest !== null ? { action: { label: `Use ${unit}${fmt(largest)}`, set: { r: largest } } } : {}),
+        },
+      };
+    };
+    /** Each body's BREP text, made once per op (sent to the background kernel with every new size). */
+    const breps = new WeakMap<object, string>();
     const spec: OpSpec = {
       title,
       label: title,
@@ -2244,28 +2345,28 @@ class App implements ToolHost {
       compute: ({ r, which }) => {
         if (wholeSolids) spec.drag = dragFor(which); // "Edges" can move the handle to another edge
         if (r <= 0) throw new Error("value must be greater than 0");
-        const out = new Map<number, Shape>();
-        // Edges it can't do at this size are left sharp (the panel says so, and the largest size that does them all)
-        let skipped = 0, asked = 0, largest: number | null = null;
+        const got = new Map<number, Pick<RoundResult, "shape" | "asked" | "largest"> & { skipped: number }>();
         for (const [id, picked] of perBody) {
-          const { shape, w, edges } = edgesOf(id, picked, which);
-          if (edges && !edges.size) throw new Error(`"${this.doc.get(id)!.name}" has no ${w} edges`);
-          const got = roundSome(kind, shape, edges, r);
-          out.set(id, got.shape);
-          skipped += got.skipped.length;
-          asked += got.asked;
-          if (got.skipped.length && got.largest !== null) largest = Math.min(largest ?? Infinity, got.largest);
+          const { shape, edges } = checked(id, picked, which);
+          const res = roundSome(kind, shape, edges, r);
+          got.set(id, { ...res, skipped: res.skipped.length });
         }
-        const outcome = this.replaceOutcome(out, title);
-        if (!skipped) return outcome;
-        const what = isFillet ? "rounded" : "chamfered", unit = isFillet ? "R " : "";
-        return {
-          ...outcome,
-          warn: {
-            text: `${skipped} of ${asked} edge${asked > 1 ? "s" : ""} can't be ${what} at ${unit}${fmt(r)} — left sharp (Apply keeps the rest).${largest !== null ? ` All of them work up to about ${unit}${fmt(largest)}.` : ""}`,
-            ...(largest !== null ? { action: { label: `Use ${unit}${fmt(largest)}`, set: { r: largest } } } : {}),
-          },
-        };
+        return outcome(got, r);
+      },
+      // The same in the background kernel: the shape goes as BREP text, its edges by place in the edge list
+      computeAsync: async ({ r, which }) => {
+        if (wholeSolids) spec.drag = dragFor(which);
+        if (r <= 0) throw new Error("value must be greater than 0");
+        const got = new Map<number, Pick<RoundResult, "shape" | "asked" | "largest"> & { skipped: number }>();
+        for (const [id, picked] of perBody) {
+          const { shape, edges } = checked(id, picked, which);
+          const all = shape.edges.map((e) => e.hashCode);
+          let brep = breps.get(shape);
+          if (brep === undefined) breps.set(shape, (brep = serializeShape(shape)));
+          const res = await this.bgKernel.run({ op: "round", kind, brep, edges: edges ? [...edges].map((h) => all.indexOf(h)).filter((i) => i >= 0) : null, size: r });
+          got.set(id, { shape: deserialize(res.brep) as Solid, skipped: res.skipped.length, asked: res.asked, largest: res.largest });
+        }
+        return outcome(got, r);
       },
       remember: ({ r, which }) => {
         if (isFillet) this.defaults.fillet = r;

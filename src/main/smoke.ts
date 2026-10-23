@@ -2779,6 +2779,42 @@ const SCENARIO_TEXT = String.raw`
           K.isValidShape(lidOver.shape) && Math.abs(ovV - wantOver) < 1e-3 && ovSize === "67.4 × 47.4 × 7" && Math.abs(ovB[0][2] - 15) < 1e-6 && ovOverlap < 1e-6 && Math.abs(flat - 64 * 44 * 2) < 1e-3 && others.every((x) => x === true),
         { others, waiting, stillWaiting, note, inErr, inV: r(inV), wantIn: r(wantIn), inZ, inOverlap, ovV: r(ovV), wantOver: r(wantOver), ovSize, ovOverlap, flat: r(flat) });
     }
+    // The background kernel (a second OpenCascade in a worker): loaded; a fillet there = the same fillet here (edges
+    // picked by place in the edge list); the app stays live while a heavy one runs; Esc stops it, the model unchanged
+    {
+      for (let i = 0; i < 300 && !app.bgKernel.ready; i++) await sleep(50);
+      const ready = app.bgKernel.ready;
+      const blk = K.makeBox(G, [0, 0, 0], 30, 20, 4), all = blk.edges.map((e) => e.hashCode), pick = [0, 3, 7];
+      const here = K.roundSome("fillet", blk, new Set(pick.map((i) => all[i])), 5);
+      const there = await app.bgKernel.run({ op: "round", kind: "fillet", brep: K.serializeShape(blk), edges: pick, size: 5 });
+      const thereShape = K.deserialize(there.brep);
+      const same = Math.abs(K.solidVolume(thereShape) - K.solidVolume(here.shape)) < 1e-6 && there.skipped.length === here.skipped.length && there.asked === here.asked;
+      // A heavy one: a plate with 49 round holes, every edge R 0.4 — the longest gap between this thread's timer ticks meanwhile
+      let plate = K.makeBox(G, [0, 0, 0], 140, 140, 6);
+      const holes = []; for (let i = 0; i < 7; i++) for (let j = 0; j < 7; j++) holes.push(K.makeCylinder(G, [-60 + 20 * i, -60 + 20 * j, 0], 4, 6));
+      plate = K.booleanOp("subtract", plate, holes);
+      app.doc.reset([]);
+      const pb = app.doc.makeBody(plate, "Holes"); app.doc.commit([pb], "plate"); vp.fit(); app.run("mode.body"); await sleep(100);
+      const t0 = performance.now(); let last = t0, gap = 0, ticks = 0;
+      const tick = setInterval(() => { const t = performance.now(); gap = Math.max(gap, t - last); last = t; ticks++; }, 10);
+      app.setSelection([{ kind: "body", body: pb.id, id: 0 }]); app.run("op.fillet"); await sleep(30);
+      opValue("r", 0.4); await sleep(100);
+      const working = document.querySelector("#op-panel .op-error.waiting")?.textContent || "";
+      for (let i = 0; i < 300 && (app.op?.job || app.op?.wanted); i++) await sleep(20);
+      const took = performance.now() - t0;
+      clearInterval(tick);
+      const shown = !!(app.op && app.op.result);
+      // Esc while it works: stopped, panel closed, the model as it was; the background kernel back after
+      opValue("r", 0.6);
+      for (let i = 0; i < 50 && !app.op?.job; i++) await sleep(20);
+      const busy = !!app.op?.job;
+      key("Escape", "Escape"); await sleep(50);
+      const closed = !app.op, unchanged = app.doc.bodies.length === 1 && app.doc.bodies[0].shape === plate;
+      for (let i = 0; i < 300 && !app.bgKernel.ready; i++) await sleep(50);
+      expect("background kernel: loaded; its fillet = this one (3 edges by place); a heavy fillet (49 holes) shown, this thread never stalling half that long (the result's meshing still here); Esc stops it (model unchanged), it comes back",
+        ready && same && /Working/.test(working) && shown && gap < took / 2 && busy && closed && unchanged && app.bgKernel.ready,
+        { ready, same, working, took: Math.round(took), gap: Math.round(gap), ticks, shown, busy, closed, unchanged, readyAgain: app.bgKernel.ready });
+    }
     // Fillet that can't do every edge: a 40 × 40 × 4 plate, all edges R 5 → its 4 corners rounded, the 8 edges round
     // the 4 mm faces left sharp, the panel says so (orange) and offers the largest R that does all; that button → no
     // warning, every edge rounded. One edge that can't be done at all → an error naming the largest that works.
@@ -2788,12 +2824,14 @@ const SCENARIO_TEXT = String.raw`
       app.doc.commit([plate], "plate"); app.run("mode.body");
       app.setSelection([{ kind: "body", body: plate.id, id: 0 }]);
       app.run("op.fillet"); await sleep(50);
-      opValue("r", 5); await sleep(400);
+      opValue("r", 5); await sleep(150);
+      for (let i = 0; i < 100 && (app.op?.job || app.op?.wanted); i++) await sleep(50); // (worked out in the background kernel)
       const msg = document.querySelector("#op-panel .op-error"), warn = msg?.classList.contains("warn"), text = msg?.textContent || "";
       const useBtn = document.querySelector("#op-panel .op-warn-act"), useLabel = useBtn?.textContent || "";
       const partial = app.op && app.op.result && [...app.op.result.ghost.values()][0];
       const partialCyl = partial ? partial.faces.filter((f) => f.geomType === "CYLINDRE").length : -1;
-      useBtn?.click(); await sleep(500);
+      useBtn?.click(); await sleep(150);
+      for (let i = 0; i < 100 && (app.op?.job || app.op?.wanted); i++) await sleep(50);
       const r2 = Number(document.querySelector("#op-panel [data-key=r]")?.value), after = document.querySelector("#op-panel .op-error")?.textContent || "";
       app.applyOp(); await sleep(50);
       const done = app.doc.bodies[0].shape, plain = done.faces.filter((f) => f.geomType === "PLANE").length;
