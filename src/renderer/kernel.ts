@@ -3259,6 +3259,21 @@ export function rotateShape<T extends Geom>(shape: T, angleDeg: number, center: 
 }
 
 /**
+ * Mirror image across the plane through `point` with normal `normal`. Not noted as a rigid move:
+ * the display meshes it again (reusing the original's triangles would show them inside out).
+ */
+export function mirrorShape<T extends Geom>(shape: T, point: V3, normal: V3): T {
+  const n = norm3(normal);
+  if (isMesh(shape)) {
+    // p ↦ (I − 2nnᵀ)·p + 2(n·point)n
+    const M = [0, 1, 2].flatMap((i) => [0, 1, 2].map((j) => (i === j ? 1 : 0) - 2 * n[i] * n[j]));
+    const d = 2 * dot3(n, point);
+    return shape.transformed(M, [d * n[0], d * n[1], d * n[2]]) as T;
+  }
+  return shape.clone().mirror(n, point) as T;
+}
+
+/**
  * Scale about `center` by per-axis factors. Equal factors work on any shape; different
  * ones rebuild the shape from its scaled corners, so they need flat faces and straight edges.
  */

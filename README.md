@@ -29,7 +29,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | Revolve / Sweep | **Revolve** (Modify menu; Pro: **R E**) a flat face about a guide line, one of its edges or X / Y / Z (any angle; a circle beside the axis → a donut) · **Sweep** (Pro: **S W**) a flat face along a path or guide line — a flat ring makes a tube; pick the face and path in the viewport while the panel is open |
 | Holes | **Resize hole / pin**: Edge mode, click a round hole's (or pin's) rim, **S**, type the diameter — or how much bigger for several of different sizes (a looser fit for 3D printing); any other hole — rectangle, slot, a sketched shape — one rim edge + **S**: *Bigger by* mm, all round · **Del** with rims selected fills the holes (any shape) / takes off the pins |
 | Boolean | Union, Subtract, Intersect (first selected solid is the target) |
-| Transform | Move / Rotate gizmo (snaps to grid / 5°), Duplicate, Delete |
+| Transform | Move / Rotate gizmo (snaps to grid / 5°), Duplicate, **Mirror** (**M**: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side, touching it; *Join* makes a solid and its copy one, e.g. a half dome → a ball), Delete |
 | History | Unlimited-ish undo / redo (200 steps) |
 | Files | Save/Open native `.y3d` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL |
 

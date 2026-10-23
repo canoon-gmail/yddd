@@ -53,6 +53,7 @@ export const ICONS: Record<string, string> = {
   repeat: svg(`<rect x="3" y="12" width="6.5" height="6.5" rx="1" ${SOFT} ${DASH}/><rect x="14.5" y="12" width="6.5" height="6.5" rx="1" ${FILL}/><path d="M6.2 9.5c2-4 9.6-4 11.6 0M15.2 9.2l2.6.5.4-2.6"/>`),
   duplicate: svg(`<rect x="4" y="4" width="11" height="11" rx="1.8" ${SOFT}/><rect x="9" y="9" width="11" height="11" rx="1.8" ${FILL}/>`),
   array: svg(`<rect x="2" y="7.5" width="5" height="6.5" rx="1" ${FILL}/><rect x="9.5" y="7.5" width="5" height="6.5" rx="1" ${FILL}/><rect x="17" y="7.5" width="5" height="6.5" rx="1"/><path d="M2.5 18.5h19M18.5 16l3 2.5-3 2.5"/>`),
+  mirror: svg(`<path d="M12 2.5v19" ${SOFT} ${DASH}/><path d="M9.5 5.5L3 18.5h6.5z" ${FILL}/><path d="M14.5 5.5L21 18.5h-6.5z"/>`),
   circular: svg(`<circle cx="12" cy="12" r="1.5" ${DOT}/><circle cx="12" cy="12" r="7.5" ${SOFT} ${DASH}/><rect x="10" y="2" width="4" height="4" rx="0.9" ${FILL}/><rect x="18" y="10" width="4" height="4" rx="0.9" ${FILL}/><rect x="10" y="18" width="4" height="4" rx="0.9"/><rect x="2" y="10" width="4" height="4" rx="0.9"/>`),
 
   // Utility & History.

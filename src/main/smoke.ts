@@ -2742,6 +2742,53 @@ const SCENARIO_ARRAY = String.raw`
       shown.labels === "+X,−X,+Y,−Y,+Z,−Z" && shown.lit === "+X" && inView && picked.dir === "3" && picked.lit === "−Y" && picked.ys === "-50,-25" && marks().length === 0,
       { shown, inView, where, picked, after: marks().length });
   }
+  // Mirror (M): ±X / ±Y / ±Z marks; the copy lands beyond that side of the objects' box, touching it
+  {
+    const mark = async (label) => { [...document.querySelectorAll("#op-choices .op-choice")].find((m) => m.textContent === label)?.click(); await sleep(150); };
+    const vol = (id) => K.solidVolume(app.doc.get(id).shape);
+    const bb = (id) => app.doc.get(id).shape.boundingBox.bounds.map((p) => p.map(r).join(" ")).join(" / ");
+    // A half dome on its flat side (z = 0), −Z with Join: one whole ball, no seam round the middle
+    app.doc.reset([]);
+    const dome = app.doc.makeBody(K.booleanOp("intersect", K.makeSphereAt([0, 0, 0], 10), [K.makeBox(G, [0, 0, 0], 30, 30, 15)]), "Dome");
+    app.doc.commit([dome], "dome"); vp.setView("iso"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: dome.id, id: 0 }]);
+    await key("m", "KeyM"); await sleep(50);
+    const labels = [...document.querySelectorAll("#op-choices .op-choice")].map((m) => m.textContent).join();
+    await mark("−Z"); opCheck("join", true); await sleep(300);
+    app.applyOp(); await sleep(50);
+    // (a seam stays round the middle: OpenCascade doesn't merge two sphere faces whose axes point opposite ways)
+    const ball = app.doc.bodies, flat = ball.length === 1 ? ball[0].shape.faces.filter((f) => f.geomType === "PLANE").length : -1;
+    expect("mirror: M → ±X / ±Y / ±Z marks; a half dome on z = 0, −Z + Join → one closed ball (volume 4/3·π·10³, valid, no flat face left inside)",
+      labels === "+X,−X,+Y,−Y,+Z,−Z" && ball.length === 1 && Math.abs(vol(ball[0].id) - (4 / 3) * Math.PI * 1000) < 1e-3 && K.isValidShape(ball[0].shape) && flat === 0 && bb(ball[0].id) === "-10 -10 -10 / 10 10 10",
+      { labels, n: ball.length, vol: ball.length && r(vol(ball[0].id)), flat, box: ball.length && bb(ball[0].id) });
+    app.run("edit.undo"); await sleep(20);
+    expect("mirror: one undo brings the half dome back", app.doc.bodies.length === 1 && Math.abs(vol(dome.id) - (2 / 3) * Math.PI * 1000) < 1e-3, app.doc.bodies.length);
+    // An L-shaped solid, its whole group selected, +X (Join off): a reflected copy in a new group, the same size, right way out
+    app.doc.reset([]);
+    const ell = { ...app.doc.makeBody(K.booleanOp("union", K.makeBox(G, [5, 10, 0], 10, 20, 5), [K.makeBox(G, [15, 2.5, 0], 30, 5, 5)]), "Bracket"), group: "Bracket 1" };
+    app.doc.commit([ell], "L"); vp.fit(); await sleep(50);
+    app.setSelection([{ kind: "body", body: ell.id, id: 0 }]);
+    await key("m", "KeyM"); await sleep(50); await mark("+X"); app.applyOp(); await sleep(50);
+    const cp = app.doc.bodies.find((b) => b.id !== ell.id);
+    const cpBox = cp && bb(cp.id), want = "30 0 0 / 60 20 5";
+    // (the copy's long arm along Y is at the far end: the L is mirrored, not just moved)
+    const arm = cp && K.solidVolume(K.booleanOp("intersect", cp.shape, [K.makeBox(G, [55, 10, 0], 10, 20, 5)]));
+    expect("mirror: an L-shaped group, +X → a mirrored copy beyond its right side (same volume, valid, its long arm at the far end) in a new group Bracket 2",
+      cp && cpBox === want && Math.abs(vol(cp.id) - vol(ell.id)) < 1e-6 && vol(cp.id) > 0 && K.isValidShape(cp.shape) && Math.abs(arm - 1000) < 1e-6 && cp.group === "Bracket 2" && app.doc.get(ell.id).group === "Bracket 1",
+      { cpBox, want, vol: cp && r(vol(cp.id)), arm: arm && r(arm), group: cp?.group });
+    // Join: only a solid touching its copy joins (the far one is copied); a flat face is copied
+    app.doc.reset([]);
+    const a = app.doc.makeBody(K.makeBox(G, [5, 5, 0], 10, 10, 10), "A"), b = app.doc.makeBody(K.makeBox(G, [25, 5, 0], 10, 10, 10), "B");
+    const f = app.doc.makeBody(K.makeCircleFace(G, [25, 25, 0], 5), "Circle", "face");
+    app.doc.commit([a, b, f], "A, B, circle"); vp.fit(); await sleep(50);
+    app.setSelection([a, b, f].map((x) => ({ kind: "body", body: x.id, id: 0 })));
+    await key("m", "KeyM"); await sleep(50); await mark("+X"); opCheck("join", true); await sleep(300); app.applyOp(); await sleep(50);
+    const all = app.doc.bodies, solids = all.filter((x) => x.kind === "solid"), faces = all.filter((x) => x.kind === "face");
+    expect("mirror +X with Join: B (at the side) joins its copy (twice the volume), A's copy stays apart, the circle face is copied (3 → 5 objects)",
+      all.length === 5 && Math.abs(vol(b.id) - 2000) < 1e-6 && bb(b.id) === "20 0 0 / 40 10 10" && solids.length === 3 && faces.length === 2 &&
+        solids.some((x) => x.id !== a.id && x.id !== b.id && bb(x.id) === "50 0 0 / 60 10 10"),
+      { n: all.length, b: bb(b.id), solids: solids.map((x) => bb(x.id)) });
+  }
   // A guide line as the span (like ~/untitled.y3d: a guide from the box's corner along its top-front edge, on past it):
   // where it lies on the edge the edge wins; past the box the guide is picked — the copies fill it
   {

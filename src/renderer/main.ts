@@ -31,6 +31,7 @@ import {
   tessellate,
   translateShape,
   rotateShape,
+  mirrorShape,
   cloneShape,
   serializeShape,
   deserialize,
@@ -375,6 +376,7 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.offset", icon: "offset", label: "Offset", key: "O" },
       { cmd: "op.revolve", icon: "revolve", label: "Revolve", key: "Pro: R E" },
       { cmd: "edit.circular", icon: "circular", label: "Circular copy", key: "" },
+      { cmd: "edit.mirror", icon: "mirror", label: "Mirror", key: "M" },
       { cmd: "op.sweep", icon: "sweep", label: "Sweep", key: "Pro: S W" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis", key: "C" },
       { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide", key: "Shift+C" },
@@ -481,6 +483,7 @@ const KEYMAP: Record<string, string> = {
   "Shift+R": "xf.repeat",
   r: "xf.rotate",
   s: "xf.scale",
+  m: "edit.mirror",
   x: "edit.delete",
   Delete: "edit.delete",
   Home: "view.fit",
@@ -1105,6 +1108,7 @@ class App implements ToolHost {
       case "edit.duplicate": return this.duplicate();
       case "edit.array": return this.arrayCopy();
       case "edit.circular": return this.circularCopy();
+      case "edit.mirror": return this.mirrorCopy();
       case "edit.arrayChange": return this.arrayCopy(true);
       case "edit.group": return this.groupSelected();
       case "edit.ungroup": return this.ungroupSelected();
@@ -4159,6 +4163,26 @@ class App implements ToolHost {
     this.toast(`${label} — Ctrl+Z brings ${rims.length === 1 ? "it" : "them"} back`);
   }
 
+  /**
+   * Copies of `ids`: the groups selected whole (every member in `ids`) → the new group their copies
+   * go in ("Bracket 1" → "Bracket 2"); copies of the rest of a group's members aren't grouped.
+   */
+  private copyGroupNames(ids: number[]): Map<string, string> {
+    const idSet = new Set(ids);
+    const whole = [...new Set(ids.map((id) => this.doc.get(id)!.group))].filter(
+      (g): g is string => !!g && this.doc.bodies.every((b) => b.group !== g || idSet.has(b.id)));
+    const newGroup = new Map<string, string>();
+    const taken = new Set(this.doc.bodies.map((b) => b.group));
+    for (const g of whole) {
+      const base = g.replace(/\s+\d+$/, "") || "Group";
+      let n = 1;
+      while (taken.has(`${base} ${n}`)) n++;
+      taken.add(`${base} ${n}`);
+      newGroup.set(g, `${base} ${n}`);
+    }
+    return newGroup;
+  }
+
   private duplicate(): void {
     this.endInteractions();
     const edgeSel = this.selection.filter((x) => x.kind === "edge");
@@ -4210,18 +4234,8 @@ class App implements ToolHost {
     });
     // A whole group selected: its copies are a new group of their own ("Circular 1" → "Circular 2"), and
     // an array / circular copy's record goes with them (the copy can be changed from its icon too).
-    const idSet = new Set(ids), copyOf = new Map(ids.map((id, i) => [id, copies[i].id]));
-    const whole = [...new Set(ids.map((id) => this.doc.get(id)!.group))].filter(
-      (g): g is string => !!g && this.doc.bodies.every((b) => b.group !== g || idSet.has(b.id)));
-    const newGroup = new Map<string, string>();
-    const taken = new Set(this.doc.bodies.map((b) => b.group));
-    for (const g of whole) {
-      const base = g.replace(/\s+\d+$/, "") || "Group";
-      let n = 1;
-      while (taken.has(`${base} ${n}`)) n++;
-      taken.add(`${base} ${n}`);
-      newGroup.set(g, `${base} ${n}`);
-    }
+    const copyOf = new Map(ids.map((id, i) => [id, copies[i].id]));
+    const newGroup = this.copyGroupNames(ids), whole = [...newGroup.keys()];
     const grouped = copies.map((c, i) => {
       const g = newGroup.get(this.doc.get(ids[i])!.group ?? "");
       return g ? { ...c, group: g } : c;
@@ -4378,6 +4392,101 @@ class App implements ToolHost {
                 this.repeatCopyIds = "";
                 this.toast(edit ? `${group}: now ${count} round` : `${count} round the ${ai === CIRCLE ? "circle's centre" : axes[ai].name} (${count - 1} new) — to change it later: its icon in the Bodies panel`);
               },
+            };
+          },
+        };
+      },
+    });
+  }
+
+  /**
+   * Mirror (M): a mirrored copy of the selected objects beyond one side of their box — click a
+   * ±X / ±Y / ±Z mark; the mirror plane is that side, so the copy touches the original. Join: each
+   * solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball). One
+   * undo step; a whole group's copies go in a new group (as Duplicate). To flip: delete the original.
+   */
+  private mirrorCopy(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) return this.toast("Mirror: select objects first (Solid mode, key 1)", "error");
+    const DIRS = ["+X", "−X", "+Y", "−Y", "+Z", "−Z"];
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const [p, q] = this.doc.get(id)!.shape.boundingBox.bounds;
+      for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], q[k]); }
+    }
+    const c = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2) as V3, ext = [0, 1, 2].map((k) => hi[k] - lo[k]);
+    /** Side `dir` (index into DIRS): the mirror plane (that side of the box). */
+    const plane = (dir: number): { point: V3; normal: V3 } => {
+      const axis = dir >> 1, point = [...c] as V3, normal: V3 = [0, 0, 0];
+      point[axis] = dir & 1 ? lo[axis] : hi[axis];
+      normal[axis] = 1;
+      return { point, normal };
+    };
+    const copyName = (b: Body) => b.name.replace(/\s+\d+$/, "");
+    /** Each object's mirror image; with `join`, a solid's is unioned with it (null: they don't touch / the union failed). */
+    const results = (dir: number, join: boolean) => {
+      const { point, normal } = plane(dir);
+      return ids.map((id) => {
+        const b = this.doc.get(id)!, image = mirrorShape(b.shape, point, normal);
+        let joined: Shape | null = null;
+        if (join && b.kind === "solid") {
+          try {
+            const u = booleanOp("union", b.shape as Solid, [image as Solid]);
+            joined = solidPieces(u).length === 1 ? u : null;
+          } catch {
+            joined = null;
+          }
+        }
+        return { b, image, joined };
+      });
+    };
+    this.startOp({
+      title: "Mirror",
+      label: "Mirror",
+      applyLabel: "Done",
+      fields: [
+        { key: "dir", label: "Side", type: "select", options: ["— click a mark —", ...DIRS], value: 0 },
+        { key: "join", label: "Join (a solid and its copy become one where they touch)", value: 0, type: "checkbox" },
+      ],
+      hint: "Mirror: click a ±X / ±Y / ±Z mark — the copy appears beyond that side, touching it · Join: one solid · Enter or Done apply · Esc cancel",
+      // ±X / ±Y / ±Z marks just outside the objects' sides (axis colours)
+      choices: (() => {
+        const out = Math.max(...ext) * 0.2 + 4;
+        const AXIS_COLORS = ["#d9534f", "#5cb85c", "#4a90e2"]; // (as the world axes)
+        return DIRS.map((label, dir) => {
+          const axis = dir >> 1, from = plane(dir).point, at = [...from] as V3;
+          at[axis] += (dir & 1 ? -1 : 1) * out;
+          return { at, from, key: "dir", value: dir + 1, label, color: AXIS_COLORS[axis], title: `Mirror across the ${label} side` };
+        });
+      })(),
+      compute: ({ dir: d, join }) => {
+        if (!(d >= 1)) throw new OpWaiting("Click a ±X / ±Y / ±Z mark: the side to mirror across");
+        const dir = d - 1, got = results(dir, !!join);
+        const ghost = new Map<number, Shape>();
+        got.forEach(({ b, image, joined }, j) => {
+          if (joined) ghost.set(b.id, joined);
+          else if (b.kind === "solid" || b.kind === "face") ghost.set(-(j + 1), image as Shape);
+        });
+        return {
+          ghost,
+          commit: () => {
+            const groups = this.copyGroupNames(ids);
+            const joinedShapes = new Map(got.filter((g) => g.joined).map((g) => [g.b.id, g.joined!]));
+            const copies = got.filter((g) => !g.joined).map(({ b, image }) => {
+              const m = this.doc.makeBody(image, copyName(b), b.kind), g = groups.get(b.group ?? "");
+              return g ? { ...m, group: g } : m;
+            });
+            this.doc.commit([...this.doc.bodies.map((b) => (joinedShapes.has(b.id) ? withShape(b, joinedShapes.get(b.id)!) : b)), ...copies], `Mirror ${DIRS[dir]}`);
+            const n = joinedShapes.size, apart = join ? got.filter((g) => !g.joined && g.b.kind === "solid").length : 0;
+            return {
+              select: [...ids, ...copies.map((b) => b.id)],
+              solidMode: true,
+              then: () => this.toast(
+                `Mirrored across the ${DIRS[dir]} side` +
+                  (n ? ` — ${n} joined into one` : "") +
+                  (apart ? ` (${apart} not joined: ${apart > 1 ? "they don't" : "it doesn't"} touch its copy)` : "") +
+                  (groups.size ? ` · copies in ${[...groups.values()].join(", ")}` : ""),
+              ),
             };
           },
         };
@@ -5474,6 +5583,7 @@ class App implements ToolHost {
       ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) → slide along its axis, as with G"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
+      ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
