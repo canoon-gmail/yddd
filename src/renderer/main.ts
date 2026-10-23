@@ -63,6 +63,9 @@ import {
   faceInfo,
   faceRefEdges,
   offsetFace,
+  boxFromFace,
+  boxLid,
+  hasBoxRim,
   offsetRing,
   scaleShape,
   guidePlaneNormal,
@@ -638,6 +641,13 @@ class App implements ToolHost {
   private selEdgeCache: { sel: SelItem[]; edges: Map<number, Set<number>> } | null = null;
   private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
+  /** Box from Face (Macro menu): the last values. */
+  private boxDefaults = { wall: 2, bottom: 2, height: 30, round: 0, radius: 3 };
+  /** Box Lid (Macro menu): the last values, per type (inside lip / over the box). */
+  private lidDefaults = {
+    in: { thickness: 2, depth: 3, wall: 1.5, clearance: 0 },
+    over: { thickness: 2, depth: 5, wall: 1.5, clearance: 0 },
+  };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
   private hudEl = $("hud");
@@ -1091,6 +1101,9 @@ class App implements ToolHost {
       case "tool.sketch": return this.startSketch();
 
       case "op.pushpull": return this.opPushPull();
+      case "macro.box": return this.opBoxFromFace();
+      case "macro.lidIn": return this.openBoxLid(false, this.selectedLidBox());
+      case "macro.lidOver": return this.openBoxLid(true, this.selectedLidBox());
       case "op.fillet": return this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -2247,6 +2260,147 @@ class App implements ToolHost {
       },
       remember: ({ t }) => (this.defaults.shell = t),
     });
+  }
+
+  /**
+   * Macro → Box from Face: an open-top box round a flat face — the face is its inside (floor and inner outline);
+   * walls grow out from it, the bottom down under it (a face object becomes the box; on a solid's face, a new
+   * solid) — wall, bottom, inside depth, and optionally round vertical edges. The panel opens at once and
+   * waits for the face if none is selected; a click on another flat face (or a face object's row) changes it.
+   */
+  private opBoxFromFace(): void {
+    this.openBoxFromFace(this.oneFaceTarget());
+  }
+
+  private openBoxFromFace(target: { bodyId: number; faceId: number } | null): void {
+    const tb = target && this.doc.get(target.bodyId);
+    const body = tb && isBrep(tb) && findFace(tb.shape, target!.faceId)?.geomType === "PLANE" ? tb : null;
+    const faceId = body ? target!.faceId : 0;
+    // What a click picks: a flat face (of a face object or a solid), or something it can't use
+    type Target = { bodyId: number; faceId: number } | "bad" | null;
+    const targetAt = (e: PointerEvent): Target => {
+      const hit = this.viewport.pick(e.clientX, e.clientY, "face");
+      const b = hit && this.doc.get(hit.body);
+      if (!hit || !b) return null;
+      return hit.kind === "face" && isBrep(b) && findFace(b.shape, hit.id)?.geomType === "PLANE" ? { bodyId: b.id, faceId: hit.id } : "bad";
+    };
+    const targetOf = (id: number): Target => {
+      const b = this.doc.get(id);
+      return b?.kind === "face" && b.shape.faces[0]?.geomType === "PLANE" ? { bodyId: b.id, faceId: b.shape.faces[0].hashCode } : "bad";
+    };
+    const take = (t: Target) => {
+      if (!t) return;
+      if (t === "bad") return this.toast("Box from Face: click a flat face — of a face object (Rectangle, Circle, a sketch...) or a solid", "error");
+      spec.remember!(this.opValues().values); // (the panel opens again with them)
+      this.openBoxFromFace(t);
+    };
+    const picked: SelItem[] = body ? [body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: faceId }] : [];
+    const todo = "click a flat face: it's the box's inside (floor and inner outline)";
+    const d = this.boxDefaults;
+    const spec: OpSpec = {
+      title: "Box from Face",
+      label: "Box from Face",
+      note: `Face: ${body ? escapeHtml(body.kind === "face" ? body.name : `a face of ${body.name}`) : "—"}`,
+      hint: `Box from Face: ${body ? "click another flat face to change it · Enter apply · " : `${todo} · `}Esc cancel`,
+      fields: [
+        { key: "wall", label: "Wall (mm)", value: d.wall, step: 0.5, min: 0 },
+        { key: "bottom", label: "Bottom (mm)", value: d.bottom, step: 0.5, min: 0 },
+        { key: "height", label: "Inside depth (mm)", value: d.height, step: 1, min: 0 },
+        { key: "round", label: "Round vertical edges", value: d.round, type: "checkbox" },
+        { key: "radius", label: "Inside radius (mm)", value: d.radius, step: 0.5, min: 0 },
+      ],
+      compute: ({ wall, bottom, height, round, radius }) => {
+        if (!body) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+        const solid = boxFromFace(body.shape, faceId, { wall, bottom, height, radius: round ? radius : 0 });
+        // A face object becomes the box; on a solid's face it's a new solid
+        const replace = body.kind === "face";
+        return {
+          ghost: new Map([[replace ? body.id : -1, solid]]),
+          commit: () => {
+            const nb = inGroupOf(this.doc.makeBody(solid, "Box"), body);
+            this.doc.commit(replace ? this.doc.bodies.map((b) => (b.id === body.id ? nb : b)) : [...this.doc.bodies, nb], "Box from Face");
+            return { select: [nb.id], solidMode: true };
+          },
+        };
+      },
+      remember: ({ wall, bottom, height, round, radius }) => (this.boxDefaults = { wall, bottom, height, round, radius }),
+      pick: (e) => take(targetAt(e)),
+      pickBody: (id) => take(targetOf(id)),
+      hover: (e) => {
+        const t = targetAt(e);
+        this.viewport.setHighlight(picked, t && t !== "bad" ? { kind: "face", body: t.bodyId, id: t.faceId } : null);
+        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t ? "pointer" : "crosshair";
+      },
+    };
+    this.startOp(spec);
+    this.viewport.setHighlight(picked, null);
+  }
+
+  /** The one selected solid (or a face of it), for Box Lid; null for anything else. */
+  private selectedLidBox(): number | null {
+    const ids = [...new Set(this.selection.map((s) => s.body))];
+    return ids.length === 1 && this.doc.get(ids[0])?.kind === "solid" ? ids[0] : null;
+  }
+
+  /**
+   * Macro → Box Lid: a lid for an open-top box (Box from Face, Shell...), closed on it — `over` false: a plate on the
+   * rim with a lip fitting in the opening; true: a cap, bigger, its skirt round the box's outside. The panel waits for
+   * the box if none is selected; a click on another one changes it.
+   */
+  private openBoxLid(over: boolean, boxId: number | null): void {
+    const tb = boxId === null ? undefined : this.doc.get(boxId);
+    const box = tb?.kind === "solid" ? tb : null;
+    const kind = over ? "Lid over the box" : "Lid with inside lip";
+    // What a click picks: a solid with an open top, or something it can't use
+    const targetOf = (id: number | null | undefined): number | "bad" | null => {
+      if (id === null || id === undefined) return null;
+      const b = this.doc.get(id);
+      return b?.kind === "solid" && hasBoxRim(b.shape as Solid) ? b.id : "bad";
+    };
+    const take = (t: number | "bad" | null) => {
+      if (t === null) return;
+      if (t === "bad") return this.toast(`${kind}: click an open-top box — a solid with a flat rim round its opening (Box from Face, Shell...)`, "error");
+      spec.remember!(this.opValues().values); // (the panel opens again with them)
+      this.openBoxLid(over, t);
+    };
+    const at = (e: PointerEvent) => targetOf(this.viewport.pick(e.clientX, e.clientY, "body")?.body);
+    const d = over ? this.lidDefaults.over : this.lidDefaults.in;
+    const part = over ? "Skirt" : "Lip";
+    const todo = "click the open-top box to make it for";
+    const spec: OpSpec = {
+      title: over ? "Box Lid — over the box" : "Box Lid — inside lip",
+      label: kind,
+      note: `Box: ${box ? escapeHtml(box.name) : "—"}`,
+      hint: `${kind}: ${box ? "click another box to change it · Enter apply · " : `${todo} · `}Esc cancel`,
+      fields: [
+        { key: "thickness", label: "Lid thickness (mm)", value: d.thickness, step: 0.5, min: 0 },
+        { key: "depth", label: `${part} depth (mm${over ? "" : ", 0: none"})`, value: d.depth, step: 0.5, min: 0 },
+        { key: "wall", label: `${part} wall (mm${over ? "" : ", 0: solid"})`, value: d.wall, step: 0.5, min: 0 },
+        { key: "clearance", label: "Clearance (mm)", value: d.clearance, step: 0.1, min: 0 },
+      ],
+      compute: ({ thickness, depth, wall, clearance }) => {
+        if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+        const lid = boxLid(box.shape as Solid, { over, thickness, lipDepth: depth, lipWall: wall, clearance });
+        return {
+          ghost: new Map([[-1, lid]]),
+          commit: () => {
+            const nb = inGroupOf(this.doc.makeBody(lid, "Lid"), box);
+            this.doc.commit([...this.doc.bodies, nb], kind);
+            return { select: [nb.id], solidMode: true };
+          },
+        };
+      },
+      remember: ({ thickness, depth, wall, clearance }) => (this.lidDefaults[over ? "over" : "in"] = { thickness, depth, wall, clearance }),
+      pick: (e) => take(at(e)),
+      pickBody: (id) => take(targetOf(id)),
+      hover: (e) => {
+        const t = at(e);
+        this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], typeof t === "number" ? { kind: "body", body: t, id: 0 } : null);
+        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t !== null ? "pointer" : "crosshair";
+      },
+    };
+    this.startOp(spec);
+    this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], null);
   }
 
   /** The one selected face, or the face of the one selected flat face object; null for any other selection. */
@@ -5765,6 +5919,7 @@ class App implements ToolHost {
 
   /** Do the next `count` walkthrough steps; the first one starts a new document. */
   private async tutorialDo(count: number): Promise<void> {
+    if (!textFontReady()) await loadTextFont().catch(() => {}); // (a step may write a label: Cable Storage Box)
     const tut = this.tut;
     if (!tut) return;
     if (tut.step === 0) {
@@ -5832,6 +5987,8 @@ class App implements ToolHost {
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list)"],
       ["H", "Shell / hollow (opens the selected faces)"],
+      ["Macro → Box Lid → Inside Lip / Over the Box", "A lid for an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits), made closed on it: Inside Lip — a plate on the rim, a lip under it fitting in the opening (Lip depth 0: a flat lid; Lip wall 0: a solid plug); Over the Box — a cap, bigger, its skirt round the box's outside. Clearance: the gap to the box (0: an exact fit)"],
+      ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
       ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
@@ -6371,7 +6528,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

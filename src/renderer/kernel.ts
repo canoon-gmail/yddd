@@ -2866,6 +2866,141 @@ export function offsetFace(shape: Shape, faceId: number, distance: number, round
   return round && distance < 0 ? offsetPlanar(offsetPlanar(face, 2 * distance, false), -distance, true) : offsetPlanar(face, distance, round);
 }
 
+/** Box from Face (Macro menu): wall and bottom thickness, inside depth, the face's corners rounded (radius; 0 = sharp). */
+export interface BoxFromFace {
+  wall: number;
+  bottom: number;
+  height: number;
+  radius: number;
+}
+
+/**
+ * An open-top box round a flat face: the face is its inside — floor and inner outline (any shape: a rectangle
+ * makes a tray, a circle a cup) — so the inside stays that size whatever the walls. Walls `wall` thick grow out
+ * from the outline, the bottom `bottom` thick down under the face; `height` is the inside depth, up along the
+ * face's normal. `radius`: the face's outward corners rounded first (the vertical edges), the outside following.
+ */
+export function boxFromFace(shape: Shape, faceId: number, o: BoxFromFace): Solid {
+  const face = findFace(shape, faceId);
+  if (!face) throw new Error("face not found");
+  if (face.geomType !== "PLANE") throw new Error("Box from Face works on flat faces only");
+  if (!(o.wall > 0)) throw new Error("the wall must be thicker than 0");
+  if (!(o.bottom > 0)) throw new Error("the bottom must be thicker than 0");
+  if (!(o.height > 0)) throw new Error("the height must be more than 0");
+  if (o.radius < 0) throw new Error("the radius can't be below 0");
+  // Round corners keeping the size: in by the radius, then out again with arcs at the corners
+  let inner = face;
+  if (o.radius > 1e-9) {
+    try {
+      inner = asBSplineOutline(offsetPlanar(offsetPlanar(face, -o.radius, false), o.radius, true));
+    } catch {
+      throw new Error("the radius is too big for this face");
+    }
+  }
+  // (round: the outside's corners follow the inside's, radius + wall; sharp stays sharp. A freeform outline — an
+  // oval — offsets into "offset curves": made B-splines, or the extruded solid fails OpenCascade's check)
+  const outer = asBSplineOutline(offsetPlanar(inner, o.wall, o.radius > 1e-9));
+  const n = norm3(face.normalAt().toTuple() as V3);
+  const along = (d: number) => new Vector([n[0] * d, n[1] * d, n[2] * d]);
+  const base = outer.clone().translate([-n[0] * o.bottom, -n[1] * o.bottom, -n[2] * o.bottom]) as Face;
+  const body = basicFaceExtrusion(base, along(o.bottom + o.height)) as Shape3D;
+  // The inside: from the face (the floor) up, a little past the top (a clean cut through it)
+  const hollow = basicFaceExtrusion(inner, along(o.height + Math.max(1, o.height))) as Shape3D;
+  const out = booleanOp("subtract", body, [hollow]);
+  if (!isValidShape(out)) throw new Error("Box from Face: the result is not a valid solid");
+  return out;
+}
+
+/**
+ * Box Lid (Macro menu): plate thickness; `over` false: a lip under it that fits in the opening (depth 0: none; wall
+ * 0: a solid plug); true: a cap — a skirt down round the box's outside (wall > 0). `clearance`: the gap to the box.
+ */
+export interface BoxLid {
+  over: boolean;
+  thickness: number;
+  lipDepth: number;
+  lipWall: number;
+  clearance: number;
+}
+
+/**
+ * An open-top box's rim: the flat ring at its open top (a flat face with a hole — the opening — lying on the very top
+ * of the solid along its own normal; the largest if several). Null if the solid hasn't one.
+ */
+function boxRim(box: Solid): Face | null {
+  const pts = box.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
+  let best: Face | null = null, bestArea = 0;
+  for (const f of box.faces) {
+    if (f.geomType !== "PLANE" || f.clone().innerWires().length < 1) continue;
+    const n = norm3(f.normalAt().toTuple() as V3), at = dot3(f.center.toTuple() as V3, n);
+    if (pts.some((p) => dot3(p, n) > at + 1e-6)) continue; // (something sticks out past it: not the top)
+    const a = measureArea(f);
+    if (a > bestArea) [best, bestArea] = [f, a];
+  }
+  return best;
+}
+
+/** Is `box` an open-top box a lid can be made for (it has a rim, see boxRim)? (Asked on hover: kept per shape.) */
+export function hasBoxRim(box: Solid): boolean {
+  let has = rimKnown.get(box);
+  if (has === undefined) rimKnown.set(box, (has = boxRim(box) !== null));
+  return has;
+}
+const rimKnown = new WeakMap<object, boolean>();
+
+/**
+ * A lid for an open-top box, closed on it. Inside lip: a plate the rim's outside outline, `thickness` thick, lying on
+ * the rim; under it a lip `lipDepth` deep that fits in the opening — `clearance` smaller all round, a ring `lipWall`
+ * thick (0: a solid plug). Over the box (`over`): a cap — the plate bigger, a skirt `lipWall` thick and `lipDepth`
+ * deep round the box's outside, `clearance` away from it.
+ */
+export function boxLid(box: Solid, o: BoxLid): Solid {
+  const rim = boxRim(box);
+  if (!rim) throw new Error("this solid has no open top (a flat rim round an opening) — make it with Box from Face or Shell");
+  if (!(o.thickness > 0)) throw new Error("the lid must be thicker than 0");
+  if (o.lipDepth < 0 || o.lipWall < 0 || o.clearance < 0) throw new Error("lip depth, lip wall and clearance can't be below 0");
+  const n = norm3(rim.normalAt().toTuple() as V3);
+  const along = (d: number) => new Vector([n[0] * d, n[1] * d, n[2] * d]);
+  // Down into / round the box from the rim: moved down first, then extruded up to it (keeps the solid the right way out)
+  const down = (f: Face) => basicFaceExtrusion(f.clone().translate([-n[0] * o.lipDepth, -n[1] * o.lipDepth, -n[2] * o.lipDepth]) as Face, along(o.lipDepth)) as Shape3D;
+  const outside = makeFace(rim.clone().outerWire());
+  if (o.over) {
+    if (!(o.lipWall > 1e-9)) throw new Error("a lid over the box needs a wall thicker than 0 (its skirt)");
+    const skirtIn = o.clearance > 1e-9 ? asBSplineOutline(offsetPlanar(outside, o.clearance, false)) : outside;
+    const skirtOut = asBSplineOutline(offsetPlanar(skirtIn, o.lipWall, false));
+    if (o.lipDepth <= 1e-9) return basicFaceExtrusion(skirtOut, along(o.thickness)) as Shape3D;
+    // One block from the skirt's foot to the plate's top, the room for the box cut out under the plate (no union along
+    // the curved outline of an oval: that one fails OpenCascade's check)
+    const block = basicFaceExtrusion(skirtOut.clone().translate([-n[0] * o.lipDepth, -n[1] * o.lipDepth, -n[2] * o.lipDepth]) as Face, along(o.lipDepth + o.thickness)) as Shape3D;
+    const out = booleanOp("subtract", block, [down(skirtIn)]);
+    if (!isValidShape(out)) throw new Error("Box Lid: the result is not a valid solid");
+    return out;
+  }
+  const holes = rim.clone().innerWires().map((w) => makeFace(w));
+  const opening = holes.reduce((a, f) => (measureArea(f) > measureArea(a) ? f : a));
+  const plate = basicFaceExtrusion(outside, along(o.thickness)) as Shape3D;
+  if (o.lipDepth <= 1e-9) return plate;
+  let lipOuter: Face;
+  try {
+    lipOuter = o.clearance > 1e-9 ? asBSplineOutline(offsetPlanar(opening, -o.clearance, false)) : opening;
+  } catch {
+    throw new Error("the clearance is too big for the opening");
+  }
+  let lip = down(lipOuter);
+  if (o.lipWall > 1e-9) {
+    let lipInner: Face;
+    try {
+      lipInner = asBSplineOutline(offsetPlanar(lipOuter, -o.lipWall, false));
+    } catch {
+      throw new Error("the lip wall is too thick for the opening (set it to 0 for a solid plug)");
+    }
+    lip = booleanOp("subtract", lip, [down(lipInner)]);
+  }
+  const out = booleanOp("union", plate, [lip]);
+  if (!isValidShape(out)) throw new Error("Box Lid: the result is not a valid solid");
+  return out;
+}
+
 /**
  * The band between a flat face's outline and its offset outline (see offsetFace): the larger
  * face with the smaller cut out. Holes get their own bands, so the result can be several faces.

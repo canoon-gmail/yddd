@@ -2237,7 +2237,7 @@ const SCENARIO_CABLE = String.raw`
   app.run("help.cablebox"); await sleep(30);
   const panel = document.getElementById("tutorial");
   const total = panel.querySelectorAll("li").length;
-  expect("cable: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Cable storage box" && total === 6, total);
+  expect("cable: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Cable storage box" && total === 9, total);
   const before = toasts().length;
   for (let i = 0; i < total; i++) {
     if (i === 1) {
@@ -2246,17 +2246,17 @@ const SCENARIO_CABLE = String.raw`
       expect("cable: Start turns the view to the start-up iso view", o.dot(iso) > 0.9999, { o: o.toArray(), iso: iso.toArray() });
     }
     if (i === 3) {
-      // "First divider" by hand: Box tool, Ctrl-click the back-left inner floor corner, a little inside, Tab 4 × 112 × 56
+      // "First divider" by hand: Box tool, Ctrl-click where the back wall's flat inside starts (floor level), a little inside, Tab 4 × 112 × 56
       vp.fit(); await sleep(50);
       const n0 = app.doc.bodies.length;
       app.run("tool.box");
-      ev("pointermove", [-116, 56, 4]); ev("pointerdown", [-116, 56, 4]);
+      ev("pointermove", [-112, 56, 4]); ev("pointerdown", [-112, 56, 4]);
       ev("pointermove", [-100, 40, 4]);
       key("Tab", "Tab"); await sleep(30);
       const ok = dialog([4, 112, 56]); await sleep(30);
       const made = app.doc.bodies.length === n0 + 1 ? app.doc.bodies[n0] : null;
       const bb = made && made.shape.boundingBox.bounds;
-      expect("cable: first divider drawn as the step says sits in the back-left inner corner", ok && bb && [bb[0].map(r), bb[1].map(r)].join() === "-116,-56,4,-112,56,60", bb && [bb[0].map(r), bb[1].map(r)]);
+      expect("cable: first divider drawn as the step says starts where the back wall's flat inside does, across the box", ok && bb && [bb[0].map(r), bb[1].map(r)].join() === "-112,-56,4,-108,56,60", bb && [bb[0].map(r), bb[1].map(r)]);
       if (made) app.run("edit.undo");
       key("Escape", "Escape");
     }
@@ -2265,16 +2265,22 @@ const SCENARIO_CABLE = String.raw`
     if (bad.length || toasts().length > before) { expect("cable: step " + (i + 1) + " valid", false, { bad, errors: toasts() }); break; }
   }
   expect("cable: all steps done, no errors", panel.querySelectorAll("li.done").length === total && toasts().length === before, { done: panel.querySelectorAll("li.done").length, errors: toasts() });
-  const box = app.doc.bodies.length === 1 ? app.doc.bodies[0] : null;
+  const box = app.doc.bodies.length === 2 ? app.doc.bodies[0] : null, lid = box && app.doc.bodies[1];
   if (box) {
     const bb = box.shape.boundingBox.bounds;
-    const outer = 240 * 120 * 60 - 4 * (1 - Math.PI / 4) * 64 * 60, hollow = 232 * 112 * 56, divs = 3 * 4 * 112 * 56;
+    // outside R 8 corners, inside R 4 (Box from Face: the inside radius, the outside that + the wall)
+    const outer = (240 * 120 - (4 - Math.PI) * 64) * 60, hollow = (232 * 112 - (4 - Math.PI) * 16) * 56, divs = 3 * 4 * 112 * 56;
     const vol = K.solidVolume(box.shape), want = outer - hollow + divs;
-    expect("cable: one part, 240 × 120 × 60, rounded outside, hollow with 3 dividers", box.name === "Cable box" && [bb[0].map(r), bb[1].map(r)].join() === "-120,-60,0,120,60,60" && Math.abs(vol - want) < 1 && box.shape.faces.filter((f) => f.geomType === "CYLINDRE").length === 4,
+    expect("cable: one box, 240 × 120 × 60 standing on the grid, R 8 outside / R 4 inside corners, 3 dividers", box.name === "Cable box" && [bb[0].map(r), bb[1].map(r)].join() === "-120,-60,0,120,60,60" && Math.abs(vol - want) < 1 && box.shape.faces.filter((f) => f.geomType === "CYLINDRE").length === 8,
       { name: box.name, bb, vol: r(vol), want: r(want) });
-  } else expect("cable: one part", false, app.doc.bodies.map((b) => b.name));
+    const lb = lid.shape.boundingBox.bounds, cap = K.boxLid(box.shape, { over: true, thickness: 3, lipDepth: 10, lipWall: 2, clearance: 0.3 });
+    const label = K.solidVolume(lid.shape) - K.solidVolume(cap), overlap = K.solidVolume(K.booleanOp("intersect", lid.shape, [box.shape]));
+    expect("cable: the lid fits over the box (244.6 × 124.6, z 50 – 63, clear of it) with the raised CABLES label joined on top (to z 64.5)",
+      lid.name === "Cable box lid" && K.isValidShape(lid.shape) && [lb[0].map(r), lb[1].map(r)].join() === "-122.3,-62.3,50,122.3,62.3,64.5" && overlap < 1e-6 && label > 100,
+      { name: lid.name, lb: lb.map((p) => p.map(r)), overlap, label: r(label) });
+  } else expect("cable: a box and a lid", false, app.doc.bodies.map((b) => b.name));
   await press("back");
-  expect("cable: Back undoes the join (box + 3 dividers)", app.doc.bodies.length === 4, app.doc.bodies.map((b) => b.name));
+  expect("cable: Back undoes the label's join (box, lid, 6 letters)", app.doc.bodies.length === 8, app.doc.bodies.map((b) => b.name));
   app.run("view.iso"); await press("do"); await sleep(300);
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("cable scenario failed: " + JSON.stringify(failed));
@@ -2665,6 +2671,113 @@ const SCENARIO_TEXT = String.raw`
       const okAgain = pen() && !pen().classList.contains("off");
       expect("text edit: the pencil is usable on a pushed text; its H cut in two → grey, saying the letters were changed; undo → usable again",
         okBefore && offAfter && /changed/.test(why || "") && okAgain, { okBefore, offAfter, why, okAgain });
+    }
+    // Macro → Box from Face: a 60 × 40 rectangle is the inside of an open box (wall 2 out, bottom 3 down, inside depth 20);
+    // round edges R 5 (outside R 7); a circle → a cup; on a solid's top face → a new box from it; radius too big → an error, nothing made
+    {
+      const vol = (b) => K.solidVolume(b.shape);
+      const boxOn = async (body, faceSel, v) => {
+        app.setSelection([faceSel]); app.run("macro.box"); await sleep(50);
+        for (const [k, x] of Object.entries(v)) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (!i) continue; if (i.type === "checkbox") i.checked = !!x; else i.value = String(x); i.dispatchEvent(new Event(i.type === "checkbox" ? "change" : "input", { bubbles: true })); }
+        await sleep(300);
+        const err = document.querySelector("#op-panel .op-error")?.textContent || "";
+        app.applyOp(); await sleep(50);
+        return err;
+      };
+      app.doc.reset([]);
+      const rect = app.doc.makeBody(K.makeRectFace(G, [0, 0, 0], 60, 40), "Rectangle", "face");
+      app.doc.commit([rect], "rect"); app.run("mode.body");
+      await boxOn(rect, { kind: "body", body: rect.id, id: 0 }, { wall: 2, bottom: 3, height: 20, round: 0 });
+      const b1 = app.doc.bodies[0], v1 = b1 && b1.kind === "solid" ? vol(b1) : 0, bb1 = b1.shape.boundingBox.bounds;
+      app.run("edit.undo"); await sleep(20);
+      await boxOn(rect, { kind: "body", body: rect.id, id: 0 }, { wall: 2, bottom: 3, height: 20, round: 1, radius: 5 });
+      // inside: 60×40 with R 5 corners; outside: that grown 2 (perimeter × 2 + π·2²)
+      const inA = 2400 - (4 - Math.PI) * 25, inP = 200 - 8 * 5 + 2 * Math.PI * 5;
+      const v2 = vol(app.doc.bodies[0]), want2 = (inA + inP * 2 + Math.PI * 4) * 23 - inA * 20;
+      app.doc.reset([]);
+      const circ = app.doc.makeBody(K.makeCircleFace(G, [0, 0, 0], 20), "Circle", "face"), blk = app.doc.makeBody(K.makeBox(G, [100, 0, 0], 50, 50, 10), "Block");
+      app.doc.commit([circ, blk], "circle, block");
+      await boxOn(circ, { kind: "body", body: circ.id, id: 0 }, { wall: 2, bottom: 3, height: 20, round: 0 });
+      const cup = app.doc.bodies.find((b) => b.id !== blk.id), v3 = vol(cup);
+      const top = blk.shape.faces.find((f) => f.geomType === "PLANE" && f.normalAt().toTuple()[2] > 0.99);
+      await boxOn(blk, { kind: "face", body: blk.id, id: top.hashCode }, { wall: 2, bottom: 3, height: 20, round: 0 });
+      const onTop = app.doc.bodies.at(-1), bt = onTop.shape.boundingBox.bounds;
+      const n0 = app.doc.bodies.length;
+      const err = await boxOn(blk, { kind: "face", body: blk.id, id: top.hashCode }, { wall: 2, bottom: 3, height: 20, round: 1, radius: 30 });
+      if (app.op) app.cancelOp && app.cancelOp();
+      const nAfter = app.doc.bodies.length;
+      // Nothing selected: the panel opens at once and waits; a click on a face object picks it
+      app.doc.reset([]);
+      const rect2 = app.doc.makeBody(K.makeRectFace(G, [0, 0, 0], 60, 40), "Rectangle", "face");
+      app.doc.commit([rect2], "rect"); vp.setView("iso"); vp.fit(); await sleep(50);
+      app.setSelection([]); app.run("macro.box"); await sleep(300);
+      const waitMsg = document.querySelector("#op-panel .op-error.waiting")?.textContent || "", opened = !!app.op;
+      const sc = window.__see(new (vp.camera.position.constructor)(5, 5, 0));
+      app.op && app.op.spec.pick(new PointerEvent("pointerdown", { clientX: sc.x, clientY: sc.y, button: 0 })); await sleep(300);
+      const note = document.querySelector("#op-panel .op-note")?.textContent || "";
+      app.applyOp(); await sleep(50);
+      const picked = app.doc.bodies.length === 1 && app.doc.bodies[0].kind === "solid" && Math.abs(K.solidVolume(app.doc.bodies[0].shape) - (64 * 44 * 23 - 48000)) < 1e-3;
+      expect("macro box: nothing selected → the panel opens and waits (\"click a flat face\"); a click on the rectangle picks it → its box",
+        opened && /click a flat face/i.test(waitMsg) && /Rectangle/.test(note) && picked, { opened, waitMsg, note, picked });
+      // Other outlines (kernel): a hexagon (sharp: walls of even thickness, sharp outside corners; R 3: round), an oval
+      // (a circle stretched 1.5× in X: freeform curves), a ring face (a hole in it → a tube up the middle)
+      const opt = { wall: 2, bottom: 3, height: 20, radius: 0 }, ok = (sh) => sh && K.isValidShape(sh);
+      const hex = K.makePolygonFace(G, [0, 0, 0], 20, 6, 0), hexBox = K.boxFromFace(hex, hex.faces[0].hashCode, opt);
+      const ap = 20 * Math.sqrt(3) / 2, hexWant = 2 * Math.sqrt(3) * ((ap + 2) ** 2 * 23 - ap ** 2 * 20);
+      const hexRound = K.boxFromFace(hex, hex.faces[0].hashCode, { ...opt, radius: 3 });
+      const oval = K.scaleShape(K.makeCircleFace(G, [0, 0, 0], 20), [1.5, 1, 1], [0, 0, 0]), ovalBox = K.boxFromFace(oval, oval.faces[0].hashCode, opt);
+      const oa = 30, ob = 20, oh = ((oa - ob) / (oa + ob)) ** 2, oP = Math.PI * (oa + ob) * (1 + 3 * oh / (10 + Math.sqrt(4 - 3 * oh))), oA = K.solidVolume(K.extrudeFace(oval, oval.faces[0].hashCode, 1)); // (its real area: the stretch is a close B-spline, not an exact ellipse)
+      const ovalWant = (oA + oP * 2 + Math.PI * 4) * 23 - oA * 20;
+      const disk = K.makeCircleFace(G, [0, 0, 0], 20), ring = K.offsetRing(disk, disk.faces[0].hashCode, -12)[0];
+      const ringBox = ring && K.boxFromFace(ring, ring.faces[0].hashCode, opt), ringWant = Math.PI * ((22 ** 2 - 6 ** 2) * 23 - (20 ** 2 - 8 ** 2) * 20);
+      const vols = { hex: r(K.solidVolume(hexBox)), hexWant: r(hexWant), hexRound: ok(hexRound) && r(K.solidVolume(hexRound)), oval: r(K.solidVolume(ovalBox)), ovalWant: r(ovalWant), ring: ringBox && r(K.solidVolume(ringBox)), ringWant: r(ringWant) };
+      expect("macro box: a hexagon (exact; R 3 round: valid, a little less), an oval (freeform outline: valid, within 1% of an ellipse\'s estimate) and a ring face (a tube up the middle, exact) all make valid boxes",
+        ok(hexBox) && Math.abs(vols.hex - hexWant) < 1e-2 && vols.hexRound > 0 && vols.hexRound < vols.hex && ok(ovalBox) && Math.abs(vols.oval - ovalWant) < 1e-2 * ovalWant && ok(ringBox) && Math.abs(vols.ring - ringWant) < 0.05,
+        vols);
+      const near = (a, b, e = 1e-3) => Math.abs(a - b) < e;
+      const bx = [0, 1, 2].map((k) => r(bb1[1][k] - bb1[0][k])).join(" × ");
+      expect("macro box: 60×40 rect = the inside → 64 × 44 × 23 outside (z −3 – 20), vol 64·44·23 − 60·40·20; R 5 → exact; circle R 20 → cup R 22; on a block's top (z 10) → z 7 – 30; radius 30 → error, nothing made",
+        b1.kind === "solid" && K.isValidShape(b1.shape) && near(v1, 64 * 44 * 23 - 48000) && bx === "64 × 44 × 23" && near(bb1[0][2], -3) && near(bb1[1][2], 20) && near(v2, want2, 0.05) && near(v3, Math.PI * (484 * 23 - 400 * 20), 0.05) &&
+          nAfter === n0 && near(bt[0][2], 7) && near(bt[1][2], 30) && onTop.id !== blk.id && /radius/i.test(err),
+        { v1: r(v1), bx, v2: r(v2), want2: r(want2), v3: r(v3), want3: r(Math.PI * (484 * 23 - 400 * 20)), bt: bt.map((p) => r(p[2])), err, n: nAfter, n0 });
+    }
+    // Macro → Box Lid: for a 60 × 40 (inside) box, wall 2, rim at z 20 — Inside Lip (plate 64 × 44 × 2 on the rim, a
+    // lip 3 deep, 1.5 wall, 0.2 clearance); Over the Box (cap: skirt 5 deep, 1.5 wall, 0.2 off the outside); waits for the box
+    {
+      app.doc.reset([]);
+      const rectF = K.makeRectFace(G, [0, 0, 0], 60, 40);
+      const box = app.doc.makeBody(K.boxFromFace(rectF, rectF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 0 }), "Box");
+      const block = app.doc.makeBody(K.makeBox(G, [100, 0, 0], 20, 20, 10), "Block");
+      app.doc.commit([box, block], "box"); vp.setView("iso"); vp.fit(); await sleep(50);
+      const set = (v) => { for (const [k, x] of Object.entries(v)) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(x); i.dispatchEvent(new Event("input", { bubbles: true })); } } };
+      app.setSelection([]); app.run("macro.lidIn"); await sleep(300);
+      const waiting = document.querySelector("#op-panel .op-error.waiting")?.textContent || "";
+      app.op.spec.pickBody(block.id); await sleep(50);
+      const stillWaiting = !!document.querySelector("#op-panel .op-error.waiting");
+      app.op.spec.pickBody(box.id); await sleep(50);
+      const note = document.querySelector("#op-panel .op-note")?.textContent || "";
+      set({ thickness: 2, depth: 3, wall: 1.5, clearance: 0.2 }); await sleep(300);
+      const inErr = document.querySelector("#op-panel .op-error")?.textContent || "";
+      app.applyOp(); await sleep(50);
+      const lidIn = app.doc.bodies.at(-1), inV = K.solidVolume(lidIn.shape), inZ = lidIn.shape.boundingBox.bounds.map((p) => r(p[2]));
+      const inOverlap = K.solidVolume(K.booleanOp("intersect", lidIn.shape, [box.shape]));
+      app.setSelection([{ kind: "body", body: box.id, id: 0 }]); app.run("macro.lidOver"); await sleep(50);
+      set({ thickness: 2, depth: 5, wall: 1.5, clearance: 0.2 }); await sleep(300); app.applyOp(); await sleep(50);
+      const lidOver = app.doc.bodies.at(-1), ovV = K.solidVolume(lidOver.shape), ovB = lidOver.shape.boundingBox.bounds;
+      const ovOverlap = K.solidVolume(K.booleanOp("intersect", lidOver.shape, [box.shape]));
+      const flat = K.solidVolume(K.boxLid(box.shape, { over: false, thickness: 2, lipDepth: 0, lipWall: 1.5, clearance: 0 }));
+      // Rounded (R 5) and oval boxes: both lid types valid and clear of the box
+      const rounded = K.boxFromFace(rectF, rectF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 5 });
+      const ovalF = K.scaleShape(K.makeCircleFace(G, [0, 0, 0], 20), [1.5, 1, 1], [0, 0, 0]), ovalBox = K.boxFromFace(ovalF, ovalF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 0 });
+      const others = [rounded, ovalBox].flatMap((bx) => [false, true].map((over) => {
+        try { const l = K.boxLid(bx, { over, thickness: 2, lipDepth: 4, lipWall: 1.5, clearance: 0.2 }); return K.isValidShape(l) && K.solidVolume(K.booleanOp("intersect", l, [bx])) < 1e-6; } catch (e) { return String(e); }
+      }));
+      const wantIn = 64 * 44 * 2 + (59.6 * 39.6 - 56.6 * 36.6) * 3, wantOver = 67.4 * 47.4 * 2 + (67.4 * 47.4 - 64.4 * 44.4) * 5;
+      const ovSize = [0, 1, 2].map((k) => r(ovB[1][k] - ovB[0][k])).join(" × ");
+      expect("box lid: waits for the box (a plain block refused); inside lip → plate + lip (exact, z 17 – 22, not into the box); over the box → 67.4 × 47.4 × 7 cap (exact, z 15 – 22, not into the box); lip depth 0 → a flat plate; rounded and oval boxes: both types valid, clear of the box",
+        /click the open-top box/i.test(waiting) && stillWaiting && /Box/.test(note) && lidIn.kind === "solid" && K.isValidShape(lidIn.shape) && Math.abs(inV - wantIn) < 1e-3 && inZ.join() === "17,22" && inOverlap < 1e-6 &&
+          K.isValidShape(lidOver.shape) && Math.abs(ovV - wantOver) < 1e-3 && ovSize === "67.4 × 47.4 × 7" && Math.abs(ovB[0][2] - 15) < 1e-6 && ovOverlap < 1e-6 && Math.abs(flat - 64 * 44 * 2) < 1e-3 && others.every((x) => x === true),
+        { others, waiting, stillWaiting, note, inErr, inV: r(inV), wantIn: r(wantIn), inZ, inOverlap, ovV: r(ovV), wantOver: r(wantOver), ovSize, ovOverlap, flat: r(flat) });
     }
     // On a box's front wall (y = −5), seen from the front: the H stands up the wall, facing out
     app.doc.reset([]);

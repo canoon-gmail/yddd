@@ -152,6 +152,13 @@ function buildMenu(): void {
       ],
     },
     {
+      label: "&Macro",
+      submenu: [
+        item("Box from Face…", "macro.box"),
+        { label: "Box Lid", submenu: [item("Inside Lip…", "macro.lidIn"), item("Over the Box…", "macro.lidOver")] },
+      ],
+    },
+    {
       label: "&Help",
       submenu: [item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter")],
     },
