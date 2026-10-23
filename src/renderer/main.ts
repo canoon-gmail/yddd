@@ -29,6 +29,7 @@ import {
   BUILT_IN_FONTS,
   textFontReady,
   filletEdges,
+  roundSome,
   filletDragAxis,
   chamferEdges,
   pushPull,
@@ -200,6 +201,8 @@ interface OpOutcome {
   hide?: number[];
   /** Hide the selected edges' highlight while previewed (they change with it, e.g. a resized hole's rim). */
   hideSelection?: boolean;
+  /** It worked, but not quite as asked (e.g. some edges left sharp): shown in the panel (Apply still works), with a button to set fields. */
+  warn?: { text: string; action?: { label: string; set: Record<string, number> } };
   /** Apply to the document. Returns the body ids to select afterwards (`then`: run once the panel has closed). */
   commit(): { select: number[]; solidMode?: boolean; then?: () => void };
 }
@@ -1906,6 +1909,26 @@ class App implements ToolHost {
       op.key = key;
       err.textContent = "";
       err.classList.remove("waiting");
+      err.classList.toggle("warn", !!result.warn);
+      if (result.warn) {
+        err.textContent = result.warn.text;
+        const act = result.warn.action;
+        if (act) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "op-warn-act";
+          b.textContent = act.label;
+          b.addEventListener("click", () => {
+            for (const [k, v] of Object.entries(act.set)) {
+              const i = this.opPanel.querySelector<HTMLInputElement>(`[data-key="${k}"]`);
+              if (!i) continue;
+              i.value = fmt(v);
+              i.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          });
+          err.append(" ", b);
+        }
+      }
       if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
       else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
       op.previewMs = performance.now() - t0;
@@ -1914,6 +1937,7 @@ class App implements ToolHost {
       op.result = null;
       op.key = "";
       err.textContent = errorMessage(e);
+      err.classList.remove("warn");
       err.classList.toggle("waiting", e instanceof OpWaiting);
       this.viewport.clearGhost();
       return null;
@@ -2218,12 +2242,27 @@ class App implements ToolHost {
         if (wholeSolids) spec.drag = dragFor(which); // "Edges" can move the handle to another edge
         if (r <= 0) throw new Error("value must be greater than 0");
         const out = new Map<number, Shape>();
+        // Edges it can't do at this size are left sharp (the panel says so, and the largest size that does them all)
+        let skipped = 0, asked = 0, largest: number | null = null;
         for (const [id, picked] of perBody) {
           const { shape, w, edges } = edgesOf(id, picked, which);
           if (edges && !edges.size) throw new Error(`"${this.doc.get(id)!.name}" has no ${w} edges`);
-          out.set(id, isFillet ? filletEdges(shape, edges, r) : chamferEdges(shape, edges, r));
+          const got = roundSome(kind, shape, edges, r);
+          out.set(id, got.shape);
+          skipped += got.skipped.length;
+          asked += got.asked;
+          if (got.skipped.length && got.largest !== null) largest = Math.min(largest ?? Infinity, got.largest);
         }
-        return this.replaceOutcome(out, title);
+        const outcome = this.replaceOutcome(out, title);
+        if (!skipped) return outcome;
+        const what = isFillet ? "rounded" : "chamfered", unit = isFillet ? "R " : "";
+        return {
+          ...outcome,
+          warn: {
+            text: `${skipped} of ${asked} edge${asked > 1 ? "s" : ""} can't be ${what} at ${unit}${fmt(r)} — left sharp (Apply keeps the rest).${largest !== null ? ` All of them work up to about ${unit}${fmt(largest)}.` : ""}`,
+            ...(largest !== null ? { action: { label: `Use ${unit}${fmt(largest)}`, set: { r: largest } } } : {}),
+          },
+        };
       },
       remember: ({ r, which }) => {
         if (isFillet) this.defaults.fillet = r;
@@ -5985,7 +6024,7 @@ class App implements ToolHost {
         ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). The Auto box by Snap in the status bar turns it off: then hold Ctrl to snap"]
         : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (tick Auto by Snap in the status bar to snap without Ctrl)"],
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
-      ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list)"],
+      ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list); edges it can't do at that size are left sharp — the panel says how many (orange), Apply keeps the rest, and a button sets the largest size that does them all"],
       ["H", "Shell / hollow (opens the selected faces)"],
       ["Macro → Box Lid → Inside Lip / Over the Box", "A lid for an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits), made closed on it: Inside Lip — a plate on the rim, a lip under it fitting in the opening (Lip depth 0: a flat lid; Lip wall 0: a solid plug); Over the Box — a cap, bigger, its skirt round the box's outside. Clearance: the gap to the box (0: an exact fit)"],
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
@@ -6528,7 +6567,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { y3dApp: App }).y3dApp = app; // handy for debugging in DevTools
-    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { y3dKernel: object }).y3dKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

@@ -213,6 +213,8 @@ kbd {
 #op-panel label.check input { width: auto; accent-color: var(--accent); }
 #op-panel .op-error { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 4px; }
 #op-panel .op-error.waiting { color: #7cc47f; }
+#op-panel .op-error.warn { color: #f0b429; }
+#op-panel .op-warn-act { margin-top: 4px; padding: 1px 8px; font: inherit; font-size: 12px; color: var(--text); background: var(--bg); border: 1px solid #f0b429; border-radius: 4px; cursor: pointer; }
 #op-panel .op-error.waiting::before { content: "▸ "; }
 #op-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
 #dim-labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }

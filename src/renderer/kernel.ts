@@ -1134,6 +1134,83 @@ export function filletEdges(shape: Solid, edgeIds: Set<number> | null, radius: n
   return shape.fillet((e) => (!seams.has(e.hashCode) && (!edgeIds || edgeIds.has(e.hashCode)) ? radius : null));
 }
 
+/** A fillet / chamfer that could only round some of the edges asked for (see roundSome). */
+export interface RoundResult {
+  shape: Solid;
+  /** Edges (ids on the input) left sharp: they can't be done at this size. Empty: all done. */
+  skipped: number[];
+  /** Asked for, all told. */
+  asked: number;
+  /** When not all could be done: about the largest size that does them all (null: none found in time / not tried). */
+  largest: number | null;
+}
+
+/**
+ * Fillet (or chamfer) `edgeIds` (null: every real edge) at `size` — and when OpenCascade can't do them all, the most
+ * it can: the edges halved again and again, what works in each half put together (each try a real fillet, kept only
+ * if the solid comes out valid). Then, time allowing, the largest size that does them all (halving the size range).
+ * Throws only if none of them can be done. `budgetMs` caps the tries (a fillet round a gear takes ~1 s).
+ */
+export function roundSome(kind: "fillet" | "chamfer", shape: Solid, edgeIds: Set<number> | null, size: number, budgetMs = 2500): RoundResult {
+  const seams = seamEdgeIds(shape);
+  const ids = shape.edges.map((e) => e.hashCode).filter((id) => !seams.has(id) && (!edgeIds || edgeIds.has(id)));
+  const run = (set: Set<number>, r: number) => (kind === "fillet" ? filletEdges(shape, set, r) : chamferEdges(shape, set, r));
+  const attempt = (set: Set<number>, r: number): Solid | null => {
+    try {
+      const out = run(set, r);
+      return isValidShape(out) && solidVolume(out) > 1e-9 ? out : null;
+    } catch {
+      return null;
+    }
+  };
+  const start = performance.now();
+  const whole = attempt(new Set(ids), size);
+  if (whole) return { shape: whole, skipped: [], asked: ids.length, largest: null };
+  // How many more tries fit in the budget, at what the first one took (a failed fillet round a gear's 170 edges:
+  // ~2 s — then hardly any: an answer soon rather than a long freeze)
+  const each = Math.max(20, performance.now() - start);
+  let tries = Math.floor((budgetMs - each) / each);
+  // (some kept for the largest size that does them all: up to 7, a third at most)
+  let keep = Math.min(7, Math.floor(tries / 3));
+  const late = () => tries <= keep || performance.now() - start > budgetMs;
+  const tried = (set: Set<number>, r: number) => (tries--, attempt(set, r));
+  // The most edges that work together: each half's, then both halves' together if that works too
+  const best = (list: number[]): { set: number[]; shape: Solid | null } => {
+    if (late()) return { set: [], shape: null };
+    if (list.length === 1) {
+      const one = tried(new Set(list), size);
+      return one ? { set: list, shape: one } : { set: [], shape: null };
+    }
+    const mid = list.length >> 1;
+    const a = best(list.slice(0, mid)), b = best(list.slice(mid));
+    if (!a.set.length || !b.set.length) return a.set.length >= b.set.length ? a : b;
+    const both = [...a.set, ...b.set], joint = late() ? null : tried(new Set(both), size);
+    return joint ? { set: both, shape: joint } : a.set.length >= b.set.length ? a : b;
+  };
+  const got = best(ids);
+  // The largest size that does them all: halve the range (7 tries: within 1/128 of the size asked)
+  let largest: number | null = null;
+  keep = 0;
+  let lo = 0, hi = size;
+  for (let k = 0; k < 7 && !late(); k++) {
+    const mid = (lo + hi) / 2;
+    if (tried(new Set(ids), mid)) [lo, largest] = [mid, mid];
+    else hi = mid;
+  }
+  if (!got.shape) {
+    const what = kind === "fillet" ? "round" : "chamfer";
+    throw new Error(`can't ${what} ${ids.length > 1 ? "these edges" : "this edge"} at ${+size.toFixed(3)} mm${largest ? ` — the largest that works is about ${floorNice(largest)} mm` : " — try a smaller size"}`);
+  }
+  const done = new Set(got.set);
+  return { shape: got.shape, skipped: ids.filter((id) => !done.has(id)), asked: ids.length, largest: largest && floorNice(largest) };
+}
+
+/** A size rounded down to a tidy step (2 significant figures): 2.734 → 2.7, 0.4689 → 0.46. */
+function floorNice(v: number): number {
+  const step = 10 ** (Math.floor(Math.log10(v)) - 1);
+  return +(Math.floor(v / step) * step).toFixed(6);
+}
+
 /**
  * Drag axis for Fillet / Chamfer: from the middle of an edge (the given ones, or the highest real
  * edge of the solid), across an adjacent face — flat and most upward-facing first — away from the

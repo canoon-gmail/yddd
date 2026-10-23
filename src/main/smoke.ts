@@ -2779,6 +2779,31 @@ const SCENARIO_TEXT = String.raw`
           K.isValidShape(lidOver.shape) && Math.abs(ovV - wantOver) < 1e-3 && ovSize === "67.4 × 47.4 × 7" && Math.abs(ovB[0][2] - 15) < 1e-6 && ovOverlap < 1e-6 && Math.abs(flat - 64 * 44 * 2) < 1e-3 && others.every((x) => x === true),
         { others, waiting, stillWaiting, note, inErr, inV: r(inV), wantIn: r(wantIn), inZ, inOverlap, ovV: r(ovV), wantOver: r(wantOver), ovSize, ovOverlap, flat: r(flat) });
     }
+    // Fillet that can't do every edge: a 40 × 40 × 4 plate, all edges R 5 → its 4 corners rounded, the 8 edges round
+    // the 4 mm faces left sharp, the panel says so (orange) and offers the largest R that does all; that button → no
+    // warning, every edge rounded. One edge that can't be done at all → an error naming the largest that works.
+    {
+      app.doc.reset([]);
+      const plate = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 40, 4), "Plate");
+      app.doc.commit([plate], "plate"); app.run("mode.body");
+      app.setSelection([{ kind: "body", body: plate.id, id: 0 }]);
+      app.run("op.fillet"); await sleep(50);
+      opValue("r", 5); await sleep(400);
+      const msg = document.querySelector("#op-panel .op-error"), warn = msg?.classList.contains("warn"), text = msg?.textContent || "";
+      const useBtn = document.querySelector("#op-panel .op-warn-act"), useLabel = useBtn?.textContent || "";
+      const partial = app.op && app.op.result && [...app.op.result.ghost.values()][0];
+      const partialCyl = partial ? partial.faces.filter((f) => f.geomType === "CYLINDRE").length : -1;
+      useBtn?.click(); await sleep(500);
+      const r2 = Number(document.querySelector("#op-panel [data-key=r]")?.value), after = document.querySelector("#op-panel .op-error")?.textContent || "";
+      app.applyOp(); await sleep(50);
+      const done = app.doc.bodies[0].shape, plain = done.faces.filter((f) => f.geomType === "PLANE").length;
+      expect("fillet: a 4 mm plate, all edges R 5 → corners rounded, 8 edges left sharp, an orange note + \"Use R …\"; that → all 12 rounded (6 flat faces left), applied",
+        warn && /8 of 12 edges can't be rounded at R 5/.test(text) && /^Use R /.test(useLabel) && partialCyl === 4 && r2 > 1 && r2 < 2.01 && after === "" && K.isValidShape(done) && plain === 6,
+        { warn, text, useLabel, partialCyl, r2, after, plain });
+      const cube = K.makeBox(G, [0, 0, 0], 10, 10, 10), e0 = cube.edges[0].hashCode;
+      let err = ""; try { K.roundSome("fillet", cube, new Set([e0]), 12); } catch (e) { err = String(e); }
+      expect("fillet: one cube edge at R 12 → an error saying the largest that works", /can't round this edge at 12 mm — the largest that works is about 9\.\d/.test(err), err);
+    }
     // On a box's front wall (y = −5), seen from the front: the H stands up the wall, facing out
     app.doc.reset([]);
     const wall = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 10, 20), "Box");
@@ -4258,7 +4283,7 @@ const SCENARIO_CUTAXIS = String.raw`
     const filletErr = document.querySelector("#op-panel .op-error")?.textContent ?? "";
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
     app.run("mode.body");
-    expect("a fillet the kernel can't make: a readable error, with OpenCascade's reason", /could not compute this \(OpenCascade/.test(filletErr) && !/object/.test(filletErr), filletErr);
+    expect("a fillet the kernel can't make: a readable error, with the largest radius that works", /can't round this edge at 50 mm — the largest that works is about \d/.test(filletErr) && !/object/.test(filletErr), filletErr);
     app.doc.undo();
     // G G centre to centre: pressing a rod's end centre shows the other solids' centres as marks; dropping
     // on the cup's top centre puts the rod's end exactly there
