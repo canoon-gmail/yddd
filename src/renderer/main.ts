@@ -3350,7 +3350,8 @@ class App implements ToolHost {
       const box = this.viewport.drawnBox(id);
       if (!box) return true;
       box.expandByScalar(0.02 * box.getSize(new THREE.Vector3()).length() + 1e-3);
-      return !!ray.intersectBox(box, hit) && hit.distanceTo(A) <= len + 1e-6;
+      // (starting inside it — e.g. a face's corner-to-corner diagonal — intersectBox gives the way out)
+      return box.containsPoint(A) || (!!ray.intersectBox(box, hit) && hit.distanceTo(A) <= len + 1e-6);
     };
     const shapes = ids.filter(near).map((id) => this.doc.get(id)!.shape).filter(notMesh);
     return { point: a, normal: guidePlaneNormal(shapes, a, b, this.viewDir(), n), along: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] };

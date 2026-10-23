@@ -2,7 +2,9 @@
  * Opt-in end-to-end smoke test. Run with:  Y3D_SMOKE=/tmp/y3d-smoke npx electron .
  * (npm run smoke; npm run smoke:half skips scenarios 1–3 — see Y3D_SMOKE_HALF.)
  * Drives the real UI with synthetic pointer events, captures screenshots and
- * prints a JSON report, then quits. Not loaded during normal use.
+ * prints a JSON report, then quits. Not loaded during normal use. Real mouse input is ignored until the
+ * last checks (navigation), so the mouse over the window can't upset it; Y3D_SMOKE_JITTER=1 checks that.
+ * One run at a time: runs share /tmp/y3d-smoke (settings, panel width) and the CPU.
  */
 import type { BrowserWindow } from "electron";
 import { app, Menu } from "electron";
@@ -1226,7 +1228,7 @@ const SCENARIO_3 = String.raw`
         const g = which === "top" ? { a: [lo[0], lo[1], hi[2]], b: [hi[0], hi[1], hi[2]] } : { a: [lo[0], lo[1], lo[2]], b: [hi[0], lo[1], hi[2]] };
         vp.setView(view); await sleep(30);
         app.doc.setGuides([...app.doc.guides, g], "Add guide");
-        app.opCut([bid], app.doc.guides.length - 1);
+        app.opCut([bid], app.doc.guides.length - 1); await sleep(30); // (the cut commits after an await)
         const piece = last(), pb = piece.shape.boundingBox.bounds, kb = app.doc.get(bid).shape.boundingBox.bounds;
         const span = (bb) => [0, 1, 2].map((k) => r(bb[1][k] - bb[0][k]));
         // Straight across the face: top diagonal → both pieces full height (20); front diagonal → both full depth (30)
@@ -1699,7 +1701,7 @@ const SCENARIO_3 = String.raw`
     app.doc.commit([...app.doc.bodies, bar, blk], "bar + block");
     const n0 = app.doc.bodies.length;
     app.setSelection([{ kind: "body", body: bar.id, id: 0 }, { kind: "body", body: blk.id, id: 0 }]);
-    app.run("bool.subtract");
+    app.run("bool.subtract"); await sleep(30); // (the pieces are selected after an await)
     const n1 = app.doc.bodies.length, sel = app.selection.map((s) => s.body);
     const pieces = sel.map((id) => app.doc.get(id)?.shape).filter(Boolean);
     const len = (sh) => { const [a, b] = sh.boundingBox.bounds; return r(b[0] - a[0]); };
@@ -5801,6 +5803,14 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await writeFile(path.join(outDir, name), img.toPNG());
   };
   let report: unknown[] = [];
+  // Y3D_SMOKE_JITTER=1: a stray real mouse over the window (a move to a random spot every 50 ms) — the
+  // scenarios must pass all the same (see the real-input filter below); stopped for navigationChecks.
+  const jitter = process.env.Y3D_SMOKE_JITTER
+    ? setInterval(() => {
+        const [w, h] = win.getContentSize();
+        win.webContents.sendInputEvent({ type: "mouseMove", x: Math.floor(Math.random() * w), y: Math.floor(Math.random() * h) });
+      }, 50)
+    : undefined;
   try {
     // window.__see(v): a world point on screen, for the scenarios' clicks / hovers. In orbit runs a point
     // hidden behind a solid first turns the view (round its centre) to the first iso corner — or the top
@@ -5840,6 +5850,14 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
         vp.camera.position.copy(v).add(d.clone().normalize().multiplyScalar(dist));
         vp.controls.update();
       };
+      // The scenarios drive the app with synthetic DOM events only: real input (the user's mouse resting on
+      // or crossing the window, or Chromium's own moves when the layout under a still cursor changes)
+      // would land between a scenario's hover and its click and move the tool's cursor. Dropped until
+      // navigationChecks, which uses real input.
+      window.__realInput = false;
+      for (const t of ["pointermove", "pointerdown", "pointerup", "pointerover", "pointerout", "pointerenter", "pointerleave", "pointercancel",
+        "mousemove", "mousedown", "mouseup", "mouseover", "mouseout", "mouseenter", "mouseleave", "click", "dblclick", "contextmenu", "wheel"])
+        window.addEventListener(t, (e) => { if (e.isTrusted && !window.__realInput) e.stopImmediatePropagation(); }, { capture: true, passive: false });
       window.__see = (v) => {
         // (behind the camera / far off screen: pan to it)
         if (orbit && !vp.viewLocked && outOfView(v)) lookAt(v, vp.camera.position.clone().sub(vp.controls.target));
@@ -5917,12 +5935,17 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     if (process.env.Y3D_SMOKE_HALF) {
       await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.y3dApp; i++) await new Promise((r) => setTimeout(r, 100)); window.y3dApp.doc.reset([]); return 0; })()`, true);
     } else {
+      // Scenarios 1–3 check an op's result straight after app.applyOp(): with the background kernel ready,
+      // Fillet / Chamfer / Shell / heavy booleans apply only when its job is back. They run on this thread
+      // (as before the worker starts); the background path has its own checks ("background kernel: …", in SCENARIO_TEXT).
+      await win.webContents.executeJavaScript(`(async () => { const k = window.y3dApp.bgKernel; for (let i = 0; i < 300 && !k.ready; i++) await new Promise((r) => setTimeout(r, 50)); k.ready = false; return 0; })()`, true);
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO, true));
       await shot("1-fillet-preview.png");
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_2, true));
       await shot("2-final.png");
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_3, true));
       await shot("3-complex.png");
+      await win.webContents.executeJavaScript(`window.y3dApp.bgKernel.ready = true; 0`, true);
     }
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_STL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_STEP, true));
@@ -6027,6 +6050,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);
+    clearInterval(jitter);
+    await win.webContents.executeJavaScript("window.__realInput = true; 0", true);
     report = report.concat(await navigationChecks(win));
   } catch (e) {
     errors.push(`scenario failed: ${String(e)}`);
