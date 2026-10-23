@@ -3642,8 +3642,9 @@ function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean): So
  * A flat face swept along an open path into a new solid. `toPath`: the face is first moved so its
  * centre sits on the path's end nearest it, turned square to the path there and then `turnDeg` about
  * the path; otherwise it is swept where it is. `round`: round corners where the path turns sharply (else mitred).
+ * `scale`: the profile's size (1 = as drawn), about the path's end it starts from.
  */
-export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0): Solid {
+export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0, scale = 1): Solid {
   let face = findFace(shape, faceId);
   if (!face || face.geomType !== "PLANE") throw new Error("Sweep: the profile must be a flat face");
   if (!pathEnds(path).length) throw new Error("Sweep: the path must be open (it has no ends)");
@@ -3654,6 +3655,8 @@ export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: bool
     face = translateShape(face, sub3(end.point, c));
     if (Math.abs(turnDeg) > 1e-9) face = rotateShape(face, turnDeg, end.point, end.dir);
   }
+  if (!(scale > 0)) throw new Error("Sweep: Profile size must be more than 0%");
+  if (Math.abs(scale - 1) > 1e-9) face = scaleShape(face, [scale, scale, scale], nearestEnd(face, path)!.point);
   // outerWire / innerWires delete the face they are called on.
   return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round);
 }

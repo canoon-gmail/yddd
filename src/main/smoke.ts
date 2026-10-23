@@ -1053,7 +1053,7 @@ const SCENARIO_3 = String.raw`
     const jv = K.solidVolume(app.doc.get(bx).shape);
     expect("15b Revolve a solid's face 90° about its edge: joined into the solid (quarter cylinder r 20 · 20 added)",
       app.doc.bodies.length === n && near(jv, v0 + Math.PI * 400 * 20 / 4) && K.isValidShape(app.doc.get(bx).shape), { edges, v0, jv });
-    // S W / R E with a solid selected: Scale / Rotate closes; Sweep waits for a face click, Revolve says what to select
+    // S W / R E with a solid selected: Scale / Rotate closes; Sweep and Revolve wait for a face click
     app.run("mode.body");
     const refused = [];
     for (const [k1, k2] of [["s", "w"], ["r", "e"]]) {
@@ -1063,8 +1063,8 @@ const SCENARIO_3 = String.raw`
       refused.push({ op: app.op && app.op.spec.title, xf: !!app.xf, err: [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent).join(" | ") });
       key("Escape", "Escape");
     }
-    expect("15b S W / R E on a solid: no Scale panel or Rotate gizmo left; Sweep panel waiting, Revolve error",
-      refused[0].op === "Sweep" && !refused[0].err && !refused[1].op && !refused[1].xf && /^Revolve: select one flat face/.test(refused[1].err), refused);
+    expect("15b S W / R E on a solid: no Scale panel or Rotate gizmo left; Sweep / Revolve panel waiting (no error)",
+      refused[0].op === "Sweep" && !refused[0].err && !refused[0].xf && refused[1].op === "Revolve" && !refused[1].err && !refused[1].xf, refused);
     // Not in Pro: S W is just Scale (W does nothing)
     document.body.classList.remove("pro");
     app.run("mode.body"); app.setSelection([{ kind: "body", body: path, id: 0 }]); await chord("s", "w");
@@ -2620,7 +2620,8 @@ const SCENARIO_SPLINE = String.raw`
     app.run("mode.body");
     // A circle swept along a long Spline (12 points): its heavy tube face is drawn coarser — quick, not 400 000 triangles
     {
-      const q = Array.from({ length: 12 }, (_, i) => [i * 4, (i % 2 ? 6 : -6) + i, 0]);
+      // (10 mm apart: its tightest bend 2.1 mm — 4 mm apart bent at 0.33 mm, the 1.5 mm tube folded through itself there)
+      const q = Array.from({ length: 12 }, (_, i) => [i * 10, (i % 2 ? 6 : -6) + i, 0]);
       const nq = q.length, add = (u, v) => u.map((x, i) => x + v[i]), sub = (u, v) => u.map((x, i) => x - v[i]), mul = (u, k) => u.map((x) => x * k);
       const tan = (i) => (i === 0 ? sub(q[1], q[0]) : i === nq - 1 ? sub(q[nq - 1], q[nq - 2]) : mul(sub(q[i + 1], q[i - 1]), 0.5));
       const pts = [q[0]];
@@ -2636,6 +2637,11 @@ const SCENARIO_SPLINE = String.raw`
       const kinds = [...new Set(tube.faces.map((f) => f.geomType))].sort().join(), want = Math.PI * 1.5 * 1.5 * L, v = K.solidVolume(tube);
       expect("spline: a circle swept along a 12-point Spline — exact tori (arcs fitted within 0.01 mm), volume = disc × path length (within 0.05%), valid, drawn quickly",
         K.isValidShape(tube) && kinds === "PLANE,TORUS" && Math.abs(v - want) / want < 5e-4 && ms < 1500 && tris < 100000, { ms: Math.round(ms), tris, kinds, v, want, valid: K.isValidShape(tube) });
+      // Profile size %: the tube swept at 50% — its volume a quarter; cut through its path: 2 valid pieces
+      const half = K.sweepFace(disc, disc.faces[0].hashCode, wire, true, false, 0, 0.5), hv = K.solidVolume(half);
+      const cut = K.splitByPlane(half, [0, 0, 0], [0, 0, 1]);
+      expect("spline: Profile size 50% → the tube's volume ÷ 4 (within 0.05%); cut through its path: 2 valid pieces",
+        K.isValidShape(half) && Math.abs(hv - v / 4) / (v / 4) < 5e-4 && cut.above && cut.below && K.isValidShape(cut.above) && K.isValidShape(cut.below), { hv, want: v / 4 });
     }
     // K on the face again: its curve comes back as a Spline, points to drag
     app.setSelection([{ kind: "body", body: face.id, id: 0 }]);
@@ -2707,6 +2713,35 @@ const SCENARIO_ARRAYFAST = String.raw`
     app.applyOp(); await sleep(50);
     const made2 = app.doc.bodies.filter((b) => !before2.has(b.shape)), remeshed2 = made2.filter((b) => vp.meshMs.has(b.shape)).length;
     expect("circular fast: applied — 4 balls, the 3 copies reuse the ball's triangles (none meshed)", app.doc.bodies.length === 4 && made2.length === 3 && remeshed2 === 0, { bodies: app.doc.bodies.length, made: made2.length, remeshed2 });
+    // Nothing selected: Array copy / Revolve open their panel and wait for a pick (like Sweep), no error
+    const opErr = () => (document.querySelector("#op-panel .op-error") || {}).textContent || "";
+    const row = (id) => document.querySelector("#outliner .ol-row[data-id='" + id + "'] .ol-name").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    document.querySelectorAll("#toasts .toast").forEach((t) => t.remove());
+    app.doc.reset([]); app.run("mode.body");
+    const b3 = app.doc.makeBody(K.makeSphereAt([0, 0, 10], 10), "Ball");
+    app.doc.commit([b3], "ball"); vp.fit(); app.setSelection([]); await sleep(50);
+    app.run("edit.array"); await sleep(50);
+    const aw = { title: app.op && app.op.spec.title, err: opErr(), green: !!document.querySelector("#op-panel .op-error.waiting"), toasts: document.querySelectorAll("#toasts .toast.error").length };
+    row(b3.id); await sleep(150);
+    const ap = { n: !!document.querySelector("#op-panel [data-key=n]"), sel: app.selectedBodyIds().join() };
+    opValue("dir", 0); opValue("centre", 0); opValue("n", 3); opValue("gap", 5); await sleep(150);
+    app.applyOp(); await sleep(50);
+    expect("wait for pick: Array copy with nothing selected waits (no error), a Bodies row picks the ball → its panel → 3 balls",
+      aw.title === "Array copy" && /click an object/i.test(aw.err) && aw.green && aw.toasts === 0 && ap.n && ap.sel === String(b3.id) && app.doc.bodies.length === 3, { aw, ap, bodies: app.doc.bodies.length });
+    app.doc.reset([]); app.run("mode.body");
+    const sq = app.doc.makeBody(K.makeRectFace(G, [10, 0, 0], 10, 10), "Square", "face");
+    app.doc.commit([sq], "square"); vp.fit(); app.setSelection([]); await sleep(50);
+    app.run("op.revolve"); await sleep(50);
+    const rw = { title: app.op && app.op.spec.title, err: opErr(), green: !!document.querySelector("#op-panel .op-error.waiting"), toasts: document.querySelectorAll("#toasts .toast.error").length };
+    row(sq.id); await sleep(150);
+    const axisSel3 = document.querySelector("#op-panel select[data-key=axis]");
+    const yi = axisSel3 ? [...axisSel3.options].findIndex((o) => /^Y axis/.test(o.textContent)) : -1;
+    opValue("axis", yi); opValue("angle", 360); await sleep(150);
+    const rn = (document.querySelector("#op-panel .op-note") || {}).textContent || "";
+    app.applyOp(); await sleep(50);
+    const ring = app.doc.bodies[0], rv = ring ? K.solidVolume(ring.shape) : 0, want = Math.PI * (15 * 15 - 5 * 5) * 10;
+    expect("wait for pick: Revolve with nothing selected waits (no error), a Bodies row picks the square → about Y: a ring (π·(15²−5²)·10)",
+      rw.title === "Revolve" && /flat face/.test(rw.err) && rw.green && rw.toasts === 0 && /Face: Square/.test(rn) && app.doc.bodies.length === 1 && ring.kind === "solid" && Math.abs(rv - want) < 1e-3 * want, { rw, rn, yi, rv, want });
   } catch (e) {
     expect("array fast: no errors", false, String(e && e.stack || e));
   }

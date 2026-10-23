@@ -2010,7 +2010,7 @@ class App implements ToolHost {
     if (!op) return null;
     const { values, key } = this.opValues();
     if (key === op.key && op.result) return op.result;
-    const err = op.inputs[0].closest("#op-panel")!.querySelector(".op-error")!;
+    const err = this.opPanel.querySelector(".op-error")!;
     try {
       if (Object.values(values).some((v) => !Number.isFinite(v))) throw new Error("enter a number");
       // Worked out in the background kernel: the app stays live; the newest values go next when this one's done
@@ -2777,18 +2777,56 @@ class App implements ToolHost {
 
   /** Revolve: turn a flat face about an axis (a guide line, one of its straight edges or a world axis) into a solid. */
   private opRevolve(): void {
-    const target = this.oneFaceTarget();
-    if (!target) {
-      this.toast("Revolve: select one flat face (Face mode, key 2) or one flat face object", "error");
-      return;
-    }
-    const { bodyId, faceId } = target;
+    const t = this.oneFaceTarget();
+    const tb = t && this.doc.get(t.bodyId);
+    if (tb && isBrep(tb) && findFace(tb.shape, t!.faceId)?.geomType === "PLANE") this.openRevolve(t!);
+    else this.waitForRevolveFace();
+  }
+
+  /** Revolve with no flat face selected: the panel opens and waits for a click on one (or a face object's row). */
+  private waitForRevolveFace(): void {
+    type Target = { bodyId: number; faceId: number } | "bad" | null;
+    const targetAt = (e: PointerEvent): Target => {
+      const hit = this.viewport.pick(e.clientX, e.clientY, "face");
+      const b = hit && this.doc.get(hit.body);
+      if (!hit || !b) return null;
+      return hit.kind === "face" && isBrep(b) && findFace(b.shape, hit.id)?.geomType === "PLANE" ? { bodyId: b.id, faceId: hit.id } : "bad";
+    };
+    const targetOf = (id: number): Target => {
+      const b = this.doc.get(id);
+      return b?.kind === "face" && b.shape.faces[0]?.geomType === "PLANE" ? { bodyId: b.id, faceId: b.shape.faces[0].hashCode } : "bad";
+    };
+    const take = (t: Target) => {
+      if (!t) return;
+      if (t === "bad") return this.toast("Revolve: click a flat face — of a face object (Rectangle, Circle, a sketch...) or a solid", "error");
+      const { angle } = this.opValues().values;
+      if (Number.isFinite(angle)) this.defaults.revolveAngle = angle; // (the panel opens again with it)
+      this.openRevolve(t);
+    };
+    const todo = "click a flat face to revolve";
+    this.startOp({
+      title: "Revolve",
+      label: "Revolve",
+      note: "Face: —",
+      hint: `Revolve: ${todo} · Esc cancel`,
+      fields: [{ key: "angle", label: "Angle (°)", value: this.defaults.revolveAngle, step: 15 }],
+      compute: () => {
+        throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+      },
+      pick: (e) => take(targetAt(e)),
+      pickBody: (id) => take(targetOf(id)),
+      hover: (e) => {
+        const t = targetAt(e);
+        this.viewport.setHighlight([], t && t !== "bad" ? { kind: "face", body: t.bodyId, id: t.faceId } : null);
+        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t ? "pointer" : "crosshair";
+      },
+    });
+    this.viewport.setHighlight([], null);
+  }
+
+  private openRevolve({ bodyId, faceId }: { bodyId: number; faceId: number }): void {
     const body = this.shapeBody(bodyId, "Revolve");
     if (!body) return;
-    if (findFace(body.shape, faceId)?.geomType !== "PLANE") {
-      this.toast("Revolve works on flat faces only", "error");
-      return;
-    }
     // Axes to pick from: guide lines (nearest the face first), the face's straight edges, the world axes.
     const c = new THREE.Vector3(...faceAxis(body.shape, faceId)!.center);
     const along = (a: V3, b: V3): Axis => ({ origin: a, dir: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] });
@@ -2820,9 +2858,12 @@ class App implements ToolHost {
       const b = ray.direction.dot(dir), d = ray.direction.dot(ray.origin), f = dir.dot(ray.origin);
       return { i: firstWorld + w, at: dir.multiplyScalar((f - b * d) / (1 - b * b)) };
     };
+    // (the face shows picked: it may have been clicked in the panel, not selected)
+    const picked: SelItem[] = [body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: faceId }];
     this.startOp({
       title: "Revolve",
       label: "Revolve",
+      note: `Face: ${escapeHtml(body.kind === "face" ? body.name : `a face of ${body.name}`)}`,
       fields,
       hint: "Revolve: click a guide line, a straight edge of the face or the X / Y / Z axis line to turn about it · Enter apply · Esc cancel",
       pick: (e) => {
@@ -2834,7 +2875,7 @@ class App implements ToolHost {
       },
       hover: (e) => {
         const t = axisAt(e);
-        this.viewport.setHighlight(this.selection, t?.edge !== undefined ? { kind: "edge", body: body.id, id: t.edge } : null);
+        this.viewport.setHighlight(picked, t?.edge !== undefined ? { kind: "edge", body: body.id, id: t.edge } : null);
         const shown = Number(this.op?.inputs.find((i) => i.dataset.key === "axis")?.value ?? -1);
         this.viewport.setGuides(this.doc.guides, axes[shown]?.guide ?? -1, t && t.i < firstEdge ? axes[t.i].guide! : -1);
         this.hud(t?.at ? axes[t.i].name : null, t?.at);
@@ -2851,6 +2892,7 @@ class App implements ToolHost {
         if (newBody !== undefined) this.defaults.joinNew = !!newBody;
       },
     });
+    this.viewport.setHighlight(picked, null);
   }
 
   /**
@@ -2888,6 +2930,8 @@ class App implements ToolHost {
       }
       if (onPath) fields.push({ key: "toPath", label: "Centre profile on the path", value: 0, type: "checkbox" });
       fields.push({ key: "turn", label: "Turn profile (°)", value: this.defaults.sweepTurn, step: 5 });
+      // (the profile's size for this sweep only — e.g. smaller to fit a tight bend; the face itself stays)
+      fields.push({ key: "size", label: "Profile size (%)", value: 100, step: 5 });
     }
     if (body?.kind === "solid") fields.push({ key: "newBody", label: "New solid", value: this.defaults.joinNew ? 1 : 0, type: "checkbox" });
     const todo = !body ? "click a flat face for the profile (a flat ring makes a tube)" : !wire ? "click a path or guide line to sweep along" : "";
@@ -2927,9 +2971,9 @@ class App implements ToolHost {
       fields,
       note: `Profile: ${body ? (body.kind === "face" ? body.name : `a face of ${body.name}`) : "—"}<br>Path: ${guide ? "guide line" : pathBody ? pathBody.name : "—"}`,
       hint: `Sweep: ${todo ? `${todo} · ` : "click another face / path / guide line to change it · Enter apply · "}Esc cancel`,
-      compute: ({ round, toPath, turn, newBody }) => {
+      compute: ({ round, toPath, turn, size, newBody }) => {
         if (!body || !wire) throw new OpWaiting(todo);
-        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn), !!newBody, "Sweep");
+        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100), !!newBody, "Sweep");
       },
       remember: ({ round, turn, newBody }) => {
         this.defaults.sweepRound = round;
@@ -5315,12 +5359,60 @@ class App implements ToolHost {
    */
   private arrayCopy(change = false): void {
     const ids = this.selectedBodyIds();
+    if (!ids.length && !change) return this.waitForArrayObjects();
     if (!ids.length) return this.toast("Array copy: select objects first (Solid mode, key 1)", "error");
     const rec = this.arrayToChange(ids);
     if (change && typeof rec === "string") return this.toast(rec, "error");
     if (change && !rec) return this.toast("Change the array: select an array's whole group (click its name in the Bodies panel)", "error");
     if (change && rec && typeof rec !== "string" && rec.circular) return this.circularCopy(rec);
     this.opArrayCopy(ids, typeof rec === "string" ? null : rec, change);
+  }
+
+  /**
+   * Array copy with nothing selected: the panel opens and waits for the objects to copy — a click (or a
+   * row in the Bodies panel) picks one and goes on; Shift+click picks several, Enter goes on with them.
+   */
+  private waitForArrayObjects(): void {
+    const picked: number[] = [];
+    const go = (ids: number[]) => {
+      this.closeOpPanel();
+      this.setMode("body");
+      this.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
+      this.arrayCopy();
+    };
+    const take = (id: number | undefined, more: boolean) => {
+      if (id === undefined) return;
+      const k = picked.indexOf(id);
+      if (k >= 0 && more) picked.splice(k, 1);
+      else if (k < 0) picked.push(id);
+      if (!more) return go(picked);
+      const note = this.opPanel.querySelector(".op-note");
+      if (note) note.textContent = `Objects: ${picked.length ? picked.map((i) => this.doc.get(i)!.name).join(", ") : "—"}`;
+      if (this.op) this.op.result = null; // (the panel's values didn't change: worked out again)
+      this.previewOp();
+      this.viewport.setHighlight(shown(), null);
+    };
+    const shown = (): SelItem[] => picked.map((id) => ({ kind: "body", body: id, id: 0 }));
+    const todo = "click an object to copy (Shift+click: several, then Enter)";
+    this.startOp({
+      title: "Array copy",
+      label: "Array copy",
+      note: "Objects: —",
+      hint: `Array copy: ${todo} · Esc cancel`,
+      fields: [],
+      applyLabel: "Next ⏎",
+      compute: () => {
+        if (!picked.length) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+        return { ghost: new Map(), commit: () => ({ select: [], then: () => go([...picked]) }) };
+      },
+      pick: (e) => take(this.viewport.pick(e.clientX, e.clientY, "body")?.body, e.shiftKey || e.ctrlKey),
+      pickBody: (id) => take(id, false),
+      hover: (e) => {
+        const hit = this.viewport.pick(e.clientX, e.clientY, "body");
+        this.viewport.setHighlight(shown(), hit ? { kind: "body", body: hit.body, id: 0 } : null);
+        this.viewport.canvas.style.cursor = hit ? "pointer" : "crosshair";
+      },
+    });
   }
 
   private arrayGroupCache = { version: -1, map: new Map<string, ArrayRecord | string | null>() };
@@ -6444,8 +6536,8 @@ class App implements ToolHost {
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
-      ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
-      ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns"],
+      ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
+      ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
