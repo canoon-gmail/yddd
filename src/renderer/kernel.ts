@@ -3357,6 +3357,102 @@ export function pullToPoint(shape: Shape, faceId: number, h: number, top = 0): S
   return solid;
 }
 
+/**
+ * A sharp tip of a solid, to round: a cone's apex, or a corner where flat faces meet at less than 90° each (a
+ * pyramid's point — not a box corner). `axis`: unit, from the tip into the solid; `half`: the angle (radians) from it
+ * to the widest edge / the cone's side; `reach`: how far (along the axis) the tip's faces go before anything else.
+ */
+export interface Tip {
+  at: V3;
+  axis: V3;
+  half: number;
+  reach: number;
+  cone: boolean;
+}
+
+const tipCache = new WeakMap<object, Tip[]>();
+
+/** The solid's sharp tips (outward ones only: a pocket's deepest point isn't one), see Tip. */
+export function solidTips(shape: Shape): Tip[] {
+  const cached = tipCache.get(shape);
+  if (cached) return cached;
+  const tips: Tip[] = [];
+  const near = (p: V3, q: V3) => Math.hypot(...sub3(p, q)) < 1e-6;
+  const ends = shape.edges.map((e) => ({ e, a: e.startPoint.toTuple() as V3, b: e.endPoint.toTuple() as V3 }));
+  // Cone apexes: a CONE face whose apex is one of the solid's corners, the solid inside it
+  for (const f of shape.faces) {
+    if (f.geomType !== "CONE") continue;
+    let apex: V3, dir: V3, semi: number;
+    const s = coneOf(f), ax = s.Position(), loc = ax.Location(), d = ax.Direction();
+    try {
+      semi = Math.abs(s.SemiAngle());
+      dir = [d.X(), d.Y(), d.Z()];
+      const R = s.RefRadius(), t = R / Math.tan(s.SemiAngle());
+      apex = [loc.X() - t * dir[0], loc.Y() - t * dir[1], loc.Z() - t * dir[2]];
+    } finally {
+      for (const o of [d, loc, ax, s]) o.delete();
+    }
+    if (!ends.some(({ a, b }) => near(a, apex) || near(b, apex))) continue;
+    const q = f.pointOnSurface(0.5, 0.5).toTuple() as V3, along = dot3(sub3(q, apex), dir);
+    const axis: V3 = along >= 0 ? dir : neg(dir);
+    const radial = sub3(sub3(q, apex), axis.map((v) => v * Math.abs(along)) as V3);
+    if (dot3(normalAtUV(f, 0.5, 0.5), radial) <= 0) continue; // (a cone-shaped hole's bottom)
+    const reach = Math.max(...outlinePoints(f).map((p) => dot3(sub3(p, apex), axis))); // (where the cone's side ends)
+    if (reach > 1e-6 && !tips.some((t) => near(t.at, apex))) tips.push({ at: apex, axis, half: semi, reach, cone: true });
+  }
+  // Pointed corners where flat faces meet
+  const corners: V3[] = [];
+  for (const { a, b } of ends) for (const p of [a, b]) if (!corners.some((c) => near(c, p))) corners.push(p);
+  const faceEdges = shape.faces.map((f) => ({ f, ids: new Set(f.edges.map((e) => e.hashCode)) }));
+  for (const P of corners) {
+    if (tips.some((t) => near(t.at, P))) continue;
+    const at = ends.filter(({ a, b }) => near(a, P) || near(b, P));
+    if (at.length < 3 || at.some(({ e }) => e.geomType !== "LINE")) continue;
+    const dirs = at.map(({ a, b }) => norm3(near(a, P) ? sub3(b, P) : sub3(a, P)));
+    const faces = faceEdges.filter(({ ids }) => at.some((x) => ids.has(x.e.hashCode)));
+    if (faces.some(({ f }) => f.geomType !== "PLANE")) continue;
+    // Each face's angle at the corner under 90° (not a box corner), and every edge behind every face (pointing out)
+    let sharp = true;
+    for (const { f, ids } of faces) {
+      const mine = at.filter((x) => ids.has(x.e.hashCode)).map((x) => dirs[at.indexOf(x)]);
+      const n = norm3(f.normalAt().toTuple() as V3);
+      if (mine.length !== 2 || dot3(mine[0], mine[1]) < Math.cos((89 * Math.PI) / 180) || dirs.some((d) => dot3(n, d) > 1e-7)) sharp = false;
+    }
+    if (!sharp) continue;
+    const axis = norm3(dirs.reduce((s, d) => [s[0] + d[0], s[1] + d[1], s[2] + d[2]] as V3, [0, 0, 0] as V3));
+    const half = Math.max(...dirs.map((d) => Math.acos(Math.min(1, dot3(d, axis)))));
+    const reach = Math.min(...at.map(({ a, b }) => dot3(sub3(near(a, P) ? b : a, P), axis)));
+    if (half < (80 * Math.PI) / 180 && reach > 1e-6) tips.push({ at: P, axis, half, reach, cone: false });
+  }
+  tipCache.set(shape, tips);
+  return tips;
+}
+
+/** The largest radius roundTip takes for this tip (its ball must end before the tip's faces do). */
+export function tipRadiusMax(tip: Tip): number {
+  return (tip.reach * Math.sin(tip.half)) / Math.cos(tip.half) ** 2;
+}
+
+/**
+ * Round a tip (see solidTips) with a ball of radius `r`: for a cone, a sphere cap meeting the side smoothly; for a
+ * pyramid, the tip cut down to a sphere touching its edges (smooth along the edges, a slight crease on the faces).
+ */
+export function roundTip(shape: Solid, tip: Tip, r: number): Solid {
+  if (!(r > 0)) throw new Error("radius must be > 0");
+  const max = tipRadiusMax(tip);
+  if (r >= max * (1 - 1e-6)) throw new Error(`Round tip: ${+r.toFixed(3)} mm is too big for this tip — under ${+max.toFixed(2)} mm`);
+  const { at: A, axis: u, half: g } = tip;
+  const D = r / Math.sin(g), xt = (r * Math.cos(g) ** 2) / Math.sin(g), rt = r * Math.cos(g);
+  const along = (x: number): V3 => [A[0] + x * u[0], A[1] + x * u[1], A[2] + x * u[2]];
+  // The tip's end up to where the ball touches its side / edges (a little wider, from a little beyond the point)
+  const tool = occCylinder(rt * 1.05 + 1e-3, xt + r, along(-r), u) as Solid;
+  const cap = boolean("common", makeSphereAt(along(D), r), tool);
+  const rest = boolean("cut", shape, tool);
+  const out = boolean("fuse", rest, tip.cone ? cap : boolean("common", shape, cap)).simplify() as Solid;
+  if (!isValidShape(out) || solidVolume(out) <= 1e-9) throw new Error("Round tip: the result is not a valid solid");
+  return out;
+}
+
 /** The straight edges of a flat face (their ends), e.g. as revolve axes. */
 export function faceLineEdges(shape: Shape, faceId: number): [V3, V3][] {
   const face = findFace(shape, faceId);

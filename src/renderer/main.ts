@@ -106,6 +106,10 @@ import {
   makeCone,
   pointCenter,
   pullToPoint,
+  solidTips,
+  roundTip,
+  tipRadiusMax,
+  type Tip,
   makeCircleFace,
   makeRectFace,
   makePolygonFace,
@@ -1130,7 +1134,7 @@ class App implements ToolHost {
       case "macro.box": return this.opBoxFromFace();
       case "macro.lidIn": return this.openBoxLid(false, this.selectedLidBox());
       case "macro.lidOver": return this.openBoxLid(true, this.selectedLidBox());
-      case "op.fillet": return this.opEdges("fillet");
+      case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
       case "op.offset": return this.opOffset();
@@ -1157,7 +1161,7 @@ class App implements ToolHost {
       case "bool.intersect": return this.boolean("intersect");
 
       case "xf.move":
-        if (this.selPoint && this.centerDot) return this.opPullToPoint();
+        if (this.selDot >= 0) return this.opPullToPoint();
         if (this.selGuide >= 0 && !this.selection.length) return this.startGuideMove();
         return this.mode === "edge" && this.selection.some((s) => s.kind === "edge") ? this.startEdgeMove() : this.startTransform("translate");
       case "xf.rotate": return this.startTransform("rotate");
@@ -1251,7 +1255,7 @@ class App implements ToolHost {
 
   private setSelection(items: SelItem[]): void {
     this.selection = items;
-    if (items.length) this.selPoint = false;
+    if (items.length) this.selDot = -1;
     if (items.length) this.clearGuideGroup();
     this.refreshSelection();
     if (this.xf?.guide !== undefined) {
@@ -1279,17 +1283,18 @@ class App implements ToolHost {
       this.showDimensions();
     }
     // The selected flat face's centre dot: select it (G then pulls the face to a point).
-    if (this.centerDot && !this.xf && !e.shiftKey && !e.ctrlKey && this.onCenterDot(e)) {
+    const dot = this.xf || e.shiftKey || e.ctrlKey ? -1 : this.dotAt(e);
+    if (dot >= 0) {
       if (this.selGuide >= 0) {
         this.selGuide = -1;
         this.showGuides();
       }
-      this.selPoint = true;
+      this.selDot = dot;
       this.setSelection([]);
-      this.hint("Centre point selected · G pulls the face to a point: a cone (a circle) or a pyramid · Esc deselects");
+      this.hint(this.dots[dot].tip ? "Tip selected · F rounds it · Esc deselects" : "Centre point selected · G pulls the face to a point: a cone (a circle) or a pyramid · Esc deselects");
       return;
     }
-    this.selPoint = false;
+    this.selDot = -1;
     const g = this.viewport.guideAt(e.clientX, e.clientY);
     if (g !== this.selGuide) {
       this.selGuide = g;
@@ -1439,7 +1444,7 @@ class App implements ToolHost {
 
   private refreshSelection(): void {
     this.viewport.setHighlight(this.selection, this.hover);
-    this.updateCenterDot();
+    this.updateDots();
     this.renderOutliner();
     this.renderProps();
     this.renderToolbarState();
@@ -1554,16 +1559,16 @@ class App implements ToolHost {
       if (this.hoverGuide >= 0) { this.hoverGuide = -1; this.showGuides(); }
       return;
     }
-    const onDot = !this.xf && this.onCenterDot(e);
+    const onDot = this.xf ? -1 : this.dotAt(e);
     if (onDot !== this.hoverDot) {
       this.hoverDot = onDot;
-      this.updateCenterDot();
-      if (!onDot) this.viewport.canvas.style.cursor = this.selCursor();
+      this.updateDots();
+      if (onDot < 0) this.viewport.canvas.style.cursor = this.selCursor();
     }
-    if (onDot) {
+    if (onDot >= 0) {
       if (this.hover) { this.hover = null; this.viewport.setHighlight(this.selection, null); }
       this.viewport.canvas.style.cursor = "pointer";
-      if (!this.selPoint) this.hint("Centre point: click it, then G pulls the face to a point (a cone / pyramid)");
+      if (onDot !== this.selDot) this.hint(this.dots[onDot].tip ? "Tip: click it, then F rounds it" : "Centre point: click it, then G pulls the face to a point (a cone / pyramid)");
       return;
     }
     const g = this.viewport.guideAt(e.clientX, e.clientY);
@@ -1656,7 +1661,7 @@ class App implements ToolHost {
             this.selDim = -1;
             this.showDimensions();
           }
-          this.selPoint = false;
+          this.selDot = -1;
           this.setSelection([]);
         }
         return;
@@ -4392,49 +4397,61 @@ class App implements ToolHost {
     tool.start(bodyId, edgeId);
   }
 
-  /** The centre dot of the one selected flat face that can be pulled to a point (see pointCenter). */
-  private centerDot: { body: number; face: number; at: V3 } | null = null;
-  /** The centre dot is selected (the face isn't): G pulls the face to a point. */
-  private selPoint = false;
-  private hoverDot = false;
+  /**
+   * Dots on the selection to click: the one selected flat face's centre (see pointCenter; G pulls the face to a
+   * point), the selected solid's sharp tips (see solidTips; F rounds one).
+   */
+  private dots: { body: number; at: V3; face?: number; tip?: Tip }[] = [];
+  /** The clicked dot (dots[selDot]; the face / solid itself isn't selected then), -1: none. */
+  private selDot = -1;
+  private hoverDot = -1;
 
-  /** Show the centre dot of the selected flat face (circle, straight edges, no holes), or of the selected point. */
-  private updateCenterDot(): void {
-    if (!this.selPoint) {
-      this.centerDot = null;
+  /** Work out the dots for the selection (kept while one is selected) and show them (not while an op panel is open). */
+  private updateDots(): void {
+    if (this.selDot < 0) {
+      this.dots = [];
       const s = this.selection.length === 1 ? this.selection[0] : null;
       const b = s && this.doc.get(s.body);
       if (s && b && isBrep(b) && (b.kind === "solid" || b.kind === "face")) {
         try {
           const faceId = s.kind === "face" ? s.id : s.kind === "body" && b.kind === "face" ? b.shape.faces[0]?.hashCode : undefined;
           const p = faceId !== undefined ? pointCenter(b.shape, faceId) : null;
-          if (p) this.centerDot = { body: b.id, face: faceId!, at: p.center };
+          if (p) this.dots.push({ body: b.id, face: faceId!, at: p.center });
+          if (b.kind === "solid" && s.kind !== "edge") for (const tip of solidTips(b.shape)) this.dots.push({ body: b.id, tip, at: tip.at });
         } catch (err) {
-          console.warn("centre dot:", err); // (a shape already freed, e.g. mid-replace: no dot)
+          console.warn("dots:", err); // (a shape already freed, e.g. mid-replace: no dots)
+          this.dots = [];
         }
       }
     }
-    if (!this.centerDot) this.hoverDot = false;
-    this.viewport.showCenterDot(this.centerDot && !this.op ? new THREE.Vector3(...this.centerDot.at) : null, this.selPoint ? "selected" : this.hoverDot ? "hover" : "shown");
+    if (this.hoverDot >= this.dots.length) this.hoverDot = -1;
+    const look = (i: number) => (i === this.selDot ? "selected" : i === this.hoverDot ? "hover" : "shown");
+    this.viewport.showDots(this.op ? [] : this.dots.map((d, i) => ({ p: new THREE.Vector3(...d.at), look: look(i) })));
   }
 
-  /** The pointer is on the centre dot. */
-  private onCenterDot(e: { clientX: number; clientY: number }): boolean {
-    if (!this.centerDot) return false;
-    const p = new THREE.Vector3(...this.centerDot.at), s = this.viewport.toScreen(p);
-    return this.viewport.inView(p, 0) && Math.hypot(e.clientX - s.x, e.clientY - s.y) < 10;
+  /** The dot under the pointer (index into dots), -1: none. */
+  private dotAt(e: { clientX: number; clientY: number }): number {
+    let best = -1, bd = 10;
+    this.dots.forEach((d, i) => {
+      const p = new THREE.Vector3(...d.at), s = this.viewport.toScreen(p), dist = Math.hypot(e.clientX - s.x, e.clientY - s.y);
+      if (this.viewport.inView(p, 0) && dist < bd) [best, bd] = [i, dist];
+    });
+    return best;
+  }
+
+  private dropDot(): void {
+    this.selDot = -1;
+    this.updateDots();
   }
 
   /** G on a flat face's centre dot: the face becomes a cone (a circle) or a pyramid, its tip that far out — or a flat top. */
   private opPullToPoint(): void {
-    const dot = this.centerDot!;
+    const dot = this.dots[this.selDot];
+    if (dot.face === undefined) return this.toast("G on a tip: nothing to move — F rounds it (G pulls a face's centre dot)", "error");
     const body = this.shapeBody(dot.body, "Pull to a point");
     const p = body && pointCenter(body.shape, dot.face);
-    if (!body || !p) {
-      this.selPoint = false;
-      this.updateCenterDot();
-      return;
-    }
+    if (!body || !p) return this.dropDot();
+    const faceId = dot.face;
     const size = p.circle ?? Math.max(...p.corners!.map((c) => Math.hypot(c[0] - p.center[0], c[1] - p.center[1], c[2] - p.center[2])));
     const name = p.circle ? "Cone" : "Pyramid";
     const isFace = body.kind === "face";
@@ -4447,7 +4464,7 @@ class App implements ToolHost {
         { key: "top", label: "Top size (%) — 0: a point", value: 0, step: 10, min: 0 },
       ],
       compute: ({ h, top }) => {
-        const piece = pullToPoint(body.shape, dot.face, h, top / 100);
+        const piece = pullToPoint(body.shape, faceId, h, top / 100);
         if (isFace) {
           return {
             ghost: new Map([[body.id, piece]]),
@@ -4463,7 +4480,28 @@ class App implements ToolHost {
       },
       drag: { origin: p.center, dir: p.normal, key: "h" },
     });
-    this.viewport.showCenterDot(null); // (back with the selection when the panel closes)
+    this.updateDots(); // (hidden while the panel is open; back with the selection when it closes)
+  }
+
+  /** F on a tip's dot: round the point with a ball of that radius (a cone's: smoothly; a pyramid's: smooth along its edges). */
+  private opRoundTip(): void {
+    const dot = this.dots[this.selDot];
+    if (!dot.tip) return this.toast("F on a face's centre dot: nothing to round — G pulls it to a point (F rounds a tip)", "error");
+    const body = this.shapeBody(dot.body, "Round tip");
+    if (!body) return this.dropDot();
+    const tip = dot.tip, max = tipRadiusMax(tip);
+    const value = max > 2 ? 1 : +(max / 2).toPrecision(2);
+    this.startOp({
+      title: "Round tip",
+      label: "Round tip",
+      note: `${tip.cone ? "A cone's point: the ball blends into its side" : "A pointed corner: the ball blends into its edges"} · under ${fmt(max)} mm`,
+      fields: [{ key: "r", label: "Radius (mm)", value, step: value < 1 ? 0.1 : 0.5, min: 0 }],
+      compute: ({ r }) => {
+        const result = roundTip(this.solidOf(body.id, "Round tip"), tip, r);
+        return { ghost: new Map([[body.id, result]]), commit: () => this.replaceOutcome(new Map([[body.id, result]]), "Round tip").commit() };
+      },
+    });
+    this.updateDots();
   }
 
   private selGuide = -1;
@@ -6293,6 +6331,7 @@ class App implements ToolHost {
         : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (tick Auto by Snap in the status bar to snap without Ctrl)"],
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["Dot · G", "Pull to a point: select a flat circle, rectangle or polygon face (or its face object) — a dot shows in its middle; click the dot, G, drag or type the height: a cone / pyramid (out of a solid: added to it; a minus height into it: cut out of it) · Top size %: a flat top instead of a point"],
+      ["Tip dot · F", "Round tip: a selected solid shows a dot on each sharp tip (a cone's point, a pyramid's — not box corners); click the dot, F, the radius (mm): the point becomes a ball — on a cone it blends smoothly into the side, on a pyramid into its edges (a slight crease on the flat sides); the panel says the largest radius the tip takes"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list); edges it can't do at that size are left sharp — the panel says how many (orange), Apply keeps the rest, and a button sets the largest size that does them all"],
       ["H", "Shell / hollow (opens the selected faces)"],
       ["Macro → Box Lid → Inside Lip / Over the Box", "A lid for an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits), made closed on it: Inside Lip — a plate on the rim, a lip under it fitting in the opening (Lip depth 0: a flat lid; Lip wall 0: a solid plug); Over the Box — a cap, bigger, its skirt round the box's outside. Clearance: the gap to the box (0: an exact fit)"],
@@ -6916,7 +6955,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, pointCenter, pullToPoint, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

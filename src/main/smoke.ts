@@ -2395,11 +2395,12 @@ const SCENARIO_POINT = String.raw`
   const opValue = (k, v) => { const i = document.querySelector("#op-panel input[data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); } };
   const vol = (b) => K.solidVolume(b.shape);
   const near = (a, b) => Math.abs(a - b) < 1e-6 * Math.max(1, Math.abs(b));
-  const dotAt = () => app.centerDot && app.centerDot.at.map((v) => Math.round(v * 1000) / 1000).join();
+  const cdot = () => app.dots.find((d) => d.face !== undefined);
+  const dotAt = () => cdot() && cdot().at.map((v) => Math.round(v * 1000) / 1000).join();
   // Pull the selected thing's centre dot: click the dot, G, set the fields, apply
   const pull = async (h, top = 0) => {
-    clickAt(app.centerDot.at); await sleep(20);
-    const picked = app.selPoint && app.selection.length === 0;
+    clickAt(cdot().at); await sleep(20);
+    const picked = app.selDot >= 0 && app.dots[app.selDot].face !== undefined && app.selection.length === 0;
     app.chord = null; // (not G G: the last pull's G was a moment ago)
     key("g", "KeyG"); await sleep(30);
     const title = app.op ? app.op.spec.title : null;
@@ -2416,7 +2417,7 @@ const SCENARIO_POINT = String.raw`
     app.doc.commit([circle], "circle"); vp.fit(); await sleep(30);
     app.setSelection([{ kind: "body", body: circle.id, id: 0 }]); await sleep(10);
     expect("point: a selected circle face shows its centre dot", dotAt() === "0,0,0", dotAt());
-    if (!app.centerDot) return [{ label: "pull a face to a point", passed: 0, total: 1, checks }];
+    if (!cdot()) return [{ label: "pull a face to a point", passed: 0, total: 1, checks }];
     const c = await pull(30);
     const cone = app.doc.bodies[0];
     expect("point: click the dot (the face lets go), G → Pull to a point; 30 → a cone (volume π·10²·30/3, one cone face, valid, named Cone)",
@@ -2454,15 +2455,15 @@ const SCENARIO_POINT = String.raw`
     app.run("mode.face");
     const side = cyl.shape.faces.find((f) => f.geomType === "CYLINDRE"), cap = cyl.shape.faces.find((f) => f.geomType === "PLANE" && f.center.z > 5);
     app.setSelection([{ kind: "face", body: cyl.id, id: side.hashCode }]); await sleep(10);
-    const sideDot = app.centerDot;
+    const sideDot = cdot();
     app.setSelection([{ kind: "face", body: cyl.id, id: side.hashCode }, { kind: "face", body: cyl.id, id: cap.hashCode }]); await sleep(10);
-    const twoDot = app.centerDot;
+    const twoDot = cdot();
     app.setSelection([{ kind: "face", body: cyl.id, id: cap.hashCode }]); await sleep(10);
-    clickAt(app.centerDot.at); await sleep(20);
-    const sel = app.selPoint;
+    clickAt(cdot().at); await sleep(20);
+    const sel = app.selDot >= 0;
     key("Escape", "Escape"); await sleep(10);
     expect("point: no dot on a curved face or with two faces; a cylinder's top has one; Esc lets the point go",
-      !sideDot && !twoDot && sel && !app.selPoint && !app.centerDot, { sideDot, twoDot, sel, after: app.selPoint });
+      !sideDot && !twoDot && sel && app.selDot < 0 && !cdot(), { sideDot: !!sideDot, twoDot: !!twoDot, sel, after: app.selDot });
   } catch (e) {
     expect("point: no errors", false, String(e && e.stack || e));
   }
@@ -2470,6 +2471,77 @@ const SCENARIO_POINT = String.raw`
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("point scenario failed: " + JSON.stringify(failed));
   return [{ label: "pull a face to a point", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** F on a tip's dot: round a cone's / pyramid's point (exact ball), not box corners or a pocket's bottom; too big says so. */
+const SCENARIO_TIP = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, vp = app.viewport, K = window.ydddKernel, V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  const clickAt = (p) => { const s = vp.toScreen(new V(...p)); for (const t of ["pointermove", "pointerdown", "pointerup"]) vp.canvas.dispatchEvent(new PointerEvent(t, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const opValue = (k, v) => { const i = document.querySelector("#op-panel input[data-key=" + k + "]"); if (i) { i.value = String(v); i.dispatchEvent(new Event("input", { bubbles: true })); } };
+  const tipDots = () => app.dots.filter((d) => d.tip);
+  const zmax = (b) => b.shape.boundingBox.bounds[1][2];
+  const show = (shape, name) => { app.doc.reset([]); const b = app.doc.makeBody(shape, name); app.doc.commit([b], name); app.run("mode.body"); vp.fit(); app.setSelection([{ kind: "body", body: b.id, id: 0 }]); return b; };
+  // Click the tip's dot, F, the radius, apply
+  const round = async (r) => {
+    clickAt(tipDots()[0].at); await sleep(20);
+    const picked = app.selDot >= 0 && !!app.dots[app.selDot].tip && app.selection.length === 0;
+    app.chord = null;
+    key("f", "KeyF"); await sleep(30);
+    const title = app.op ? app.op.spec.title : null;
+    opValue("r", r); await sleep(30);
+    app.applyOp(); await sleep(50);
+    const open = !!app.op, err = document.querySelector("#op-panel .op-error")?.textContent || "";
+    if (open) key("Escape", "Escape");
+    return { picked, title, err, open };
+  };
+  try {
+    app.run("view.iso");
+    // A cone (half-angle atan(10/30)): its tip has a dot; F 2 → a ball tip, exactly r/sin − r lower, no sharp tip left
+    const cone = show(K.makeCone(G, [0, 0, 0], 10, 0, 30), "Cone"); await sleep(30);
+    const coneDots = app.dots.length;
+    const c = await round(2);
+    const g = Math.atan(10 / 30), cb = app.doc.bodies[0];
+    expect("tip: a selected cone shows one dot, at its tip; click it, F → Round tip; 2 → a ball tip (2/sin − 2 lower, valid, no sharp tip left)",
+      coneDots === 1 && c.picked && c.title === "Round tip" && !c.open && Math.abs(zmax(cb) - (30 - (2 / Math.sin(g) - 2))) < 1e-6 && K.isValidShape(cb.shape) && K.solidTips(cb.shape).length === 0 && K.solidVolume(cb.shape) < K.solidVolume(cone.shape),
+      { coneDots, ...c, z: zmax(cb), tips: K.solidTips(cb.shape).length });
+    app.run("edit.undo"); await sleep(20);
+    expect("tip: undo brings the sharp tip back", Math.abs(zmax(app.doc.bodies[0]) - 30) < 1e-9, zmax(app.doc.bodies[0]));
+    // A square pyramid's point
+    const sq = K.makeRectFace(G, [0, 0, 0], 40, 40);
+    show(K.pullToPoint(sq, sq.hashCode, 28), "Pyramid"); await sleep(30);
+    const pyrDots = tipDots().length;
+    const p = await round(3);
+    const pb = app.doc.bodies[0], half = Math.atan(Math.hypot(20, 20) / 28);
+    expect("tip: a square pyramid's point (one tip dot) rounds too: 3 → 3/sin(edge angle) − 3 lower, valid",
+      pyrDots === 1 && !p.open && Math.abs(zmax(pb) - (28 - (3 / Math.sin(half) - 3))) < 1e-6 && K.isValidShape(pb.shape), { pyrDots, ...p, z: zmax(pb) });
+    // Too big: the panel says the most it takes
+    show(K.makeCone(G, [0, 0, 0], 10, 0, 30), "Cone"); await sleep(30);
+    const big = await round(50);
+    expect("tip: a radius too big for the tip: the panel says so (under … mm), nothing changes", big.open && /too big .* under/.test(big.err) && Math.abs(zmax(app.doc.bodies[0]) - 30) < 1e-9, big);
+    // No tip dots: a box's corners, a pyramid-shaped pocket's bottom, a cone-shaped hole's bottom
+    const box = K.makeBox(G, [0, 0, 0], 40, 40, 20), top = box.faces.find((f) => f.geomType === "PLANE" && Math.abs(f.center.z - 20) < 1e-6);
+    show(box, "Box"); await sleep(10); const boxDots = tipDots().length;
+    show(K.booleanOp("subtract", box, [K.pullToPoint(box, top.hashCode, -10)]), "Pocket"); await sleep(10); const pocketDots = tipDots().length;
+    show(K.booleanOp("subtract", box, [K.makeCone(G, [0, 0, 20], 8, 0, -10)]), "Hole"); await sleep(10); const holeDots = tipDots().length;
+    expect("tip: no tip dots on a box's corners, a pyramid pocket's or a cone hole's bottom", boxDots + pocketDots + holeDots === 0, { boxDots, pocketDots, holeDots });
+    // A pencil (cylinder + cone): its tip; F on a face's centre dot doesn't round
+    show(K.booleanOp("union", K.makeCylinder(G, [0, 0, 0], 5, 40), [K.makeCone(G, [0, 0, 40], 5, 0, 15)]), "Pencil"); await sleep(30);
+    const pencil = await round(0.3);
+    expect("tip: a pencil's (cylinder + cone) tip rounds", !pencil.open && K.isValidShape(app.doc.bodies[0].shape) && zmax(app.doc.bodies[0]) < 55, { ...pencil, z: zmax(app.doc.bodies[0]) });
+  } catch (e) {
+    expect("tip: no errors", false, String(e && e.stack || e));
+  }
+  app.doc.reset([]); app.run("mode.body");
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("tip scenario failed: " + JSON.stringify(failed));
+  return [{ label: "round a tip", passed: checks.length - failed.length, total: checks.length, checks }];
 })()
 `;
 
@@ -6102,6 +6174,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       // (while working on it: just the cone / pull-to-a-point scenarios)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TIP, true));
+      if (process.env.YDDD_SMOKE_EXP) console.log("SMOKE_EXP " + JSON.stringify(await win.webContents.executeJavaScript(await readFile(process.env.YDDD_SMOKE_EXP, "utf8"), true)));
       // Screenshots: a box's top face selected (its centre dot), then G on the dot (the pyramid preview, its panel)
       await win.webContents.executeJavaScript(`(async () => {
         const app = window.ydddApp, K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
@@ -6113,10 +6187,29 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       })()`, true);
       await shot("point-dot.png");
       await win.webContents.executeJavaScript(`(async () => {
-        const app = window.ydddApp; app.selPoint = true; app.setSelection([]); app.run("xf.move");
+        const app = window.ydddApp; app.selDot = app.dots.findIndex((d) => d.face !== undefined); app.setSelection([]); app.run("xf.move");
         await new Promise((r) => setTimeout(r, 300)); return 0;
       })()`, true);
       await shot("point-pull.png");
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.ydddApp, K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+        if (app.op) app.cancelOp();
+        app.doc.reset([]);
+        const cone = app.doc.makeBody(K.makeCone(G, [0, 0, 0], 15, 0, 40), "Cone"), sq = K.makeRectFace(G, [45, 0, 0], 30, 30);
+        const pyr = app.doc.makeBody(K.pullToPoint(sq, sq.hashCode, 40), "Pyramid");
+        app.doc.commit([cone, pyr], "tips"); app.run("mode.body"); app.viewport.setView("front"); app.viewport.fit();
+        app.setSelection([{ kind: "body", body: cone.id, id: 0 }]);
+        await new Promise((r) => setTimeout(r, 300)); return 0;
+      })()`, true);
+      await shot("tip-dot.png");
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.ydddApp, K = window.ydddKernel;
+        const out = app.doc.bodies.map((b) => { const t = K.solidTips(b.shape)[0]; return K.roundTip(b.shape, t, 4); });
+        app.doc.replaceShapes(new Map(app.doc.bodies.map((b, i) => [b.id, out[i]])), "round");
+        app.setSelection([]); app.viewport.setView("iso"); app.viewport.fit();
+        await new Promise((r) => setTimeout(r, 300)); return 0;
+      })()`, true);
+      await shot("tip-round.png");
       console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
@@ -6256,6 +6349,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PRINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);

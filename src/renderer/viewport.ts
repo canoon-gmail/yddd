@@ -1523,24 +1523,30 @@ export class Viewport {
   }
   private pivotDots: THREE.Points | null = null;
 
-  /** The centre dot of a selected flat face (G on it pulls the face to a point), or none with null: brighter hovered / selected. */
-  showCenterDot(p: THREE.Vector3 | null, look: "shown" | "hover" | "selected" = "shown"): void {
-    if (this.centerDot) {
-      this.scene.remove(this.centerDot);
-      this.centerDot.geometry.dispose();
-      (this.centerDot.material as THREE.Material).dispose();
-      this.centerDot = null;
+  /**
+   * Dots on the selection to click (a flat face's centre: G pulls it to a point; a solid's tips: F rounds them),
+   * drawn on top; brighter hovered / selected. An empty list hides them.
+   */
+  showDots(dots: { p: THREE.Vector3; look: "shown" | "hover" | "selected" }[]): void {
+    for (const d of this.dots) {
+      this.scene.remove(d);
+      d.geometry.dispose();
+      (d.material as THREE.Material).dispose();
     }
-    if (p) {
-      const { color, size } = { shown: { color: 0xffffff, size: 9 }, hover: { color: 0x7fd0ff, size: 13 }, selected: { color: 0xffcc33, size: 13 } }[look];
-      const m = new THREE.PointsMaterial({ color, size, sizeAttenuation: false, depthTest: false, transparent: true });
-      this.centerDot = new THREE.Points(new THREE.BufferGeometry().setFromPoints([p]), m);
-      this.centerDot.renderOrder = 29;
-      this.scene.add(this.centerDot);
+    this.dots = [];
+    const looks = { shown: { color: 0xffffff, size: 9 }, hover: { color: 0x7fd0ff, size: 13 }, selected: { color: 0xffcc33, size: 13 } };
+    for (const look of ["shown", "hover", "selected"] as const) {
+      const pts = dots.filter((d) => d.look === look).map((d) => d.p);
+      if (!pts.length) continue;
+      const m = new THREE.PointsMaterial({ ...looks[look], sizeAttenuation: false, depthTest: false, transparent: true });
+      const obj = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), m);
+      obj.renderOrder = 29;
+      this.scene.add(obj);
+      this.dots.push(obj);
     }
     this.requestRender();
   }
-  private centerDot: THREE.Points | null = null;
+  private dots: THREE.Points[] = [];
 
   /** Show (or hide with null) the object-snap marker. */
   showSnapMarker(snap: { point: THREE.Vector3; kind: SnapKind } | null): void {
