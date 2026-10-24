@@ -56,11 +56,24 @@ export interface TextRecord {
   readonly frame: { readonly origin: V3; readonly x: V3; readonly y: V3; readonly z: V3 };
 }
 
+/** How a body looks on screen (the swatch in the Bodies panel). Unset = its group's, else the default. */
+export interface Look {
+  /** "#rrggbb". */
+  readonly color?: string;
+  /** 0.1..1 (1 = solid). */
+  readonly opacity?: number;
+}
+
+/** Group looks by group name (members without a look of their own take the group's). */
+export type GroupLooks = Readonly<Record<string, Look>>;
+
 interface BodyBase {
   readonly id: number;
   readonly name: string;
   /** Group it belongs to (by name; one level, shown together in the Bodies panel). */
   readonly group?: string;
+  /** Its own colour / opacity (each one unset = the group's, see GroupLooks). */
+  readonly look?: Look;
   /** A Text tool letter (flat, or pushed into a solid): how it was made. */
   readonly text?: TextRecord;
 }
@@ -129,6 +142,7 @@ export interface HistoryEntry {
   guides: readonly Guide[];
   dims: readonly Dimension[];
   arrays: readonly ArrayRecord[];
+  looks: GroupLooks;
   label: string;
 }
 
@@ -139,6 +153,7 @@ export class Doc {
   private guideList: readonly Guide[] = [];
   private dimList: readonly Dimension[] = [];
   private arrayList: readonly ArrayRecord[] = [];
+  private lookMap: GroupLooks = {};
   private undoStack: HistoryEntry[] = [];
   private redoStack: HistoryEntry[] = [];
   private nextId = 1;
@@ -175,6 +190,16 @@ export class Doc {
   /** Array copies that can still be changed (see ArrayRecord); records whose sources are gone are dropped. */
   get arrays(): readonly ArrayRecord[] {
     return this.arrayList;
+  }
+
+  /** Group colours / opacities (see GroupLooks); groups no object is in any more are dropped. */
+  get groupLooks(): GroupLooks {
+    return this.lookMap;
+  }
+
+  /** What a body looks like (see lookOf). */
+  lookOf(b: Body): Look {
+    return lookOf(b, this.lookMap);
   }
 
   get(id: number): Body | undefined {
@@ -224,7 +249,7 @@ export class Doc {
    */
   linkCopies: ((prev: Snapshot, next: Snapshot, arrays: readonly ArrayRecord[], label: string) => { bodies: Snapshot; arrays: readonly ArrayRecord[] } | null) | null = null;
 
-  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList, arrays: readonly ArrayRecord[] = this.arrayList): void {
+  commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList, arrays: readonly ArrayRecord[] = this.arrayList, looks: GroupLooks = this.lookMap): void {
     const linked = this.linkCopies && next !== this.snapshot && arrays.length ? this.linkCopies(this.snapshot, next, arrays, label) : null;
     if (linked) ({ bodies: next, arrays } = linked);
     dims = this.relinked(dims, next);
@@ -235,6 +260,7 @@ export class Doc {
     this.guideList = guides;
     this.dimList = dims;
     this.arrayList = liveArrays(arrays, next);
+    this.lookMap = liveLooks(looks, next);
     this.dirty = true;
     this.version++;
     this.emit();
@@ -246,6 +272,7 @@ export class Doc {
     this.redoStack = [];
     this.dimList = this.relinked(this.dimList, next);
     this.arrayList = liveArrays(this.arrayList, next);
+    this.lookMap = liveLooks(this.lookMap, next);
     this.snapshot = next;
     this.dirty = true;
     this.version++;
@@ -272,7 +299,7 @@ export class Doc {
 
   /** The current state as a history entry. */
   private entry(label: string): HistoryEntry {
-    return { bodies: this.snapshot, guides: this.guideList, dims: this.dimList, arrays: this.arrayList, label };
+    return { bodies: this.snapshot, guides: this.guideList, dims: this.dimList, arrays: this.arrayList, looks: this.lookMap, label };
   }
 
   private restoreEntry(e: HistoryEntry): void {
@@ -280,6 +307,7 @@ export class Doc {
     this.guideList = e.guides;
     this.dimList = e.dims;
     this.arrayList = e.arrays;
+    this.lookMap = e.looks;
   }
 
   /** The step Undo / Redo would go to (its bodies and label), without going. */
@@ -313,7 +341,7 @@ export class Doc {
    * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
    * is an index into `bodies` (as saved in a file), turned into that body's new id.
    */
-  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = []): void {
+  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = [], looks: GroupLooks = {}): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;
@@ -321,6 +349,7 @@ export class Doc {
     const idOf = (i: number) => this.snapshot[i]?.id ?? -1;
     this.dimList = dims.map(({ body, ...d }) => (body !== undefined && this.snapshot[body] ? { ...d, body: this.snapshot[body].id } : d));
     this.arrayList = liveArrays(arrays.map((r) => ({ ...r, sources: r.sources.map(idOf), copies: r.copies.map(idOf) })), this.snapshot);
+    this.lookMap = liveLooks(looks, this.snapshot);
     this.undoStack = [];
     this.redoStack = [];
     this.filePath = filePath;
@@ -358,6 +387,21 @@ function liveArrays(arrays: readonly ArrayRecord[], bodies: Snapshot): readonly 
   const ids = new Set(bodies.map((b) => b.id));
   const live = arrays.filter((r) => r.sources.every((id) => ids.has(id)));
   return live.length === arrays.length ? arrays : live;
+}
+
+/** What a body looks like: its own colour / opacity, each one unset → its group's. */
+export function lookOf(b: Body, looks: GroupLooks): Look {
+  const g = b.group ? looks[b.group] : undefined;
+  if (!g) return b.look ?? {};
+  return { color: b.look?.color ?? g.color, opacity: b.look?.opacity ?? g.opacity };
+}
+
+/** Group looks of groups that still have members. */
+function liveLooks(looks: GroupLooks, bodies: Snapshot): GroupLooks {
+  const names = Object.keys(looks);
+  if (!names.length) return looks;
+  const used = new Set(bodies.map((b) => b.group));
+  return names.every((g) => used.has(g)) ? looks : Object.fromEntries(names.filter((g) => used.has(g)).map((g) => [g, looks[g]]));
 }
 
 /** `b` with new geometry (same id / name). A face body may become a solid (push/pull); a mesh stays a mesh. */

@@ -107,6 +107,11 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-swatch.path { background: transparent; border-top: 2px solid #ff69b4; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
 .ol-swatch.guide { background: transparent; border-top: 2px dashed #ff6fb5; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
 .ol-swatch.mesh { background: repeating-linear-gradient(45deg, #9aa5b1 0 2px, #5d6670 2px 4px); }
+.ol-look { cursor: pointer; }
+.ol-look:hover { outline: 1px solid var(--text); outline-offset: 1px; }
+.ol-swatch.ol-look[style*="--sw"] { background: var(--sw); }
+.ol-swatch.face.ol-look[style*="--sw"] { background: transparent; border-color: var(--sw); }
+.ol-group .ol-swatch:not([style*="--sw"]) { background: transparent; border: 1px dashed var(--muted); width: 8px; height: 8px; }
 .ol-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ol-name input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 3px; }
 .ol-eye { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; }
@@ -453,3 +458,14 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 #keys-panel .kp-msg .btn { margin-left: 6px; padding: 1px 8px; font-size: 11px; }
 #keys-panel .kp-none { padding: 14px 0; color: var(--muted); text-align: center; }
 #keys-panel .kp-foot { display: flex; justify-content: flex-end; gap: 6px; padding: 10px 14px; }
+
+/* ---------------------------------------------------------------- colour / opacity pop-up (Bodies panel swatch) */
+.look-pop { width: 210px; }
+.look-presets { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 4px 8px 8px; }
+#look-pop .look-preset { width: 100%; height: 22px; padding: 0; border: 1px solid var(--border); border-radius: 4px; }
+#look-pop .look-preset:hover { outline: 2px solid var(--accent-2); }
+.look-field { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }
+.look-field input[type="color"] { width: 40px; height: 22px; padding: 0; border: 1px solid var(--border); background: none; margin-left: auto; }
+.look-field input[type="range"] { flex: 1; min-width: 0; }
+.look-pct { width: 38px; text-align: right; color: var(--muted); }
+#look-pop .look-reset { margin-top: 4px; color: var(--muted); font-size: 12px; }

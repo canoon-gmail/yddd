@@ -4302,6 +4302,99 @@ const SCENARIO_ARRAY = String.raw`
 `;
 
 /** Groups: Ctrl+G / Ctrl+Shift+G, and in the Bodies panel — select, rename, hide, fold; saved in the file. */
+const SCENARIO_LOOKS = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const ol = document.getElementById("outliner");
+  const pop = () => document.getElementById("look-pop");
+  const outside = () => document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+  const key = (k) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code: k, bubbles: true, cancelable: true }));
+  const row = (id) => ol.querySelector('.ol-row[data-id="' + id + '"]');
+  const head = (g) => [...ol.querySelectorAll(".ol-group")].find((h) => h.dataset.group === g);
+  const setOp = (pct) => { const i = pop().querySelector(".look-op"); i.value = String(pct); i.dispatchEvent(new Event("input", { bubbles: true })); };
+  const batchOf = (id) => vp.views.get(id).slot?.mesh;
+  const rgb = (id) => { const m = batchOf(id), v = vp.views.get(id), a = m.geometry.getAttribute("color").array, k = v.slot.vOffset * 3; return [a[k], a[k + 1], a[k + 2]].map((x) => Math.round(x * 255)); };
+  app.doc.reset([]);
+  app.run("mode.body");
+  const [a, b, c, d] = [0, 30, 60, 90].map((x) => app.doc.makeBody(K.makeBox(G, [x, 0, 0], 10, 10, 10), "Box"));
+  app.doc.commit([a, b, c, d], "boxes"); await sleep(50);
+
+  // A body's swatch: a preset shows at once, a click elsewhere keeps it (one undo step)
+  row(a.id).querySelector(".ol-look").click(); await sleep(20);
+  const opened = !!pop() && app.selection.length === 0;
+  pop().querySelector('.look-preset[data-c="#d93b3b"]').click(); await sleep(20);
+  const previewed = vp.looks.get(a.id)?.color === 0xd93b3b && !app.doc.get(a.id).look;
+  outside(); await sleep(50);
+  expect("looks: a body's swatch opens the pop-up (not selecting it); a colour shows at once, kept on closing (one undo step 'Colour')",
+    opened && previewed && !pop() && app.doc.get(a.id).look?.color === "#d93b3b" && app.doc.undoLabel === "Colour" &&
+      row(a.id).querySelector(".ol-look").getAttribute("style").includes("#d93b3b"),
+    { opened, previewed, look: app.doc.get(a.id).look, undo: app.doc.undoLabel });
+  // Opacity: its own batch, see-through; the colour in its vertices
+  row(a.id).querySelector(".ol-look").click(); await sleep(20);
+  setOp(50); key("Enter"); await sleep(50);
+  app.viewport.requestRender(); await sleep(100);
+  const m = batchOf(a.id), plain = batchOf(b.id);
+  expect("looks: opacity 50 % → the body is in a see-through batch of its own (others stay solid), its colour in the vertices",
+    app.doc.get(a.id).look?.opacity === 0.5 && m && m !== plain && m.material.transparent && Math.abs(m.material.opacity - 0.5) < 1e-6 &&
+      !plain.material.transparent && rgb(a.id).join() === "177,11,11", // (#d93b3b in three.js's linear colour space)
+    { look: app.doc.get(a.id).look, op: m?.material.opacity, rgb: m && rgb(a.id) });
+  // Esc takes it back
+  row(b.id).querySelector(".ol-look").click(); await sleep(20);
+  pop().querySelector('.look-preset[data-c="#4caf50"]').click(); await sleep(20);
+  key("Escape"); await sleep(20);
+  expect("looks: Esc closes the pop-up without a change", !pop() && !app.doc.get(b.id).look && !vp.looks.has(b.id), { look: app.doc.get(b.id).look });
+  // Several selected: the swatch of one of them colours them all
+  app.setSelection([b, c].map((x) => ({ kind: "body", body: x.id, id: 0 })));
+  row(b.id).querySelector(".ol-look").click(); await sleep(20);
+  pop().querySelector('.look-preset[data-c="#3b82f6"]').click(); outside(); await sleep(50);
+  expect("looks: with several objects selected, one's swatch colours them all", app.doc.get(b.id).look?.color === "#3b82f6" && app.doc.get(c.id).look?.color === "#3b82f6" && !app.doc.get(d.id).look,
+    [b, c, d].map((x) => app.doc.get(x.id).look));
+
+  // A group's colour: members without their own take it; with own colours → asked (smoke: "Apply to all members")
+  app.setSelection([c, d].map((x) => ({ kind: "body", body: x.id, id: 0 })));
+  app.run("edit.group"); await sleep(20);
+  const g = app.doc.get(c.id).group;
+  head(g).querySelector(".ol-look").click(); await sleep(20);
+  const gOpen = !!pop() && pop().querySelector("h5").textContent.includes(g);
+  pop().querySelector('.look-preset[data-c="#e9c46a"]').click(); outside(); await sleep(300);
+  expect("looks: a group's colour → the group's look; a member with its own colour asked about and (Apply to all) given the group's",
+    gOpen && app.doc.groupLooks[g]?.color === "#e9c46a" && !app.doc.get(c.id).look && !app.doc.get(d.id).look &&
+      app.doc.lookOf(app.doc.get(c.id)).color === "#e9c46a" && vp.looks.get(d.id)?.color === 0xe9c46a && head(g).querySelector(".ol-look").getAttribute("style").includes("#e9c46a"),
+    { gOpen, gl: app.doc.groupLooks, c: app.doc.get(c.id).look });
+  // A member's own opacity over the group's colour (only it: nothing selected)
+  app.setSelection([]);
+  row(d.id).querySelector(".ol-look").click(); await sleep(20);
+  setOp(40); outside(); await sleep(50);
+  const dl = app.doc.lookOf(app.doc.get(d.id));
+  expect("looks: a member's own opacity keeps the group's colour", app.doc.get(d.id).look?.opacity === 0.4 && !app.doc.get(d.id).look?.color && dl.color === "#e9c46a" && dl.opacity === 0.4 && !app.doc.get(c.id).look, { own: app.doc.get(d.id).look, dl, c: app.doc.get(c.id).look });
+  // Rename / duplicate the group / save + open / undo
+  head(g).querySelector(".ol-name").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const input = head(g).querySelector("input");
+  input.value = "Bins"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); await sleep(20);
+  const renamed = app.doc.groupLooks.Bins?.color === "#e9c46a" && !app.doc.groupLooks[g];
+  head("Bins").querySelector(".ol-name").click(); await sleep(20);
+  app.run("edit.duplicate"); await sleep(50);
+  key("Escape"); await sleep(50);
+  const copyGroup = Object.keys(app.doc.groupLooks).find((k) => k !== "Bins");
+  const copies = app.doc.bodies.filter((x) => x.group === copyGroup);
+  expect("looks: renaming a group keeps its colour; a copy of the group has it too (and a copied member keeps its own)",
+    renamed && copyGroup && app.doc.groupLooks[copyGroup].color === "#e9c46a" && copies.length === 2 && copies.some((x) => x.look?.opacity === 0.4),
+    { looks: app.doc.groupLooks, copies: copies.map((x) => x.look) });
+  const before = app.doc.bodies.map((x) => JSON.stringify(app.doc.lookOf(x))).join("|");
+  app.loadModel(app.modelText(), null); await sleep(50);
+  const after = app.doc.bodies.map((x) => JSON.stringify(app.doc.lookOf(x))).join("|");
+  app.run("edit.undo"); await sleep(50);
+  const undone = app.doc.bodies.length === 4 && app.doc.groupLooks.Bins?.color === "#e9c46a";
+  expect("looks: saved in the file and read back (the undo history too)", before === after && undone, { before, after, n: app.doc.bodies.length });
+  await sleep(200);
+  return [{ label: "looks (colour / opacity)", passed: checks.filter((x) => x.ok).length, total: checks.length, checks }];
+})()
+`;
+
 const SCENARIO_GROUPS = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -6923,6 +7016,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`window.__smokeDir = ${JSON.stringify(outDir)}; 0`, true);
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GROUPS, true));
     await shot("7c-groups.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LOOKS, true));
+    await shot("7d-looks.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SNAPMARK, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_AUTOSNAP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CUTAXIS, true));

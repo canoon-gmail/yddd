@@ -134,7 +134,7 @@ import {
   movedIds,
   parseStl,
 } from "./kernel";
-import { Doc, isBrep, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type Guide, type HistoryEntry, type ShapeBody, type TextRecord } from "./document";
+import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
@@ -306,14 +306,27 @@ interface OpChoice {
   title?: string;
 }
 
-/** A copy of a Text tool letter is one too (its text can be edited, see TextRecord). */
-function withTextOf<T extends Body>(made: T, from: Body): T {
-  return from.text ? { ...made, text: from.text } : made;
+/** Colour presets in the colour pop-up (common filament colours). */
+const LOOK_PRESETS = ["#f2f2f2", "#2b2b2b", "#9aa5b1", "#d93b3b", "#f4a259", "#e9c46a", "#4caf50", "#3b82f6", "#8e5bd8", "#ec6fb0"];
+
+/** A Bodies panel swatch's inline style for a look (nothing = the CSS default for its kind). */
+function swatchStyle(l: Look): string {
+  return (l.color ? `--sw: ${l.color};` : "") + (l.opacity !== undefined && l.opacity < 1 ? `opacity: ${Math.max(0.25, l.opacity)};` : "");
 }
 
-/** A new body made from `from` (extruded, cut off, split off...) goes in the same group. */
+/** A body made from `from` (a copy, extruded, split off...) has its colour / opacity. */
+function withLookOf<T extends Body>(made: T, from: Body): T {
+  return from.look ? { ...made, look: from.look } : made;
+}
+
+/** A copy of a Text tool letter is one too (its text can be edited, see TextRecord); it keeps its look. */
+function withTextOf<T extends Body>(made: T, from: Body): T {
+  return withLookOf(from.text ? { ...made, text: from.text } : made, from);
+}
+
+/** A new body made from `from` (extruded, cut off, split off...) goes in the same group, with the same look. */
 function inGroupOf<T extends Body>(made: T, from: Body): T {
-  return from.group ? { ...made, group: from.group } : made;
+  return withLookOf(from.group ? { ...made, group: from.group } : made, from);
 }
 
 /** Names flat faces get automatically ("Circle 3", "Face 1"...): a solid pushed from one is called "Solid N" instead. */
@@ -345,6 +358,7 @@ interface SavedStep {
   guides?: Guide[];
   dims?: Dimension[];
   arrays?: ArrayRecord[];
+  looks?: GroupLooks;
 }
 
 /** The undo history part of a .yddd file. */
@@ -352,7 +366,7 @@ interface SavedHistory {
   ids: number[];
   dims?: Dimension[];
   arrays?: ArrayRecord[];
-  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; s: number }[];
+  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; s: number }[];
   shapes: string[];
   undo: SavedStep[];
   redo: SavedStep[];
@@ -5006,6 +5020,12 @@ class App implements ToolHost {
     return newGroup;
   }
 
+  /** The group looks with copied groups (see copyGroupNames) looking like the groups they were copied from. */
+  private copiedLooks(newGroup: Map<string, string>): GroupLooks {
+    const looks = this.doc.groupLooks, add = [...newGroup].filter(([g]) => looks[g]);
+    return add.length ? { ...looks, ...Object.fromEntries(add.map(([g, copy]) => [copy, looks[g]])) } : looks;
+  }
+
   private duplicate(): void {
     this.endInteractions();
     const edgeSel = this.selection.filter((x) => x.kind === "edge");
@@ -5068,7 +5088,7 @@ class App implements ToolHost {
       if (!g || ![...r.sources, ...r.copies].every((id) => copyOf.has(id))) return [];
       return [{ ...r, group: g, sources: r.sources.map((id) => copyOf.get(id)!), copies: r.copies.map((id) => copyOf.get(id)!) }];
     });
-    this.doc.commit([...this.doc.bodies, ...grouped], whole.length ? `Duplicate ${whole.join(", ")}` : "Duplicate", this.doc.guides, this.doc.dimensions, [...this.doc.arrays, ...records]);
+    this.doc.commit([...this.doc.bodies, ...grouped], whole.length ? `Duplicate ${whole.join(", ")}` : "Duplicate", this.doc.guides, this.doc.dimensions, [...this.doc.arrays, ...records], this.copiedLooks(newGroup));
     if (whole.length) this.toast(`Copied as ${[...newGroup.values()].join(", ")} — move it into place`);
     this.setMode("body");
     this.setSelection(copies.map((b) => ({ kind: "body", body: b.id, id: 0 })));
@@ -5306,7 +5326,7 @@ class App implements ToolHost {
               const m = withTextOf(this.doc.makeBody(image, copyName(b), b.kind), b), g = groups.get(b.group ?? "");
               return g ? { ...m, group: g } : m;
             });
-            this.doc.commit([...this.doc.bodies.map((b) => (joinedShapes.has(b.id) ? withShape(b, joinedShapes.get(b.id)!) : b)), ...copies], `Mirror ${DIRS[dir]}`);
+            this.doc.commit([...this.doc.bodies.map((b) => (joinedShapes.has(b.id) ? withShape(b, joinedShapes.get(b.id)!) : b)), ...copies], `Mirror ${DIRS[dir]}`, this.doc.guides, this.doc.dimensions, this.doc.arrays, this.copiedLooks(groups));
             const n = joinedShapes.size, apart = join ? got.filter((g) => !g.joined && g.b.kind === "solid").length : 0;
             return {
               select: [...ids, ...copies.map((b) => b.id)],
@@ -5849,6 +5869,7 @@ class App implements ToolHost {
       this.linkArrayCopies();
     }
     this.viewport.sync(this.doc.bodies);
+    this.viewport.setLooks(new Map(this.doc.bodies.map((b) => [b.id, this.doc.lookOf(b)])));
     this.showGuides();
     this.showDimensions();
     if (this.tool instanceof MeasureTool) this.tool.refresh();
@@ -6042,7 +6063,7 @@ class App implements ToolHost {
 
   /** Set while Union / Subtract / Intersect waits for solids: a click in the Bodies panel (a row, or a group) goes here. */
   private outlinerPick: ((ids: number[]) => void) | null = null;
-  private olRows = new Map<number, { row: HTMLElement; body: Body; hidden: boolean }>();
+  private olRows = new Map<number, { row: HTMLElement; body: Body; hidden: boolean; lk: string }>();
   /** Group header rows by group name, and the groups folded shut. */
   private olGroups = new Map<string, HTMLElement>();
   private olCollapsed = new Set<string>();
@@ -6066,6 +6087,11 @@ class App implements ToolHost {
       el.addEventListener("click", (e) => {
         const t = e.target as HTMLElement;
         if (t.closest("input")) return;
+        const sw = t.closest<HTMLElement>(".ol-look");
+        if (sw) {
+          const g = groupOf(e), b = bodyOf(e);
+          return this.editLook(g !== null ? { group: g } : { body: b!.id }, sw);
+        }
         const gg = t.closest<HTMLElement>(".ol-guides")?.dataset.guides;
         if (gg !== undefined) {
           if (t.closest(".ol-eye")) {
@@ -6184,13 +6210,19 @@ class App implements ToolHost {
     const bodyRow = (b: Body): HTMLElement => {
       live.add(b.id);
       const hidden = this.hidden.has(b.id);
+      const look = this.doc.lookOf(b), lk = `${look.color}:${look.opacity}`;
       let entry = this.olRows.get(b.id);
-      if (!entry || entry.body !== b || entry.hidden !== hidden) {
+      if (!entry || entry.body !== b || entry.hidden !== hidden || entry.lk !== lk) {
         const row = entry?.row ?? document.createElement("div");
         row.className = "ol-row";
         row.dataset.id = String(b.id);
-        row.innerHTML = `<span class="ol-swatch${b.kind === "solid" ? "" : " " + b.kind}" title="${{ solid: "Solid", face: "Flat face", mesh: "Mesh (STL)", path: "Path (open lines from a sketch)" }[b.kind]}"></span><span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
-        entry = { row, body: b, hidden };
+        const kind = { solid: "Solid", face: "Flat face", mesh: "Mesh (STL)", path: "Path (open lines from a sketch)" }[b.kind];
+        // (a path's lines keep their colour: no look)
+        const swatch = b.kind === "path"
+          ? `<span class="ol-swatch path" title="${kind}"></span>`
+          : `<span class="ol-swatch ol-look${b.kind === "solid" ? "" : " " + b.kind}" title="${kind} · click: colour and opacity" style="${swatchStyle(look)}"></span>`;
+        row.innerHTML = `${swatch}<span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+        entry = { row, body: b, hidden, lk };
         this.olRows.set(b.id, entry);
       }
       const row = entry.row;
@@ -6226,7 +6258,8 @@ class App implements ToolHost {
       // Made by the Text tool: a pencil to edit its text (dimmed, saying why, once it can't be)
       const why = ms.some((x) => x.text) ? this.textEditable(g, ms) : null;
       const editBtn = !ms.some((x) => x.text) ? "" : why ? `<button class="ol-edit off" title="${escapeHtml(why)}">${ICONS.edit}</button>` : `<button class="ol-edit" title="Edit the text">${ICONS.edit}</button>`;
-      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${editBtn}${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+      const gl = this.doc.groupLooks[g] ?? {};
+      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-swatch ol-look" title="The group's colour and opacity (members without their own take it) · click to change" style="${swatchStyle(gl)}"></span><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${editBtn}${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
       if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
       head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
       head.classList.toggle("hidden", allHidden);
@@ -6283,7 +6316,8 @@ class App implements ToolHost {
       if (save && name && name !== group && !taken) {
         if (this.olCollapsed.delete(group)) this.olCollapsed.add(name);
         this.olGroups.delete(group);
-        this.doc.commit(this.doc.bodies.map((b) => (b.group === group ? { ...b, group: name } : b)), "Rename group");
+        const { [group]: look, ...looks } = this.doc.groupLooks;
+        this.doc.commit(this.doc.bodies.map((b) => (b.group === group ? { ...b, group: name } : b)), "Rename group", this.doc.guides, this.doc.dimensions, this.doc.arrays, look ? { ...looks, [name]: look } : this.doc.groupLooks);
       } else {
         this.olGroups.get(group)?.replaceChildren(); // (redrawn below)
         this.renderOutliner();
@@ -6295,6 +6329,128 @@ class App implements ToolHost {
       if (e.key === "Escape") commit(false);
     });
     input.addEventListener("blur", () => commit(true));
+  }
+
+  /**
+   * The colour / opacity pop-up of a body's swatch (several selected: all of them) or a group's. Changes show at once;
+   * closing it (a click elsewhere, Enter) makes them one undo step, Esc takes them back. A group's colour goes to its
+   * members without their own; if some have their own, YDDD asks whether it goes to all of them.
+   */
+  private editLook(target: { body: number } | { group: string }, anchor: HTMLElement): void {
+    document.getElementById("look-pop")?.remove();
+    const group = "group" in target ? target.group : null;
+    const body = "body" in target ? this.doc.get(target.body) : undefined;
+    if (!group && !body) return;
+    const sel = this.selectedBodyIds();
+    const ids = body ? (sel.includes(body.id) && sel.length > 1 ? sel : [body.id]).filter((id) => this.doc.get(id)?.kind !== "path") : [];
+    const members = group ? this.doc.bodies.filter((b) => b.group === group) : [];
+    const start: Look = group ? (this.doc.groupLooks[group] ?? {}) : (body!.look ?? {});
+    const shown = group ? start : this.doc.lookOf(body!);
+    const plain = body?.kind === "face" ? "#6f9bd1" : "#9aa5b1";
+    /** What it shows without a look of its own: a member, its group's. */
+    const inherited: Look = body?.group ? (this.doc.groupLooks[body.group] ?? {}) : {};
+    let look: Look = { ...start };
+    const pop = document.createElement("div");
+    pop.id = "look-pop";
+    pop.className = "popup-menu look-pop";
+    const title = group ? `Group: ${group}` : ids.length > 1 ? `${ids.length} objects` : body!.name;
+    const op = Math.round((shown.opacity ?? 1) * 100);
+    pop.innerHTML = `<h5>${escapeHtml(title)}</h5>` +
+      `<div class="look-presets">${LOOK_PRESETS.map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` +
+      `<label class="look-field">Colour <input type="color" class="look-color" value="${shown.color ?? plain}"></label>` +
+      `<label class="look-field">Opacity <input type="range" class="look-op" min="10" max="100" step="5" value="${op}"><span class="look-pct">${op} %</span></label>` +
+      `<button class="look-reset">${group ? "No group colour (members: their own / default)" : body!.group ? "Use the group's colour" : "Default colour"}</button>`;
+    document.body.appendChild(pop);
+    const r = anchor.getBoundingClientRect(), pr = pop.getBoundingClientRect();
+    pop.style.left = `${Math.max(4, Math.min(r.left - pr.width - 8, innerWidth - pr.width - 4))}px`;
+    pop.style.top = `${Math.min(r.top - 8, innerHeight - pr.height - 4)}px`;
+    const colorIn = pop.querySelector<HTMLInputElement>(".look-color")!, opIn = pop.querySelector<HTMLInputElement>(".look-op")!;
+    /** The bodies and group looks with `look` applied (`all`: also to the group's members with their own). */
+    const result = (all: boolean) => {
+      const clean = (l: Look): Look | undefined => {
+        // (100 % is only kept against a see-through group)
+        const op = l.opacity !== undefined && (l.opacity < 1 || inherited.opacity !== undefined) ? { opacity: l.opacity } : {};
+        const out: Look = { ...(l.color ? { color: l.color } : {}), ...op };
+        return out.color || out.opacity !== undefined ? out : undefined;
+      };
+      const withLook = (b: Body, l: Look | undefined): Body => {
+        const { look: _old, ...rest } = b;
+        return (l ? { ...rest, look: l } : rest) as Body;
+      };
+      if (!group) {
+        const set = new Set(ids), l = clean(look);
+        return { bodies: this.doc.bodies.map((b) => (set.has(b.id) ? withLook(b, l) : b)), looks: this.doc.groupLooks };
+      }
+      const { [group]: _g, ...rest } = this.doc.groupLooks;
+      const l = clean(look);
+      const looks = l ? { ...rest, [group]: l } : rest;
+      if (!all) return { bodies: this.doc.bodies, looks };
+      // All members: their own colour / opacity goes where the group's changed.
+      const cc = look.color !== start.color, oc = look.opacity !== start.opacity;
+      const bodies = this.doc.bodies.map((b) => {
+        if (b.group !== group || !b.look) return b;
+        return withLook(b, clean({ color: cc ? undefined : b.look.color, opacity: oc ? undefined : b.look.opacity }));
+      });
+      return { bodies, looks };
+    };
+    const preview = () => {
+      const { bodies, looks } = result(true);
+      this.viewport.setLooks(new Map(bodies.map((b) => [b.id, lookOf(b, looks)])));
+      colorIn.value = look.color ?? inherited.color ?? plain;
+      const pct = Math.round((look.opacity ?? inherited.opacity ?? 1) * 100);
+      opIn.value = String(pct);
+      pop.querySelector(".look-pct")!.textContent = `${pct} %`;
+    };
+    pop.addEventListener("input", (e) => {
+      if (e.target === colorIn) look = { ...look, color: colorIn.value };
+      if (e.target === opIn) look = { ...look, opacity: Number(opIn.value) / 100 };
+      preview();
+    });
+    pop.addEventListener("click", (e) => {
+      const t = e.target as HTMLElement;
+      const c = t.closest<HTMLElement>(".look-preset")?.dataset.c;
+      if (c) look = { ...look, color: c };
+      if (t.closest(".look-reset")) look = {};
+      preview();
+    });
+    let done = false;
+    const close = async (keep: boolean) => {
+      if (done) return;
+      done = true;
+      pop.remove();
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("pointerdown", onDown, true);
+      const same = look.color === start.color && (look.opacity ?? 1) === (start.opacity ?? 1);
+      if (!keep || same) return this.viewport.setLooks(new Map(this.doc.bodies.map((b) => [b.id, this.doc.lookOf(b)])));
+      let all = true;
+      if (group) {
+        const cc = look.color !== start.color, oc = (look.opacity ?? 1) !== (start.opacity ?? 1);
+        const own = members.filter((b) => (cc && b.look?.color) || (oc && b.look?.opacity !== undefined));
+        if (own.length) {
+          const what = cc && oc ? "colour and opacity" : cc ? "colour" : "opacity";
+          const choice = await window.yddd.ask({
+            message: `Apply the ${what} to all ${members.length} members of "${group}"?`,
+            detail: `${own.length} of them ${own.length === 1 ? "has its" : "have their"} own ${what}: ${own.slice(0, 5).map((b) => b.name).join(", ")}${own.length > 5 ? "…" : ""}.`,
+            buttons: ["Apply to all members", `Only the ${members.length - own.length} without their own`, "Cancel"],
+          });
+          if (choice === 2) return this.viewport.setLooks(new Map(this.doc.bodies.map((b) => [b.id, this.doc.lookOf(b)])));
+          all = choice === 0;
+        }
+      }
+      const { bodies, looks } = result(all);
+      this.doc.commit(bodies, group ? `Colour of ${group}` : "Colour", this.doc.guides, this.doc.dimensions, this.doc.arrays, looks);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" && e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      void close(e.key === "Enter");
+    };
+    const onDown = (e: PointerEvent) => {
+      if (!pop.contains(e.target as Node)) void close(true);
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("pointerdown", onDown, true);
   }
 
   private rename(body: Body, cell: Element): void {
@@ -6645,7 +6801,7 @@ class App implements ToolHost {
     // History: body / shape references — negative: the model's own bodies[-r - 1]; else the history's lists.
     const bodyRef = new Map<Body, number>(cur.map((b, i) => [b, -(i + 1)]));
     const shapeRef = new Map<object, number>(cur.map((b, i) => [b.shape, -(i + 1)]));
-    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; s: number }[] = [];
+    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; s: number }[] = [];
     const shapes: string[] = [];
     let size = 0;
     const refBody = (b: Body): number => {
@@ -6659,11 +6815,11 @@ class App implements ToolHost {
         shapeRef.set(b.shape, sr);
       }
       r = pool.length;
-      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), s: sr });
+      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), s: sr });
       bodyRef.set(b, r);
       return r;
     };
-    const step = (e: HistoryEntry) => ({ label: e.label, bodies: e.bodies.map(refBody), guides: e.guides, dims: e.dims, arrays: e.arrays });
+    const step = (e: HistoryEntry) => ({ label: e.label, bodies: e.bodies.map(refBody), guides: e.guides, dims: e.dims, arrays: e.arrays, ...(Object.keys(e.looks).length ? { looks: e.looks } : {}) });
     /** Newest steps first, until SAVED_HISTORY of them or the history's shapes reach HISTORY_BYTES (big meshes). */
     const keep = (list: readonly HistoryEntry[]) => {
       const out = [];
@@ -6679,7 +6835,10 @@ class App implements ToolHost {
         ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: this.geomText(b) } : { name: b.name, kind: b.kind, brep: this.geomText(b) }),
         ...(b.group ? { group: b.group } : {}),
         ...(b.text ? { text: b.text } : {}),
+        ...(b.look ? { look: b.look } : {}),
       })),
+      // Group colours / opacities by group name (see GroupLooks).
+      ...(Object.keys(this.doc.groupLooks).length ? { looks: this.doc.groupLooks } : {}),
       guides: this.doc.guides,
       // A linked dimension's body as its index in `bodies` (ids are renumbered on open).
       dimensions: this.doc.dimensions.map(({ body, ...d }) => {
@@ -6699,7 +6858,8 @@ class App implements ToolHost {
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
       format: string;
-      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord }[];
+      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look }[];
+      looks?: GroupLooks;
       guides?: Guide[];
       dimensions?: Dimension[];
       arrays?: ArrayRecord[];
@@ -6713,10 +6873,11 @@ class App implements ToolHost {
       if (kind === "path") return { kind: "path", shape: shape as unknown as Wire };
       return { kind: kind === "face" || kind === "solid" ? kind : kindOf(shape), shape };
     };
-    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord } => {
+    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look } => {
       const group = typeof b.group === "string" && b.group ? { group: b.group } : {};
-      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}) };
+      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}) };
     });
+    const looks = json.looks ?? {};
     this.endInteractions();
     this.selection = [];
     this.hidden.clear();
@@ -6733,14 +6894,14 @@ class App implements ToolHost {
             const p = h.bodies[r];
             let shape = p.s < 0 ? current[-p.s - 1].shape : shapeOf.get(p.s);
             if (!shape) shapeOf.set(p.s, (shape = geom(p.kind, h.shapes[p.s]).shape));
-            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}) } as Body;
+            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}) } as Body;
             made.set(r, b);
           }
           return b;
         };
-        const entry = (e: SavedStep): HistoryEntry => ({ label: e.label, bodies: e.bodies.map(body), guides: e.guides ?? [], dims: e.dims ?? [], arrays: e.arrays ?? [] });
+        const entry = (e: SavedStep): HistoryEntry => ({ label: e.label, bodies: e.bodies.map(body), guides: e.guides ?? [], dims: e.dims ?? [], arrays: e.arrays ?? [], looks: e.looks ?? {} });
         this.doc.restore(
-          { label: "", bodies: current, guides: json.guides ?? [], dims: h.dims ?? [], arrays: h.arrays ?? [] },
+          { label: "", bodies: current, guides: json.guides ?? [], dims: h.dims ?? [], arrays: h.arrays ?? [], looks },
           { undo: h.undo.map(entry), redo: h.redo.map(entry), counters: h.counters ?? [], nextId: h.nextId ?? 1 },
           filePath,
         );
@@ -6751,7 +6912,7 @@ class App implements ToolHost {
         this.toast("Opened without its undo history (it could not be read)", "error");
       }
     }
-    this.doc.reset(bodies, filePath, json.guides ?? [], json.dimensions ?? [], json.arrays ?? []);
+    this.doc.reset(bodies, filePath, json.guides ?? [], json.dimensions ?? [], json.arrays ?? [], looks);
     this.viewport.fit();
   }
 

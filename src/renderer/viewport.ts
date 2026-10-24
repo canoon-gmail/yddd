@@ -12,7 +12,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
-import type { Body, Dimension } from "./document";
+import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
 import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 
@@ -596,7 +596,7 @@ export class Viewport {
       }
       faceAreas.push(area);
     });
-    const mesh = new THREE.Mesh(geom, body.kind === "face" ? this.mats.regionFaces : this.mats.faces);
+    const mesh = new THREE.Mesh(geom, this.viewMats(body));
 
     const edgePos = Float32Array.from(edges.lines);
     let lines: LineSegments2 | null = null;
@@ -737,8 +737,13 @@ export class Viewport {
       if (v.group.visible && !this.xfSet.has(id)) members.push(v);
     }
     const tmp = new THREE.Color();
+    // One merged mesh per kind and opacity (see-through bodies share a material of their own).
+    const batches: { kind: "solid" | "face"; op: number; list: BodyView[] }[] = [];
     for (const kind of ["solid", "face"] as const) {
-      const list = members.filter((v) => (v.body.kind === "mesh" ? "solid" : v.body.kind) === kind);
+      const ofKind = members.filter((v) => (v.body.kind === "mesh" ? "solid" : v.body.kind) === kind);
+      for (const op of new Set(ofKind.map((v) => this.opacityOf(v.body.id)))) batches.push({ kind, op, list: ofKind.filter((v) => this.opacityOf(v.body.id) === op) });
+    }
+    for (const { kind, op, list } of batches) {
       if (!list.length) continue;
       let nv = 0, ni = 0;
       for (const v of list) {
@@ -747,9 +752,8 @@ export class Viewport {
       }
       const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), col = new Float32Array(nv * 3);
       const idx = new Uint32Array(ni);
-      tmp.setHex(kind === "face" ? COLORS.region : COLORS.solid);
       const geom = new THREE.BufferGeometry();
-      const mesh = new THREE.Mesh(geom, kind === "face" ? this.batchMats.region : this.batchMats.solid);
+      const mesh = new THREE.Mesh(geom, op < 1 ? this.lookMat(kind, null, op, true) : kind === "face" ? this.batchMats.region : this.batchMats.solid);
       mesh.raycast = () => {}; // picking uses the per-body meshes
       let vo = 0, io = 0;
       for (const v of list) {
@@ -758,6 +762,7 @@ export class Viewport {
         nor.set(g.attributes.normal.array as Float32Array, vo * 3);
         const src = g.index!.array;
         for (let k = 0; k < src.length; k++) idx[io + k] = src[k] + vo;
+        tmp.setHex(this.baseColor(v.body));
         for (let k = vo * 3; k < (vo + v.vertexCount) * 3; k += 3) {
           col[k] = tmp.r;
           col[k + 1] = tmp.g;
@@ -792,6 +797,73 @@ export class Viewport {
       lines.raycast = () => {};
       c.root.add(lines);
     }
+  }
+
+  /** Bodies' colours / opacities (see Look): only bodies with one are in here. */
+  private looks = new Map<number, { color: number | null; op: number }>();
+  /** Materials for looks, by "kind:colour:opacity:batched" (a handful: one per colour / opacity in use). */
+  private lookMats = new Map<string, { mat: THREE.MeshStandardMaterial; kind: "solid" | "face"; op: number }>();
+
+  /** Set every body's look (unchanged ones cost nothing; a changed one rebuilds its batch). */
+  setLooks(looks: Map<number, Look>): void {
+    const next = new Map<number, { color: number | null; op: number }>();
+    for (const [id, l] of looks) {
+      const color = l.color ? new THREE.Color(l.color).getHex() : null, op = Math.min(1, Math.max(0.1, l.opacity ?? 1));
+      if (color !== null || op < 1) next.set(id, { color, op });
+    }
+    let changed = false;
+    for (const id of new Set([...this.looks.keys(), ...next.keys()])) {
+      const a = this.looks.get(id), b = next.get(id);
+      if (a?.color === b?.color && a?.op === b?.op) continue;
+      changed = true;
+      this.looks.set(id, b!);
+      if (!b) this.looks.delete(id);
+      const v = this.views.get(id);
+      if (!v) continue;
+      this.markDirty(id);
+      v.mesh.material = this.viewMats(v.body);
+    }
+    if (changed) this.requestRender();
+  }
+
+  private opacityOf(id: number): number {
+    return this.looks.get(id)?.op ?? 1;
+  }
+
+  /** A body's colour when not hovered / selected. */
+  private baseColor(b: Body): number {
+    return this.looks.get(b.id)?.color ?? (b.kind === "face" ? COLORS.region : COLORS.solid);
+  }
+
+  /** A body's own mesh's materials (normal, hover, selected), used while it is moved on its own. */
+  private viewMats(b: Body): THREE.Material[] {
+    const [base, hover, sel] = b.kind === "face" ? this.mats.regionFaces : this.mats.faces;
+    const look = this.looks.get(b.id);
+    return look ? [this.lookMat(b.kind === "face" ? "face" : "solid", look.color, look.op, false), hover, sel] : [base, hover, sel];
+  }
+
+  /** A material for a look: batched ones take their colours from the vertices (`color` null). */
+  private lookMat(kind: "solid" | "face", color: number | null, op: number, batched: boolean): THREE.MeshStandardMaterial {
+    const key = `${kind}:${color}:${op}:${batched}`;
+    let m = this.lookMats.get(key);
+    if (!m) {
+      const from = batched ? (kind === "face" ? this.batchMats.region : this.batchMats.solid) : kind === "face" ? this.mats.regionFaces[0] : this.mats.faces[0];
+      const mat = from.clone();
+      if (color !== null) mat.color.setHex(color);
+      m = { mat, kind, op };
+      this.lookMats.set(key, m);
+      this.applyLookOpacity(m);
+    }
+    return m.mat;
+  }
+
+  /** A look's material's opacity: its own times the Settings' (flat faces: times their usual see-through). */
+  private applyLookOpacity({ mat, kind, op }: { mat: THREE.MeshStandardMaterial; kind: "solid" | "face"; op: number }): void {
+    const opacity = (kind === "face" ? 0.87 : this.xray ? this.xrayOpacity : this.solidOpacity) * op;
+    mat.transparent = kind === "face" || this.xray || opacity < 1;
+    mat.opacity = opacity;
+    if (kind === "solid") mat.depthWrite = !this.xray;
+    mat.needsUpdate = true;
   }
 
   setHidden(ids: Set<number>): void {
@@ -1657,7 +1729,7 @@ export class Viewport {
     // Batched mesh: vertex colours.
     if (!v.slot) return;
     const attr = v.slot.mesh.geometry.getAttribute("color") as THREE.BufferAttribute;
-    const c = new THREE.Color(level === 1 ? COLORS.hover : level === 2 ? COLORS.selected : v.body.kind === "face" ? COLORS.region : COLORS.solid);
+    const c = new THREE.Color(level === 1 ? COLORS.hover : level === 2 ? COLORS.selected : this.baseColor(v.body));
     const [a, b] = fi < 0 ? [0, v.vertexCount] : [v.faceV[fi * 2], v.faceV[fi * 2 + 1]];
     const arr = attr.array as Float32Array;
     for (let k = (v.slot.vOffset + a) * 3; k < (v.slot.vOffset + b) * 3; k += 3) {
@@ -2121,6 +2193,7 @@ export class Viewport {
       m.depthWrite = !this.xray; // out of x-ray, hidden faces stay hidden however see-through the solids are
       m.needsUpdate = true;
     }
+    for (const m of this.lookMats.values()) this.applyLookOpacity(m);
     this.requestRender();
   }
 
