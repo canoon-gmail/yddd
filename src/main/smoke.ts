@@ -4350,9 +4350,12 @@ const SCENARIO_LOOKS = String.raw`
   // Several selected: the swatch of one of them colours them all
   app.setSelection([b, c].map((x) => ({ kind: "body", body: x.id, id: 0 })));
   row(b.id).querySelector(".ol-look").click(); await sleep(20);
+  const deselected = app.selection.length === 0;
   pop().querySelector('.look-preset[data-c="#3b82f6"]').click(); outside(); await sleep(50);
-  expect("looks: with several objects selected, one's swatch colours them all", app.doc.get(b.id).look?.color === "#3b82f6" && app.doc.get(c.id).look?.color === "#3b82f6" && !app.doc.get(d.id).look,
-    [b, c, d].map((x) => app.doc.get(x.id).look));
+  app.viewport.requestRender(); await sleep(100);
+  expect("looks: with several objects selected, one's swatch colours them all (and deselects them: the gold fill would hide the colour)",
+    deselected && app.doc.get(b.id).look?.color === "#3b82f6" && app.doc.get(c.id).look?.color === "#3b82f6" && !app.doc.get(d.id).look && rgb(c.id).join() === "11,57,235",
+    { looks: [b, c, d].map((x) => app.doc.get(x.id).look), deselected, rgb: rgb(c.id) });
 
   // A group's colour: members without their own take it; with own colours → asked (smoke: "Apply to all members")
   app.setSelection([c, d].map((x) => ({ kind: "body", body: x.id, id: 0 })));

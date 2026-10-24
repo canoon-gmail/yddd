@@ -6344,6 +6344,9 @@ class App implements ToolHost {
     const sel = this.selectedBodyIds();
     const ids = body ? (sel.includes(body.id) && sel.length > 1 ? sel : [body.id]).filter((id) => this.doc.get(id)?.kind !== "path") : [];
     const members = group ? this.doc.bodies.filter((b) => b.group === group) : [];
+    // The bodies being coloured are deselected: the selection's gold fill would hide the colour (e.g. a box just drawn).
+    const coloured = new Set(group ? members.map((b) => b.id) : ids);
+    if (this.selection.some((s) => coloured.has(s.body))) this.setSelection(this.selection.filter((s) => !coloured.has(s.body)));
     const start: Look = group ? (this.doc.groupLooks[group] ?? {}) : (body!.look ?? {});
     const shown = group ? start : this.doc.lookOf(body!);
     const plain = body?.kind === "face" ? "#6f9bd1" : "#9aa5b1";
