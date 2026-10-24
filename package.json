@@ -1,6 +1,7 @@
 {
   "name": "yddd",
   "productName": "YDDD",
+  "desktopName": "yddd.desktop",
   "version": "0.1.0",
   "description": "YDDD - a direct NURBS/B-rep CAD modeler for Linux (Electron + Three.js + OpenCascade)",
   "main": "dist/main/main.js",
@@ -75,6 +76,7 @@
         "deb"
       ],
       "category": "Graphics",
+      "syncDesktopName": true,
       "icon": "build/icon.png",
       "synopsis": "Simple 3D CAD for 3D printing",
       "description": "Draw a shape, push and pull it, get exact sizes — a direct-modeling CAD app (OpenCascade) with STEP / STL / 3MF export.",
