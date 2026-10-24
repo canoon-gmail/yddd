@@ -144,6 +144,7 @@ import { write3mf } from "./threemf";
 import { JobCancelled, KernelWorker, solidFrom, type JobShape, type KernelJob } from "./kernelWorker";
 import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
+import { PROPELLER } from "./propeller";
 import { MeasureTool } from "./measure";
 import { SketchTool, type SketchFrame } from "./sketch";
 import { byDiameter, circleSize, CIRCLE_SIZE_KEY } from "./format";
@@ -1267,6 +1268,7 @@ class App implements ToolHost {
       case "help.cablebox": return this.toggleTutorial(CABLE_STORAGE_BOX);
       case "help.house": return this.toggleTutorial(HOUSE);
       case "help.planter": return this.toggleTutorial(PLANTER);
+      case "help.propeller": return this.toggleTutorial(PROPELLER);
       case "view.menu": return this.showViewMenu();
       case "view.pro": return this.togglePro();
       case "view.clearRecent": return this.clearRecent();
@@ -2949,6 +2951,9 @@ class App implements ToolHost {
       fields.push({ key: "turn", label: "Turn profile (°)", value: this.defaults.sweepTurn, step: 5 });
       // (the profile's size for this sweep only — e.g. smaller to fit a tight bend; the face itself stays)
       fields.push({ key: "size", label: "Profile size (%)", value: 100, step: 5 });
+      // (a straight path: turned / sized evenly on the way — e.g. a propeller blade)
+      fields.push({ key: "twist", label: "Twist (°)", value: 0, step: 5 });
+      fields.push({ key: "endSize", label: "End size (%)", value: 100, step: 5 });
     }
     if (body?.kind === "solid") fields.push({ key: "newBody", label: "New solid", value: this.defaults.joinNew ? 1 : 0, type: "checkbox" });
     const todo = !body ? "click a flat face for the profile (a flat ring makes a tube)" : !wire ? "click a path or guide line to sweep along" : "";
@@ -2988,9 +2993,9 @@ class App implements ToolHost {
       fields,
       note: `Profile: ${body ? (body.kind === "face" ? body.name : `a face of ${body.name}`) : "—"}<br>Path: ${guide ? "guide line" : pathBody ? pathBody.name : "—"}`,
       hint: `Sweep: ${todo ? `${todo} · ` : "click another face / path / guide line to change it · Enter apply · "}Esc cancel`,
-      compute: ({ round, toPath, turn, size, newBody }) => {
+      compute: ({ round, toPath, turn, size, twist, endSize, newBody }) => {
         if (!body || !wire) throw new OpWaiting(todo);
-        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100), !!newBody, "Sweep");
+        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100, twist || 0, (endSize ?? 100) / 100), !!newBody, "Sweep");
       },
       remember: ({ round, turn, newBody }) => {
         this.defaults.sweepRound = round;
@@ -6554,7 +6559,7 @@ class App implements ToolHost {
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
       ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
-      ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
+      ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; a straight path: Twist ° turns it evenly on the way — a propeller blade — and End size % makes the far end smaller / larger); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],

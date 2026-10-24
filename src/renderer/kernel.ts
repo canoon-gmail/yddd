@@ -43,6 +43,7 @@ import {
   basicFaceExtrusion,
   revolution,
   genericSweep,
+  makeHelix,
   deserializeShape,
   exportSTEP,
   importSTEP,
@@ -3713,9 +3714,11 @@ function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean): So
  * A flat face swept along an open path into a new solid. `toPath`: the face is first moved so its
  * centre sits on the path's end nearest it, turned square to the path there and then `turnDeg` about
  * the path; otherwise it is swept where it is. `round`: round corners where the path turns sharply (else mitred).
- * `scale`: the profile's size (1 = as drawn), about the path's end it starts from.
+ * `scale`: the profile's size (1 = as drawn), about the path's end it starts from. A straight path only:
+ * `twistDeg` turns the profile that much about the path by its far end (+ = the way `turnDeg` turns it), `endScale`
+ * its size there (× scale) — both evenly along the way.
  */
-export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0, scale = 1): Solid {
+export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0, scale = 1, twistDeg = 0, endScale = 1): Solid {
   let face = findFace(shape, faceId);
   if (!face || face.geomType !== "PLANE") throw new Error("Sweep: the profile must be a flat face");
   if (!pathEnds(path).length) throw new Error("Sweep: the path must be open (it has no ends)");
@@ -3728,8 +3731,38 @@ export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: bool
   }
   if (!(scale > 0)) throw new Error("Sweep: Profile size must be more than 0%");
   if (Math.abs(scale - 1) > 1e-9) face = scaleShape(face, [scale, scale, scale], nearestEnd(face, path)!.point);
+  if (!(endScale > 0)) throw new Error("Sweep: End size must be more than 0%");
+  if (Math.abs(twistDeg) > 1e-9 || Math.abs(endScale - 1) > 1e-9) {
+    const start = nearestEnd(face, path)!, end = pathEnds(path).find((e) => Math.hypot(...sub3(e.point, start.point)) > 1e-6);
+    const len = end ? Math.hypot(...sub3(end.point, start.point)) : 0;
+    if (!end || Math.abs(measureLength(path) - len) > 1e-6 * Math.max(1, len)) throw new Error("Sweep: Twist and End size need a straight path (a line or guide line)");
+    return twistedSweep(face.clone().outerWire(), face.clone().innerWires(), start.point, end.point, twistDeg, endScale);
+  }
   // outerWire / innerWires delete the face they are called on.
   return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round);
+}
+
+/**
+ * Loops swept straight from a to b, turning evenly by twistDeg about the line (a helix round it steers the
+ * profile, as a twisted extrusion) and growing / shrinking evenly to endScale — exact, one surface per edge.
+ */
+function twistedSweep(outer: Wire, holes: Wire[], a: V3, b: V3, twistDeg: number, endScale: number): Solid {
+  const d = sub3(b, a), len = Math.hypot(...d);
+  const sweep = (w: Wire) => {
+    const spine = assembleWire([makeLine(a, b)]);
+    const aux = Math.abs(twistDeg) > 1e-9 ? makeHelix((360 / twistDeg) * len, len, 1, a, d) : undefined;
+    let law: unknown = null;
+    if (Math.abs(endScale - 1) > 1e-9) {
+      const lin = new oc.Law_Linear();
+      lin.Set(0, 1, len, endScale);
+      law = lin.Trim(0, len, 1e-6);
+    }
+    return genericSweep(w, spine, { auxiliarySpine: aux, law: law as never }) as Solid;
+  };
+  let solid = sweep(outer);
+  if (holes.length) solid = boolean("cut", solid, holes.map(sweep));
+  if (!isValidShape(solid) || solidVolume(solid) <= 1e-9) throw new Error("Sweep: the twisted result is not a valid solid");
+  return solid;
 }
 
 /** A straight path from `a` to `b` (e.g. a guide line to sweep along). */

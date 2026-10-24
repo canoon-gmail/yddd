@@ -163,7 +163,7 @@ function buildMenu(): void {
     },
     {
       label: "&Help",
-      submenu: [item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter")],
+      submenu: [item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter"), item("Propeller", "help.propeller")],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));

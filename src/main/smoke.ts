@@ -2162,6 +2162,57 @@ const SCENARIO_PLANTER = String.raw`
 })()
 `;
 
+/** Help → Propeller: every step valid; the swept blade twisted 45° → 15° and 60% at the tip; 3 blades, one part, the shaft hole. */
+const SCENARIO_PROPELLER = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
+  const press = async (act) => { document.querySelector("#tutorial button[data-act=" + act + "]").click(); await sleep(60); };
+  // The blade's angle (to the grid) at its cross-section x = at: from the straight sides of that end face
+  const pitch = (s, at) => { const f = s.faces.find((f) => f.geomType === "PLANE" && Math.abs(f.center.x - at) < 1e-6); const span = (e) => { const a = e.startPoint.toTuple(), b = e.endPoint.toTuple(); return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]); };
+    const e = f && f.edges.reduce((x, y) => (span(y) > span(x) ? y : x)); // (its straight sides: the longest across)
+    if (!e) return null; const a = e.startPoint.toTuple(), b = e.endPoint.toTuple(); return { deg: +(Math.atan2(Math.abs(b[2] - a[2]), Math.abs(b[1] - a[1])) * 180 / Math.PI).toFixed(4), len: +Math.hypot(b[1] - a[1], b[2] - a[2]).toFixed(4) }; };
+  app.doc.dirty = false;
+  document.querySelectorAll("#toasts .toast").forEach((t) => t.remove());
+  app.run("help.propeller"); await sleep(30);
+  const panel = document.getElementById("tutorial");
+  const titles = [...panel.querySelectorAll("li > b:first-child")].map((b) => b.textContent);
+  const total = titles.length;
+  expect("propeller: panel opens with the steps", !panel.hidden && panel.querySelector("h2").textContent === "Propeller" && total === 7, titles);
+  const before = toasts().length, info = {};
+  for (let i = 0; i < total; i++) {
+    const t0 = performance.now();
+    await press("do");
+    const bad = app.doc.bodies.filter((b) => b.kind !== "path" && !K.isValidShape(b.shape)).map((b) => b.name);
+    if (bad.length || toasts().length > before) { expect("propeller: step " + (i + 1) + " valid", false, { bad, errors: toasts() }); break; }
+    info[titles[i]] = { ms: Math.round(performance.now() - t0), names: app.doc.bodies.map((b) => b.name) };
+    if (titles[i] === "Sweep a twisted blade") {
+      const blade = app.doc.bodies.find((b) => b.name === "Blade");
+      Object.assign(info[titles[i]], blade ? { root: pitch(blade.shape, 4), tip: pitch(blade.shape, 40), v: K.solidVolume(blade.shape) } : {});
+    }
+  }
+  const names = app.doc.bodies.map((b) => b.name);
+  expect("propeller: all steps done, no errors, one body", panel.querySelectorAll("li.done").length === total && toasts().length === before && names.join() === "Propeller", { done: panel.querySelectorAll("li.done").length, errors: toasts(), names, info });
+  const sw = info["Sweep a twisted blade"] || {};
+  // (the straight sides: 10 mm at the root, 60% at the tip)
+  expect("propeller: the blade is swept with the twist — 45° at the root, 15° at the tip, 60% the size there",
+    sw.root && sw.tip && Math.abs(sw.root.deg - 45) < 1e-3 && Math.abs(sw.tip.deg - 15) < 1e-3 && Math.abs(sw.root.len - 10) < 1e-3 && Math.abs(sw.tip.len - 6) < 1e-3, sw);
+  const p = app.doc.bodies[0];
+  if (p) {
+    const [lo, hi] = p.shape.boundingBox.bounds, hub = Math.PI * (49 - 2.25) * 10, v = K.solidVolume(p.shape);
+    // 3 blades outside the hub: each less than the whole swept blade
+    expect("propeller: 80 mm across (tip at x 40), hub 10 high, the blades add 3 × (less than a blade), a hole through",
+      Math.abs(hi[0] - 40) < 1e-3 && Math.abs(lo[2] + 5) < 1e-3 && Math.abs(hi[2] - 5) < 1e-3 && v > hub + 3 * 0.8 * sw.v && v < hub + 3 * sw.v && p.shape.faces.length > 10, { lo, hi, v, hub, blade: sw.v });
+  }
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("propeller scenario failed: " + JSON.stringify(failed));
+  return checks;
+})()
+`;
+
 const SCENARIO_BIRD = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -6543,6 +6594,16 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "propeller") {
+      // (while working on it: just Help → Propeller, and a picture of it)
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PROPELLER, true));
+      await win.webContents.executeJavaScript(`window.ydddApp.viewport.fit(); 0`, true);
+      await new Promise((r) => setTimeout(r, 300));
+      await shot("propeller.png");
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(0);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "round") {
       // (while working on it: just the round corner scenario, and a screenshot of a rectangle's corners being rounded)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ROUND, true));
@@ -6680,6 +6741,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await shot("5b-house.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PLANTER, true));
     await shot("5c-planter.png");
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PROPELLER, true));
+    await shot("5d-propeller.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CABLE, true));
     await shot("6-cablebox.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_MEASURE, true));
