@@ -17,18 +17,92 @@
     "smoke": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke electron .",
     "smoke:half": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke YDDD_SMOKE_HALF=1 electron .",
     "bench": "npm run build && YDDD_STRESS=${N:-2000} YDDD_BENCH=1 electron .",
-    "bench:ops": "npm run build && YDDD_BENCH=ops electron ."
-  },
-  "dependencies": {
-    "replicad": "^1.1.0",
-    "replicad-opencascadejs": "^1.1.0",
-    "three": "^0.186.1"
+    "bench:ops": "npm run build && YDDD_BENCH=ops electron .",
+    "dist": "npm run build && electron-builder --linux AppImage deb"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
     "@types/three": "^0.186.0",
     "electron": "^44.7.2",
+    "electron-builder": "^26.18.0",
+    "replicad": "^1.1.0",
+    "replicad-opencascadejs": "^1.1.0",
+    "three": "^0.186.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"
+  },
+  "homepage": "https://github.com/canoon-gmail/yddd",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/canoon-gmail/yddd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/canoon-gmail/yddd/issues"
+  },
+  "author": {
+    "name": "thaijava",
+    "url": "https://github.com/canoon-gmail"
+  },
+  "build": {
+    "appId": "io.github.canoon-gmail.yddd",
+    "productName": "YDDD",
+    "artifactName": "YDDD-${version}-${arch}.${ext}",
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraFiles": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "licenses",
+        "to": "licenses"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Graphics",
+      "icon": "build/icon.png",
+      "synopsis": "Simple 3D CAD for 3D printing",
+      "description": "Draw a shape, push and pull it, get exact sizes — a direct-modeling CAD app (OpenCascade) with STEP / STL / 3MF export.",
+      "maintainer": "thaijava <https://github.com/canoon-gmail/yddd/issues>",
+      "mimeTypes": [
+        "application/x-yddd"
+      ],
+      "fileAssociations": [
+        {
+          "ext": "yddd",
+          "name": "YDDD model",
+          "mimeType": "application/x-yddd"
+        }
+      ]
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0",
+        "fontconfig"
+      ]
+    }
   }
 }
