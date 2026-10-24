@@ -1,0 +1,35 @@
+name: First impressions
+description: Just tried YDDD? Tell us how the first 10 minutes went. 3 short questions.
+title: "[First try] "
+labels: ["first-impressions"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying YDDD! One line per question is fine. Nothing is a wrong answer.
+  - type: textarea
+    id: tried
+    attributes:
+      label: What did you try to make?
+    validations:
+      required: true
+  - type: textarea
+    id: confusing
+    attributes:
+      label: What was confusing in the first 10 minutes?
+      description: Where did you get stuck, or what did not do what you thought?
+    validations:
+      required: true
+  - type: textarea
+    id: again
+    attributes:
+      label: What would make you use it again?
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Computer (optional)
+      placeholder: e.g. Ubuntu 24.04, Windows 11
+    validations:
+      required: false

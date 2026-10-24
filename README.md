@@ -67,7 +67,8 @@ push/pull and so on.
 
 ## License notes
 
-OpenCascade (replicad-opencascadejs) is LGPL-2.1; replicad and Three.js are MIT.
+YDDD is MIT (`LICENSE`). OpenCascade (replicad-opencascadejs, `vendor/occt`) is LGPL-2.1; replicad and
+Three.js are MIT; the Noto fonts are SIL OFL 1.1 — see `THIRD_PARTY_NOTICES.md` and `licenses/`.
 
 ## TODO
 

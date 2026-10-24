@@ -1,0 +1,38 @@
+name: Feature request
+description: Something you wanted to make but YDDD could not do (yet).
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us about the thing you want to print. A real part helps us more than a list of tools.
+  - type: textarea
+    id: make
+    attributes:
+      label: What do you want to print / model?
+      description: A photo, sketch or link to a similar part is welcome.
+      placeholder: e.g. a wall hook for my bike, a lid for a jar, a name tag ...
+    validations:
+      required: true
+  - type: textarea
+    id: blocked
+    attributes:
+      label: What stopped you?
+      description: Which step could you not do, or was too hard?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How would you like it to work? (optional)
+      description: If you have an idea, or know how another app does it.
+    validations:
+      required: false
+  - type: input
+    id: other
+    attributes:
+      label: Other apps you use (optional)
+      placeholder: e.g. Tinkercad, FreeCAD, Fusion 360, SketchUp, OpenSCAD
+    validations:
+      required: false

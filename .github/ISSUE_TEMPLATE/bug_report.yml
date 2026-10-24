@@ -1,0 +1,64 @@
+name: Bug report
+description: Something went wrong, broke, or gave a wrong shape.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for telling us! Short is fine. A saved `.yddd` file or a screenshot helps a lot.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What went wrong, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen again
+      description: What did you click / type, one step per line.
+      placeholder: |
+        1. Draw a box 20 x 20 x 10
+        2. Edge mode, pick the top edges, F
+        3. Type Radius 3, Enter
+        4. ...
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: What did you get instead?
+      description: An error message, a wrong shape, a freeze, a crash ...
+    validations:
+      required: false
+  - type: textarea
+    id: files
+    attributes:
+      label: File / screenshot
+      description: |
+        Drag and drop here. GitHub does not take `.yddd` files directly — zip it first, or rename it to `.txt`.
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Computer (OS / distro)
+      placeholder: e.g. Ubuntu 24.04, Fedora 41, Windows 11, macOS 15
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: YDDD version or commit
+      description: The version you downloaded, or `git log -1 --oneline` if you built it yourself.
+      placeholder: e.g. 0.1.0, or 9b8dfb2
+    validations:
+      required: false

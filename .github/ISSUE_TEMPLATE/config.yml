@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question / show what you made
+    url: https://github.com/canoon-gmail/yddd/discussions
+    about: Not a bug? Questions, ideas and prints you made are welcome in Discussions.
