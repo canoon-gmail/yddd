@@ -85,9 +85,9 @@ The milestone is "first user comments", but there is nowhere obvious to leave on
 - First confirm that the repo is **public**. This could not be checked here.
 
 ### 7. Smaller items (each under 1 hour)
-- **Bird house screenshot is not usable as is.** `5-birdhouse.png` shows two error toasts,
-  including "Failed: Union: 'Ball 1' is a mesh (imported STL)…". Don't use it for promo without
-  re-shooting. Check whether a real user can hit that error during the walkthrough.
+- ~~**Bird house screenshot is not usable as is.**~~ Done 2026-10-24: the "'Ball 1' is a mesh" toasts
+  were left over from the STL mesh smoke scenario (it checks that Union on a mesh is refused); the
+  walkthrough itself has no error. The bird scenario now clears old toasts first, so the shot is clean.
 - **Tutorial panel covers the model.** In every tutorial shot the panel takes about 1/3 of the
   viewport. For promo shots, close the panel (or Fit after closing) and take the model alone.
 - **Version / About.** Add Help → About showing the version (0.1.0), the licence and the GitHub

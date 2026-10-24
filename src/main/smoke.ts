@@ -2222,6 +2222,7 @@ const SCENARIO_BIRD = String.raw`
   const toasts = () => [...document.querySelectorAll("#toasts .toast.error")].map((t) => t.textContent);
   const press = async (act) => { document.querySelector("#tutorial button[data-act=" + act + "]").click(); await sleep(60); };
   app.doc.dirty = false;
+  document.getElementById("toasts").replaceChildren(); // the mesh scenario's expected errors would stay in 5-birdhouse.png
   app.run("help.birdhouse"); await sleep(30);
   const panel = document.getElementById("tutorial");
   const total = panel.querySelectorAll("li").length;
