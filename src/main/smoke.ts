@@ -2603,6 +2603,23 @@ const SCENARIO_SPLINE = String.raw`
     const back = T().loops[0].segs[0];
     expect("spline: selected, its 4 points show; drag one → the curve runs through the new place; Ctrl+Z puts it back",
       T().mode === "select" && handles === 4 && dragOk && near(back.thru[1], [20, 50]), { mode: T().mode, handles, moved: moved.thru, back: back.thru });
+    // Dragged near the other path's end (3 px off, a fine grid): onto that end exactly; far from any point: where let go
+    {
+      const snap0 = app.snap; app.snap = 0.001;
+      if (!T().splineHandles().length) await click([20, 50]); // (selected: its points to drag)
+      const off = 3 * vp.worldPerPixel(new V(60, 10, 0)), to = [60 + off, 10 + off];
+      pe("pointermove", [20, 50]); pe("pointerdown", [20, 50]); pe("pointermove", [40, 30]); await sleep(30); pe("pointermove", to); await sleep(30); pe("pointerup", to); await sleep(20);
+      const snapped = T().loops[0].segs[0].thru[1];
+      await key("z", { ctrlKey: true });
+      const far = [60 + 7 * off, 10 + 7 * off]; // (about 30 px off: no point near)
+      if (!T().splineHandles().length) await click([20, 50]);
+      pe("pointermove", [20, 50]); pe("pointerdown", [20, 50]); pe("pointermove", [40, 30]); await sleep(30); pe("pointermove", far); await sleep(30); pe("pointerup", far); await sleep(20);
+      const freeAt = T().loops[0].segs[0].thru[1];
+      await key("z", { ctrlKey: true });
+      app.snap = snap0;
+      expect("spline: a Spline point dragged near another path's end snaps onto it; far from any point it stays where let go",
+        near(snapped, [60, 10]) && Math.hypot(freeAt[0] - far[0], freeAt[1] - far[1]) < 0.01 && near(T().loops[0].segs[0].thru[1], [20, 50]), { snapped, freeAt, far });
+    }
     // Done → a flat face (the closed one) and a path (the open one)
     document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(50);
     const face = app.doc.bodies.find((b) => b.kind === "face"), path = app.doc.bodies.find((b) => b.kind === "path");

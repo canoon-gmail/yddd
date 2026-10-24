@@ -1299,6 +1299,7 @@ export class SketchTool implements Tool {
       this.ptDrag = null;
       if (pd.moved) this.undoStack.push(pd.snap);
       this.host.hud(null);
+      this.host.viewport.showSnapMarker(null);
       return this.update();
     }
     const dr = this.drag;
@@ -1340,13 +1341,36 @@ export class SketchTool implements Tool {
     return best;
   }
 
-  /** Drag a Spline point to `e` (grid steps when snapping): the curve through its points again. */
+  /**
+   * Drag a Spline point to `e`: onto a point of the sketch's other lines (ends first, then middles / centres) or of
+   * the model, else the plane (grid steps when snapping); Ctrl: free. The curve through its points again.
+   */
   private ptDragTo(e: PointerEvent): void {
     const dr = this.ptDrag!;
-    let q = this.planeAt(e);
-    if (!q) return;
-    const step = this.host.snapStep(e);
-    if (step > 0) q = [Math.round(q[0] / step) * step, Math.round(q[1] / step) * step];
+    const vp = this.host.viewport, free = vp.autoSnap && e.ctrlKey;
+    let q: P | null = null;
+    if (!free) {
+      // (the dragged Spline's own lines left out: its point would stick where it was)
+      const pts: { p: P; kind: "vertex" | "midpoint" | "center" }[] = [];
+      const seg = (g: Seg) => pts.push({ p: g.a, kind: "vertex" }, { p: g.b, kind: "vertex" }, { p: segMid(g), kind: "midpoint" });
+      this.loops.forEach((l, i) => (dr.item.kind === "loop" && dr.item.i === i ? undefined : l.kind === "circle" ? pts.push({ p: l.c, kind: "center" }) : l.segs.forEach(seg)));
+      this.opens.forEach((o, i) => (dr.item.kind === "loop" || dr.item.i !== i ? o.forEach(seg) : undefined));
+      let best: { p: P; kind: "vertex" | "midpoint" | "center"; score: number } | null = null;
+      for (const { p, kind } of pts) {
+        const sc = vp.toScreen(this.world(p)), d = Math.hypot(sc.x - e.clientX, sc.y - e.clientY), score = d + (kind === "vertex" ? 0 : 4);
+        if (d <= SNAP_PX && (!best || score < best.score)) best = { p, kind, score };
+      }
+      const sp = best ? null : vp.snapPoint(e.clientX, e.clientY);
+      if (best) q = best.p;
+      else if (sp && sp.kind !== "axis") q = this.local(sp.point);
+      vp.showSnapMarker(best ? { point: this.world(best.p), kind: best.kind } : q && sp ? { point: this.world(q), kind: sp.kind } : null);
+    } else vp.showSnapMarker(null);
+    if (!q) {
+      q = this.planeAt(e);
+      if (!q) return;
+      const step = this.host.snapStep(e);
+      if (step > 0) q = [Math.round(q[0] / step) * step, Math.round(q[1] / step) * step];
+    }
     const segs = dr.item.kind === "loop" ? (this.loops[dr.item.i] as Extract<Loop, { kind: "path" }>).segs : this.opens[dr.item.i];
     const g = segs[dr.seg] as Extract<Seg, { kind: "spline" }>;
     const thru = g.thru!.map((p, k) => (k === dr.k ? q! : p));
