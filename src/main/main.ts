@@ -9,6 +9,9 @@ const RENDERER_DIR = path.join(__dirname, "..", "renderer");
 // Smoke runs keep their own settings / storage: they can run next to the user's open YDDD and leave its settings alone.
 if (process.env.YDDD_SMOKE) app.setPath("userData", path.join(process.env.YDDD_SMOKE, "user-data"));
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
+// No usable GPU (a VM, missing drivers): let WebGL fall back to Chromium's software renderer (SwiftShader)
+// instead of failing. A working GPU is still used. "Unsafe" is about untrusted web pages; YDDD only loads its own code.
+app.commandLine.appendSwitch("enable-unsafe-swiftshader");
 
 // A privileged custom scheme lets the renderer fetch() the OpenCascade .wasm
 // (file:// does not support fetch / streaming wasm compilation).

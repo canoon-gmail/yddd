@@ -7179,7 +7179,10 @@ async function boot(): Promise<void> {
     else await app.offerRecovery();
   } catch (e) {
     loading.classList.add("error");
-    loading.innerHTML = `<div>Failed to start the geometry kernel:</div><div>${escapeHtml(errorMessage(e))}</div>`;
+    const msg = errorMessage(e);
+    const webgl = /webgl/i.test(msg);
+    loading.innerHTML = `<div>${webgl ? "Failed to start 3D graphics (WebGL):" : "Failed to start the geometry kernel:"}</div><div>${escapeHtml(msg)}</div>`
+      + (webgl ? "<div>Check the graphics drivers, or turn on 3D acceleration if YDDD runs in a virtual machine.</div>" : "");
     console.error(e);
   }
 }
