@@ -6108,9 +6108,9 @@ const SCENARIO_SKETCH = String.raw`
     const showsOk = fld("pic-scale").value === "100" && fld("pic-rotate").value === "0";
     wheel("pic-scale", true); wheel("pic-scale", true); wheel("pic-scale", true, true); // 100 → 105 → 110 → 111
     typed("pic-rotate", "90"); wheel("pic-rotate", false); // 90 → 85
-    typed("pic-clear", "80");
+    typed("pic-opacity", "20");
     const pq = app.tool.pic;
-    expect("sketch picture: menu fields — Scale 100 → wheel ×2 + Shift-wheel = 111%, Rotate 90 then wheel down = 85°, 80% transparent", showsOk && fld("pic-scale").value === "111" && Math.abs(pq.w - pw * 1.11) < 1e-9 && Math.abs(pq.ang - pa - (85 * Math.PI) / 180) < 1e-9 && Math.abs(pq.mat.opacity - 0.2) < 1e-9 && !document.querySelector("#sketch-corner [data-act=pic-match]"), { scale: fld("pic-scale").value, w: pq.w / pw, ang: ((pq.ang - pa) * 180) / Math.PI, op: pq.mat.opacity });
+    expect("sketch picture: menu fields — Scale 100 → wheel ×2 + Shift-wheel = 111%, Rotate 90 then wheel down = 85°, Opacity 20%", showsOk && fld("pic-scale").value === "111" && Math.abs(pq.w - pw * 1.11) < 1e-9 && Math.abs(pq.ang - pa - (85 * Math.PI) / 180) < 1e-9 && Math.abs(pq.mat.opacity - 0.2) < 1e-9 && !document.querySelector("#sketch-corner [data-act=pic-match]"), { scale: fld("pic-scale").value, w: pq.w / pw, ang: ((pq.ang - pa) * 180) / Math.PI, op: pq.mat.opacity });
     // The handles at its bottom-right corner: the square scales about the centre (dragged out to twice as far: ×2),
     // the ring rotates about it (dragged a quarter round: +90°) — the fields follow
     {
@@ -6370,6 +6370,170 @@ const SCENARIO_MESH = String.raw`
  * DOM events can't give: Alt + left drag orbits (no selection), a plain click still selects, the
  * wheel (also a touchpad's two-finger slide) zooms.
  */
+/** "/": every operation and its keys — search, change a key (checked: not allowed / another's / a chord / mouse 4),
+ * the new keys work, the toolbar and the menu show them, ↺ and Restore all defaults. */
+async function keysPanelChecks(win: BrowserWindow, errors: string[]): Promise<unknown> {
+  const got = await win.webContents.executeJavaScript(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const app = window.ydddApp, vp = app.viewport;
+    const key = (k, code, mods = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true, ...mods }));
+    const panel = () => document.getElementById("keys-panel");
+    const row = (cmd) => panel()?.querySelector("tr[data-cmd='" + cmd + "']");
+    const rows = () => [...panel().querySelectorAll("tr[data-cmd]")].map((r) => r.dataset.cmd);
+    const click = (el) => el?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const add = (cmd) => click(row(cmd)?.querySelector(".kp-add"));
+    const msg = (cmd) => row(cmd)?.querySelector(".kp-msg")?.textContent ?? "";
+    const out = {};
+    app.doc.reset([]); app.run("mode.body"); app.setSelection([]);
+    const xray0 = vp.xray;
+    key("/", "Slash"); await sleep(30);
+    out.opened = !!panel() && document.activeElement === panel().querySelector("input[type=search]");
+    click(panel()?.querySelector("[data-act=reset-all]")); await sleep(20); // (keys left by an earlier run in this user-data)
+    out.count = rows().length;
+    out.firstRows = rows().slice(0, 3);
+    out.filletKeys = [...row("op.fillet").querySelectorAll("kbd")].map((k) => k.textContent);
+    const search = panel().querySelector("input[type=search]");
+    search.value = "x-ray"; search.dispatchEvent(new Event("input"));
+    out.search = rows();
+    search.value = "ctrl+s"; search.dispatchEvent(new Event("input"));
+    out.searchKey = rows();
+    search.value = ""; search.dispatchEvent(new Event("input"));
+    // Shift+J: a new key at once (with a modifier)
+    add("view.xray"); key("J", "KeyJ", { shiftKey: true }); await sleep(20);
+    out.shiftJ = [...app.keys["view.xray"]];
+    out.resetShown = !!row("view.xray").querySelector(".kp-reset");
+    // Ctrl+Q: not allowed
+    add("view.xray"); key("q", "KeyQ", { ctrlKey: true }); await sleep(20);
+    out.ctrlQ = { keys: [...app.keys["view.xray"]], msg: msg("view.xray") };
+    // Shift+D: Duplicate's — "Use it here" takes it
+    add("view.xray"); key("D", "KeyD", { shiftKey: true }); await sleep(20);
+    out.pending = msg("view.xray");
+    click(row("view.xray").querySelector("[data-act=take]")); await sleep(20);
+    out.taken = { xray: [...app.keys["view.xray"]], dup: [...app.keys["edit.duplicate"]], msg: msg("view.xray") };
+    // Q then W: a two-key shortcut
+    add("view.xray"); key("q", "KeyQ"); await sleep(100); key("w", "KeyW"); await sleep(20);
+    out.chord = [...app.keys["view.xray"]];
+    // Mouse 4
+    add("view.xray"); window.dispatchEvent(new MouseEvent("mousedown", { button: 3, bubbles: true })); await sleep(20);
+    out.mouse = [...app.keys["view.xray"]];
+    // Settings… (no key): Ctrl+Shift+K — for the menu check
+    add("file.settings"); key("K", "KeyK", { ctrlKey: true, shiftKey: true }); await sleep(20);
+    out.saved = JSON.parse(localStorage.getItem("yddd.keys") ?? "{}");
+    // The panel holds the app's keys while it's open: Shift+J does nothing yet
+    key("J", "KeyJ", { shiftKey: true }); await sleep(20);
+    out.heldWhileOpen = vp.xray === xray0;
+    key("Escape", "Escape"); await sleep(20);
+    out.closed = !panel();
+    const toggles = async (fire) => { const was = vp.xray; await fire(); await sleep(30); const ok = vp.xray !== was; return ok; };
+    out.work = {
+      shiftJ: await toggles(() => key("J", "KeyJ", { shiftKey: true })),
+      shiftD: await toggles(() => key("D", "KeyD", { shiftKey: true })),
+      chord: await toggles(async () => { key("q", "KeyQ"); await sleep(50); key("w", "KeyW"); }),
+      mouse: await toggles(() => window.dispatchEvent(new MouseEvent("mousedown", { button: 3, bubbles: true }))),
+      oldKeyStill: await toggles(() => key("X", "KeyX", { shiftKey: true })),
+    };
+    out.dupBodies = app.doc.bodies.length;
+    out.toolbarTitle = document.querySelector("#toolbar button[data-cmd='view.xray']")?.title;
+    if (vp.xray !== xray0) vp.setXray(xray0);
+    return out;
+  })()`, true);
+  await new Promise((r) => setTimeout(r, 150));
+  // Orbit / Pan / Zoom: Pan + right drag, Zoom only with Ctrl held — then real mouse input moves the view so.
+  const nav = await win.webContents.executeJavaScript(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const app = window.ydddApp, vp = app.viewport, panel = () => document.getElementById("keys-panel");
+    const click = (el) => el?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const row = (cmd) => panel()?.querySelector("tr[data-cmd='" + cmd + "']");
+    const msg = (cmd) => row(cmd)?.querySelector(".kp-msg")?.textContent ?? "";
+    const out = {};
+    app.run("help.keys"); await sleep(20);
+    out.rows = ["nav.orbit", "nav.pan", "nav.zoom"].map((c) => [...row(c).querySelectorAll("kbd")].map((k) => k.textContent).join(" · "));
+    out.runButton = !!row("nav.pan").querySelector(".kp-run");
+    click(row("nav.pan").querySelector(".kp-add")); window.dispatchEvent(new PointerEvent("pointerdown", { button: 2, bubbles: true, cancelable: true })); await sleep(20);
+    click(row("nav.orbit").querySelector(".kp-add")); window.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true })); await sleep(20);
+    out.wheelOrbit = msg("nav.orbit");
+    click(row("nav.orbit").querySelector(".kp-add")); window.dispatchEvent(new PointerEvent("pointerdown", { button: 0, bubbles: true, cancelable: true })); await sleep(20);
+    out.plainLeft = msg("nav.orbit");
+    click(row("nav.orbit").querySelector(".kp-add")); window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", code: "KeyJ", bubbles: true, cancelable: true })); await sleep(20);
+    out.keyOrbit = msg("nav.orbit");
+    click(row("nav.zoom").querySelector("kbd[data-i='0']")); window.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true })); await sleep(20);
+    out.keys = { orbit: [...app.keys["nav.orbit"]], pan: [...app.keys["nav.pan"]], zoom: [...app.keys["nav.zoom"]] };
+    out.vpNav = JSON.parse(JSON.stringify(vp.nav));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    out.hint = document.getElementById("status-hint")?.textContent ?? "";
+    app.doc.reset([]); app.run("mode.body"); app.setSelection([]); vp.setView("iso"); vp.fit(); await sleep(50);
+    const r = vp.canvas.getBoundingClientRect();
+    out.at = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    return out;
+  })()`, true);
+  const cam = () => win.webContents.executeJavaScript(`(() => { const vp = window.ydddApp.viewport; return { t: vp.controls.target.toArray(), d: vp.camera.position.distanceTo(vp.controls.target) }; })()`, true) as Promise<{ t: number[]; d: number }>;
+  const send = async (e: Parameters<typeof win.webContents.sendInputEvent>[0]) => {
+    win.webContents.sendInputEvent(e);
+    await new Promise((r) => setTimeout(r, 30));
+  };
+  const { x, y } = nav.at;
+  const realWas = await win.webContents.executeJavaScript(`(() => { const was = window.__realInput; window.__realInput = true; return was; })()`, true); // (real input on for this)
+  const c0 = await cam();
+  await send({ type: "mouseMove", x, y });
+  await send({ type: "mouseDown", x, y, button: "right", clickCount: 1 });
+  for (let k = 1; k <= 6; k++) await send({ type: "mouseMove", x: x + k * 15, y: y + k * 5, button: "right", modifiers: ["rightButtonDown"] } as never);
+  await send({ type: "mouseUp", x: x + 90, y: y + 30, button: "right", clickCount: 1 });
+  const c1 = await cam();
+  await send({ type: "mouseWheel", x, y, deltaX: 0, deltaY: -240, canScroll: true } as never);
+  await new Promise((r) => setTimeout(r, 100));
+  const c2 = await cam();
+  await send({ type: "mouseWheel", x, y, deltaX: 0, deltaY: -240, canScroll: true, modifiers: ["control"] } as never);
+  await new Promise((r) => setTimeout(r, 100));
+  const c3 = await cam();
+  await win.webContents.executeJavaScript(`window.__realInput = ${JSON.stringify(realWas ?? false)}; 0`, true);
+  const moved = (a: { t: number[] }, b: { t: number[] }) => Math.hypot(...a.t.map((v, k) => v - b.t[k]));
+  const navWork = { rightPans: moved(c0, c1) > 1 && Math.abs(c1.d - c0.d) < 1e-6 * c0.d, plainWheelStill: Math.abs(c2.d - c1.d) < 1e-6 * c1.d, ctrlWheelZooms: Math.abs(c3.d - c2.d) > c2.d * 0.01 };
+  const settingsAcc = Menu.getApplicationMenu()?.items.find((i) => i.label === "&File")?.submenu?.items.find((i) => i.label === "Settings…")?.accelerator;
+  const reset = await win.webContents.executeJavaScript(`(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const app = window.ydddApp, panel = () => document.getElementById("keys-panel");
+    const click = (el) => el?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const row = (cmd) => panel()?.querySelector("tr[data-cmd='" + cmd + "']");
+    app.run("help.keys"); await sleep(20);
+    click(row("view.xray").querySelector(".kp-reset")); await sleep(20);
+    const one = { xray: [...app.keys["view.xray"]], dup: [...app.keys["edit.duplicate"]], dupReset: !!row("edit.duplicate").querySelector(".kp-reset") };
+    click(panel().querySelector("[data-act=reset-all]")); await sleep(20);
+    const all = { dup: [...app.keys["edit.duplicate"]], settings: [...app.keys["file.settings"]], stored: localStorage.getItem("yddd.keys"), resets: panel().querySelectorAll(".kp-reset").length };
+    click(panel().querySelector("[data-act=close]")); await sleep(20);
+    // a default numpad key and a punctuation one still work: Num 5 → Iso, ? → help
+    app.run("view.top"); const before = app.viewport.camera.position.toArray().join();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "5", code: "Numpad5", bubbles: true, cancelable: true })); await sleep(20);
+    const iso = app.viewport.camera.position.toArray().join() !== before;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "?", code: "Slash", shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+    const help = !document.getElementById("help").hidden;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    return { one, all, closed: !panel(), iso, help, helpClosed: document.getElementById("help").hidden };
+  })()`, true);
+  await new Promise((r) => setTimeout(r, 150));
+  const settingsAccAfter = Menu.getApplicationMenu()?.items.find((i) => i.label === "&File")?.submenu?.items.find((i) => i.label === "Settings…")?.accelerator;
+  const checks = [
+    { label: "keys: / opens the panel (search box focused), every command listed (File first), Fillet's key F", ok: got.opened && got.count >= 70 && got.firstRows.join() === "file.new,file.open,file.save" && got.filletKeys.join() === "F", got: { opened: got.opened, count: got.count, first: got.firstRows, fillet: got.filletKeys } },
+    { label: "keys: search by name (x-ray → X-ray) and by a whole key (ctrl+s → just Save, not Ctrl+Shift+S)", ok: got.search.join() === "view.xray" && got.searchKey.join() === "file.save", got: { search: got.search, byKey: got.searchKey } },
+    { label: "keys: + then Shift+J adds it (↺ shows); Ctrl+Q refused with a reason", ok: got.shiftJ.join() === "Shift+X,Shift+J" && got.resetShown && got.ctrlQ.keys.join() === "Shift+X,Shift+J" && /quits/.test(got.ctrlQ.msg), got: { shiftJ: got.shiftJ, ctrlQ: got.ctrlQ } },
+    { label: "keys: Shift+D is Duplicate's — asked, Use it here moves it", ok: /Duplicate/.test(got.pending) && got.taken.xray.includes("Shift+D") && got.taken.dup.join() === "Ctrl+D", got: { pending: got.pending, taken: got.taken } },
+    { label: "keys: Q then W → a two-key shortcut; mouse button 4 → Mouse4; saved (only changed commands)", ok: got.chord.includes("Q W") && got.mouse.includes("Mouse4") && Object.keys(got.saved).sort().join() === "edit.duplicate,file.settings,view.xray", got: { chord: got.chord, mouse: got.mouse, saved: got.saved } },
+    { label: "keys: the panel holds the app's keys; Esc closes it; then Shift+J, Shift+D (not Duplicate), Q W, mouse 4 and the old Shift+X all toggle X-ray", ok: got.heldWhileOpen && got.closed && Object.values(got.work).every(Boolean) && got.dupBodies === 0, got: { held: got.heldWhileOpen, closed: got.closed, work: got.work, bodies: got.dupBodies } },
+    { label: "keys: the toolbar's X-ray tooltip and the File menu's Settings… show the new keys", ok: /Shift\+J/.test(got.toolbarTitle ?? "") && /Q W/.test(got.toolbarTitle ?? "") && settingsAcc === "CmdOrCtrl+Shift+K", got: { title: got.toolbarTitle, settingsAcc } },
+    { label: "keys: ↺ puts X-ray's default back (Duplicate keeps its change, its ↺ shown); Restore all: every default, nothing stored, the menu too", ok: reset.one.xray.join() === "Shift+X" && reset.one.dup.join() === "Ctrl+D" && reset.one.dupReset && reset.all.dup.join() === "Shift+D,Ctrl+D" && reset.all.settings.length === 0 && reset.all.stored === null && reset.all.resets === 0 && reset.closed && !settingsAccAfter, got: { reset, settingsAccAfter } },
+    { label: "keys: Orbit / Pan / Zoom listed with their mouse gestures (not runnable); Pan + right button; the wheel can't orbit, a plain left drag can't, nor a key; Zoom's Wheel → Ctrl+Wheel; the viewport and the status hint follow",
+      ok: nav.rows.join(" | ") === "Middle drag · Alt+Left drag | Shift+Left drag · Shift+Middle drag · Ctrl+Middle drag | Wheel" && !nav.runButton
+        && /only zooms/.test(nav.wheelOrbit) && /plain left drag/.test(nav.plainLeft) && /not a key/.test(nav.keyOrbit)
+        && nav.keys.pan.join() === "Shift+LeftDrag,Shift+MiddleDrag,Ctrl+MiddleDrag,RightDrag" && nav.keys.zoom.join() === "Ctrl+Wheel" && nav.keys.orbit.join() === "MiddleDrag,Alt+LeftDrag"
+        && nav.vpNav.pan.includes("RightDrag") && nav.vpNav.zoom.join() === "Ctrl+Wheel" && /Right drag pan/.test(nav.hint) && /Ctrl\+Wheel zoom/.test(nav.hint),
+      got: nav },
+    { label: "keys: real mouse — a right drag pans, the plain wheel no longer zooms, Ctrl + wheel does", ok: Object.values(navWork).every(Boolean), got: { navWork, c0, c1, c2, c3 } },
+    { label: "keys: defaults still work — Num 5 → Iso, ? → help (Esc closes it)", ok: reset.iso && reset.help && reset.helpClosed, got: { iso: reset.iso, help: reset.help, closed: reset.helpClosed } },
+  ];
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) errors.push("keys panel failed: " + JSON.stringify(failed));
+  return { label: "keys panel", passed: checks.length - failed.length, total: checks.length, checks };
+}
+
 async function navigationChecks(win: BrowserWindow): Promise<unknown> {
   const js = <T>(code: string) => win.webContents.executeJavaScript(code, true) as Promise<T>;
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -6582,6 +6746,12 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     await win.webContents.executeJavaScript(`(async () => { for (let i = 0; i < 200 && !window.ydddApp; i++) await new Promise((r) => setTimeout(r, 100)); window.ydddApp.setAutoSnap(false, false); return 0; })()`, true);
     // YDDD_SMOKE_HALF=1 (npm run smoke:half): skip scenarios 1–3 (the first half of the run's time) — the
     // later ones start from their own fresh model.
+    if (process.env.YDDD_SMOKE_ONLY === "keys") {
+      report.push(await keysPanelChecks(win, errors));
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "array") {
       // (while working on it: just the array scenarios)
       for (const sc of [SCENARIO_ARRAY, SCENARIO_ARRAYFAST]) {
@@ -6829,6 +6999,38 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       if (!ok) errors.push("settings circle size failed: " + JSON.stringify({ found: !!mi, got }));
       report.push({ label: "settings: radius / diameter", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Settings… Radius | Diameter switch (Radius by default); Diameter: Cylinder / Sphere / Circle Tab dialogs ask for the diameter (20 → 20 across); Radius: 20 → 40 across", ok, got }] });
     }
+    {
+      // File → Settings…: Solid opacity / X-ray opacity sliders — the solids follow as a slider moves, saved at once.
+      const mi = Menu.getApplicationMenu()?.items.find((i) => i.label === "&File")?.submenu?.items.find((i) => i.label === "Settings…");
+      mi?.click();
+      await new Promise((r) => setTimeout(r, 100));
+      const got = await win.webContents.executeJavaScript(`(async () => {
+        const vp = window.ydddApp.viewport, m = vp.batchMats.solid, face = vp.mats.faces[0];
+        const was = [localStorage.getItem("yddd.solidOpacity"), localStorage.getItem("yddd.xrayOpacity")], xray = vp.xray;
+        const dlg = document.getElementById("props-dlg");
+        const r = (k) => dlg?.querySelector(".range-row input[data-k=" + k + "]");
+        const move = (k, v) => { r(k).value = String(v); r(k).dispatchEvent(new Event("input", { bubbles: true })); };
+        const look = () => ({ op: m.opacity, faceOp: face.opacity, transparent: m.transparent, depthWrite: m.depthWrite });
+        if (!r("solid") || !r("xray")) return { found: false };
+        const out = { found: true, start: [r("solid").value, r("xray").value] };
+        vp.setXray(false); move("solid", 40); out.solid40 = { ...look(), saved: localStorage.getItem("yddd.solidOpacity"), shown: r("solid").nextElementSibling.textContent };
+        move("xray", 30); out.xrayMovedOff = look();
+        vp.setXray(true); out.xrayOn = look();
+        vp.setXray(false); move("solid", 100); out.opaque = look();
+        for (const [k, v] of [["yddd.solidOpacity", was[0]], ["yddd.xrayOpacity", was[1]]]) v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v);
+        vp.setOpacity(1, 0.8); vp.setXray(xray);
+        dlg.requestSubmit();
+        return out;
+      })()`, true);
+      const ok = !!mi && got.found && got.start.join() === "100,80"
+        && got.solid40.op === 0.4 && got.solid40.faceOp === 0.4 && got.solid40.transparent && got.solid40.depthWrite && got.solid40.saved === "40" && got.solid40.shown === "40%"
+        && got.xrayMovedOff.op === 0.4
+        && got.xrayOn.op === 0.3 && got.xrayOn.transparent && !got.xrayOn.depthWrite
+        && got.opaque.op === 1 && !got.opaque.transparent && got.opaque.depthWrite;
+      if (!ok) errors.push("settings opacity failed: " + JSON.stringify({ found: !!mi, got }));
+      report.push({ label: "settings: opacity", passed: ok ? 1 : 0, total: 1, checks: [{ label: "File → Settings… Solid opacity 100% / X-ray opacity 80% by default; Solid 40% → solids 0.4 (hidden faces stay hidden), saved; X-ray 30% → used only in x-ray (hidden faces show); Solid 100% → opaque again", ok, got }] });
+    }
+    report.push(await keysPanelChecks(win, errors));
     await shot("7b-array.png");
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_PRINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_CONE, true));
@@ -6839,6 +7041,21 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ARRAYFAST, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
+    // The same sketch in Select, for a look at the selection colours (as in the main view): an outline and a path
+    // selected (gold, blue rim / gold path), another outline under the cursor (grey). (Cancelled just below.)
+    await win.webContents.executeJavaScript(`(() => {
+      const t = window.ydddApp.tool;
+      if (!t?.loops?.length) return 0;
+      t.setMode("select");
+      const c = t.loops.find((l) => l.kind === "circle") ?? { c: [0, 0], r: 10 }, y = c.c[1] - 2.5 * c.r;
+      t.opens.push([{ kind: "line", a: [c.c[0] - 3 * c.r, y], b: [c.c[0], y] }, { kind: "line", a: [c.c[0], y], b: [c.c[0] + c.r, y - c.r] }]);
+      t.selected = [{ kind: "loop", i: 0 }, { kind: "open", i: t.opens.length - 1 }];
+      t.hoverItem = t.loops.length > 1 ? { kind: "loop", i: 1 } : null;
+      t.update();
+      return 0;
+    })()`, true);
+    await new Promise((r) => setTimeout(r, 100));
+    await shot("8b-sketch-select.png");
     await win.webContents.executeJavaScript(`document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); 0`, true);
     clearInterval(jitter);
     await win.webContents.executeJavaScript("window.__realInput = true; 0", true);

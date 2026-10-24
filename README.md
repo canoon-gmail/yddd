@@ -35,7 +35,7 @@ npm run start:stress          # launch with 2000 test solids (N=5000 npm run sta
 | History | Unlimited-ish undo / redo (200 steps) |
 | Files | Save/Open native `.yddd` (exact BREP), **Open Recent** (last 10, Ctrl+Shift+1…9), Import STEP, Export STEP / STL / **3MF** (for slicers: Bambu Studio, PrusaSlicer, Cura — one named object per body, closed meshes, mm) |
 
-Press **F1** in the app for all shortcuts.
+Press **F1** in the app for all shortcuts, or **/** to search every operation, run it, and change its key (a key, two keys one after the other, or mouse side button 4 / 5 — checked against keys already in use; ↺ puts a default back).
 
 ## Mouse
  

@@ -196,6 +196,8 @@ kbd {
 #props-dlg .seg .btn { border-radius: 0; }
 #props-dlg .seg .btn:first-child { border-radius: 4px 0 0 4px; }
 #props-dlg .seg .btn:last-child { border-radius: 0 4px 4px 0; margin-left: -1px; }
+#props-dlg label.range-row input { width: 120px; padding: 0; border: none; background: none; accent-color: var(--accent); }
+#props-dlg label.range-row output { width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
 #props-dlg .stl-estimate { margin-top: 6px; color: var(--accent-2); font-variant-numeric: tabular-nums; }
 #op-panel {
   position: absolute; top: 12px; left: 12px; width: 240px; padding: 10px 12px;
@@ -399,3 +401,55 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 #tool-panel .tp-field input, #tool-panel .tp-field select { width: 110px; box-sizing: border-box; }
 #tool-panel textarea:focus, #tool-panel .tp-field input:focus, #tool-panel .tp-field select:focus { outline: none; border-color: var(--accent); }
 #tool-panel .tp-error { color: var(--danger); font-size: 12px; margin-top: 4px; }
+
+/* "/": every operation and its keys — search, run, change */
+#keys-panel {
+  position: fixed; left: 50%; top: 8vh; transform: translateX(-50%); z-index: 60; width: 620px; max-height: 84vh;
+  display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.55); outline: none;
+}
+#keys-panel .kp-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px 6px; }
+#keys-panel h4 { margin: 0; font-size: 14px; color: var(--accent-2); white-space: nowrap; }
+#keys-panel input[type=search] {
+  flex: 1; padding: 5px 9px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+}
+#keys-panel input[type=search]:focus { outline: none; border-color: var(--accent); }
+#keys-panel .kp-close { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 0 4px; }
+#keys-panel .kp-close:hover { color: var(--text); }
+#keys-panel .kp-note { padding: 0 14px 8px; font-size: 11px; color: var(--muted); }
+#keys-panel .kp-list { overflow-y: auto; padding: 0 14px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+#keys-panel table { width: 100%; border-collapse: collapse; }
+#keys-panel thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left; padding: 7px 0 5px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--border);
+}
+#keys-panel tr.kp-group th { text-align: left; padding: 10px 0 3px; font-size: 11px; font-weight: 600; color: var(--accent); }
+#keys-panel td { padding: 3px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+#keys-panel td.kp-op { width: 45%; }
+#keys-panel .kp-run {
+  background: none; border: none; padding: 3px 6px; margin-left: -6px; font: inherit; color: var(--text); cursor: pointer; border-radius: 4px; text-align: left;
+}
+#keys-panel .kp-label { display: inline-block; padding: 3px 0; color: var(--text); }
+#keys-panel .kp-run:hover { background: var(--panel-2); color: var(--accent-2); }
+#keys-panel .kp-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 1px 0; min-height: 26px; }
+#keys-panel .kp-key { display: inline-flex; align-items: center; }
+#keys-panel .kp-key kbd { cursor: pointer; }
+#keys-panel .kp-key kbd:hover { border-color: var(--accent); }
+#keys-panel .kp-key.wait { padding: 1px 7px; border: 1px dashed var(--accent); border-radius: 4px; color: var(--accent-2); font-size: 12px; animation: kp-blink 1s ease-in-out infinite; }
+@keyframes kp-blink { 50% { opacity: 0.55; } }
+#keys-panel .kp-del { visibility: hidden; background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 2px; font-size: 12px; }
+#keys-panel .kp-key:hover .kp-del { visibility: visible; }
+#keys-panel .kp-del:hover { color: #ff7b72; }
+#keys-panel .kp-add, #keys-panel .kp-reset {
+  background: none; border: 1px solid transparent; border-radius: 4px; color: var(--muted); cursor: pointer; padding: 0 5px; font-size: 13px; line-height: 18px;
+}
+#keys-panel .kp-add { visibility: hidden; }
+#keys-panel tr:hover .kp-add { visibility: visible; }
+#keys-panel .kp-add:hover, #keys-panel .kp-reset:hover { border-color: var(--border); color: var(--text); }
+#keys-panel .kp-reset { color: var(--accent); }
+#keys-panel .kp-msg { flex-basis: 100%; font-size: 11px; color: var(--muted); }
+#keys-panel .kp-msg.error { color: #ff7b72; }
+#keys-panel .kp-msg.warn { color: var(--accent-2); }
+#keys-panel .kp-msg .btn { margin-left: 6px; padding: 1px 8px; font-size: 11px; }
+#keys-panel .kp-none { padding: 14px 0; color: var(--muted); text-align: center; }
+#keys-panel .kp-foot { display: flex; justify-content: flex-end; gap: 6px; padding: 10px 14px; }

@@ -121,6 +121,8 @@ function thumbOf(tex: THREE.Texture): HTMLCanvasElement {
 
 /** Width of a sketch's open paths on screen, px (outlines are 1 px). */
 const PATH_WIDTH = 2.5;
+/** A selected path / the one under the cursor: as wide as a selected edge in the main view. */
+const PATH_SEL_WIDTH = 3.5;
 /** Round corner's radius (mm): the last one set, for the session. */
 let roundR = 2;
 
@@ -597,10 +599,14 @@ export class SketchTool implements Tool {
   private readonly mats = {
     line: new THREE.LineBasicMaterial({ color: 0xffd166, depthTest: false, transparent: true }),
     open: new THREE.LineBasicMaterial({ color: 0xff69b4, depthTest: false, transparent: true }),
-    sel: new THREE.LineBasicMaterial({ color: 0x4fd1ff, depthTest: false, transparent: true }),
-    hover: new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.85 }),
-    selFill: new THREE.MeshBasicMaterial({ color: 0x4fd1ff, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
-    hoverFill: new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
+    // Selected / under the cursor: as in the main view — a selected outline gold with a blue rim, a selected path
+    // gold, the one under the cursor grey / white (viewport.ts: COLORS, edgeSelected / edgeHover, SilhouetteGlow).
+    sel: new THREE.LineBasicMaterial({ color: 0x1e88ff, depthTest: false, transparent: true }),
+    hover: new THREE.LineBasicMaterial({ color: 0xe2e5e8, depthTest: false, transparent: true }),
+    selFill: new THREE.MeshBasicMaterial({ color: 0xf0d78c, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
+    hoverFill: new THREE.MeshBasicMaterial({ color: 0xc0c4c8, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
+    selPath: new THREE.LineBasicMaterial({ color: 0xffe08a, depthTest: false, transparent: true }),
+    hoverPath: new THREE.LineBasicMaterial({ color: 0xe2e5e8, depthTest: false, transparent: true }),
     rubber: new THREE.LineBasicMaterial({ color: 0x8fd3ff, depthTest: false, transparent: true }),
     fill: new THREE.MeshBasicMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
     guide: new THREE.LineDashedMaterial({ color: 0xff6fb5, dashSize: 1, gapSize: 1, depthTest: false, transparent: true }),
@@ -667,7 +673,7 @@ export class SketchTool implements Tool {
         else this.update();
       }
     });
-    // The menu's fields: Scale % (of its size when loaded), Rotate ° (since loaded), Transparent % — typed, or
+    // The menu's fields: Scale % (of its size when loaded), Rotate ° (since loaded), Opacity % — typed, or
     // the mouse wheel over one (Shift: finer steps)
     this.corner.addEventListener("input", (e) => this.picField(e.target as HTMLInputElement));
     this.corner.addEventListener("wheel", (e) => {
@@ -694,8 +700,8 @@ export class SketchTool implements Tool {
     if (!p || f.value === "" || !Number.isFinite(v)) return;
     if (f.dataset.act === "pic-scale" && v > 0) this.placePicture((p.w0 * v) / 100 / p.w);
     else if (f.dataset.act === "pic-rotate") this.placePicture(1, null, (v * Math.PI) / 180 - p.turned);
-    else if (f.dataset.act === "pic-clear") {
-      p.mat.opacity = 1 - v / 100;
+    else if (f.dataset.act === "pic-opacity") {
+      p.mat.opacity = v / 100;
       this.storePicture();
     } else return;
     this.update();
@@ -706,10 +712,10 @@ export class SketchTool implements Tool {
     const p = this.pic;
     if (!p) return;
     const deg = (((p.turned * 180) / Math.PI + 540) % 360) - 180;
-    const vals: Record<string, string> = { "pic-scale": num((p.w / p.w0) * 100), "pic-rotate": num(Math.abs(deg) < 1e-9 ? 0 : deg), "pic-clear": String(Math.round((1 - p.mat.opacity) * 100)) };
+    const vals: Record<string, string> = { "pic-scale": num((p.w / p.w0) * 100), "pic-rotate": num(Math.abs(deg) < 1e-9 ? 0 : deg), "pic-opacity": String(Math.round(p.mat.opacity * 100)) };
     for (const f of this.corner.querySelectorAll<HTMLInputElement>(".pic-menu input")) {
       if (f !== document.activeElement && f.value !== vals[f.dataset.act!]) f.value = vals[f.dataset.act!];
-      if (f.dataset.act === "pic-clear") f.nextElementSibling!.textContent = `${f.value}%`;
+      if (f.dataset.act === "pic-opacity") f.nextElementSibling!.textContent = `${f.value}%`;
     }
   }
 
@@ -718,14 +724,14 @@ export class SketchTool implements Tool {
     this.corner.innerHTML = `<button type="button" data-act="turn" title="Turn the view a quarter (the sketch stays as it is)">${ICONS.turnView}</button><button type="button" data-act="picture" title="Load a picture to trace (shown only while sketching, remembered for this face)">${ICONS.picture}</button>`;
     const p = this.pic;
     if (!p) return;
-    const clear = Math.round((1 - p.mat.opacity) * 100);
+    const opacity = Math.round(p.mat.opacity * 100);
     const wrap = document.createElement("div");
     wrap.className = `pic-wrap${this.mode === "picture" ? " on" : ""}`;
-    wrap.innerHTML = `<button type="button" class="pic-thumb" data-act="pic" title="The picture — click: work on it (drag to move, scale, rotate, transparency, match) · click again: done"></button>
+    wrap.innerHTML = `<button type="button" class="pic-thumb" data-act="pic" title="The picture — click: work on it (drag to move, scale, rotate, opacity, match) · click again: done"></button>
       <div class="pic-menu"><div class="box">
         <label class="row"><span>Scale</span><input type="number" data-act="pic-scale" data-step="5" min="0" step="any" title="Size, % of the size it was loaded at — mouse wheel: ±5 (Shift: ±1)"><em>%</em></label>
         <label class="row"><span>Rotate</span><input type="number" data-act="pic-rotate" data-step="5" step="any" title="Turn, ° (+ = counter-clockwise) — mouse wheel: ±5 (Shift: ±1)"><em>°</em></label>
-        <label class="row"><span>Transparent</span><input type="range" data-act="pic-clear" data-step="5" min="0" max="95" step="1" value="${clear}"><output>${clear}%</output></label>
+        <label class="row"><span>Opacity</span><input type="range" data-act="pic-opacity" data-step="5" min="5" max="100" step="1" value="${opacity}" title="How solid the picture is: 100% hides what is behind it — mouse wheel: ±5 (Shift: ±1)"><output>${opacity}%</output></label>
         <div class="row"><button type="button" class="btn" data-act="pic-remove">Remove picture</button></div>
       </div></div>`;
     wrap.querySelector(".pic-thumb")!.appendChild(p.thumb);
@@ -2336,7 +2342,7 @@ export class SketchTool implements Tool {
       objs.push(closed ? new THREE.LineLoop(g, mat) : new THREE.Line(g, mat));
     };
     /** Open paths: thicker than outlines (2.5 px), in the line material's colour. */
-    const pathLine = (pts: P[], mat: THREE.LineBasicMaterial) => objs.push(vp.thickLine(pts.map((p) => this.world(p)), mat.color.getHex(), PATH_WIDTH, mat.opacity));
+    const pathLine = (pts: P[], mat: THREE.LineBasicMaterial, width = PATH_WIDTH) => objs.push(vp.thickLine(pts.map((p) => this.world(p)), mat.color.getHex(), width, mat.opacity));
     const dot = (p: P) => {
       const w = this.world(p), m = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 6), vp.mats.cursor);
       m.position.copy(w);
@@ -2371,7 +2377,8 @@ export class SketchTool implements Tool {
     for (const g of new Set(this.loops.map((l) => l.g).filter((x): x is number => x !== undefined))) if (groupObj(g, this.mats.fill, this.mats.line)) merged.add(g);
     const shown = (l: Loop) => l.g === undefined || !merged.has(l.g);
     // Closed outlines: filled (holes left open) and outlined.
-    for (const { outer, holes } of nest(this.loops)) {
+    const nested = nest(this.loops);
+    for (const { outer, holes } of nested) {
       if (!shown(this.loops[outer])) continue;
       const shape = new THREE.Shape(loopPolygon(this.loops[outer]).map(([u, v]) => new THREE.Vector2(u, v)));
       for (const h of holes) shape.holes.push(new THREE.Path(loopPolygon(this.loops[h]).map(([u, v]) => new THREE.Vector2(u, v))));
@@ -2380,13 +2387,8 @@ export class SketchTool implements Tool {
       mesh.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
       objs.push(mesh);
     }
-    for (const l of this.loops) if (shown(l)) lines(loopPolygon(l), this.mats.line, true);
-    // Open paths, and the lines being drawn.
-    // (open lines in pink — the colour of the paths they become: not a closed outline)
-    for (const o of this.opens) pathLine([...o.flatMap(segPoints), o[o.length - 1].b], this.mats.open);
-    if (this.path.length) lines([...this.path.flatMap(segPoints), this.cur!], this.mats.line);
-    for (const p of [this.first, this.arcEnd, this.anchor, ...this.thru]) if (p) dot(p);
-    // Select: the selected outlines / paths in blue (outlines also filled), the one under the cursor in white.
+    // Select: as in the main view — the selected outlines filled gold with a blue rim, selected paths gold and wider,
+    // the one under the cursor grey / white. Fills go under the outlines (a hole, an outline inside, stays seen).
     // (a joined outline: its group's merged shape, once)
     const done = new Set<string>();
     const asGroup = (it: Item, fill: THREE.Material | null, line: THREE.LineBasicMaterial) => {
@@ -2399,29 +2401,34 @@ export class SketchTool implements Tool {
       }
       return true;
     };
-    const itemLines = (it: Item, mat: THREE.LineBasicMaterial) => {
+    const itemLines = (it: Item, mat: THREE.LineBasicMaterial, pathMat: THREE.LineBasicMaterial) => {
       if (asGroup(it, null, mat)) return;
       if (it.kind === "loop") lines(loopPolygon(this.loops[it.i]), mat, true);
       else {
         const o = this.opens[it.i];
-        pathLine([...o.flatMap(segPoints), o[o.length - 1].b], mat);
+        pathLine([...o.flatMap(segPoints), o[o.length - 1].b], pathMat, PATH_SEL_WIDTH);
       }
     };
     const itemFill = (it: Item, mat: THREE.Material) => {
       if (it.kind !== "loop" || asGroup(it, mat, this.mats.line)) return;
-      const mesh = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(loopPolygon(this.loops[it.i]).map(([u, v]) => new THREE.Vector2(u, v)))), mat);
+      const shape = new THREE.Shape(loopPolygon(this.loops[it.i]).map(([u, v]) => new THREE.Vector2(u, v)));
+      for (const h of nested.find((n) => n.outer === it.i)?.holes ?? []) shape.holes.push(new THREE.Path(loopPolygon(this.loops[h]).map(([u, v]) => new THREE.Vector2(u, v))));
+      const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), mat);
       mesh.matrixAutoUpdate = false;
       mesh.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
       objs.push(mesh);
     };
-    for (const it of this.selected) {
-      itemFill(it, this.mats.selFill);
-      itemLines(it, this.mats.sel);
-    }
-    if (this.hoverItem && !this.selected.some((s) => sameItem(s, this.hoverItem))) {
-      itemFill(this.hoverItem, this.mats.hoverFill);
-      itemLines(this.hoverItem, this.mats.hover);
-    }
+    const hoverOnly = this.hoverItem && !this.selected.some((s) => sameItem(s, this.hoverItem)) ? this.hoverItem : null;
+    for (const it of this.selected) itemFill(it, this.mats.selFill);
+    if (hoverOnly) itemFill(hoverOnly, this.mats.hoverFill);
+    for (const l of this.loops) if (shown(l)) lines(loopPolygon(l), this.mats.line, true);
+    // Open paths, and the lines being drawn.
+    // (open lines in pink — the colour of the paths they become: not a closed outline)
+    for (const o of this.opens) pathLine([...o.flatMap(segPoints), o[o.length - 1].b], this.mats.open);
+    if (this.path.length) lines([...this.path.flatMap(segPoints), this.cur!], this.mats.line);
+    for (const p of [this.first, this.arcEnd, this.anchor, ...this.thru]) if (p) dot(p);
+    for (const it of this.selected) itemLines(it, this.mats.sel, this.mats.selPath);
+    if (hoverOnly) itemLines(hoverOnly, this.mats.hover, this.mats.hoverPath);
     // Select: the selected Splines' points, to drag (the one under the cursor / dragged bigger).
     if (this.mode === "select") {
       for (const h of this.splineHandles()) {
@@ -2644,7 +2651,7 @@ export class SketchTool implements Tool {
       circle: this.anchor ? `Click a point on the circle · type the ${circleSize.word} + Enter` : "Click the centre",
       picture: !this.pic ? "No picture — click the picture icon (bottom left) to load one"
         : ["Drag the picture to move it · its corner: the square scales, the ring rotates · type a % + Enter to scale it · Match: click a point on the picture · click off the picture: back to drawing", "Match: click a 2nd point on the picture", "Match: click where the 1st point belongs (on the model / sketch)", "Match: click where the 2nd point belongs"][this.picPts.length]
-          + " · the menu by the thumbnail (bottom left): scale, rotate, transparency · thumbnail again: done · Del: remove it · L A R C: draw",
+          + " · the menu by the thumbnail (bottom left): scale, rotate, opacity · thumbnail again: done · Del: remove it · L A R C: draw",
     };
     const btn = (m: Mode, label: string, key: string) => `<button type="button" class="btn${this.mode === m ? " primary" : ""}" data-mode="${m}" title="${label} (${key})">${label} <kbd>${key}</kbd></button>`;
     const closed = this.loops.length, open = this.opens.length;

@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("yddd", {
   setTitle: (title: string) => ipcRenderer.send("set-title", title),
   setDirty: (dirty: boolean) => ipcRenderer.send("set-dirty", dirty),
   closeNow: () => ipcRenderer.send("close-now"),
+  setMenuKeys: (keys: Record<string, string>) => ipcRenderer.send("menu-keys", keys),
   onMenu: (cb: (cmd: string) => void) => {
     ipcRenderer.on("menu", (_e, cmd: string) => cb(cmd));
   },

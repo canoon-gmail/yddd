@@ -23,6 +23,8 @@ interface YDDDApi {
   clearRecovery(): Promise<void>;
   setTitle(title: string): void;
   setDirty(dirty: boolean): void;
+  /** The menu's shortcuts as shown (command → Electron accelerator, "" = none); the renderer handles the keys. */
+  setMenuKeys?(keys: Record<string, string>): void;
   closeNow(): void;
   onMenu(cb: (cmd: string) => void): void;
 }

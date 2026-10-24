@@ -82,10 +82,15 @@ function recentLabel(file: string): string {
   return `${path.basename(file)}   ${shown}`.replace(/&/g, "&&");
 }
 
+/** The renderer's shortcuts for the menu to show (command → accelerator, "" = none; see keymap.ts). */
+let menuKeys: Record<string, string> = {};
+
 function buildMenu(): void {
+  // The renderer handles the keys (they can be changed with "/"): the menu only shows them.
   const item = (label: string, cmd: string, accelerator?: string): MenuItemConstructorOptions => ({
     label,
-    accelerator,
+    accelerator: (cmd in menuKeys ? menuKeys[cmd] : accelerator) || undefined,
+    registerAccelerator: false,
     click: () => send(cmd),
   });
   const template: MenuItemConstructorOptions[] = [
@@ -111,9 +116,9 @@ function buildMenu(): void {
         item("Save", "file.save", "CmdOrCtrl+S"),
         item("Save As…", "file.saveAs", "CmdOrCtrl+Shift+S"),
         { type: "separator" },
-        item("Import STEP…", "file.importStep", "CmdOrCtrl+I"),
+        item("Import STEP…", "file.importStep"),
         item("Import STL…", "file.importStl"),
-        item("Export STEP…", "file.exportStep", "CmdOrCtrl+E"),
+        item("Export STEP…", "file.exportStep"),
         item("Export STL…", "file.exportStl", "CmdOrCtrl+Shift+E"),
         item("Export 3MF… (Bambu Studio, PrusaSlicer, Cura)", "file.export3mf"),
         { type: "separator" },
@@ -163,7 +168,7 @@ function buildMenu(): void {
     },
     {
       label: "&Help",
-      submenu: [item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter"), item("Propeller", "help.propeller")],
+      submenu: [item("Shortcuts: Search & Change…", "help.keys", "/"), item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter"), item("Propeller", "help.propeller")],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -182,6 +187,11 @@ interface OpenRequest {
 }
 
 function registerIpc(): void {
+  ipcMain.on("menu-keys", (_e, keys: Record<string, string>) => {
+    menuKeys = keys;
+    buildMenu();
+  });
+
   ipcMain.handle("save-file", async (_e, req: SaveRequest) => {
     if (!win) return null;
     const res = await dialog.showSaveDialog(win, {

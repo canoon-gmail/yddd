@@ -7,6 +7,7 @@
  */
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { DEFAULT_KEYS, dragGesture, navAction, wheelGesture, wheelZooms, type NavGestures } from "./keymap";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
@@ -233,35 +234,30 @@ export class Viewport {
     this.scene.add(this.selEdges, this.hoverEdges, this.selOutline, this.hoverOutline);
 
     this.controls = new OrbitControls(this.camera, this.canvas);
-    // Requirements:
-    // 1) No right mouse drag (disabled)
-    // 2) Middle mouse drag or Alt + Left drag = Orbit (ROTATE) — Alt for touchpads / mice without a middle button
-    // 3) Shift + Left mouse drag = Pan (PAN)
-    // Two-finger slide on a touchpad arrives as the wheel: zoom.
-    // Normal Left click/drag is reserved for select / draw tools (not camera orbit).
-    this.controls.mouseButtons = {
-      LEFT: THREE.MOUSE.ROTATE,
-      MIDDLE: THREE.MOUSE.ROTATE,
-      RIGHT: -1,
-    } as unknown as OrbitControls["mouseButtons"];
-
-    // Prevent regular Left-drag from rotating the view:
-    // Only allow Left-button actions when Shift (PAN) or Alt (orbit) is held down.
+    // The view's mouse gestures (keymap.ts, changed with "/"): by default middle drag or Alt + left drag orbits (Alt
+    // for touchpads / mice without a middle button), Shift + left / Shift or Ctrl + middle drag pans, the wheel (a
+    // touchpad's two-finger slide) zooms. A plain left click / drag is the tools' and selection's.
+    // Each press sets what its button does for this drag. (OrbitControls swaps orbit and pan while Ctrl / Shift is
+    // held, so with those held the other one is asked for.)
     this.canvas.addEventListener("pointerdown", (e) => {
-      if (this.viewLocked) {
-        // Sketch: the view stays square to the plane — pan and zoom only.
-        this.controls.enableRotate = false;
-      } else if (e.button === 0 && !e.shiftKey && !e.altKey) {
-        // Normal left-click: temporarily disable rotate on OrbitControls for this gesture
-        this.controls.enableRotate = false;
-      } else {
-        this.controls.enableRotate = true;
+      const g = dragGesture(e), act = g ? navAction(this.nav, g) : null;
+      const button = (["LEFT", "MIDDLE", "RIGHT"] as const)[e.button];
+      if (button) {
+        const swap = e.ctrlKey || e.metaKey || e.shiftKey;
+        const { ROTATE, PAN, DOLLY } = THREE.MOUSE;
+        (this.controls.mouseButtons as Record<string, number>)[button] = act === "zoom" ? DOLLY : act === "orbit" ? (swap ? PAN : ROTATE) : act === "pan" ? (swap ? ROTATE : PAN) : -1;
       }
-      // Alt + Left drag orbits even over the move / rotate gizmo.
-      if (e.button === 0 && e.altKey) this.tc.enabled = false;
-      // Ctrl + Left is snapping (tools, dragged points), not pan (OrbitControls would pan): only Shift pans.
-      if (e.button === 0 && (e.ctrlKey || e.metaKey) && !e.shiftKey) this.controls.enablePan = false;
+      // Sketch: the view stays square to the plane — pan and zoom only.
+      this.controls.enableRotate = !this.viewLocked;
+      this.controls.enablePan = true;
+      this.controls.enableZoom = true;
+      // A left-button view drag works over the move / rotate gizmo too.
+      if (e.button === 0 && act) this.tc.enabled = false;
     }, { capture: true });
+    // The wheel zooms only with the keys set for it.
+    this.canvas.addEventListener("wheel", (e) => {
+      this.controls.enableZoom = wheelZooms(this.nav, wheelGesture(e));
+    }, { capture: true, passive: true });
 
     window.addEventListener("pointerup", () => {
       this.controls.enableRotate = true;
@@ -2100,14 +2096,29 @@ export class Viewport {
     this.controls.update();
   }
 
+  /** The view's mouse gestures: what drags orbit / pan / zoom (see the pointerdown handler). */
+  nav: NavGestures = { orbit: [...DEFAULT_KEYS["nav.orbit"]], pan: [...DEFAULT_KEYS["nav.pan"]], zoom: [...DEFAULT_KEYS["nav.zoom"]] };
+
   /** Semi-transparent (x-ray) solids: hidden faces and edges show through. */
   xray = false;
+  /** Settings: how solid the solids look (1 = opaque) — normally, and in x-ray. */
+  solidOpacity = 1;
+  xrayOpacity = 0.8;
   setXray(on: boolean): void {
     this.xray = on;
+    this.applyOpacity();
+  }
+  setOpacity(solid: number, xray: number): void {
+    this.solidOpacity = solid;
+    this.xrayOpacity = xray;
+    this.applyOpacity();
+  }
+  private applyOpacity(): void {
+    const opacity = this.xray ? this.xrayOpacity : this.solidOpacity;
     for (const m of [this.batchMats.solid, ...this.mats.faces]) {
-      m.transparent = on;
-      m.opacity = on ? 0.8 : 1;
-      m.depthWrite = !on;
+      m.transparent = this.xray || opacity < 1;
+      m.opacity = opacity;
+      m.depthWrite = !this.xray; // out of x-ray, hidden faces stay hidden however see-through the solids are
       m.needsUpdate = true;
     }
     this.requestRender();

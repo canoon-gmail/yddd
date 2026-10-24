@@ -147,7 +147,8 @@ import { PLANTER } from "./planter";
 import { PROPELLER } from "./propeller";
 import { MeasureTool } from "./measure";
 import { SketchTool, type SketchFrame } from "./sketch";
-import { byDiameter, circleSize, CIRCLE_SIZE_KEY } from "./format";
+import { byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, XRAY_OPACITY_KEY } from "./format";
+import { eventKey, isDefault, keyTable, keysPanelOpen, keysText, loadKeys, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
 import type { TutCtx, Tutorial } from "./tutorials";
 
 /** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
@@ -389,114 +390,113 @@ interface ToolbarItem {
   cmd: string;
   icon: string;
   label: string;
-  key?: string;
 }
 
 const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
   {
     title: "Select",
     items: [
-      { cmd: "mode.body", icon: "solid", label: "Solid", key: "1" },
-      { cmd: "mode.face", icon: "face", label: "Face", key: "2" },
-      { cmd: "mode.edge", icon: "edge", label: "Edge", key: "3" },
+      { cmd: "mode.body", icon: "solid", label: "Solid" },
+      { cmd: "mode.face", icon: "face", label: "Face" },
+      { cmd: "mode.edge", icon: "edge", label: "Edge" },
     ],
   },
   {
     title: "Solid",
     drawer: true,
     items: [
-      { cmd: "tool.box", icon: "box", label: "Box", key: "B B" },
-      { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder", key: "B C" },
-      { cmd: "tool.sphere", icon: "sphere", label: "Sphere", key: "B S" },
-      { cmd: "tool.cone", icon: "cone", label: "Cone", key: "B O" },
+      { cmd: "tool.box", icon: "box", label: "Box" },
+      { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder" },
+      { cmd: "tool.sphere", icon: "sphere", label: "Sphere" },
+      { cmd: "tool.cone", icon: "cone", label: "Cone" },
     ],
   },
   {
     title: "Face",
     drawer: true,
     items: [
-      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle", key: "A" },
-      { cmd: "tool.circle", icon: "circle", label: "Circle", key: "A C" },
-      { cmd: "tool.polygon", icon: "polygon", label: "Polygon", key: "A P" },
-      { cmd: "tool.text", icon: "text", label: "Text", key: "T · A T" },
-      { cmd: "tool.sketch", icon: "sketch", label: "Sketch", key: "K" },
+      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle" },
+      { cmd: "tool.circle", icon: "circle", label: "Circle" },
+      { cmd: "tool.polygon", icon: "polygon", label: "Polygon" },
+      { cmd: "tool.text", icon: "text", label: "Text" },
+      { cmd: "tool.sketch", icon: "sketch", label: "Sketch" },
     ],
   },
   {
     title: "Modify",
     drawer: true,
     items: [
-      { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull", key: "P / Space" },
-      { cmd: "op.fillet", icon: "fillet", label: "Fillet", key: "F" },
-      { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer", key: "Shift+F" },
-      { cmd: "op.shell", icon: "shell", label: "Shell", key: "H" },
-      { cmd: "op.offset", icon: "offset", label: "Offset", key: "O" },
-      { cmd: "op.revolve", icon: "revolve", label: "Revolve", key: "Pro: R E" },
-      { cmd: "edit.circular", icon: "circular", label: "Circular copy", key: "" },
-      { cmd: "edit.mirror", icon: "mirror", label: "Mirror", key: "M" },
-      { cmd: "op.sweep", icon: "sweep", label: "Sweep", key: "Pro: S W" },
-      { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis", key: "C" },
-      { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide", key: "Shift+C" },
-      { cmd: "tool.divideFace", icon: "pencil", label: "Draw line on face", key: "D" },
-      { cmd: "tool.guide", icon: "guide", label: "Guide line", key: "Shift+G" },
-      { cmd: "edit.clearGuides", icon: "clearGuides", label: "Clear guides", key: "" },
+      { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull" },
+      { cmd: "op.fillet", icon: "fillet", label: "Fillet" },
+      { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer" },
+      { cmd: "op.shell", icon: "shell", label: "Shell" },
+      { cmd: "op.offset", icon: "offset", label: "Offset" },
+      { cmd: "op.revolve", icon: "revolve", label: "Revolve" },
+      { cmd: "edit.circular", icon: "circular", label: "Circular copy" },
+      { cmd: "edit.mirror", icon: "mirror", label: "Mirror" },
+      { cmd: "op.sweep", icon: "sweep", label: "Sweep" },
+      { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis" },
+      { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide" },
+      { cmd: "tool.divideFace", icon: "pencil", label: "Draw line on face" },
+      { cmd: "tool.guide", icon: "guide", label: "Guide line" },
+      { cmd: "edit.clearGuides", icon: "clearGuides", label: "Clear guides" },
     ],
   },
   {
     title: "Boolean",
     drawer: true,
     items: [
-      { cmd: "bool.union", icon: "union", label: "Union", key: "+ / Shift+U" },
-      { cmd: "bool.subtract", icon: "subtract", label: "Subtract", key: "− / Shift+S" },
-      { cmd: "bool.intersect", icon: "intersect", label: "Intersect", key: "Shift+I" },
+      { cmd: "bool.union", icon: "union", label: "Union" },
+      { cmd: "bool.subtract", icon: "subtract", label: "Subtract" },
+      { cmd: "bool.intersect", icon: "intersect", label: "Intersect" },
     ],
   },
   {
     title: "Transform",
     drawer: true,
     items: [
-      { cmd: "xf.move", icon: "move", label: "Move", key: "G" },
-      { cmd: "xf.moveFrom", icon: "moveFrom", label: "Move from point", key: "G G" },
-      { cmd: "xf.rotate", icon: "rotate", label: "Rotate", key: "R" },
-      { cmd: "xf.scale", icon: "scale", label: "Scale", key: "S" },
-      { cmd: "xf.repeat", icon: "repeat", label: "Repeat last", key: "Shift+R" },
-      { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate", key: "Shift+D / Ctrl+D" },
+      { cmd: "xf.move", icon: "move", label: "Move" },
+      { cmd: "xf.moveFrom", icon: "moveFrom", label: "Move from point" },
+      { cmd: "xf.rotate", icon: "rotate", label: "Rotate" },
+      { cmd: "xf.scale", icon: "scale", label: "Scale" },
+      { cmd: "xf.repeat", icon: "repeat", label: "Repeat last" },
+      { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate" },
     ],
   },
   {
     title: "Measure",
-    items: [{ cmd: "tool.measure", icon: "measure", label: "Measure", key: "=" }],
+    items: [{ cmd: "tool.measure", icon: "measure", label: "Measure" }],
   },
   {
     title: "Delete",
-    items: [{ cmd: "edit.delete", icon: "delete", label: "Delete", key: "Del" }],
+    items: [{ cmd: "edit.delete", icon: "delete", label: "Delete" }],
   },
   {
     title: "History",
     items: [
-      { cmd: "edit.undo", icon: "undo", label: "Undo", key: "Ctrl+Z" },
-      { cmd: "edit.redo", icon: "redo", label: "Redo", key: "Ctrl+R · Ctrl+Shift+Z" },
+      { cmd: "edit.undo", icon: "undo", label: "Undo" },
+      { cmd: "edit.redo", icon: "redo", label: "Redo" },
     ],
   },
   {
     title: "View",
     drawer: true,
     items: [
-      { cmd: "view.fit", icon: "fit", label: "Fit", key: "Home" },
-      { cmd: "view.iso", icon: "iso", label: "Iso", key: "5" },
-      { cmd: "view.top", icon: "top", label: "Top", key: "7" },
-      { cmd: "view.front", icon: "front", label: "Front", key: "Num 1" },
-      { cmd: "view.right", icon: "right", label: "Right", key: "Num 3" },
+      { cmd: "view.fit", icon: "fit", label: "Fit" },
+      { cmd: "view.iso", icon: "iso", label: "Iso" },
+      { cmd: "view.top", icon: "top", label: "Top" },
+      { cmd: "view.front", icon: "front", label: "Front" },
+      { cmd: "view.right", icon: "right", label: "Right" },
     ],
   },
   {
     title: "X-ray",
-    items: [{ cmd: "view.xray", icon: "xray", label: "X-ray", key: "Shift+X" }],
+    items: [{ cmd: "view.xray", icon: "xray", label: "X-ray" }],
   },
 ];
 
 /** Commands that work during a sketch (anything else waits for Done / Cancel). */
-const SKETCH_COMMANDS = new Set(["view.fit", "view.fitSelection", "view.xray", "view.pro", "help.shortcuts"]);
+const SKETCH_COMMANDS = new Set(["view.fit", "view.fitSelection", "view.xray", "view.pro", "help.shortcuts", "help.keys"]);
 
 /** localStorage: Pro layout on ("1"); saves so far; the Pro tip was shown (or not needed). */
 const PRO_KEY = "yddd.pro", SAVES_KEY = "yddd.saves", PRO_TIP_KEY = "yddd.proTip";
@@ -519,70 +519,13 @@ const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
 )}") 2 2, default`;
 const isPro = () => document.body.classList.contains("pro");
 
-const KEYMAP: Record<string, string> = {
-  "1": "mode.body",
-  "2": "mode.face",
-  "3": "mode.edge",
-  b: "tool.box",
-  a: "tool.rectangle",
-  t: "tool.text",
-  k: "tool.sketch",
-  p: "op.pushpull",
-  Space: "op.pushpull",
-  f: "op.fillet",
-  "Shift+F": "op.chamfer",
-  h: "op.shell",
-  o: "op.offset",
-  c: "op.cut",
-  g: "xf.move",
-  d: "tool.divideFace",
-  "Shift+G": "tool.guide",
-  "Shift+C": "op.splitFace",
-  "Shift+R": "xf.repeat",
-  r: "xf.rotate",
-  s: "xf.scale",
-  m: "edit.mirror",
-  x: "edit.delete",
-  Delete: "edit.delete",
-  Home: "view.fit",
-  "5": "view.iso",
-  Numpad5: "view.iso",
-  "7": "view.top",
-  Numpad7: "view.top",
-  Numpad1: "view.front", // top-row "1" stays Solid mode
-  Numpad3: "view.right", // top-row "3" stays Edge mode
-  ".": "view.fitSelection",
-  "Shift+U": "bool.union",
-  "Shift+S": "bool.subtract",
-  NumpadAdd: "bool.union",
-  NumpadSubtract: "bool.subtract",
-  "+": "bool.union",
-  "=": "tool.measure",
-  "-": "bool.subtract",
-  "Shift+I": "bool.intersect",
-  v: "view.menu",
-  "Shift+X": "view.xray",
-  "Shift+D": "edit.duplicate",
-  "?": "help.shortcuts",
-};
-
-/**
- * Two-key chords: the first key starts its tool at once; a second key within CHORD_MS switches tool.
- * B B box · B C cylinder · B S sphere · B O cone — A rectangle · A C circle · A P polygon · A T text — G G move from point.
- */
-const CHORDS: Record<string, Record<string, string>> = {
-  b: { b: "tool.box", c: "tool.cylinder", s: "tool.sphere", o: "tool.cone" },
-  a: { a: "tool.rectangle", r: "tool.rectangle", c: "tool.circle", p: "tool.polygon", t: "tool.text" },
-  g: { g: "xf.moveFrom" },
-};
-/** Pro layout only: S W sweep (S starts Scale, W switches) · R E revolve (R starts Rotate, E switches). */
-const PRO_CHORDS: Record<string, Record<string, string>> = {
-  s: { w: "op.sweep" },
-  r: { e: "op.revolve" },
-};
+/** A text field keeps these (its own select all, copy, paste, cut, undo, redo). */
+const FIELD_KEYS = new Set(["Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl+X", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+Y"]);
+/** A two-key shortcut's second key counts this long (ms) after the first. */
 const CHORD_MS = 1500;
 
 /** Toolbar commands that go into the recent strip (mode switches, undo/redo and views have their own keys / buttons). */
+const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => g.title !== "Select" && g.title !== "History" && g.title !== "View").flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 const RECENT_MAX = 10;
 /** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
@@ -623,7 +566,9 @@ class App implements ToolHost {
   private hover: SelItem | null = null;
   private hidden = new Set<number>();
   private tool: Tool | null = null;
-  /** Pending two-key chord (see CHORDS): its second-key map and when the first key was pressed. */
+  /** Every command's keys (keymap.ts: the defaults, or the user's own — "/" changes them). */
+  private keys: Keys = loadKeys();
+  /** Pending two-key chord (e.g. B C): its second-key map and when the first key was pressed. */
   private chord: { keys: Record<string, string>; at: number } | null = null;
   /** Toasts already shown when a chord's first key ran (its own, newer error toasts go if the chord goes on). */
   private chordToasts = new Set<Element>();
@@ -702,6 +647,8 @@ class App implements ToolHost {
     this.bindSidebarGrip();
     const container = $("viewport");
     this.viewport = new Viewport(container);
+    this.viewport.nav = navGestures(this.keys);
+    this.viewport.setOpacity(opacitySetting(SOLID_OPACITY_KEY, 100) / 100, opacitySetting(XRAY_OPACITY_KEY, 80) / 100);
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.doc.relinkDims = (dims, prev, next) => relinkDimensions(dims, prev, next);
     this.doc.linkCopies = (prev, next, arrays, label) => this.linkCopies(prev, next, arrays, label);
@@ -715,6 +662,7 @@ class App implements ToolHost {
 
     this.doc.onChange(() => this.onDocChange());
     this.doc.onChange(() => this.scheduleAutosave());
+    window.yddd?.setMenuKeys?.(menuAccelerators(this.keys));
     window.yddd?.onMenu((cmd) => (cmd.startsWith(OPEN_RECENT) ? void this.openRecent(cmd.slice(OPEN_RECENT.length)) : this.run(cmd)));
     // Unsaved-changes prompt on close is handled by the main process (see setDirty);
     // a beforeunload handler would silently block closing in Electron.
@@ -1129,7 +1077,7 @@ class App implements ToolHost {
       const b = document.createElement("button");
       b.className = "tb-btn";
       b.dataset.cmd = cmd;
-      b.title = (it.key ? `${it.label} (${it.key})` : it.label) + " · drag to reorder · right-click: remove / clear";
+      b.title = this.toolTitle(it) + " · drag to reorder · right-click: remove / clear";
       b.innerHTML = `${ICONS[it.icon]}<span>${it.label}</span>`;
       b.addEventListener("click", () => {
         b.blur();
@@ -1264,6 +1212,7 @@ class App implements ToolHost {
       case "file.settings": return this.settingsDialog();
 
       case "help.shortcuts": return this.toggleHelp();
+      case "help.keys": return openKeysPanel({ keys: () => this.keys, setKeys: (k) => this.setKeys(k), run: (cmd) => this.run(cmd) });
       case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
       case "help.cablebox": return this.toggleTutorial(CABLE_STORAGE_BOX);
       case "help.house": return this.toggleTutorial(HOUSE);
@@ -1515,7 +1464,7 @@ class App implements ToolHost {
     this.renderOutliner();
     this.renderProps();
     this.renderToolbarState();
-    if (!this.tool && !this.op) this.hint(this.xf ? "Drag the gizmo handles · Esc to finish" : MODE_HINTS[this.mode]);
+    if (!this.tool && !this.op) this.hint(this.xf ? "Drag the gizmo handles · Esc to finish" : this.modeHint());
     $("status-mode").textContent = { body: "Solid", face: "Face", edge: "Edge" }[this.mode] + " mode";
   }
 
@@ -1676,15 +1625,17 @@ class App implements ToolHost {
 
   private bindKeys(): void {
     window.addEventListener("keydown", (e) => {
+      if (keysPanelOpen()) return; // ("/" panel: its own keys)
       if (this.busyNow) {
         if (e.key === "Escape") this.busyStop?.(); // (a background kernel job stops; a main-thread one can't)
         return e.preventDefault(); // (a slow step is about to run: see runBusy)
       }
       const target = e.target as HTMLElement;
       const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
+      const k = eventKey(e);
       // A chord's second key also counts in the op panel its first key opened (S → Scale's field has focus).
-      const chordCmd = this.chord && (!typing || !!target.closest("#op-panel")) && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && performance.now() - this.chord.at < CHORD_MS ? this.chord.keys[e.key.toLowerCase()] : undefined;
-      if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) this.chord = null;
+      const chordCmd = this.chord && k && (!typing || !!target.closest("#op-panel")) && performance.now() - this.chord.at < CHORD_MS ? this.chord.keys[k] : undefined;
+      if (k) this.chord = null;
       if (chordCmd) {
         e.preventDefault();
         // The first key's tool / op / gizmo goes (and its complaint, e.g. Scale with nothing selected).
@@ -1693,9 +1644,11 @@ class App implements ToolHost {
         this.run(chordCmd);
         return;
       }
-      if (typing) return;
+      // In a field, keys type — but Ctrl / Alt shortcuts still work (Save, Open… as the menu's did), except the field's own
+      // Ctrl+A / C / V / X / Z / Y.
+      if (typing && !((e.ctrlKey || e.altKey || e.metaKey) && k && !FIELD_KEYS.has(k))) return;
       if (!$("help").hidden) {
-        if (e.key === "Escape" || e.key === "?" || e.key === "F1") this.toggleHelp();
+        if (e.key === "Escape" || (k && this.keys["help.shortcuts"]?.includes(k))) this.toggleHelp();
         return;
       }
       if (this.tool && this.tool.key(e)) {
@@ -1734,28 +1687,25 @@ class App implements ToolHost {
         }
         return;
       }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyP") {
-        e.preventDefault();
-        this.run("view.pro"); // (a second key for Ctrl+Shift+F1)
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyZ") {
-        e.preventDefault();
-        this.run("edit.redo"); // Redo's second shortcut (the menu shows Ctrl+R)
-        return;
-      }
-      if (e.ctrlKey || e.altKey || e.metaKey) return; // handled by native menu accelerators
-      const combo = e.shiftKey && e.key.length === 1 && /[a-z]/i.test(e.key) ? `Shift+${e.key.toUpperCase()}` : e.key.length === 1 ? e.key.toLowerCase() : e.key;
-      const cmd = KEYMAP[e.code] ?? KEYMAP[combo] ?? KEYMAP[e.key];
-      if (cmd) {
+      // The keymap (keymap.ts) — Ctrl ones too: the menu only shows them.
+      if (!k) return;
+      const table = keyTable(this.keys, isPro());
+      const cmd = table.single.get(k), chord = table.chords.get(k);
+      if (cmd || chord) {
         e.preventDefault();
         this.chordToasts = new Set($("toasts").children);
-        this.run(cmd);
-        const chord = CHORDS[combo] ?? (isPro() ? PRO_CHORDS[combo] : undefined);
+        if (cmd) this.run(cmd);
         // (not while sketching, where the first key was turned down: its second key would end the sketch)
-        const blocked = this.tool instanceof SketchTool && !SKETCH_COMMANDS.has(cmd);
+        const blocked = this.tool instanceof SketchTool && !(cmd && SKETCH_COMMANDS.has(cmd));
         if (chord && !blocked) this.chord = { keys: chord, at: performance.now() };
       }
+    });
+    // A mouse side button (4 / 5) with a shortcut: runs its command.
+    window.addEventListener("mousedown", (e) => {
+      const k = mouseKey(e), cmd = k && !this.busyNow && !keysPanelOpen() ? keyTable(this.keys, isPro()).single.get(k) : undefined;
+      if (!cmd) return;
+      e.preventDefault();
+      this.run(cmd);
     });
   }
 
@@ -5919,13 +5869,44 @@ class App implements ToolHost {
 
   // ================================================================ UI rendering
 
+  /** The status bar's hint for the selection mode (Solid mode: the view's mouse gestures as set). */
+  private modeHint(): string {
+    if (this.mode !== "body" || (["orbit", "pan", "zoom"] as const).every((a) => isDefault(this.keys, `nav.${a}`))) return MODE_HINTS[this.mode];
+    const nav = (a: string, what: string) => (keysText(this.keys, `nav.${a}`) ? `${keysText(this.keys, `nav.${a}`)} ${what}` : "");
+    return `Solid mode: click to select solids (click again → face / edge), Shift+click to add.  ${[nav("orbit", "orbit"), nav("pan", "pan"), nav("zoom", "zoom")].filter(Boolean).join(" · ")}`;
+  }
+
+  /** A toolbar button's tooltip: its label and keys. */
+  private toolTitle(it: ToolbarItem): string {
+    const k = keysText(this.keys, it.cmd);
+    return k ? `${it.label} (${k})` : it.label;
+  }
+
+  /** New keys ("/"): saved, the menu / toolbar / recent strip show them. */
+  private setKeys(keys: Keys): void {
+    this.keys = keys;
+    this.chord = null;
+    saveKeys(keys);
+    this.viewport.nav = navGestures(keys);
+    window.yddd?.setMenuKeys?.(menuAccelerators(keys));
+    if (!this.tool && !this.op && !this.xf) this.hint(this.modeHint());
+    for (const b of document.querySelectorAll<HTMLElement>("#toolbar button[data-cmd]")) {
+      const it = TOOLBAR_ITEMS.get(b.dataset.cmd!);
+      if (!it) continue;
+      b.title = this.toolTitle(it);
+      const kbd = b.querySelector("kbd");
+      if (kbd) kbd.textContent = keysText(keys, it.cmd);
+    }
+    this.renderRecent();
+  }
+
   private buildToolbar(): void {
     const bar = $("toolbar");
     const mkBtn = (it: ToolbarItem, cls: string, html: string): HTMLButtonElement => {
       const b = document.createElement("button");
       b.className = cls;
       b.dataset.cmd = it.cmd;
-      b.title = it.key ? `${it.label} (${it.key})` : it.label;
+      b.title = this.toolTitle(it);
       b.innerHTML = html;
       return b;
     };
@@ -5950,7 +5931,7 @@ class App implements ToolHost {
         const main = mkBtn(group.items[0], "tb-main", "");
         const setMain = (it: ToolbarItem): void => {
           main.dataset.cmd = it.cmd;
-          main.title = it.key ? `${it.label} (${it.key})` : it.label;
+          main.title = this.toolTitle(it);
           main.innerHTML = `${ICONS[it.icon]}<span>${it.label}</span><i class="tb-caret">▾</i>`;
         };
         setMain(group.items[0]);
@@ -5961,7 +5942,7 @@ class App implements ToolHost {
         const list = document.createElement("div");
         list.className = "tb-flyout";
         for (const it of group.items) {
-          const b = mkBtn(it, "tb-btn tb-item", `${ICONS[it.icon]}<span>${it.label}</span>${it.key ? `<kbd>${it.key}</kbd>` : ""}`);
+          const b = mkBtn(it, "tb-btn tb-item", `${ICONS[it.icon]}<span>${it.label}</span><kbd>${keysText(this.keys, it.cmd)}</kbd>`);
           b.addEventListener("click", () => {
             b.blur();
             setMain(it);
@@ -6528,9 +6509,10 @@ class App implements ToolHost {
       return;
     }
     const rows: [string, string][] = [
-      ["Middle-drag · Alt+Left-drag", "Orbit view"],
-      ["Shift + Left-drag · Shift / Ctrl + Middle-drag", "Pan view"],
-      ["Wheel · two-finger slide (touchpad)", "Zoom to cursor"],
+      [keysText(this.keys, "help.keys") || "Help → Shortcuts", "All operations and their keys: search, run one, change a key (or mouse side button 4 / 5), ↺ back to the default — the keys below are the defaults"],
+      ...((["orbit", "pan", "zoom"] as const).every((a) => isDefault(this.keys, `nav.${a}`))
+        ? [["Middle-drag · Alt+Left-drag", "Orbit view"], ["Shift + Left-drag · Shift / Ctrl + Middle-drag", "Pan view"], ["Wheel · two-finger slide (touchpad)", "Zoom to cursor"]] as [string, string][]
+        : [[keysText(this.keys, "nav.orbit") || "—", "Orbit view"], [keysText(this.keys, "nav.pan") || "—", "Pan view"], [keysText(this.keys, "nav.zoom") || "—", "Zoom to cursor"]] as [string, string][]),
       ["1 · 2 · 3", "Selection mode: Solid · Face · Edge"],
       ["Click / Shift+click", "Select / add to selection"],
       ["Bodies panel: Shift+click · Ctrl+click", "Select all the rows from the last clicked one to this one (Ctrl+Shift: add them) · add / remove one"],
@@ -6582,7 +6564,7 @@ class App implements ToolHost {
       ["V", "View menu at the cursor: Top 7 · Front 1 · Right 3 · Iso 5 · V again = opposite side (e.g. bottom)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
       ["Ctrl+Shift+F1", "Pro layout on / off: less text — a one-row sketch panel, a small text-only Recent strip, short hints (also in the View menu)"],
-      ["Ctrl+S · Ctrl+O · Ctrl+E", "Save · Open · Export STEP"],
+      ["Ctrl+S · Ctrl+O", "Save · Open"],
     ];
     help.innerHTML = `<div class="card"><h2>Keyboard &amp; mouse</h2><table>${rows.map(([k, v]) => `<tr><td><kbd>${k}</kbd></td><td>${v}</td></tr>`).join("")}</table></div>`;
     help.hidden = false;
@@ -6947,7 +6929,7 @@ class App implements ToolHost {
     }
   }
 
-  /** File → Settings: a Radius | Diameter switch for circles, cylinders and spheres. Saved at once (localStorage). */
+  /** File → Settings: a Radius | Diameter switch for circles, cylinders and spheres; solids' opacity (normal / x-ray). Saved at once (localStorage). */
   private settingsDialog(): void {
     document.getElementById("props-dlg")?.remove();
     const dlg = document.createElement("form");
@@ -6955,7 +6937,21 @@ class App implements ToolHost {
     dlg.innerHTML =
       `<h4>Settings</h4>` +
       `<div class="seg-row"><span>Circles, cylinders, spheres</span><span class="seg"><button type="button" class="btn" data-v="r">Radius</button><button type="button" class="btn" data-v="d">Diameter</button></span></div>` +
+      `<label class="range-row" title="How solid the solids look normally — 100%: opaque"><span>Solid opacity</span><input type="range" data-k="solid" min="5" max="100" step="5"><output></output></label>` +
+      `<label class="range-row" title="How solid the solids look in X-ray (Shift+X), where hidden faces and edges show through"><span>X-ray opacity</span><input type="range" data-k="xray" min="5" max="100" step="5"><output></output></label>` +
       `<div class="op-buttons"><button type="submit" class="btn primary">Done</button></div>`;
+    const vp = this.viewport;
+    for (const r of dlg.querySelectorAll<HTMLInputElement>(".range-row input")) {
+      const solid = r.dataset.k === "solid", out = r.nextElementSibling!;
+      r.value = String(Math.round((solid ? vp.solidOpacity : vp.xrayOpacity) * 100));
+      out.textContent = `${r.value}%`;
+      r.addEventListener("input", () => {
+        const v = Number(r.value) / 100;
+        out.textContent = `${r.value}%`;
+        localStorage.setItem(solid ? SOLID_OPACITY_KEY : XRAY_OPACITY_KEY, r.value);
+        vp.setOpacity(solid ? v : vp.solidOpacity, solid ? vp.xrayOpacity : v);
+      });
+    }
     const seg = [...dlg.querySelectorAll<HTMLButtonElement>(".seg button")];
     const show = () => seg.forEach((b) => b.classList.toggle("primary", (b.dataset.v === "d") === byDiameter()));
     for (const b of seg)
