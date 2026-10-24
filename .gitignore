@@ -3,3 +3,10 @@ dist/
 *.log
 scratch/
 release/
+
+# Tutorial videos (uploaded to YouTube, not kept in git)
+birdhouse-tutorial.*
+
+# YouTube upload credentials (scripts/upload-youtube.mjs)
+client_secret*.json
+token.json
