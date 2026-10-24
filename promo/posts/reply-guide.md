@@ -62,7 +62,7 @@ and write it down in a feedback list. If you fix it, come back and reply "fixed 
 ## "How do I install it?" / "npm install failed"
 
 > Sorry! Which distro and Node version? Please open an issue with the error output.
-> [Link Releases/AppImage if available.]
+> [Link the .deb on Releases if available.]
 
 ## "It crashed / my fillet failed"
 

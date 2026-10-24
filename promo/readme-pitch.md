@@ -11,8 +11,8 @@ No history tree, no constraint solver, nothing to set up first.
 
 ## Download
 
-**[Download YDDD for Linux (AppImage)](https://github.com/canoon-gmail/yddd/releases/latest)**:
-download it, `chmod +x YDDD-*.AppImage`, then run it. A `.deb` is on the same page.
+**[Download YDDD for Linux (.deb)](https://github.com/canoon-gmail/yddd/releases/latest)**:
+download it, then `sudo apt install ./YDDD-*.deb` (Ubuntu, Debian, Mint, Pop!_OS).
 Windows and macOS are coming. [Tell us if you want one](https://github.com/canoon-gmail/yddd/discussions).
 
 ## Your first print in 3 minutes

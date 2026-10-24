@@ -28,7 +28,7 @@ inside outline → Box from Face (2 mm wall, 2 mm bottom, 40 mm deep) → Box Li
 0.3 mm clearance → 3MF. [replace with your real numbers]
 
 Honest limits: Linux only right now (Windows/mac later), [install: build from source with
-npm / AppImage on Releases], no history tree, one-person hobby project, free and MIT.
+npm / .deb on Releases], no history tree, one-person hobby project, free and MIT.
 
 Repo: https://github.com/canoon-gmail/yddd
 

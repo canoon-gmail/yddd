@@ -34,6 +34,8 @@ This is the biggest blocker by far. Most 3D-print hobbyists will not run `npm in
 - Tag `v0.1.0` and write short release notes: what it is, 3 screenshots, "chmod +x and run".
 - Test the AppImage once on a clean distro (Ubuntu 24.04 live or a VM). Watch for the sandbox /
   `--no-sandbox` problem and for missing `libfuse2`.
+  - 2026-10-24: tested on a fresh Ubuntu: the AppImage stopped at "AppImage requires FUSE". AppImage
+    dropped; YDDD ships as a .deb only (`npm run dist`).
 
 ### 2. No way to leave feedback. (Effort: ~1 hour)
 The milestone is "first user comments", but there is nowhere obvious to leave one.
@@ -110,6 +112,6 @@ The milestone is "first user comments", but there is nowhere obvious to leave on
   README images can be made again with every release.
 
 ## Suggested order
-6 (10 min) → 2 (1 h) → 3 (2 h, the README with a static image) → 1 (AppImage release) → 5 → 4.
+6 (10 min) → 2 (1 h) → 3 (2 h, the README with a static image) → 1 (.deb release) → 5 → 4.
 After 1–3 the project can be posted (r/3Dprinting, r/linux, r/functionalprint, the Prusa /
 Bambu forums) with a real download link and a place to comment.

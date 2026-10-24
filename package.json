@@ -19,7 +19,7 @@
     "smoke:half": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke YDDD_SMOKE_HALF=1 electron .",
     "bench": "npm run build && YDDD_STRESS=${N:-2000} YDDD_BENCH=1 electron .",
     "bench:ops": "npm run build && YDDD_BENCH=ops electron .",
-    "dist": "npm run build && electron-builder --linux AppImage deb"
+    "dist": "npm run build && electron-builder --linux deb"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
@@ -72,7 +72,6 @@
     },
     "linux": {
       "target": [
-        "AppImage",
         "deb"
       ],
       "category": "Graphics",

@@ -29,7 +29,7 @@ Tech, for the curious:
 - An end-to-end smoke test drives the real app with scripted mouse input
 
 Honest limits: Linux only for now, you build it from source (npm install && npm start)
-[or: AppImage on the Releases page], no parametric history, no assemblies/constraints,
+[or: a .deb on the Releases page], no parametric history, no assemblies/constraints,
 one developer. MIT licensed (OpenCascade itself is LGPL-2.1).
 
 What I'd really like to hear:

@@ -13,7 +13,7 @@ community's sidebar / wiki the day you post. Rules change.
    or Planter walkthrough from the Help menu, ending in Export 3MF → slicer).
    Every channel below works far better with a picture.
 3. **Install path.** Right now it's `git clone && npm install && npm start`. Many
-   r/3Dprinting readers will stop there. An AppImage on a GitHub Release would
+   r/3Dprinting readers will stop there. A .deb on a GitHub Release would
    roughly double who can try it. If not ready, say so honestly in every post.
 4. Be around for 3–4 hours after each post to answer. Post one channel at a time,
    fix what the first one finds, then do the next.
@@ -36,7 +36,7 @@ community's sidebar / wiki the day you post. Rules change.
 
 ## Suggested order
 
-1. Fix blockers (LICENSE, GIF, ideally AppImage).
+1. Fix blockers (LICENSE, GIF, ideally a .deb release).
 2. **Mastodon** first (low risk, gentle feedback, find embarrassing bugs).
 3. **Thai makers** (Thai text is a unique angle; friendly audience).
 4. **r/functionalprint** with a real printed part, then **r/3Dprinting** a few days later.

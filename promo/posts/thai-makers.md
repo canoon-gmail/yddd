@@ -21,7 +21,7 @@ Note: the app's menus are in English; only the Text tool supports Thai letters. 
 ป้ายในรูปผมทำประมาณ [N] นาที [ใส่เวลาจริง]
 
 ลิงก์: https://github.com/canoon-gmail/yddd
-(ตอนนี้ต้อง [ติดตั้งจากซอร์สด้วย npm / ดาวน์โหลด AppImage จากหน้า Releases])
+(ตอนนี้ต้อง [ติดตั้งจากซอร์สด้วย npm / ดาวน์โหลดไฟล์ .deb จากหน้า Releases])
 
 อยากขอความเห็นตรง ๆ ครับ:
 1. สระ วรรณยุกต์ ภาษาไทยออกมาถูกต้องไหม กับฟอนต์ที่คุณใช้ (ลองฟอนต์ไหนแล้วเพี้ยนบ้าง)

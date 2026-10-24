@@ -23,7 +23,7 @@ want a bracket or a box with a lid. So I've been writing YDDD as a solo hobby pr
 - Electron + Three.js; OpenCascade runs as WebAssembly, heavy ops in a worker thread.
 - MIT license (bundled OpenCascade wasm: LGPL-2.1).
 
-Install right now: [git clone + npm install + npm start / AppImage on the Releases page].
+Install right now: [git clone + npm install + npm start / .deb on the Releases page].
 Tested on [your distro + version]. [Wayland/X11 notes if known.]
 
 Repo: https://github.com/canoon-gmail/yddd
