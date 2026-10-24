@@ -4544,8 +4544,8 @@ const SCENARIO_RECENTSTRIP = String.raw`
   const strip = () => [...document.querySelectorAll("#recent-list [data-cmd]")].map((b) => b.dataset.cmd);
   const saved = { recent: app.recent, use: app.recentUse };
   app.recent = []; app.recentUse = []; app.renderRecent();
-  app.run("view.iso"); app.run("view.front"); app.run("view.top"); await sleep(20);
-  expect("recent strip: view commands (Iso / Front / Top) don't go in", strip().length === 0, strip());
+  app.run("view.iso"); app.run("view.front"); app.run("view.top"); app.pushRecent("view.xray"); app.pushRecent("edit.delete"); await sleep(20);
+  expect("recent strip: view commands (Iso / Front / Top), X-ray and Delete don't go in", strip().length === 0, strip());
   const cmds = ["tool.box", "tool.rectangle", "op.pushpull", "op.fillet", "op.chamfer", "op.shell", "op.cut", "xf.move", "xf.rotate", "xf.scale", "bool.subtract", "bool.union"];
   for (const c of cmds.slice(0, 10)) app.pushRecent(c);
   const full = strip();

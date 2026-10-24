@@ -538,9 +538,10 @@ const FIELD_KEYS = new Set(["Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl+X", "Ctrl+Z", "C
 /** A two-key shortcut's second key counts this long (ms) after the first. */
 const CHORD_MS = 1500;
 
-/** Toolbar commands that go into the recent strip (mode switches, undo/redo and views have their own keys / buttons). */
 const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
-const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => g.title !== "Select" && g.title !== "History" && g.title !== "View").flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
+/** Toolbar commands that go into the recent strip (mode switches, undo/redo, views, X-ray and Delete have their own keys / buttons). */
+const NOT_RECENT = new Set(["Select", "History", "View", "X-ray", "Delete"]);
+const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 const RECENT_MAX = 10;
 /** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
 const FACE_EDGE_PICK_PX = 14;
