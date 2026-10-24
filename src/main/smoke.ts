@@ -2619,6 +2619,7 @@ const SCENARIO_SPLINE = String.raw`
     expect("spline: Edge mode, click the path (its line), Del → the path is deleted; undo brings it back", picked && gone && !!app.doc.get(pathId), { picked, gone, back: !!app.doc.get(pathId) });
     app.run("mode.body");
     // A circle swept along a long Spline (12 points): its heavy tube face is drawn coarser — quick, not 400 000 triangles
+    let sweptTube = null;
     {
       // (10 mm apart: its tightest bend 2.1 mm — 4 mm apart bent at 0.33 mm, the 1.5 mm tube folded through itself there)
       const q = Array.from({ length: 12 }, (_, i) => [i * 10, (i % 2 ? 6 : -6) + i, 0]);
@@ -2637,6 +2638,14 @@ const SCENARIO_SPLINE = String.raw`
       const kinds = [...new Set(tube.faces.map((f) => f.geomType))].sort().join(), want = Math.PI * 1.5 * 1.5 * L, v = K.solidVolume(tube);
       expect("spline: a circle swept along a 12-point Spline — exact tori (arcs fitted within 0.01 mm), volume = disc × path length (within 0.05%), valid, drawn quickly",
         K.isValidShape(tube) && kinds === "PLANE,TORUS" && Math.abs(v - want) / want < 5e-4 && ms < 1500 && tris < 100000, { ms: Math.round(ms), tris, kinds, v, want, valid: K.isValidShape(tube) });
+      // The rings where its arc pieces meet smoothly: not drawn (only its 2 end circles); a filleted box keeps its fillets' edges
+      const rings = tube.faces.filter((f) => f.geomType === "TORUS").length - 1, shown = mesh.edges.edgeGroups.length;
+      const s0 = performance.now(), seams = K.seamEdgeIds(tube).size, seamMs = performance.now() - s0;
+      const box = K.filletEdges(K.makeBox({ origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }, [0, 0, 0], 20, 20, 20), null, 2);
+      const boxShown = K.tessellate(box).edges.edgeGroups.length;
+      sweptTube = tube;
+      expect("spline: the swept tube's rings (where its arc pieces meet smoothly) not drawn — just its 2 end circles; a filleted box: its 24 fillet edges still drawn",
+        rings > 3 && shown === 2 && seamMs < 300 && boxShown === 24, { rings, shown, seams, seamMs: Math.round(seamMs), boxShown });
       // Profile size %: the tube swept at 50% — its volume a quarter; cut through its path: 2 valid pieces
       const half = K.sweepFace(disc, disc.faces[0].hashCode, wire, true, false, 0, 0.5), hv = K.solidVolume(half);
       const cut = K.splitByPlane(half, [0, 0, 0], [0, 0, 1]);
@@ -2649,6 +2658,30 @@ const SCENARIO_SPLINE = String.raw`
     const again = T() && T().loops[0] && T().loops[0].segs && T().loops[0].segs[0];
     expect("spline: K on its face → back in the sketch as a Spline (its 4 points again, to drag)", again && again.thru && again.thru.length === 4 && again.closed && ring.every((p) => again.thru.some((q) => near(p, q))), again && again.thru);
     document.querySelector("#sketch-panel button[data-act=cancel]")?.click(); await sleep(20);
+    // Face mode, a click on the swept tube (one of its smoothly joined pieces): the whole tube, in Solid mode; its flat
+    // ends stay faces (e.g. for Shell). A rounded box's / a cylinder's rounded top's fillet faces stay faces too.
+    {
+      const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+      const smooth = K.smoothSurfaceFaces(sweptTube), tori = sweptTube.faces.filter((f) => f.geomType === "TORUS");
+      const rbox = K.filletEdges(K.makeBox(G, [0, 0, 0], 20, 20, 20), null, 2), rcyl = K.filletEdges(K.makeCylinder(G, [0, 0, 0], 10, 20), null, 2);
+      const kernelOk = tori.every((f) => smooth.has(f.hashCode)) && sweptTube.faces.every((f) => f.geomType !== "PLANE" || !smooth.has(f.hashCode))
+        && K.smoothSurfaceFaces(rbox).size === 0 && K.smoothSurfaceFaces(rcyl).size === 0;
+      app.doc.reset([{ kind: "solid", shape: sweptTube, name: "Tube" }]); await sleep(300);
+      const id = app.doc.bodies[0].id;
+      app.setSelection([{ kind: "body", body: id, id: 0 }]); vp.setView("top"); app.run("view.fitSelection"); await sleep(100); app.setSelection([]);
+      const pe3 = (t, p) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+      const click3 = async (p) => { pe3("pointermove", p); pe3("pointerdown", p); pe3("pointerup", p); await sleep(450); };
+      const mid = tori[tori.length >> 1].center.toTuple();
+      app.run("mode.face"); await sleep(20);
+      await click3([mid[0], mid[1], 1.5]);
+      const got = { mode: app.mode, sel: app.selection.map((x) => x.kind + ":" + x.body) };
+      // (a second click on the selected tube: no drilling down to a piece — it stays the whole tube)
+      await click3([mid[0], mid[1], 1.5]);
+      const stays = app.mode === "body" && app.selection.length === 1 && app.selection[0].kind === "body";
+      expect("spline: Face mode, click the swept tube → the whole tube selected, in Solid mode (a 2nd click stays on it); not for a rounded box's / a rounded cylinder top's fillets",
+        kernelOk && got.mode === "body" && got.sel.join() === "body:" + id && stays, { kernelOk, smooth: smooth.size, tori: tori.length, rbox: K.smoothSurfaceFaces(rbox).size, rcyl: K.smoothSurfaceFaces(rcyl).size, got, stays });
+      app.run("mode.body");
+    }
   } catch (e) {
     expect("spline: no errors", false, String(e && e.stack || e));
   }

@@ -493,20 +493,91 @@ function extractMesh(shape: unknown, opts: { tolerance: number; angularTolerance
  * Seam edges of a solid: edges used by only ONE face. On a closed solid every
  * real edge separates two faces; an edge with a single face is either the seam
  * where a periodic surface (sphere, cylinder, torus...) wraps onto itself, or a
- * zero-length "degenerate" edge at a pole. Neither is a visible crease, so they
- * are not drawn, not pickable and skipped by "fillet all edges".
+ * zero-length "degenerate" edge at a pole. Also an edge where two curved faces meet
+ * smoothly (e.g. the rings between the arc pieces of a tube swept along a Spline, or two
+ * half cylinders). None is a visible crease, so they are not drawn, not pickable and
+ * skipped by "fillet all edges". (A flat face meeting a curved one smoothly — a fillet's
+ * edge — stays: it shows where the rounding starts.)
  * Flat face bodies have no seams (their single-face edges are the real outline).
  */
 export function seamEdgeIds(shape: Shape): Set<number> {
   if (isFaceShape(shape)) return new Set();
-  const faceCount = new Map<number, number>();
+  const facesOf = new Map<number, Face[]>();
   for (const face of shape.faces) {
     // A seam appears twice in its face (once per orientation): count each face once.
-    for (const id of new Set(face.edges.map((e) => e.hashCode))) faceCount.set(id, (faceCount.get(id) ?? 0) + 1);
+    for (const id of new Set(face.edges.map((e) => e.hashCode))) {
+      const list = facesOf.get(id);
+      if (list) list.push(face);
+      else facesOf.set(id, [face]);
+    }
   }
   const seams = new Set<number>();
-  for (const [id, n] of faceCount) if (n === 1) seams.add(id);
+  let edges: Map<number, Edge> | null = null;
+  for (const [id, faces] of facesOf) {
+    if (faces.length === 1) seams.add(id);
+    else if (faces.length === 2 && faces.every((f) => f.geomType !== "PLANE")) {
+      edges ??= new Map(shape.edges.map((e) => [e.hashCode, e]));
+      const e = edges.get(id);
+      if (e && smoothJoin(e, faces[0], faces[1])) seams.add(id);
+    }
+  }
   return seams;
+}
+
+/**
+ * Faces of a tube-like surface made of smoothly joined pieces — a profile swept along a Spline (its arc pieces) or
+ * revolved: a chain of curved faces meeting smoothly (hidden joins, see seamEdgeIds) with a torus in it and running
+ * smoothly into no flat face (that would be a fillet: a rounded box, a cylinder's rounded top). A click on one picks
+ * the whole solid — one slice of a tube is no use on its own. Cached per shape.
+ */
+export function smoothSurfaceFaces(shape: Shape): Set<number> {
+  const known = smoothSurfaceCache.get(shape);
+  if (known) return known;
+  const out = new Set<number>();
+  smoothSurfaceCache.set(shape, out);
+  if (isFaceShape(shape)) return out;
+  const seams = seamEdgeIds(shape);
+  const faces = shape.faces, edges = new Map(shape.edges.map((e) => [e.hashCode, e]));
+  const facesOf = new Map<number, Face[]>();
+  for (const f of faces) for (const id of new Set(f.edges.map((e) => e.hashCode))) facesOf.set(id, [...(facesOf.get(id) ?? []), f]);
+  const seen = new Set<number>();
+  for (const start of faces) {
+    if (seen.has(start.hashCode) || start.geomType === "PLANE") continue;
+    // The chain: curved faces reached across hidden joins
+    const chain: Face[] = [start];
+    seen.add(start.hashCode);
+    let tangentFlat = false;
+    for (let i = 0; i < chain.length; i++) {
+      for (const id of new Set(chain[i].edges.map((e) => e.hashCode))) {
+        const two = facesOf.get(id);
+        if (!two || two.length !== 2) continue;
+        const other = two[0].hashCode === chain[i].hashCode ? two[1] : two[0];
+        if (other.geomType === "PLANE") {
+          const e = edges.get(id);
+          if (!tangentFlat && e && smoothJoin(e, chain[i], other)) tangentFlat = true;
+        } else if (seams.has(id) && !seen.has(other.hashCode)) {
+          seen.add(other.hashCode);
+          chain.push(other);
+        }
+      }
+    }
+    if (chain.length > 1 && !tangentFlat && chain.some((f) => f.geomType === "TORUS")) for (const f of chain) out.add(f.hashCode);
+  }
+  return out;
+}
+
+const smoothSurfaceCache = new WeakMap<object, Set<number>>();
+
+/** Whether two faces meet smoothly along `e` (the same outward normal at a few points along it). */
+function smoothJoin(e: Edge, a: Face, b: Face): boolean {
+  try {
+    return [0.2, 0.5, 0.8].every((t) => {
+      const p = e.pointAt(t).toTuple() as V3;
+      return dot3(normalNear(a, p), normalNear(b, p)) > 1 - 1e-6;
+    });
+  } catch {
+    return false;
+  }
 }
 
 /** Drop the given edges from an edge mesh, re-packing the line buffer. */

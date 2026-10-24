@@ -57,6 +57,7 @@ import {
   extrudeFace,
   makeSphereAt,
   seamEdgeIds,
+  smoothSurfaceFaces,
   kindOf,
   faceAxis,
   planarFaceFrame,
@@ -1382,6 +1383,14 @@ class App implements ToolHost {
       else if (!e.shiftKey) this.setSelection([]);
       return;
     }
+    // Face mode, on a piece of a smoothly joined surface (a tube swept along a Spline): the whole solid, in Solid mode.
+    const whole = this.wholeSolidOf(item);
+    if (whole) {
+      this.setMode("body");
+      const exists = this.selection.some((s) => sameItem(s, whole));
+      this.setSelection(!(e.shiftKey || e.ctrlKey) ? [whole] : exists ? this.selection.filter((s) => !sameItem(s, whole)) : [...this.selection, whole]);
+      return;
+    }
     // Edge mode, on an edge of a hole's rim: the whole rim (Shift: added); a click on an edge of the
     // selected rim: just that edge (e.g. to fillet one side).
     const rim = item.kind === "edge" && this.mode === "edge" ? this.holeRimOf(item) : null;
@@ -1407,7 +1416,7 @@ class App implements ToolHost {
       // (Only on that body: another solid in the same place — e.g. a copy — must not get in the way.)
       let sub = this.viewport.pick(e.clientX, e.clientY, "edge", item.body);
       if (!sub) sub = this.viewport.pick(e.clientX, e.clientY, "face", item.body);
-      if (sub && sub.body === item.body && sub.kind !== "body") {
+      if (sub && sub.body === item.body && sub.kind !== "body" && !this.wholeSolidOf(sub)) {
         this.setMode(sub.kind === "edge" ? "edge" : "face");
         this.setSelection([{ kind: sub.kind, body: sub.body, id: sub.id }]);
       }
@@ -1417,6 +1426,13 @@ class App implements ToolHost {
       if (edge) this.setMode("edge");
       this.setSelection([edge ?? item]);
     }
+  }
+
+  /** The whole solid for a face that is a piece of a smoothly joined surface (see smoothSurfaceFaces), else null. */
+  private wholeSolidOf(item: { kind: string; body: number; id: number }): SelItem | null {
+    if (item.kind !== "face") return null;
+    const b = this.doc.get(item.body);
+    return b?.kind === "solid" && isBrep(b) && smoothSurfaceFaces(b.shape).has(item.id) ? { kind: "body", body: item.body, id: 0 } : null;
   }
 
   /** All the edges of the hole's rim that edge `item` is on (any shape of hole), or null if it isn't a hole's rim. */
@@ -1639,7 +1655,8 @@ class App implements ToolHost {
     }
     const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
     // Face mode: preview the edge a click would switch to.
-    const item: SelItem | null = this.selectedEdgeHit(e) ?? (pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null);
+    const at: SelItem | null = this.selectedEdgeHit(e) ?? (pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null);
+    const item = (at && this.wholeSolidOf(at)) ?? at;
     if (!sameItem(item, this.hover) && !(item === null && this.hover === null)) {
       this.hover = item;
       this.viewport.setHighlight(this.selection, this.hover);
@@ -7154,7 +7171,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
