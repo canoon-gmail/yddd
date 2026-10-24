@@ -1,21 +1,43 @@
-# YDDD
+# YDDD: easy 3D CAD for 3D printing, on Linux
 
-A simple, easy 3D CAD app for Linux: draw a shape, push and pull it, and get
-exact sizes — no history tree or settings to learn first. Under the hood it is
-a direct-modeling B-rep modeller, so models stay exact. Built with **Electron + TypeScript**, **Three.js** for the viewport and
-**OpenCascade** (via [replicad](https://replicad.xyz) / WebAssembly) as the
-geometry kernel. Units are millimetres, Z is up.
+**Draw a shape, push and pull it, type exact sizes, export 3MF for your slicer.**
+No history tree, no constraint solver, nothing to set up first.
 
-## Run
+![A cable storage box with a lid and a raised label, and a tray with six compartments, made in YDDD](docs/img/hero.jpg)
 
-```bash
-npm install
-npm start        # type-check, build and launch
-npm run dev      # Vite dev server with hot reload + Electron
-npm run smoke    # automated end-to-end test, screenshots in /tmp/yddd-smoke
-npm run smoke:half  # the same without scenarios 1–3 (about half the time)
-npm run start:stress          # launch with 2000 test solids (N=5000 npm run start:stress for more)
-```
+## Download
+
+**[Download YDDD for Linux (.deb)](https://github.com/canoon-gmail/yddd/releases/latest)**:
+download it, then `sudo apt install ./YDDD-*.deb` (Ubuntu, Debian, Mint, Pop!_OS).
+Windows and macOS are coming. [Tell us if you want one](https://github.com/canoon-gmail/yddd/issues/new?template=feature_request.yml).
+
+## Your first print in 3 minutes
+
+1. Open YDDD and choose **Help → Cable Storage Box**.
+2. Press **Do all** to watch it build the box, the lid and the label. Or follow the steps yourself.
+3. Choose **File → Export 3MF** and open the file in Bambu Studio, PrusaSlicer or Cura.
+
+There are more walkthroughs in the Help menu: Planter, Bird House, House, Propeller.
+Press **F1** for all the shortcuts.
+
+## What it's good at
+
+- **Boxes and enclosures**: *Box from Face* turns any outline into an open box with walls and a
+  floor. *Box Lid* adds a lid with a lip or a cap, with the print clearance built in. *Dividers*
+  splits a box into equal compartments.
+- **Fit for printing**: click a hole or pin and type a new diameter, or "0.2 mm bigger all
+  round". Fillet, chamfer, shell.
+- **Text**: raised or cut letters on any flat face, in any installed font (Thai too).
+- **Exact geometry**: an OpenCascade B-rep kernel underneath. Export STEP, STL or 3MF (one
+  closed, named object per body).
+
+## Tell us what you think
+
+YDDD is new, and first impressions are the most useful thing you can give us.
+**[Share your first impressions](https://github.com/canoon-gmail/yddd/issues/new?template=first_impressions.yml)**:
+what you tried to make, where you got stuck, and whether you'd use it again.
+Found a bug? [Report it](https://github.com/canoon-gmail/yddd/issues/new?template=bug_report.yml) and attach the
+`.yddd` file if you can.
 
 ## Features (v0.1)
 
@@ -46,6 +68,22 @@ Press **F1** in the app for all shortcuts, or **/** to search every operation, r
 * **Left click**: select / draw / use tool
 * **Snapping**: tools snap to corners, midpoints, centres, edges, guides, axes and the grid by themselves —
   hold **Ctrl** to place freely. Untick **Auto** (status bar, by Snap) to snap only while Ctrl is held.
+
+## Development
+
+YDDD is a direct-modeling B-rep modeller built with **Electron + TypeScript**, **Three.js** for the viewport and
+**OpenCascade** (via [replicad](https://replicad.xyz) / WebAssembly) as the geometry kernel. Units are millimetres,
+Z is up.
+
+```bash
+npm install
+npm start        # type-check, build and launch
+npm run dev      # Vite dev server with hot reload + Electron
+npm run dist     # build the .deb in release/
+npm run smoke    # automated end-to-end test, screenshots in /tmp/yddd-smoke
+npm run smoke:half  # the same without scenarios 1–3 (about half the time)
+npm run start:stress          # launch with 2000 test solids (N=5000 npm run start:stress for more)
+```
 
 ## Code layout
 
