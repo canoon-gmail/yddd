@@ -70,6 +70,7 @@ import {
   offsetFace,
   boxFromFace,
   boxLid,
+  boxDividers,
   hasBoxRim,
   offsetRing,
   scaleShape,
@@ -646,6 +647,8 @@ class App implements ToolHost {
     in: { thickness: 2, depth: 3, wall: 1.5, clearance: 0 },
     over: { thickness: 2, depth: 5, wall: 1.5, clearance: 0 },
   };
+  /** Dividers (Macro menu): the last values. */
+  private dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
   private hudEl = $("hud");
@@ -1148,6 +1151,7 @@ class App implements ToolHost {
       case "macro.box": return this.opBoxFromFace();
       case "macro.lidIn": return this.openBoxLid(false, this.selectedLidBox());
       case "macro.lidOver": return this.openBoxLid(true, this.selectedLidBox());
+      case "macro.dividers": return this.openDividers(this.selectedLidBox());
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -2623,6 +2627,63 @@ class App implements ToolHost {
         };
       },
       remember: ({ thickness, depth, wall, clearance }) => (this.lidDefaults[over ? "over" : "in"] = { thickness, depth, wall, clearance }),
+      pick: (e) => take(at(e)),
+      pickBody: (id) => take(targetOf(id)),
+      hover: (e) => {
+        const t = at(e);
+        this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], typeof t === "number" ? { kind: "body", body: t, id: 0 } : null);
+        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t !== null ? "pointer" : "crosshair";
+      },
+    };
+    this.startOp(spec);
+    this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], null);
+  }
+
+  /**
+   * Macro → Dividers: walls in an open-top box (Box from Face, Shell...) — a grid of equal compartments, columns along
+   * its long side, rows across it; the walls from the floor up to a gap under the rim (room for a lid's lip), fused into
+   * the box. The panel waits for the box if none is selected; a click on another one changes it.
+   */
+  private openDividers(boxId: number | null): void {
+    const tb = boxId === null ? undefined : this.doc.get(boxId);
+    const box = tb?.kind === "solid" && hasBoxRim(tb.shape as Solid) ? tb : null;
+    const targetOf = (id: number | null | undefined): number | "bad" | null => {
+      if (id === null || id === undefined) return null;
+      const b = this.doc.get(id);
+      return b?.kind === "solid" && hasBoxRim(b.shape as Solid) ? b.id : "bad";
+    };
+    const take = (t: number | "bad" | null) => {
+      if (t === null) return;
+      if (t === "bad") return this.toast("Dividers: click an open-top box — a solid with a flat rim round its opening (Box from Face, Shell...)", "error");
+      spec.remember!(this.opValues().values); // (the panel opens again with them)
+      this.openDividers(t);
+    };
+    const at = (e: PointerEvent) => targetOf(this.viewport.pick(e.clientX, e.clientY, "body")?.body);
+    const d = this.dividerDefaults;
+    const todo = "click the open-top box to divide";
+    const spec: OpSpec = {
+      title: "Dividers",
+      label: "Dividers",
+      note: `Box: ${box ? escapeHtml(box.name) : "—"}`,
+      hint: `Dividers: ${box ? "click another box to change it · Enter apply · " : `${todo} · `}Esc cancel`,
+      fields: [
+        { key: "columns", label: "Columns (along the long side)", value: d.columns, step: 1, min: 1 },
+        { key: "rows", label: "Rows (across it)", value: d.rows, step: 1, min: 1 },
+        { key: "wall", label: "Wall (mm)", value: d.wall, step: 0.2, min: 0 },
+        { key: "topGap", label: "Below the rim (mm, room for a lid's lip)", value: d.topGap, step: 0.5, min: 0 },
+      ],
+      compute: ({ columns, rows, wall, topGap }) => {
+        if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+        const solid = boxDividers(box.shape as Solid, { columns, rows, wall, topGap });
+        return {
+          ghost: new Map([[box.id, solid]]),
+          commit: () => {
+            this.doc.commit(this.doc.bodies.map((b) => (b.id === box.id ? withShape(b, solid) : b)), "Dividers");
+            return { select: [box.id], solidMode: true };
+          },
+        };
+      },
+      remember: ({ columns, rows, wall, topGap }) => (this.dividerDefaults = { columns, rows, wall, topGap }),
       pick: (e) => take(at(e)),
       pickBody: (id) => take(targetOf(id)),
       hover: (e) => {
@@ -6697,6 +6758,7 @@ class App implements ToolHost {
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list); edges it can't do at that size are left sharp — the panel says how many (orange), Apply keeps the rest, and a button sets the largest size that does them all"],
       ["H", "Shell / hollow (opens the selected faces)"],
       ["Macro → Box Lid → Inside Lip / Over the Box", "A lid for an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits), made closed on it: Inside Lip — a plate on the rim, a lip under it fitting in the opening (Lip depth 0: a flat lid; Lip wall 0: a solid plug); Over the Box — a cap, bigger, its skirt round the box's outside. Clearance: the gap to the box (0: an exact fit)"],
+      ["Macro → Dividers", "Walls in an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits): equal compartments, Columns along its long side and Rows across it (1: no walls that way), the walls following the inside (round corners, an oval) from the floor up; Below the rim: their tops that far under it (room for an Inside Lip lid's lip). Fused into the box: one solid to print"],
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
@@ -7337,7 +7399,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

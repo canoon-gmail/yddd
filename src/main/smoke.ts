@@ -3432,6 +3432,44 @@ const SCENARIO_TEXT = String.raw`
           K.isValidShape(lidOver.shape) && Math.abs(ovV - wantOver) < 1e-3 && ovSize === "67.4 × 47.4 × 7" && Math.abs(ovB[0][2] - 15) < 1e-6 && ovOverlap < 1e-6 && Math.abs(flat - 64 * 44 * 2) < 1e-3 && others.every((x) => x === true),
         { others, waiting, stillWaiting, note, inErr, inV: r(inV), wantIn: r(wantIn), inZ, inOverlap, ovV: r(ovV), wantOver: r(wantOver), ovSize, ovOverlap, flat: r(flat) });
     }
+    // Macro → Dividers: the 60 × 40 (inside) box, 20 deep — 3 columns along the long side (X) × 2 rows, walls 1.2: one
+    // solid, its walls exactly where they should be, fused into the box (same body, its colour kept); Below the rim 3;
+    // a rounded box and a round cup valid, an oval refused; too many / 1 × 1 / too deep refused; undo takes them out
+    {
+      app.doc.reset([]);
+      const rectF = K.makeRectFace(G, [0, 0, 0], 60, 40);
+      const box = { ...app.doc.makeBody(K.boxFromFace(rectF, rectF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 0 }), "Box"), look: { color: "#3b82f6" } };
+      app.doc.commit([box], "box"); vp.setView("iso"); vp.fit(); await sleep(50);
+      const set = (v) => { for (const [k, x] of Object.entries(v)) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(x); i.dispatchEvent(new Event("input", { bubbles: true })); } } };
+      const v0 = K.solidVolume(box.shape), b0 = JSON.stringify(box.shape.boundingBox.bounds);
+      app.setSelection([]); app.run("macro.dividers"); await sleep(300);
+      const waiting = document.querySelector("#op-panel .op-error.waiting")?.textContent || "";
+      app.op.spec.pickBody(box.id); await sleep(50);
+      set({ columns: 3, rows: 2, wall: 1.2, topGap: 0 }); await sleep(300);
+      app.applyOp(); await sleep(50);
+      const d = app.doc.get(box.id), dv = K.solidVolume(d.shape) - v0;
+      const fill = (x, y, w, dd) => K.solidVolume(K.booleanOp("intersect", d.shape, [K.makeBox(G, [x, y, 0], w, dd, 20)]));
+      // (column walls at x -10.8…-9.6 and 9.6…10.8, the row wall at y -0.6…0.6; a compartment between them is empty)
+      const placed = [fill(-10.2, 0, 1.2, 36), fill(10.2, 0, 1.2, 36), fill(0, 0, 50, 1.2)].map((x) => r(x)).join() === [864, 864, 1200].join() && fill(-20, 10, 15, 15) < 1e-6;
+      const one = d.shape.solids ? d.shape.solids.length : 1;
+      const ok1 = app.doc.bodies.length === 1 && d.kind === "solid" && K.isValidShape(d.shape) && Math.abs(dv - 20 * 1.2 * (2 * 40 + 60 - 2 * 1.2)) < 1e-3 && JSON.stringify(d.shape.boundingBox.bounds) === b0 && d.look?.color === "#3b82f6" && app.doc.undoLabel === "Dividers";
+      const gapV = K.solidVolume(K.boxDividers(box.shape, { columns: 3, rows: 2, wall: 1.2, topGap: 3 })) - v0;
+      const rounded = K.boxFromFace(rectF, rectF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 5 });
+      const cupF = K.makeCircleFace(G, [0, 0, 0], 25), cup = K.boxFromFace(cupF, cupF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 0 });
+      const others = [[rounded, 4, 3], [cup, 2, 2]].map(([bx, c, rw]) => {
+        try { const o = K.boxDividers(bx, { columns: c, rows: rw, wall: 1.2, topGap: 2 }); return K.isValidShape(o) && K.solidVolume(o) > K.solidVolume(bx) + 1 && JSON.stringify(o.boundingBox.bounds) === JSON.stringify(bx.boundingBox.bounds); } catch (e) { return String(e); }
+      });
+      const err = (o) => { try { K.boxDividers(box.shape, o); return ""; } catch (e) { return String(e.message || e); } };
+      // (a scaled oval's inside: OpenCascade fails, or returns a wrong solid — refused, saying so)
+      const ovalF = K.scaleShape(K.makeCircleFace(G, [0, 0, 0], 20), [1.5, 1, 1], [0, 0, 0]), ovalBox = K.boxFromFace(ovalF, ovalF.faces[0].hashCode, { wall: 2, bottom: 3, height: 20, radius: 0 });
+      const ovalErr = (() => { try { K.boxDividers(ovalBox, { columns: 2, rows: 1, wall: 1.2, topGap: 0 }); return "made"; } catch (e) { return String(e.message || e); } })();
+      const refused = /can't join the walls/.test(ovalErr) && /no room/.test(err({ columns: 40, rows: 1, wall: 2, topGap: 0 })) && /1 × 1/.test(err({ columns: 1, rows: 1, wall: 1, topGap: 0 })) && /deeper than the box/.test(err({ columns: 2, rows: 1, wall: 1, topGap: 30 }));
+      app.run("edit.undo"); await sleep(50);
+      const undone = Math.abs(K.solidVolume(app.doc.get(box.id).shape) - v0) < 1e-6;
+      expect("dividers: waits for the box; 3 × 2, wall 1.2 → walls fused into the box (exact volume, exactly placed, size and colour kept, one undo step); below the rim 3 → lower walls; rounded box and round cup valid; an oval refused (OpenCascade); too many / 1 × 1 / too deep refused; undo",
+        /click the open-top box/i.test(waiting) && ok1 && placed && one === 1 && Math.abs(gapV - 17 * 1.2 * 137.6) < 1e-3 && others.every((x) => x === true) && refused && undone,
+        { waiting, ok1, dv: r(dv), placed, fills: [fill(-10.2, 0, 1.2, 36), fill(10.2, 0, 1.2, 36), fill(0, 0, 50, 1.2), fill(-20, 10, 15, 15)].map(r), one, gapV: r(gapV), others, ovalErr, refused, undone });
+    }
     // The background kernel (a second OpenCascade in a worker): loaded; a fillet there = the same fillet here (edges
     // picked by place in the edge list); the app stays live while a heavy one runs; Esc stops it, the model unchanged
     {

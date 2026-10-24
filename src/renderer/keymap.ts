@@ -110,6 +110,7 @@ export const COMMANDS: Command[] = [
     ["macro.box", "Box from Face…"],
     ["macro.lidIn", "Box Lid: Inside Lip…"],
     ["macro.lidOver", "Box Lid: Over the Box…"],
+    ["macro.dividers", "Dividers…"],
   ]),
   ...grp("Help", [
     ["help.keys", "Shortcuts: search, change keys"],

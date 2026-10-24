@@ -3228,6 +3228,79 @@ export function boxLid(box: Solid, o: BoxLid): Solid {
 }
 
 /**
+ * Dividers (Macro menu): `columns` compartments along the opening's long side, `rows` across it (1: no walls that
+ * way), walls `wall` thick, their tops `topGap` below the rim (room for a lid's lip).
+ */
+export interface BoxDividers {
+  columns: number;
+  rows: number;
+  wall: number;
+  topGap: number;
+}
+
+/**
+ * An open-top box (see boxRim) with divider walls in it: a grid of equal compartments across the opening, the walls
+ * from the floor up to `topGap` below the rim, following the inside's outline (round corners, an oval) — one solid.
+ * The grid lines up with the opening's longest straight edge (none: the world X axis).
+ */
+export function boxDividers(box: Solid, o: BoxDividers): Solid {
+  const rim = boxRim(box);
+  if (!rim) throw new Error("this solid has no open top (a flat rim round an opening) — make it with Box from Face or Shell");
+  const columns = Math.round(o.columns), rows = Math.round(o.rows);
+  if (!(columns >= 1 && rows >= 1)) throw new Error("columns and rows must be 1 or more");
+  if (columns === 1 && rows === 1) throw new Error("1 × 1 is no dividers: set columns or rows to 2 or more");
+  if (!(o.wall > 0)) throw new Error("the wall must be thicker than 0");
+  if (o.topGap < 0) throw new Error("the top gap can't be below 0");
+  const n = norm3(rim.normalAt().toTuple() as V3), top = dot3(rim.center.toTuple() as V3, n);
+  const holes = rim.clone().innerWires().map((w) => makeFace(w));
+  const opening = holes.reduce((a, f) => (measureArea(f) > measureArea(a) ? f : a));
+  // In-plane axes: along the longest straight edge of the opening, else the world X (Y if X is along the normal)
+  const lines = opening.edges.filter((e) => e.geomType === "LINE").map((e) => sub3(e.endPoint.toTuple() as V3, e.startPoint.toTuple() as V3));
+  const longest = lines.reduce<V3 | null>((a, d) => (!a || dot3(d, d) > dot3(a, a) ? d : a), null);
+  const flat = (d: V3): V3 => {
+    const k = dot3(d, n);
+    return [d[0] - k * n[0], d[1] - k * n[1], d[2] - k * n[2]];
+  };
+  const dir = longest ?? (Math.abs(n[0]) < 0.9 ? ([1, 0, 0] as V3) : ([0, 1, 0] as V3));
+  let u = norm3(flat(dir)), v = norm3(cross3(n, u));
+  // Extents of the opening (and the box's depth) in that frame
+  const pts = opening.edges.flatMap((e) => [0, 0.25, 0.5, 0.75, 1].map((t) => e.pointAt(t).toTuple() as V3));
+  const span = (d: V3, ps: V3[]) => [Math.min(...ps.map((p) => dot3(p, d))), Math.max(...ps.map((p) => dot3(p, d)))];
+  let [u0, u1] = span(u, pts), [v0, v1] = span(v, pts);
+  if (v1 - v0 > u1 - u0 + 1e-6) [u, v, u0, u1, v0, v1] = [v, neg(u), v0, v1, ...span(neg(u), pts)]; // (columns along the long side)
+  const [bottom] = span(n, box.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3)));
+  const height = top - o.topGap - bottom;
+  if (height <= 1e-6) throw new Error("the top gap is deeper than the box");
+  const cellU = (u1 - u0 - (columns - 1) * o.wall) / columns, cellV = (v1 - v0 - (rows - 1) * o.wall) / rows;
+  if (cellU <= 1e-6 || cellV <= 1e-6) throw new Error("no room: fewer compartments or thinner walls");
+  // A wall: a slab across the whole opening (a little past it), from the box's very bottom up to its top
+  const at = (cu: number, cv: number): V3 => [0, 1, 2].map((k) => cu * u[k] + cv * v[k] + bottom * n[k]) as V3;
+  const cu = (u0 + u1) / 2, cv = (v0 + v1) / 2, lenU = u1 - u0 + 2, lenV = v1 - v0 + 2;
+  const frame: Frame = { origin: [0, 0, 0], x: u, y: v, z: n };
+  const slabs: Solid[] = [];
+  for (let i = 1; i < columns; i++) slabs.push(makeBox(frame, at(u0 + i * cellU + (i - 0.5) * o.wall, cv), o.wall, lenV, height));
+  for (let j = 1; j < rows; j++) slabs.push(makeBox(frame, at(cu, v0 + j * cellV + (j - 0.5) * o.wall), lenU, o.wall, height));
+  // Clipped to the box's empty inside: the opening from the box's bottom to past its rim (no face of it on the rim:
+  // the walls' tops would coincide with its top), the box taken out
+  const shaft = basicFaceExtrusion(opening.clone().translate([0, 1, 2].map((k) => (bottom - top) * n[k]) as V3) as Face, new Vector([0, 1, 2].map((k) => (top + 1 - bottom) * n[k]) as V3)) as Shape3D;
+  const inside = booleanOp("subtract", shaft, [box]);
+  const grid = slabs.length > 1 ? booleanOp("union", slabs[0], slabs.slice(1)) : slabs[0];
+  // (OpenCascade fails some of these on a scaled oval's inside — the walls up to the rim, or meeting its seam — or
+  // returns a wrong solid: checked by its volume)
+  const fail = "Dividers: OpenCascade can't join the walls to this box's curved inside — try a gap below the rim, or other columns / rows";
+  let out: Solid;
+  try {
+    const walls = booleanOp("intersect", grid, [inside]);
+    out = booleanOp("union", box, [walls]);
+    if (Math.abs(measureVolume(out) - measureVolume(box) - measureVolume(walls)) > 1e-4 * Math.max(1, measureVolume(walls))) throw new Error(fail);
+  } catch {
+    throw new Error(fail);
+  }
+  if (!isValidShape(out)) throw new Error("Dividers: the result is not a valid solid");
+  return out;
+}
+
+/**
  * The band between a flat face's outline and its offset outline (see offsetFace): the larger
  * face with the smaller cut out. Holes get their own bands, so the result can be several faces.
  */

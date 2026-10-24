@@ -167,6 +167,7 @@ function buildMenu(): void {
       submenu: [
         item("Box from Face…", "macro.box"),
         { label: "Box Lid", submenu: [item("Inside Lip…", "macro.lidIn"), item("Over the Box…", "macro.lidOver")] },
+        item("Dividers…", "macro.dividers"),
       ],
     },
     {
