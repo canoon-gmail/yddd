@@ -267,6 +267,15 @@ kbd {
 #sketch-panel.compact .modes { flex-wrap: nowrap; align-items: center; }
 #sketch-panel.compact .modes .spacer { width: 10px; }
 #sketch-panel.compact .modes kbd { display: none; }
+#sketch-panel .round-box { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding: 6px 8px; border: 1px solid var(--accent); border-radius: 6px; }
+#sketch-panel .round-box b { color: var(--accent-2); font-size: 12px; }
+#sketch-panel .round-box label { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+#sketch-panel .round-box .muted { margin-top: 0; }
+#sketch-panel .round-box input {
+  width: 64px; padding: 2px 6px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+}
+#sketch-panel .round-box input:focus { outline: none; border-color: var(--accent); }
+#sketch-panel .round-box .btn { margin-left: auto; padding: 2px 10px; }
 #sketch-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 /* Rarely used tools as small buttons in the viewport's bottom-left corner, above the view name (Revolve, Sweep, Array copy). */
 #corner-tools { position: absolute; left: 10px; bottom: 28px; z-index: 15; display: flex; gap: 4px; }

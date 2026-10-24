@@ -2710,6 +2710,92 @@ const SCENARIO_SPLINE = String.raw`
 })()
 `;
 
+/** Sketch Round corner (F): a corner where two lines meet becomes a tangent arc; an outline: all its corners; too big a radius is refused. */
+const SCENARIO_ROUND = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  localStorage.removeItem("yddd.pro"); document.body.classList.remove("pro");
+  for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  app.doc.reset([]); app.run("mode.body"); app.setSelection([]); vp.setView("top"); await sleep(30);
+  const key = async (k, extra = {}) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra })); await sleep(10); };
+  const type = async (txt) => { for (const ch of txt) await key(ch); await key("Enter"); };
+  const pe = (t, p) => { const sc = window.__see(new V(p[0], p[1], 0)); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+  const click = async (p) => { pe("pointermove", p); pe("pointerdown", p); pe("pointerup", p); await sleep(450); };
+  const near = (a, b, tol = 1e-6) => Math.hypot(a[0] - b[0], a[1] - b[1]) < tol;
+  const circ = (g) => { const [a, m, b] = [g.a, g.m, g.b], d = 2 * (a[0] * (m[1] - b[1]) + m[0] * (b[1] - a[1]) + b[0] * (a[1] - m[1]));
+    const s = (p) => p[0] * p[0] + p[1] * p[1], c = [(s(a) * (m[1] - b[1]) + s(m) * (b[1] - a[1]) + s(b) * (a[1] - m[1])) / d, (s(a) * (b[0] - m[0]) + s(m) * (a[0] - b[0]) + s(b) * (m[0] - a[0])) / d];
+    return { c, r: Math.hypot(a[0] - c[0], a[1] - c[1]) }; };
+  const kinds = (segs) => segs.map((g) => g.kind[0]).join("");
+  try {
+    await key("k", { code: "KeyK" }); await sleep(50);
+    const T = () => app.tool;
+    await key("r"); await click([0, 0]); await click([40, 20]);
+    vp.fit(); await sleep(30);
+    await key("f", { code: "KeyF" });
+    const btn = document.querySelector("#sketch-panel button[data-mode=round]");
+    const box = () => document.querySelector("#sketch-panel .round-box"), field = () => document.querySelector("#sketch-panel input[data-round=r]");
+    const done = () => document.querySelector("#sketch-panel button[data-act=round-done]");
+    expect("round: F in the sketch → Round corner (button lit), its box: Radius field and Done (greyed: nothing picked)",
+      T().mode === "round" && btn && /Round corner/.test(btn.textContent) && btn.classList.contains("primary") && box() && field() && done() && done().disabled, { mode: T().mode, box: box() && box().textContent });
+    // R 3 in the field; a click on the corner (40,0) → picked (nothing changed yet); Done → that corner an arc R 3, (37,0) → (40,3)
+    field().value = "3"; field().dispatchEvent(new Event("input", { bubbles: true })); field().dispatchEvent(new Event("change", { bubbles: true }));
+    await click([40, 0]);
+    const picked = T().roundPicks.length, still = T().loops[0].segs.length;
+    done().click(); await sleep(30);
+    let segs = T().loops[0].segs, arc = segs.find((g) => g.kind === "arc"), k = arc && circ(arc);
+    expect("round: R 3 in the box, a click on a corner → picked (outline unchanged), Done → that corner an arc R 3, tangent from (37,0) to (40,3); still Round corner",
+      picked === 1 && still === 4 && segs.length === 5 && arc && Math.abs(k.r - 3) < 1e-9 && near(k.c, [37, 3]) && near(arc.a, [37, 0]) && near(arc.b, [40, 3]) && segs.every((g, i) => near(g.b, segs[(i + 1) % segs.length].a)) && T().mode === "round" && T().roundPicks.length === 0, { picked, still, arc, k });
+    // Then more: a click inside → its other 3 corners; Enter → done
+    await click([20, 10]);
+    const three = T().roundPicks.length;
+    await key("Enter");
+    segs = T().loops[0].segs;
+    expect("round: then a click inside → its other 3 corners picked, Enter → rounded (4 lines, 4 arcs)", three === 3 && segs.length === 8 && segs.filter((g) => g.kind === "arc").length === 4, { three, kinds: kinds(segs) });
+    // Undo twice → the rectangle; R 15, pick all (short sides 20) → R becomes 10, the largest that fits; Done → a slot
+    await key("z", { ctrlKey: true }); await key("z", { ctrlKey: true });
+    const back = T().loops[0].segs.length;
+    await type("15"); await click([20, 10]);
+    const r15 = field().value;
+    await key("Enter");
+    segs = T().loops[0].segs;
+    expect("round: two undos → the rectangle; R 15 on all its corners → R 10 (the largest that fits); Done → a slot (2 lines + 4 arcs)", back === 4 && r15 === "10" && segs.length === 6 && segs.filter((g) => g.kind === "line").length === 2, { back, r15, kinds: kinds(segs) });
+    await key("z", { ctrlKey: true });
+    // The slide handle: pick (0,0) at R 2, drag the yellow handle (on the line into the corner, 2 mm from it) to 5 mm → R 5; Esc unpicks
+    await type("2"); await click([0, 0]);
+    const gl = T().roundGripLine();
+    const sn = app.snap; app.snap = 1;
+    pe("pointermove", gl.at); pe("pointerdown", gl.at); const to = [gl.p[0] + gl.u[0] * 5, gl.p[1] + gl.u[1] * 5];
+    pe("pointermove", [gl.at[0] + gl.u[0], gl.at[1] + gl.u[1]]); await sleep(20); pe("pointermove", to); await sleep(20); pe("pointerup", to); await sleep(20);
+    app.snap = sn;
+    const dragged = field().value, prevSegs = T().loops[0].segs.length;
+    await key("Escape");
+    expect("round: the yellow handle dragged along the line 5 mm from the corner → R 5 (in the box); Esc unpicks (nothing rounded)", dragged === "5" && T().roundPicks.length === 0 && prevSegs === 4 && T().mode === "round", { dragged, gl });
+    await type("3"); await click([20, 10]); await key("Enter");
+    // An open path's bend: L (0,40) → (20,40) → (20,60), Enter; F, click the bend, Done → line, arc, line
+    await key("l"); await click([0, 40]); await click([20, 40]); await click([20, 60]); await key("Enter");
+    await key("f", { code: "KeyF" }); await click([20, 40]); done().click(); await sleep(30);
+    const o = T().opens[0];
+    expect("round: an open path's bend → line, arc R 3, line (its ends stay)", o && kinds(o) === "lal" && Math.abs(circ(o[1]).r - 3) < 1e-9 && near(o[0].a, [0, 40]) && near(o[2].b, [20, 60]), o && kinds(o));
+    await key("Escape");
+    expect("round: Esc → Select", T().mode === "select", T().mode);
+    document.querySelector("#sketch-panel button[data-act=done]").click(); await sleep(50);
+    const face = app.doc.bodies.find((b) => b.kind === "face"), path = app.doc.bodies.find((b) => b.kind === "path");
+    const v = face && K.solidVolume(K.extrudeFace(face.shape, face.shape.faces[0].hashCode, 10)), want = (800 - (4 - Math.PI) * 9) * 10;
+    expect("round: Done → a face with 4 round corners (pushed 10: volume (800 − (4 − π)·9) × 10) and the path", face && path && Math.abs(v - want) < 1e-6, { v, want });
+  } catch (e) {
+    expect("round: no errors", false, String(e && e.stack || e));
+  }
+  for (let k = 0; k < 3 && app.tool; k++) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  app.doc.reset([]); app.run("mode.body"); app.run("view.iso");
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("round scenario failed: " + JSON.stringify(failed));
+  return [{ label: "sketch round corner", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Array copy stays quick with many heavy objects: the preview moves meshes on screen (builds nothing); reopened, the copies reuse their source's triangles. */
 const SCENARIO_ARRAYFAST = String.raw`
 (async () => {
@@ -6457,6 +6543,24 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "round") {
+      // (while working on it: just the round corner scenario, and a screenshot of a rectangle's corners being rounded)
+      report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ROUND, true));
+      await win.webContents.executeJavaScript(`(async () => {
+        const app = window.ydddApp, vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas, sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        const key = async (k, extra = {}) => { window.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...extra })); await sleep(10); };
+        const pe = (t, p) => { const sc = window.__see(new V(p[0], p[1], 0)); canvas.dispatchEvent(new PointerEvent(t, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true })); };
+        const click = async (p) => { pe("pointermove", p); pe("pointerdown", p); pe("pointerup", p); await sleep(450); };
+        app.setSelection([]); vp.setView("top"); await key("k", { code: "KeyK" }); await sleep(50);
+        await key("r"); await click([0, 0]); await click([40, 20]); vp.fit(); await sleep(30);
+        await key("f"); for (const c of "4") await key(c); await key("Enter"); await click([40, 0]); await click([0, 20]);
+        const gl = app.tool.roundGripLine(); pe("pointermove", gl.at); await sleep(300); return 0;
+      })()`, true);
+      await shot("round.png");
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "spline") {
       // (while working on it: just the sketch spline scenario)
       report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
@@ -6667,6 +6771,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_POINT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SPLINE, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ROUND, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ARRAYFAST, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_SKETCH, true));
     await shot("8-sketch.png");
