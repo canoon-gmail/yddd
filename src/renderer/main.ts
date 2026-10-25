@@ -1191,6 +1191,8 @@ class App implements ToolHost {
       case "edit.redo": return this.undoRedo("redo");
       case "edit.delete": return this.deleteSelected();
       case "edit.duplicate": return this.duplicate();
+      case "edit.copy": return this.copySelection();
+      case "edit.paste": return this.paste();
       case "edit.array": return this.arrayCopy();
       case "edit.circular": return this.circularCopy();
       case "edit.mirror": return this.mirrorCopy();
@@ -1336,7 +1338,7 @@ class App implements ToolHost {
     const sel = this.selection.length === 1 && this.selection[0].kind === "body" ? this.selection[0].body : null;
     if (pick && item && this.mode === "body" && sel !== null && item.body !== sel && !e.shiftKey && !e.ctrlKey) {
       const own = this.viewport.pick(e.clientX, e.clientY, "body", sel);
-      const tol = 1e-4 * Math.max(1, this.viewport.camera.position.distanceTo(pick.point));
+      const tol = (1e-4 * Math.max(1, this.viewport.camera.position.distanceTo(pick.point))) / this.viewport.depthScale;
       if (own && own.point.distanceTo(pick.point) < tol) item = { kind: "body", body: sel, id: 0 };
     }
     if (!item) {
@@ -5088,6 +5090,25 @@ class App implements ToolHost {
     return add.length ? { ...looks, ...Object.fromEntries(add.map(([g, copy]) => [copy, looks[g]])) } : looks;
   }
 
+  /** Ctrl+C: what Ctrl+V copies (the selection then). */
+  private clipboard: SelItem[] = [];
+
+  private copySelection(): void {
+    if (!this.selection.length) return this.toast("Copy: select something first", "error");
+    this.clipboard = [...this.selection];
+    this.toast("Copied — Ctrl+V to paste a copy");
+  }
+
+  /** Ctrl+V: Duplicate what Ctrl+C copied (still there), or the selection if nothing was copied. */
+  private paste(): void {
+    const items = this.clipboard.filter((x) => this.doc.get(x.body));
+    if (items.length) {
+      this.setMode(items[0].kind);
+      this.setSelection(items);
+    }
+    this.duplicate();
+  }
+
   private duplicate(): void {
     this.endInteractions();
     const edgeSel = this.selection.filter((x) => x.kind === "edge");
@@ -6776,7 +6797,7 @@ class App implements ToolHost {
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
       ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
-      ["Shift+D / Ctrl+D", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
+      ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
       ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],

@@ -37,6 +37,10 @@ export type TransformResult =
   | { type: "rotate"; angleDeg: number; axis: V3; center: V3 };
 
 const EDGE_PICK_PX = 8;
+/** The camera's field of view (degrees). */
+const FOV = 35;
+/** Top / Front / Right: so narrow (the camera that much further back) the view looks orthographic — the rest stays perspective maths. */
+const ORTHO_FOV = 2;
 
 interface BodyView {
   body: Body;
@@ -211,7 +215,7 @@ export class Viewport {
     this.canvas = this.renderer.domElement;
     container.appendChild(this.canvas);
 
-    this.camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100000);
+    this.camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 100000);
     this.camera.up.set(0, 0, 1);
     this.camera.position.set(140, -190, 130);
     this.scene.add(this.camera);
@@ -268,6 +272,8 @@ export class Viewport {
     this.controls.screenSpacePanning = true;
     this.controls.zoomToCursor = true;
     this.controls.addEventListener("change", () => {
+      // Orbiting out of a Top / Front / Right view: back to perspective (pan and zoom keep the direction).
+      if (this.orthoDir && this.camera.getWorldDirection(new THREE.Vector3()).angleTo(this.orthoDir) > 1e-5) this.setFov(FOV);
       this.updateClipPlanes();
       this.stamp++;
       this.requestRender();
@@ -403,11 +409,14 @@ export class Viewport {
   viewLocked = false;
 
   /** The camera, to put it back after a sketch. */
-  cameraState(): { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 } {
-    return { position: this.camera.position.clone(), target: this.controls.target.clone(), up: this.camera.up.clone() };
+  cameraState(): { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3; fov: number; orthoDir: THREE.Vector3 | null } {
+    return { position: this.camera.position.clone(), target: this.controls.target.clone(), up: this.camera.up.clone(), fov: this.camera.fov, orthoDir: this.orthoDir?.clone() ?? null };
   }
 
-  restoreCamera(s: { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 }): void {
+  restoreCamera(s: { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3; fov: number; orthoDir: THREE.Vector3 | null }): void {
+    this.camera.fov = s.fov;
+    this.camera.updateProjectionMatrix();
+    this.orthoDir = s.orthoDir?.clone() ?? null;
     this.camera.up.copy(s.up);
     this.camera.position.copy(s.position);
     this.controls.target.copy(s.target);
@@ -420,6 +429,7 @@ export class Viewport {
    * `center`, far enough back to see every body (or `radius` around the centre, if larger).
    */
   lookAtPlane(center: THREE.Vector3, normal: THREE.Vector3, up: THREE.Vector3, radius = 0): void {
+    this.setFov(FOV);
     const box = new THREE.Box3();
     for (const v of this.views.values()) if (v.group.visible) box.expandByObject(v.mesh);
     let r = Math.max(radius, 30);
@@ -920,7 +930,7 @@ export class Viewport {
     const viewOf = (o: THREE.Object3D) => [...this.views.values()].find((v) => v.mesh === o)!;
     // Hits at (nearly) the same depth as the nearest one are overlapping faces;
     // prefer the smallest so small faces win over big ones underneath them.
-    const tol = Math.max(0.05, hits[0].distance * 2e-3);
+    const tol = Math.max(0.05, (hits[0].distance * 2e-3) / this.depthScale);
     let best: { view: BodyView; gi: number; hit: THREE.Intersection; area: number } | null = null;
     for (const hit of hits) {
       if (hit.distance - hits[0].distance > tol) break;
@@ -990,7 +1000,7 @@ export class Viewport {
           pickRay.distanceSqToSegment(a, b, undefined, world);
           if (faceDist !== null) {
             const depth = this.camera.position.distanceTo(world);
-            if (depth > faceDist * 1.01 + 0.05) continue; // hidden behind a face
+            if (this.behind(depth, faceDist)) continue; // hidden behind a face
           }
           bestD = d;
           best = { view: v, edgeId: v.edgeIds[e], point: world, d };
@@ -1192,7 +1202,7 @@ export class Viewport {
     const eye = this.camera.position;
     const dir = point.clone().sub(eye);
     const dist = dir.length();
-    const tol = Math.max(0.05, eye.distanceTo(this.controls.target) * 2e-3);
+    const tol = Math.max(0.05, (eye.distanceTo(this.controls.target) * 2e-3) / this.depthScale);
     if (dist <= tol) return false;
     this.raycaster.set(eye, dir.divideScalar(dist));
     this.raycaster.far = dist - tol;
@@ -1236,7 +1246,7 @@ export class Viewport {
         if (faceHit && !(s.inner[i] && faceHit.view === v)) {
           // Hidden behind a face? (allow points on the hit face itself, and the hovered body's inner centres)
           p.fromArray(s.pts, i * 3);
-          if (this.camera.position.distanceTo(p) > faceHit.distance * 1.01 + 0.05) continue;
+          if (this.behind(this.camera.position.distanceTo(p), faceHit.distance)) continue;
         }
         cands.push({ score, view: v, i });
       }
@@ -1255,7 +1265,7 @@ export class Viewport {
       if (p.z < -1 || p.z > 1) continue;
       const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
       if (d > SNAP_PX || (cross && d >= cross.d) || (best && d >= best.score)) continue;
-      if (faceHit && this.camera.position.distanceTo(c) > faceHit.distance * 1.01 + 0.05) continue;
+      if (faceHit && this.behind(this.camera.position.distanceTo(c), faceHit.distance)) continue;
       if (this.hiddenFrom(c, exclude)) continue;
       cross = { d, p: c };
     }
@@ -1265,7 +1275,7 @@ export class Viewport {
     if (p.z >= -1 && p.z <= 1) {
       const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
       if (d <= SNAP_PX && (!best || d < best.score)) {
-        const hidden = (faceHit && this.camera.position.length() > faceHit.distance * 1.01 + 0.05) || this.hiddenFrom(p.set(0, 0, 0), exclude);
+        const hidden = (faceHit && this.behind(this.camera.position.length(), faceHit.distance)) || this.hiddenFrom(p.set(0, 0, 0), exclude);
         if (!hidden) return { point: new THREE.Vector3(), kind: "vertex" };
       }
     }
@@ -1482,7 +1492,7 @@ export class Viewport {
         if (len - t < step / 2) t = len; // land on the far end
       }
       const p = o.clone().addScaledVector(dir, t);
-      if (hitDist !== undefined && this.camera.position.distanceTo(p) > hitDist * 1.01 + 0.05) continue;
+      if (hitDist !== undefined && this.behind(this.camera.position.distanceTo(p), hitDist)) continue;
       q.copy(p).project(this.camera);
       if (q.z < -1 || q.z > 1) continue;
       const dist = Math.hypot(((q.x + 1) / 2) * this.width - px, ((1 - q.y) / 2) * this.height - py);
@@ -1547,7 +1557,7 @@ export class Viewport {
   visiblePoints<T extends { point: THREE.Vector3 }>(pts: T[], skip?: Set<number>): T[] {
     const meshes = [...this.views.values()].filter((v) => !skip?.has(v.body.id)).map((v) => v.mesh);
     const eye = this.camera.position;
-    const tol = Math.max(0.05, eye.distanceTo(this.controls.target) * 2e-3);
+    const tol = Math.max(0.05, (eye.distanceTo(this.controls.target) * 2e-3) / this.depthScale);
     return pts.filter((p) => {
       const dir = p.point.clone().sub(eye);
       const dist = dir.length();
@@ -2197,11 +2207,15 @@ export class Viewport {
     this.requestRender();
   }
 
+  /** Top / Front / Right look nearly orthographic (see ORTHO_FOV) until an orbit; Iso is perspective. */
   setView(name: "top" | "front" | "right" | "iso"): void {
     const dirs: Record<string, V3> = { top: [0, -1e-4, 1], front: [0, -1, 0], right: [1, 0, 0], iso: [1, -1.2, 0.9] };
-    const dist = this.camera.position.distanceTo(this.controls.target);
+    const dist = this.camera.position.distanceTo(this.controls.target) / this.depthScale;
     const dir = new THREE.Vector3(...dirs[name]).normalize();
-    this.camera.position.copy(this.controls.target).addScaledVector(dir, dist);
+    this.camera.fov = name === "iso" ? FOV : ORTHO_FOV;
+    this.camera.updateProjectionMatrix();
+    this.camera.position.copy(this.controls.target).addScaledVector(dir, dist * this.depthScale);
+    this.orthoDir = name === "iso" ? null : dir.negate();
     this.controls.update();
   }
 
@@ -2209,7 +2223,33 @@ export class Viewport {
   flipView(): void {
     const off = this.camera.position.clone().sub(this.controls.target);
     this.camera.position.copy(this.controls.target).sub(off);
+    if (this.orthoDir) this.orthoDir.negate();
     this.controls.update();
+  }
+
+  /** The view direction of a Top / Front / Right view while it's nearly orthographic (null: perspective). */
+  private orthoDir: THREE.Vector3 | null = null;
+
+  /** How much further back the camera is than in perspective, for the same picture (1: perspective). */
+  get depthScale(): number {
+    return Math.tan(THREE.MathUtils.degToRad(FOV / 2)) / Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2));
+  }
+
+  /** Change the field of view, moving the camera so the picture stays the same size at the target. */
+  private setFov(fov: number): void {
+    if (fov === FOV) this.orthoDir = null;
+    if (this.camera.fov === fov) return;
+    const off = this.camera.position.clone().sub(this.controls.target);
+    const k = Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) / Math.tan(THREE.MathUtils.degToRad(fov / 2));
+    this.camera.position.copy(this.controls.target).addScaledVector(off, k);
+    this.camera.fov = fov;
+    this.camera.updateProjectionMatrix();
+    this.updateClipPlanes();
+  }
+
+  /** A point `depth` from the eye is behind a face hit `faceDist` away (with some slack, the same on screen in every view). */
+  private behind(depth: number, faceDist: number): boolean {
+    return depth > faceDist + (faceDist * 0.01) / this.depthScale + 0.05;
   }
 
   // ------------------------------------------------------------ transform gizmo

@@ -4647,6 +4647,86 @@ const SCENARIO_RECENTSTRIP = String.raw`
 })()
 `;
 
+/** Top / Front / Right look orthographic (a 2° field of view, the camera further back: same picture); pan and zoom keep it, an orbit or Iso goes back to perspective. */
+const SCENARIO_ORTHO = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport, cam = vp.camera, ctl = vp.controls;
+  const V = cam.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  const near = (a, b, t = 1e-3) => Math.abs(a - b) <= t * Math.max(1, Math.abs(b));
+  const px = () => vp.worldPerPixel(ctl.target);
+  app.doc.reset([]);
+  const front = app.doc.makeBody(K.makeBox(G, [-20, 0, 0], 40, 10, 40), "Front"), back = app.doc.makeBody(K.makeBox(G, [-5, 20, 10], 10, 10, 10), "Behind");
+  app.doc.commit([front, back], "two boxes");
+  app.run("mode.body"); app.run("view.iso"); vp.fit(); await sleep(50);
+  const isoFov = cam.fov, size0 = px();
+  key("7", "Digit7"); await sleep(20);
+  expect("7 (Top): 2° view, same picture size at the target", cam.fov === 2 && isoFov === 35 && near(px(), size0), { isoFov, fov: cam.fov, size0, size: px() });
+  // Pan: camera and target move together
+  const d = new V(15, 5, 0); cam.position.add(d); ctl.target.add(d); ctl.update(); await sleep(10);
+  // Zoom: closer along the view
+  cam.position.lerp(ctl.target, 0.3); ctl.update(); await sleep(10);
+  expect("pan and zoom stay orthographic", cam.fov === 2, cam.fov);
+  vp.flipView(); await sleep(10);
+  expect("flip (bottom view) stays orthographic", cam.fov === 2, cam.fov);
+  const size1 = px();
+  // Orbit: turn round the target
+  cam.position.sub(ctl.target).applyAxisAngle(new V(0, 0, 1), 0.3).add(ctl.target); ctl.update(); await sleep(10);
+  expect("an orbit goes back to perspective, the picture the same size", cam.fov === 35 && near(px(), size1), { fov: cam.fov, size1, size: px() });
+  app.run("view.front"); vp.fit(); await sleep(50);
+  expect("Front: orthographic", cam.fov === 2, cam.fov);
+  // A corner of the box behind (20 mm deeper) is under the front box's face: not a snap point
+  const s = vp.toScreen(new V(-5, 20, 20));
+  const sp = vp.snapPoint(s.x, s.y);
+  expect("Front: a corner hidden behind a face doesn't snap", !sp || sp.point.y < 15, sp && sp.point.toArray());
+  app.run("view.right"); await sleep(10);
+  const rightFov = cam.fov;
+  app.run("view.iso"); await sleep(10);
+  expect("Right: orthographic; Iso: perspective", rightFov === 2 && cam.fov === 35, { rightFov, iso: cam.fov });
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("ortho scenario failed: " + JSON.stringify(failed));
+  return [{ label: "ortho views", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Ctrl+C remembers the selection; Ctrl+V duplicates it (as Shift+D), even after selecting something else. */
+const SCENARIO_COPYPASTE = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const ctrl = (k) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code: "Key" + k.toUpperCase(), ctrlKey: true, bubbles: true, cancelable: true }));
+  const esc = () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  app.doc.reset([]);
+  const a = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 10, 10, 10), "Box"), b = app.doc.makeBody(K.makeCylinder(G, [50, 0, 0], 5, 10), "Cylinder");
+  app.doc.commit([a, b], "two");
+  app.run("mode.body");
+  app.setSelection([{ kind: "body", body: a.id, id: 0 }]);
+  ctrl("c"); await sleep(20);
+  app.setSelection([{ kind: "body", body: b.id, id: 0 }]);
+  ctrl("v"); await sleep(20);
+  const made = app.doc.bodies.length === 3 && app.doc.bodies[2], gizmo = !!app.xf;
+  esc(); await sleep(20);
+  const sameShape = made && Math.abs(K.solidVolume(made.shape) - 1000) < 1e-6 && made.kind === a.kind;
+  expect("Ctrl+C on the box, select the cylinder, Ctrl+V → a copy of the box on the move gizmo", sameShape && gizmo && app.selection[0]?.body === made.id, { n: app.doc.bodies.length, gizmo, sel: app.selection });
+  app.run("edit.undo"); await sleep(20);
+  expect("Ctrl+V is one undo step", app.doc.bodies.length === 2, app.doc.bodies.length);
+  ctrl("v"); await sleep(20); esc(); await sleep(20);
+  expect("Ctrl+V again pastes another copy", app.doc.bodies.length === 3, app.doc.bodies.length);
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("copy paste scenario failed: " + JSON.stringify(failed));
+  return [{ label: "copy paste", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Mug handle flush: select the handle, −, click the cup (it's used up), tick "Keep the clicked solid" (it comes back),
  *  Done; the user deletes the stub inside the cup and joins handle and cup. */
 const SCENARIO_KEEPTOOL = String.raw`
@@ -5286,6 +5366,8 @@ const SCENARIO_CUTAXIS = String.raw`
         const cube = app.doc.makeBody(K.makeBox(G, [0, 8140, 0], 6, 6, 6), "Cube");
         app.doc.commit([...app.doc.bodies, wedge, cube], "turned box and cube");
         app.setSelection([{ kind: "body", body: wedge.id, id: 0 }, { kind: "body", body: cube.id, id: 0 }]);
+        const cam0 = vp.cameraState();
+        app.run("view.iso"); // (from Front, orthographic, the top edges are on top of each other)
         app.run("view.fitSelection"); await sleep(700);
         app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
         app.run("xf.move"); await sleep(20);
@@ -5317,6 +5399,7 @@ const SCENARIO_CUTAXIS = String.raw`
         expect("plain G on a slanted straight edge: gizmo turned along it (dashed line on the edge), Tab 5 → moved exactly 5 along it; an edge along X: not turned",
           sTurned && onEdge && labels[0] === "Along the axis (mm)" && exact && !axisEdgeTurned, { sz, sTurned, onEdge, labels, mv, axisEdgeTurned });
         app.setSelection([]);
+        vp.restoreCamera(cam0);
       }
       // The Snap step is remembered for next time (as Auto is)
       const sel = document.getElementById("snap-select");
@@ -7065,6 +7148,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_HOLES, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_TOOLPANEL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_KEEPTOOL, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_COPYPASTE, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ORTHO, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {
