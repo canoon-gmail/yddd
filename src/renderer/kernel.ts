@@ -574,10 +574,32 @@ function smoothJoin(e: Edge, a: Face, b: Face): boolean {
   try {
     return [0.2, 0.5, 0.8].every((t) => {
       const p = e.pointAt(t).toTuple() as V3;
-      return dot3(normalNear(a, p), normalNear(b, p)) > 1 - 1e-6;
+      return dot3(normalOnEdge(e, a, t) ?? normalNear(a, p), normalOnEdge(e, b, t) ?? normalNear(b, p)) > 1 - 1e-6;
     });
   } catch {
     return false;
+  }
+}
+
+/**
+ * A face's unit normal at a point of one of its edges (`t`: 0…1 along the edge), from the edge's own place on the face
+ * (its pcurve) — exact and quick, unlike searching the surface for the point (normalNear: a grid of samples on an
+ * extruded Bézier, e.g. a letter's sides — ~1 ms each); null if the edge has none on it.
+ */
+function normalOnEdge(e: Edge, face: Face, t: number): V3 | null {
+  let c: InstanceType<typeof oc.BRepAdaptor_Curve2d> | null = null, uv: { X(): number; Y(): number; delete(): void } | null = null;
+  try {
+    c = new oc.BRepAdaptor_Curve2d(e.wrapped, face.wrapped);
+    const u0 = c.FirstParameter(), u1 = c.LastParameter();
+    if (!Number.isFinite(u0) || !Number.isFinite(u1)) return null;
+    const at = c.Value(u0 + (u1 - u0) * t);
+    uv = at;
+    return normalAtParams(face, at.X(), at.Y());
+  } catch {
+    return null;
+  } finally {
+    uv?.delete();
+    c?.delete();
   }
 }
 
@@ -4858,3 +4880,44 @@ export function boundingSize(shape: Geom): V3 {
   return [x1 - x0, y1 - y0, z1 - z0];
 }
 
+
+/** Battery case (Macro menu): a block with a grid of round holes, `columns` × `rows`, the batteries standing in them. */
+export interface BatteryCase {
+  /** The battery's diameter and length (mm). */
+  diameter: number;
+  length: number;
+  columns: number;
+  rows: number;
+  /** How deep the holes are, % of the battery's length (the rest sticks out, to grab it). */
+  depth: number;
+  /** Added to the hole's diameter (mm), so a printed hole fits. */
+  clearance: number;
+  /** Between holes and round them (mm). */
+  wall: number;
+  /** Under the holes (mm). */
+  floor: number;
+}
+
+/** A battery case, its bottom centred on `at` (one solid, round outer corners). */
+export function batteryCase(o: BatteryCase, at: V3 = [0, 0, 0]): Solid {
+  const columns = Math.round(o.columns), rows = Math.round(o.rows);
+  if (!(columns >= 1 && rows >= 1)) throw new Error("Battery case: columns and rows must be 1 or more");
+  if (!(o.diameter > 0 && o.length > 0)) throw new Error("Battery case: the battery needs a diameter and a length");
+  if (!(o.depth > 0)) throw new Error("Battery case: the holes need a depth above 0 %");
+  if (!(o.wall > 0 && o.floor > 0)) throw new Error("Battery case: wall and floor must be more than 0 mm");
+  if (!(o.clearance >= 0)) throw new Error("Battery case: clearance can't be below 0 mm");
+  const hole = o.diameter + o.clearance, step = hole + o.wall;
+  const w = columns * step + o.wall, d = rows * step + o.wall, h = o.floor + (o.length * o.depth) / 100;
+  const r = Math.min(o.wall + hole / 2, w / 2, d / 2) * 0.9;
+  const block = drawRoundedRectangle(w, d, r).sketchOnPlane(new Plane(at, [1, 0, 0], [0, 0, 1])).extrude(h) as Solid;
+  const holes: Solid[] = [];
+  for (let i = 0; i < columns; i++) {
+    for (let j = 0; j < rows; j++) {
+      const c: V3 = [at[0] - w / 2 + o.wall + hole / 2 + i * step, at[1] - d / 2 + o.wall + hole / 2 + j * step, at[2] + o.floor];
+      holes.push(occCylinder(hole / 2, h - o.floor + 1, c, [0, 0, 1]));
+    }
+  }
+  const out = booleanOp("subtract", block, holes);
+  if (!isValidShape(out)) throw new Error("Battery case: the result is not a valid solid");
+  return out;
+}

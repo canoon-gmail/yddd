@@ -71,6 +71,7 @@ import {
   boxFromFace,
   boxLid,
   boxDividers,
+  batteryCase,
   hasBoxRim,
   offsetRing,
   scaleShape,
@@ -513,12 +514,14 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
 /** Commands that work during a sketch (anything else waits for Done / Cancel). */
 const SKETCH_COMMANDS = new Set(["view.fit", "view.fitSelection", "view.xray", "view.pro", "help.shortcuts", "help.keys"]);
 
-/** localStorage: Pro layout on ("1"); saves so far; the Pro tip was shown (or not needed). */
-const PRO_KEY = "yddd.pro", SAVES_KEY = "yddd.saves", PRO_TIP_KEY = "yddd.proTip";
+/** Macro → Battery case: the batteries everyone has (diameter × length, mm), and the Pro layout's more. */
+const BATTERIES = [{ name: "AA", diameter: 14.5, length: 50.5 }, { name: "AAA", diameter: 10.5, length: 44.5 }, { name: "18650", diameter: 18.6, length: 65.2 }];
+const PRO_BATTERIES = [{ name: "C", diameter: 26.2, length: 50 }, { name: "D", diameter: 34.2, length: 61.5 }];
+
+/** localStorage: Pro layout on ("1"). */
+const PRO_KEY = "yddd.pro";
 /** The right panel's width: localStorage key and limits (px). */
 const SIDEBAR_KEY = "yddd.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
-/** The Pro layout tip comes with this save. */
-const PRO_TIP_SAVES = 20;
 /** localStorage: Auto snap off ("0"); on by default. */
 const AUTO_SNAP_KEY = "yddd.autoSnap";
 /** More guides than this from one Guide tool run are grouped (Bodies panel). */
@@ -649,6 +652,7 @@ class App implements ToolHost {
   };
   /** Dividers (Macro menu): the last values. */
   private dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
+  private batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
   private hudEl = $("hud");
@@ -674,6 +678,10 @@ class App implements ToolHost {
     this.buildCornerTools();
     this.renderRecent();
     $("recent").addEventListener("contextmenu", (e) => this.recentMenu(e));
+    $("props").addEventListener("click", (e) => {
+      const cmd = ((e.target as HTMLElement).closest?.(".tip-job") as HTMLElement | null)?.dataset.cmd;
+      if (cmd) this.run(cmd);
+    });
     this.bindViewportEvents();
     this.bindKeys();
     this.bindStatusBar();
@@ -700,13 +708,12 @@ class App implements ToolHost {
     $("status-hint").textContent = isPro() ? text.split(" · ")[0] : text;
   }
 
-  /** Pro layout (Ctrl+Shift+F1, remembered): less help text — a one-row sketch panel, a small text-only Recent strip, short hints. */
+  /** Pro layout (Ctrl+Shift+D, remembered — a secret: not listed anywhere): less help text — a one-row sketch panel, a small text-only Recent strip, short hints. */
   private togglePro(): void {
     const on = !isPro();
     document.body.classList.toggle("pro", on);
     localStorage.setItem(PRO_KEY, on ? "1" : "0");
-    localStorage.setItem(PRO_TIP_KEY, "1"); // found it: no need for the tip
-    this.toast(on ? "Pro layout — less text (Ctrl+Shift+F1 switches back)" : "Beginner layout — full help text (Ctrl+Shift+F1: Pro layout)");
+    this.toast(on ? "Pro layout" : "Beginner layout");
     if (this.tool instanceof SketchTool) this.tool.refresh();
     else if (!this.tool && !this.op) this.refreshSelection();
   }
@@ -741,14 +748,6 @@ class App implements ToolHost {
     });
   }
 
-  /** Count saves; at the 20th, one tip about the Pro layout (once, and only if it's not on already). */
-  private noteSaved(): void {
-    const n = Number(localStorage.getItem(SAVES_KEY) ?? 0) + 1;
-    localStorage.setItem(SAVES_KEY, String(n));
-    if (n < PRO_TIP_SAVES || isPro() || localStorage.getItem(PRO_TIP_KEY)) return;
-    localStorage.setItem(PRO_TIP_KEY, "1");
-    this.toast("Tip: you're getting fast — try the Pro layout (Ctrl+Shift+F1, also in the View menu) for less text on screen", "info", 10000);
-  }
 
   hud(text: string | null, at?: THREE.Vector3): void {
     if (!text || !at) {
@@ -985,9 +984,9 @@ class App implements ToolHost {
   private buildCornerTools(): void {
     const box = $("corner-tools");
     const items: [string, string, string][] = [
-      ["op.revolve", "revolve", "Revolve a flat face about a line or axis (Pro: R E)"],
+      ["op.revolve", "revolve", "Revolve a flat face about a line or axis"],
       ["edit.circular", "circular", "Circular copy: copies round an axis — the X / Y / Z axis, a guide line or a circle edge"],
-      ["op.sweep", "sweep", "Sweep a flat face along a path or guide line (Pro: S W)"],
+      ["op.sweep", "sweep", "Sweep a flat face along a path or guide line"],
       ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction (to change an array later: its icon in the Bodies panel)"],
     ];
     for (const [cmd, icon, title] of items) {
@@ -1152,6 +1151,7 @@ class App implements ToolHost {
       case "macro.lidIn": return this.openBoxLid(false, this.selectedLidBox());
       case "macro.lidOver": return this.openBoxLid(true, this.selectedLidBox());
       case "macro.dividers": return this.openDividers(this.selectedLidBox());
+      case "macro.battery": return this.openBatteryCase();
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -2696,6 +2696,64 @@ class App implements ToolHost {
     };
     this.startOp(spec);
     this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], null);
+  }
+
+  /**
+   * Macro → Battery case: a block with a grid of holes the batteries stand in (AA, AAA, 18650), beside what's
+   * there. The Pro layout has more: C and D cells, a custom size, the hole depth, clearance, wall and floor.
+   */
+  private openBatteryCase(): void {
+    const pro = isPro(), d = this.batteryDefaults;
+    const types = pro ? [...BATTERIES, ...PRO_BATTERIES] : BATTERIES;
+    const options = types.map((t) => `${t.name} (${fmt(t.diameter)} × ${fmt(t.length)} mm)`);
+    if (pro) options.push("Custom (size below)");
+    const fields: OpField[] = [
+      { key: "battery", label: "Battery", type: "select", options, value: Math.min(d.battery, options.length - 1) },
+      { key: "columns", label: "Columns", value: d.columns, step: 1, min: 1 },
+      { key: "rows", label: "Rows", value: d.rows, step: 1, min: 1 },
+    ];
+    if (pro) {
+      fields.push(
+        { key: "depth", label: "Hole depth (% of the battery)", value: d.depth, step: 5, min: 1 },
+        { key: "clearance", label: "Clearance (mm, added to the hole)", value: d.clearance, step: 0.1, min: 0 },
+        { key: "wall", label: "Wall (mm)", value: d.wall, step: 0.2, min: 0.4 },
+        { key: "floor", label: "Floor (mm)", value: d.floor, step: 0.2, min: 0.4 },
+        { key: "diameter", label: "Custom diameter (mm)", value: d.diameter, step: 0.5, min: 1 },
+        { key: "length", label: "Custom length (mm)", value: d.length, step: 1, min: 1 },
+      );
+    }
+    // Beside the solids already there (the right of them), else at the origin.
+    let right = -Infinity;
+    for (const b of this.doc.bodies) {
+      const box = this.viewport.drawnBox(b.id);
+      if (box) right = Math.max(right, box.max.x);
+    }
+    const params = (v: Record<string, number>) => {
+      const t = types[v.battery];
+      return {
+        diameter: t ? t.diameter : v.diameter, length: t ? t.length : v.length, columns: v.columns, rows: v.rows,
+        depth: pro ? v.depth : d.depth, clearance: pro ? v.clearance : d.clearance, wall: pro ? v.wall : d.wall, floor: pro ? v.floor : d.floor,
+      };
+    };
+    this.startOp({
+      title: "Battery case",
+      label: "Battery case",
+      fields,
+      compute: (v) => {
+        const p = params(v), t = types[v.battery];
+        let solid = batteryCase(p);
+        if (right > -Infinity) solid = translateShape(solid, [right + 10 - solid.boundingBox.bounds[0][0], 0, 0]);
+        return {
+          ghost: new Map([[-1, solid]]),
+          commit: () => {
+            const b = this.doc.makeBody(solid, `Battery case ${t ? t.name : `${fmt(p.diameter)} mm`}`);
+            this.doc.commit([...this.doc.bodies, b], "Battery case");
+            return { select: [b.id], solidMode: true };
+          },
+        };
+      },
+      remember: (v) => (this.batteryDefaults = { ...d, ...v }),
+    });
   }
 
   /** The one selected face, or the face of the one selected flat face object; null for any other selection. */
@@ -6569,9 +6627,11 @@ class App implements ToolHost {
     const el = $("props");
     const sel = this.selection;
     const tip = (html: string) => `<div class="tip">${html}</div>`;
+    // A hint's keys and words, clicked anywhere: runs the command (as the keys do).
+    const job = (cmd: string, keys: string, label: string) => `<span class="tip-job" data-cmd="${cmd}">${keys.split(" ").map((k) => `<kbd>${k}</kbd>`).join(" ")} ${label}</span>`;
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
-        tip(`Solids: <kbd>B</kbd> <kbd>B</kbd> box · <kbd>B</kbd> <kbd>C</kbd> cylinder · <kbd>B</kbd> <kbd>S</kbd> sphere · <kbd>B</kbd> <kbd>O</kbd> cone<br>Faces: <kbd>A</kbd> <kbd>A</kbd> rectangle · <kbd>A</kbd> <kbd>C</kbd> circle · <kbd>A</kbd> <kbd>P</kbd> polygon · <kbd>T</kbd> text → <kbd>P</kbd> push/pull<br><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> solid / face / edge mode<br><kbd>F1</kbd> all shortcuts`);
+        tip(`Solids: ${job("tool.box", "B B", "box")} · ${job("tool.cylinder", "B C", "cylinder")} · ${job("tool.sphere", "B S", "sphere")} · ${job("tool.cone", "B O", "cone")}<br>Faces: ${job("tool.rectangle", "A A", "rectangle")} · ${job("tool.circle", "A C", "circle")} · ${job("tool.polygon", "A P", "polygon")} · ${job("tool.text", "T", "text")} → ${job("op.pushpull", "P", "push/pull")}<br>${job("mode.body", "1", "solid")} · ${job("mode.face", "2", "face")} · ${job("mode.edge", "3", "edge mode")}<br>${job("help.shortcuts", "F1", "all shortcuts")}`);
       return;
     }
     const kind = sel[0].kind;
@@ -6592,12 +6652,12 @@ class App implements ToolHost {
           else rows.push(["Faces", String(b.shape.faces.length)], ["Edges", String(b.shape.edges.length - seamEdgeIds(b.shape).size)]);
         }
         hints = b?.kind === "face"
-          ? `<kbd>P</kbd> push/pull into a new solid · <kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale`
+          ? `${job("op.pushpull", "P", "push/pull into a new solid")} · ${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")}`
           : b?.kind === "mesh"
-          ? `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale · <kbd>Shift+D</kbd> duplicate · File → Export STL (exported with the solids)<br>A mesh can't be edited (no faces or edges)`
-          : `<kbd>G</kbd> move · <kbd>R</kbd> rotate · <kbd>S</kbd> scale · <kbd>C</kbd> cut by guide · <kbd>F</kbd> fillet all edges · <kbd>Shift+D</kbd> duplicate`;
+          ? `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("edit.duplicate", "Shift+D", "duplicate")} · File → Export STL (exported with the solids)<br>A mesh can't be edited (no faces or edges)`
+          : `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("op.cut", "C", "cut by guide")} · ${job("op.fillet", "F", "fillet all edges")} · ${job("edit.duplicate", "Shift+D", "duplicate")}`;
       } else {
-        hints = `<kbd>+</kbd> union · <kbd>−</kbd> subtract · <kbd>Shift+I</kbd> intersect<br>(first selected = target)`;
+        hints = `${job("bool.union", "+", "union")} · ${job("bool.subtract", "−", "subtract")} · ${job("bool.intersect", "Shift+I", "intersect")}<br>(first selected = target)`;
         // A whole array group (changed with its icon in the Bodies panel): what it is, or why it can't be changed now.
         const rec = this.arrayToChange(sel.map((s) => s.body));
         if (rec) rows.unshift(typeof rec !== "string" && rec.circular
@@ -6612,10 +6672,10 @@ class App implements ToolHost {
         if (b) rows.push([b.kind === "face" ? "Flat face" : "Solid", escapeHtml(b.name)]);
         if (f) rows.push(["Surface", f.geomType]);
       }
-      hints = `<kbd>P</kbd> push/pull (flat face → new solid) · <kbd>H</kbd> shell (opens selected faces) · <kbd>O</kbd> offset`;
+      hints = `${job("op.pushpull", "P", "push/pull (flat face → new solid)")} · ${job("op.shell", "H", "shell (opens selected faces)")} · ${job("op.offset", "O", "offset")}`;
     } else {
       rows.push(["Edges", String(sel.length)]);
-      hints = `<kbd>F</kbd> fillet · <kbd>Shift+F</kbd> chamfer · <kbd>O</kbd> offset (strip)`;
+      hints = `${job("op.fillet", "F", "fillet")} · ${job("op.chamfer", "Shift+F", "chamfer")} · ${job("op.offset", "O", "offset (strip)")}`;
     }
     el.innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` + tip(hints);
   }
@@ -6783,8 +6843,8 @@ class App implements ToolHost {
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
-      ["Modify menu · Pro: R E", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
-      ["Modify menu · Pro: S W", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; a straight path: Twist ° turns it evenly on the way — a propeller blade — and End size % makes the far end smaller / larger); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
+      ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
+      ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; a straight path: Twist ° turns it evenly on the way — a propeller blade — and End size % makes the far end smaller / larger); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
@@ -6806,7 +6866,6 @@ class App implements ToolHost {
       ["Shift+X", "Toggle x-ray (semi-transparent solids, on by default)"],
       ["V", "View menu at the cursor: Top 7 · Front 1 · Right 3 · Iso 5 · V again = opposite side (e.g. bottom)"],
       ["Enter · Esc", "Apply · Cancel / clear selection"],
-      ["Ctrl+Shift+F1", "Pro layout on / off: less text — a one-row sketch panel, a small text-only Recent strip, short hints (also in the View menu)"],
       ["Ctrl+S · Ctrl+O", "Save · Open"],
     ];
     help.innerHTML = `<div class="card"><h2>Keyboard &amp; mouse</h2><table>${rows.map(([k, v]) => `<tr><td><kbd>${k}</kbd></td><td>${v}</td></tr>`).join("")}</table></div>`;
@@ -7018,7 +7077,6 @@ class App implements ToolHost {
     this.toast(`Saved ${path.split(/[\\/]/).pop()}`);
     this.dropRecovery();
     void window.yddd.addRecent(path);
-    this.noteSaved();
   }
 
   // ---------------------------------------------------------------- autosave / crash recovery

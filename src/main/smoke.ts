@@ -4694,6 +4694,72 @@ const SCENARIO_ORTHO = String.raw`
 })()
 `;
 
+/** Macro → Battery case: AA / AAA / 18650 in a grid of holes, beside what's there; the Pro layout adds C / D / custom and the sizes. */
+const SCENARIO_BATTERY = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const set = (v) => { for (const [k, x] of Object.entries(v)) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (i) { i.value = String(x); i.dispatchEvent(new Event(i.tagName === "SELECT" ? "change" : "input", { bubbles: true })); } } };
+  const keys = () => [...document.querySelectorAll("#op-panel [data-key]")].map((i) => i.dataset.key);
+  const options = () => [...(document.querySelector("#op-panel select[data-key=battery]")?.options ?? [])].map((o) => o.text);
+  // The case's volume: a rounded block less the holes
+  const want = (dia, len, cols, rows, depth = 60, cl = 0.6, wall = 1.6, floor = 1.6) => {
+    const hole = dia + cl, step = hole + wall, w = cols * step + wall, d = rows * step + wall, h = floor + len * depth / 100;
+    const r = Math.min(wall + hole / 2, w / 2, d / 2) * 0.9;
+    return (w * d - (4 - Math.PI) * r * r) * h - cols * rows * Math.PI * (hole / 2) ** 2 * (h - floor);
+  };
+  localStorage.removeItem("yddd.pro"); document.body.classList.remove("pro");
+  app.doc.reset([]);
+  const other = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 40, 10), "Box");
+  app.doc.commit([other], "a box"); await sleep(30);
+  app.setSelection([]); app.run("macro.battery"); await sleep(100);
+  const beginner = { keys: keys(), options: options() };
+  set({ battery: 0, columns: 4, rows: 2 }); await sleep(200);
+  app.applyOp(); await sleep(50);
+  const aa = app.doc.bodies[1], bb = aa && aa.shape.boundingBox.bounds;
+  expect("battery case: beginner panel — AA / AAA / 18650, columns, rows; 4 × 2 AA → one valid solid (exact volume), right of the box, on the grid",
+    beginner.keys.join() === "battery,columns,rows" && beginner.options.length === 3 && /^AA \(/.test(beginner.options[0]) && /^18650/.test(beginner.options[2]) &&
+    aa && /^Battery case AA\b/.test(aa.name) && K.isValidShape(aa.shape) && Math.abs(K.solidVolume(aa.shape) - want(14.5, 50.5, 4, 2)) < 1e-3 && Math.abs(bb[0][0] - 30) < 1e-6 && Math.abs(bb[0][2]) < 1e-6,
+    { beginner, name: aa && aa.name, vol: aa && K.solidVolume(aa.shape), want: want(14.5, 50.5, 4, 2), bb });
+  app.run("edit.undo"); await sleep(30);
+  expect("battery case: one undo step", app.doc.bodies.length === 1, app.doc.bodies.length);
+  // Pro layout: C / D / custom, hole depth, clearance, wall, floor
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+  app.setSelection([]); app.run("macro.battery"); await sleep(100);
+  const pro = { keys: keys(), options: options() };
+  set({ battery: 5, columns: 3, rows: 1, depth: 50, clearance: 0.4, wall: 2, floor: 2, diameter: 20, length: 40 }); await sleep(200);
+  app.applyOp(); await sleep(50);
+  const cu = app.doc.bodies[1];
+  expect("battery case, Pro layout: + C, D, Custom and hole depth / clearance / wall / floor / custom size; a custom 20 × 40, 3 × 1 → exact volume",
+    pro.options.length === 6 && /^Custom/.test(pro.options[5]) && pro.keys.join() === "battery,columns,rows,depth,clearance,wall,floor,diameter,length" &&
+    cu && Math.abs(K.solidVolume(cu.shape) - want(20, 40, 3, 1, 50, 0.4, 2, 2)) < 1e-3,
+    { pro, vol: cu && K.solidVolume(cu.shape), want: want(20, 40, 3, 1, 50, 0.4, 2, 2) });
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+  localStorage.removeItem("yddd.pro");
+  // A label for it: text "18650", all letters selected, P — quick (the letters' smooth joins found from their edges,
+  // not by searching their Bézier sides: was ~1.2 s per change)
+  app.doc.reset([]);
+  const letters = K.makeTextFaces(G, [0, 0, 0], "18650", { height: 6, align: "left", lineSpacing: 1 }).map((f) => app.doc.makeBody(f, "Text", "face"));
+  app.doc.commit(letters, "label"); await sleep(30);
+  app.run("mode.body"); app.setSelection(letters.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+  let t0 = performance.now(); app.run("op.pushpull"); const pressMs = performance.now() - t0;
+  const dIn = document.querySelector("#op-panel input[data-key=d]");
+  dIn.value = "3"; t0 = performance.now(); app.previewOp(); const changeMs = performance.now() - t0;
+  app.applyOp(); await sleep(30);
+  const solids = app.doc.bodies.filter((b) => b.kind === "solid");
+  const seamsOk = solids.every((b) => K.seamEdgeIds(b.shape).size > 0 || b.shape.edges.length < 40);
+  expect("text label 18650: P on all its letters and a new distance each well under 0.5 s; 5 solids, their smooth joins hidden",
+    pressMs < 500 && changeMs < 500 && solids.length === 5 && seamsOk, { pressMs: Math.round(pressMs), changeMs: Math.round(changeMs), solids: solids.length, seams: solids.map((b) => K.seamEdgeIds(b.shape).size) });
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("battery scenario failed: " + JSON.stringify(failed));
+  return [{ label: "battery case", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Ctrl+C remembers the selection; Ctrl+V duplicates it (as Shift+D), even after selecting something else. */
 const SCENARIO_COPYPASTE = String.raw`
 (async () => {
@@ -4720,6 +4786,22 @@ const SCENARIO_COPYPASTE = String.raw`
   expect("Ctrl+V is one undo step", app.doc.bodies.length === 2, app.doc.bodies.length);
   ctrl("v"); await sleep(20); esc(); await sleep(20);
   expect("Ctrl+V again pastes another copy", app.doc.bodies.length === 3, app.doc.bodies.length);
+  // The selection panel's hints: a click on the keys or the words runs the command
+  app.setSelection([]); await sleep(20);
+  const jobs = [...document.querySelectorAll("#props .tip-job")];
+  const boxJob = jobs.find((j) => /box$/.test(j.textContent.trim()));
+  boxJob?.querySelector("kbd")?.click(); await sleep(20);
+  const byKey = app.tool && app.tool.name;
+  esc(); await sleep(20);
+  [...document.querySelectorAll("#props .tip-job")].find((j) => /circle$/.test(j.textContent.trim()))?.click(); await sleep(20);
+  const byWord = app.tool && app.tool.name;
+  esc(); await sleep(20);
+  app.setSelection([{ kind: "body", body: a.id, id: 0 }]); await sleep(20);
+  [...document.querySelectorAll("#props .tip-job")].find((j) => /move$/.test(j.textContent.trim()))?.click(); await sleep(20);
+  const moving = !!app.xf;
+  esc(); await sleep(20);
+  expect("panel hints: Nothing selected lists clickable jobs; a click on B (box) or on 'circle' starts that tool; a solid's 'G move' starts moving",
+    jobs.length === 13 && byKey === "Box" && /circle/i.test(byWord) && moving, { jobs: jobs.map((j) => j.dataset.cmd), byKey, byWord, moving });
   app.doc.reset([]);
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("copy paste scenario failed: " + JSON.stringify(failed));
@@ -6227,12 +6309,12 @@ const SCENARIO_SKETCH = String.raw`
     const back = vp.xray === was && btn.classList.contains("active") === was;
     expect("toolbar: X-ray is its own button outside the View drawer and shows when it's on", !!btn && !inDrawer && toggled && back, { btn: !!btn, inDrawer, toggled, back });
   }
-  // Pro layout (Ctrl+Shift+F1 / View menu): one-row sketch panel, text-only Recent strip, short hints; back again
+  // Pro layout (Ctrl+Shift+D, a secret: not in the keys panel or the shortcuts): one-row sketch panel, text-only Recent strip, short hints; back again
   {
     const hintEl = document.getElementById("status-hint");
     app.setSelection([]); app.run("tool.sketch"); await sleep(30);
     const fullTip = !!document.querySelector("#sketch-panel .tip");
-    app.run("view.pro"); await sleep(30);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(30);
     const pro = document.body.classList.contains("pro"), compact = document.getElementById("sketch-panel").classList.contains("compact") && !document.querySelector("#sketch-panel .tip") && !!document.querySelector("#sketch-panel button[data-act=done]");
     const sketchHint = hintEl.textContent;
     document.querySelector("#sketch-panel button[data-act=cancel]").click(); await sleep(20);
@@ -6240,14 +6322,18 @@ const SCENARIO_SKETCH = String.raw`
     const shortHint = hintEl.textContent;
     const svg = document.querySelector("#recent-list .tb-btn svg");
     const noIcons = !svg || getComputedStyle(svg).display === "none";
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "P", code: "KeyP", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
     const back = !document.body.classList.contains("pro") && localStorage.getItem("yddd.pro") === "0";
-    expect("pro layout: Ctrl+Shift+F1 → compact sketch panel, short hints, text-only Recent; Ctrl+Shift+P back", fullTip && pro && compact && /Enter: done/.test(sketchHint) && shortHint === "Solid mode: click to select" && noIcons && back, { fullTip, pro, compact, sketchHint, shortHint, noIcons, back });
-    // The Pro tip comes once, with the 20th save
-    localStorage.setItem("yddd.saves", "18"); localStorage.removeItem("yddd.proTip");
-    const tips = () => [...document.querySelectorAll("#toasts .toast")].filter((t) => /Pro layout/.test(t.textContent)).length;
-    const t0 = tips(); app.noteSaved(); const t19 = tips(); app.noteSaved(); const t20 = tips(); app.noteSaved(); const t21 = tips();
-    expect("pro layout: a one-time tip with the 20th save", t19 === t0 && t20 === t0 + 1 && t21 === t20 && localStorage.getItem("yddd.proTip") === "1", { t0, t19, t20, t21 });
+    expect("pro layout: Ctrl+Shift+D → compact sketch panel, short hints, text-only Recent; Ctrl+Shift+D back", fullTip && pro && compact && /Enter: done/.test(sketchHint) && shortHint === "Solid mode: click to select" && noIcons && back, { fullTip, pro, compact, sketchHint, shortHint, noIcons, back });
+    // Hidden: no 20th-save tip, not in the shortcuts list or the keys panel
+    app.run("help.shortcuts"); await sleep(30);
+    const helpText = document.getElementById("help").textContent;
+    app.run("help.shortcuts"); await sleep(20);
+    const listed = !helpText || /Pro layout|Ctrl\+Shift\+D/.test(helpText);
+    app.run("help.keys"); await sleep(30);
+    const inKeys = /Pro layout/.test(document.getElementById("keys-panel")?.textContent ?? "");
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    expect("pro layout: a secret — not in the shortcuts list or the keys panel, no save tip", !listed && !inKeys && !app.noteSaved, { listed, inKeys });
     for (const k of ["yddd.saves", "yddd.proTip", "yddd.pro"]) localStorage.removeItem(k);
   }
   // The 3D corner view follows a moved / scaled outline (re-framed to keep it in view)
@@ -7150,6 +7236,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_KEEPTOOL, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_COPYPASTE, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ORTHO, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BATTERY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {

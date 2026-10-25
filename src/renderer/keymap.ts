@@ -113,6 +113,7 @@ export const COMMANDS: Command[] = [
     ["macro.lidIn", "Box Lid: Inside Lip…"],
     ["macro.lidOver", "Box Lid: Over the Box…"],
     ["macro.dividers", "Dividers…"],
+    ["macro.battery", "Battery case…"],
   ]),
   ...grp("Help", [
     ["help.keys", "Shortcuts: search, change keys"],
@@ -186,7 +187,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "view.front": ["Num1"], // top-row "1" stays Solid mode
   "view.right": ["Num3"], // top-row "3" stays Edge mode
   "view.xray": ["Shift+X"],
-  "view.pro": ["Ctrl+Shift+F1", "Ctrl+Shift+P"],
+  "view.pro": ["Ctrl+Shift+D"], // (hidden: see HIDDEN)
   "help.keys": ["/"],
   "help.shortcuts": ["F1", "?"],
   "nav.orbit": ["MiddleDrag", "Alt+LeftDrag"],
@@ -222,6 +223,9 @@ export function checkGesture(g: string, cmd: string): string | null {
   if (g.endsWith("LeftDrag") && g.includes("Ctrl+") && !g.includes("Alt+")) return "Ctrl + left drag turns snapping off while drawing — hold Alt with it too";
   return null;
 }
+
+/** Not listed in the keys panel (still work): the Pro layout is a secret switch. */
+export const HIDDEN = new Set(["view.pro"]);
 
 /** Pro layout only: S W sweep (S starts Scale, W switches) · R E revolve (R starts Rotate, E switches). */
 export const PRO_ONLY = new Set(["S W", "R E"]);
@@ -399,6 +403,7 @@ export function openKeysPanel(host: KeysHost): void {
     const whole = !!q && Object.values(keys).some((ks) => ks.some((k) => named(k).includes(q)));
     let html = "", group = "";
     for (const c of COMMANDS) {
+      if (HIDDEN.has(c.cmd)) continue;
       const ks = keys[c.cmd] ?? [];
       const hit = !q || `${c.label} ${c.group} ${c.cmd}`.toLowerCase().includes(q) || ks.some((k) => (whole ? named(k).includes(q) : named(k).some((n) => n.includes(q))));
       if (!hit) continue;
@@ -408,7 +413,9 @@ export function openKeysPanel(host: KeysHost): void {
       }
       const chips = ks
         .map((k, i) =>
-          capture && capture.cmd === c.cmd && capture.i === i
+          PRO_ONLY.has(k) && !document.body.classList.contains("pro")
+            ? "" // (the Pro layout's own keys: shown only there)
+            : capture && capture.cmd === c.cmd && capture.i === i
             ? `<span class="kp-key wait">${capture.first ? `${esc(capture.first)} …` : isNav(c.cmd) ? "Press a button…" : "Press a key…"}</span>`
             : `<span class="kp-key"><kbd data-i="${i}" title="Click: change it">${esc(keyText(k))}</kbd><button type="button" class="kp-del" data-i="${i}" title="Remove ${esc(keyText(k))}">×</button></span>`,
         )

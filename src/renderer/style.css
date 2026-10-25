@@ -138,6 +138,8 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 #props td { padding: 2px 0; }
 #props td:first-child { color: var(--muted); width: 45%; }
 #props .tip { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+#props .tip-job { cursor: pointer; border-radius: 4px; padding: 1px 2px; margin: 0 -2px; }
+#props .tip-job:hover { background: var(--panel-2); color: var(--text); }
 kbd {
   display: inline-block; padding: 0 5px; border: 1px solid var(--border); border-bottom-width: 2px;
   border-radius: 4px; background: var(--panel-2); font-family: inherit; font-size: 11px; color: var(--text);
