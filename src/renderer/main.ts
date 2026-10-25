@@ -4261,7 +4261,7 @@ class App implements ToolHost {
       const src = letters[0].text!;
       let why: string | null = null;
       if (letters.some((b) => JSON.stringify(b.text) !== JSON.stringify(src))) why = "This group holds letters of more than one text";
-      else if (!(await this.useTextFont(src.font))) why = `Its font isn't on this computer (${src.font.split("/").pop()}) — the text can't be edited`;
+      else if (!(await this.useTextFont(src.font))) why = `Its font isn't on this computer (${src.font.split(/[\\/]/).pop()}) — the text can't be edited`;
       else if (!textPlacement(src, letters.map((b) => b.shape as Shape))) why = "Its letters were changed since (cut, filleted, some deleted...) — the text can't be edited";
       if (this.textChecks.get(group) !== entry) return;
       entry.why = why;
@@ -4318,7 +4318,7 @@ class App implements ToolHost {
     const forNew = TextTool.settings;
     if (edit) {
       const src = edit.src;
-      if (!(await useFont(src.font))) return this.toast(`Edit text: its font isn't on this computer (${src.font.split("/").pop()}) — the text can't be made again`, "error");
+      if (!(await useFont(src.font))) return this.toast(`Edit text: its font isn't on this computer (${src.font.split(/[\\/]/).pop()}) — the text can't be made again`, "error");
       place = textPlacement(src, edit.letters.map((b) => b.shape as Shape));
       if (!place) return this.toast("Edit text: its letters were changed since (cut, filleted, some deleted...) — it can't be edited", "error");
       const k = place.scale, mm = (v: number) => +(v * k).toFixed(4);

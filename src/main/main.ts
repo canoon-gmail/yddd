@@ -77,6 +77,41 @@ function setRecent(list: string[]): void {
   buildMenu();
 }
 
+type FontFile = { family: string; style: string; file: string };
+
+/** The system's fonts from fontconfig (Linux). */
+function fcFonts(): Promise<FontFile[]> {
+  return new Promise((resolve) => {
+    execFile("fc-list", ["--format", "%{family[0]}\t%{style[0]}\t%{file}\n"], { maxBuffer: 16 << 20 }, (err, out) => {
+      if (err) return resolve([]);
+      resolve(out.split("\n").map((l) => l.split("\t")).filter((f) => f.length === 3).map(([family, style, file]) => ({ family, style, file })));
+    });
+  });
+}
+
+/**
+ * The system's fonts on Windows: the Fonts registry keys (all users, then this user's own), whose entries read
+ * "Arial Bold Italic (TrueType)    REG_SZ    arialbi.ttf" — the style words split off the end of the name.
+ */
+async function windowsFonts(): Promise<FontFile[]> {
+  const dir = path.join(process.env.WINDIR ?? "C:\\Windows", "Fonts");
+  const query = (key: string) => new Promise<string>((resolve) => execFile("reg", ["query", key], { maxBuffer: 16 << 20 }, (err, out) => resolve(err ? "" : out)));
+  const KEY = "\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts";
+  const out = (await query("HKLM" + KEY)) + (await query("HKCU" + KEY));
+  const STYLE = /^(Regular|Bold|Italic|Oblique|Light|Semilight|SemiLight|Semibold|SemiBold|Demibold|ExtraBold|Black|Heavy|Thin|ExtraLight|Medium|Condensed|Narrow)$/;
+  const fonts: FontFile[] = [];
+  for (const line of out.split(/\r?\n/)) {
+    const m = /^\s+(.+?)\s+REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/.exec(line);
+    if (!m || m[1].includes("&")) continue; // (a collection: "Cambria & Cambria Math")
+    const words = m[1].replace(/\s*\((TrueType|OpenType)\)$/i, "").split(/\s+/);
+    let cut = words.length;
+    while (cut > 1 && STYLE.test(words[cut - 1])) cut--;
+    const file = path.isAbsolute(m[2]) ? m[2] : path.join(dir, m[2]);
+    fonts.push({ family: words.slice(0, cut).join(" "), style: words.slice(cut).join(" ") || "Regular", file });
+  }
+  return fonts;
+}
+
 /** "name.yddd   ~/folder" for the menu ("&" doubled: it marks a mnemonic). */
 function recentLabel(file: string): string {
   const home = os.homedir();
@@ -236,14 +271,11 @@ function registerIpc(): void {
 
   // Text tool fonts: the system's TrueType / OpenType files (fontconfig), and reading one of them.
   let fontFiles = new Set<string>();
-  ipcMain.handle("fonts-list", () => new Promise<{ family: string; style: string; file: string }[]>((resolve) => {
-    execFile("fc-list", ["--format", "%{family[0]}\t%{style[0]}\t%{file}\n"], { maxBuffer: 16 << 20 }, (err, out) => {
-      if (err) return resolve([]);
-      const fonts = out.split("\n").map((l) => l.split("\t")).filter((f) => f.length === 3 && /\.(ttf|otf)$/i.test(f[2])).map(([family, style, file]) => ({ family, style, file }));
-      fontFiles = new Set(fonts.map((f) => f.file));
-      resolve(fonts);
-    });
-  }));
+  ipcMain.handle("fonts-list", async () => {
+    const fonts = (process.platform === "win32" ? await windowsFonts() : await fcFonts()).filter((f) => /\.(ttf|otf)$/i.test(f.file));
+    fontFiles = new Set(fonts.map((f) => f.file));
+    return fonts;
+  });
   ipcMain.handle("font-read", async (_e, file: string) => {
     if (!fontFiles.has(file)) return null; // (only the listed fonts)
     try {

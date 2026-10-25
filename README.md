@@ -1,4 +1,4 @@
-# YDDD: easy 3D CAD for 3D printing, on Linux
+# YDDD: easy 3D CAD for 3D printing, on Linux and Windows
 
 **Draw a shape, push and pull it, type exact sizes, export 3MF for your slicer.**
 No history tree, no constraint solver, nothing to set up first.
@@ -7,9 +7,14 @@ No history tree, no constraint solver, nothing to set up first.
 
 ## Download
 
-**[Download YDDD for Linux (.deb)](https://github.com/canoon-gmail/yddd/releases/latest)**:
-download it, then `sudo apt install ./YDDD-*.deb` (Ubuntu, Debian, Mint, Pop!_OS).
-Windows and macOS are coming. [Tell us if you want one](https://github.com/canoon-gmail/yddd/issues/new?template=feature_request.yml).
+**[Download YDDD](https://github.com/canoon-gmail/yddd/releases/latest)**, then:
+
+- **Windows** (`YDDD-*-x64.zip`): right-click it → **Extract All**, open the folder and double-click
+  **YDDD.exe**. Nothing to install. Windows may say "Windows protected your PC" the first time
+  (YDDD isn't signed yet): click **More info → Run anyway**.
+- **Linux** (`YDDD-*.deb`): `sudo apt install ./YDDD-*.deb` (Ubuntu, Debian, Mint, Pop!_OS).
+
+macOS is coming. [Tell us if you want it](https://github.com/canoon-gmail/yddd/issues/new?template=feature_request.yml).
 
 ## Your first print in 3 minutes
 
@@ -45,7 +50,7 @@ Found a bug? [Report it](https://github.com/canoon-gmail/yddd/issues/new?templat
 |---|---|
 | Solids | Box, Cylinder, Sphere drawn interactively on the grid **or on any planar face**, grid snapping (Ctrl = free), typed exact dimensions |
 | Faces | Rectangle, Circle, Polygon (3–64 sides) create **flat faces**; **Push/Pull** a flat face to extrude it into a new solid |
-| Text | **T** (or **A T**): click where it starts on the ground or a flat face (upright on a wall), type it in the panel — font (built in: Noto Sans / Serif / Sans Thai, Regular and Bold — on Linux also any installed TTF / OTF font; Thai letters work in any of them), height (a capital letter, mm), alignment, letter spacing, more lines (Shift+Enter); Enter adds a flat face per letter as one group, **P** pushes them all into raised letters; **S** scales text evenly only (it keeps its shape); the pencil by a text group in the Bodies panel edits it again — wherever it was moved / turned / scaled, flat or pushed |
+| Text | **T** (or **A T**): click where it starts on the ground or a flat face (upright on a wall), type it in the panel — font (built in: Noto Sans / Serif / Sans Thai, Regular and Bold — on Linux and Windows also any installed TTF / OTF font; Thai letters work in any of them), height (a capital letter, mm), alignment, letter spacing, more lines (Shift+Enter); Enter adds a flat face per letter as one group, **P** pushes them all into raised letters; **S** scales text evenly only (it keeps its shape); the pencil by a text group in the Bodies panel edits it again — wherever it was moved / turned / scaled, flat or pushed |
 | Sketch | **K**: draw lines, tangent arcs, rectangles and circles on a flat face or the ground in a flat view (3D preview in the corner); select outlines to move them (**G**) or scale / rotate them with one gizmo (**S**: squares and yellow ring scale, blue ring rotates); Done turns the closed outlines into flat faces (with holes) and open lines (ended with Enter / double-click) into **paths** |
 | Select | Solid / Face / Edge modes with hover highlight, Shift+click multi-select |
 | Colour | Click a body's swatch in the Bodies panel: colour (presets or any) and opacity (10–100 %); several selected → all of them. A group's swatch colours its members that have no colour of their own — if some do, YDDD asks whether to apply it to all members. Saved in the file, undoable |
@@ -80,6 +85,7 @@ npm install
 npm start        # type-check, build and launch
 npm run dev      # Vite dev server with hot reload + Electron
 npm run dist     # build the .deb in release/
+npm run dist:win # build the Windows zip in release/ (works on Linux, no Wine)
 npm run smoke    # automated end-to-end test, screenshots in /tmp/yddd-smoke
 npm run smoke:half  # the same without scenarios 1–3 (about half the time)
 npm run start:stress          # launch with 2000 test solids (N=5000 npm run start:stress for more)

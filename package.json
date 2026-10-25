@@ -3,7 +3,7 @@
   "productName": "YDDD",
   "desktopName": "yddd.desktop",
   "version": "0.1.1",
-  "description": "YDDD - a direct NURBS/B-rep CAD modeler for Linux (Electron + Three.js + OpenCascade)",
+  "description": "YDDD - a direct NURBS/B-rep CAD modeler (Electron + Three.js + OpenCascade)",
   "main": "dist/main/main.js",
   "type": "commonjs",
   "license": "MIT",
@@ -19,7 +19,8 @@
     "smoke:half": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke YDDD_SMOKE_HALF=1 electron .",
     "bench": "npm run build && YDDD_STRESS=${N:-2000} YDDD_BENCH=1 electron .",
     "bench:ops": "npm run build && YDDD_BENCH=ops electron .",
-    "dist": "npm run build && electron-builder --linux deb"
+    "dist": "npm run build && electron-builder --linux deb",
+    "dist:win": "npm run build && electron-builder --win zip --x64"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
@@ -104,6 +105,12 @@
         "libsecret-1-0",
         "fontconfig"
       ]
+    },
+    "win": {
+      "target": [
+        "zip"
+      ],
+      "icon": "build/icon.png"
     }
   }
 }
