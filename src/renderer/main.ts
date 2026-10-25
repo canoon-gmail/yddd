@@ -198,6 +198,8 @@ interface OpField {
   min?: number;
   /** "select": `value` is the index into `options`. */
   type?: "number" | "checkbox" | "select";
+  /** Greyed out (can't be changed) while this is true of the panel's values — e.g. a field another one overrides. */
+  off?: (values: Record<string, number>) => boolean;
   options?: string[];
   /**
    * A % field that also takes sizes: the size (mm) at 100 % — then "+10mm" / "-10mm" (that much
@@ -1886,8 +1888,21 @@ class App implements ToolHost {
       if (a === "apply") this.applyOp();
       if (a === "cancel") this.cancelOp();
     });
+    // Fields another one overrides: greyed out while it does
+    const offs = spec.fields.map((f, i) => [f, inputs[i]] as const).filter(([f]) => f.off);
+    const greyOut = () => {
+      if (!offs.length || this.op?.inputs !== inputs) return;
+      const { values } = this.opValues();
+      for (const [f, input] of offs) {
+        input.disabled = f.off!(values);
+        input.closest("label")?.classList.toggle("off", input.disabled);
+      }
+    };
     for (const input of inputs) {
-      input.addEventListener(input.type === "checkbox" || input instanceof HTMLSelectElement ? "change" : "input", () => this.scheduleOpPreview());
+      input.addEventListener(input.type === "checkbox" || input instanceof HTMLSelectElement ? "change" : "input", () => {
+        greyOut();
+        this.scheduleOpPreview();
+      });
       input.addEventListener("keydown", (ev) => {
         const e = ev as KeyboardEvent;
         if (e.key === "Enter") {
@@ -1905,6 +1920,7 @@ class App implements ToolHost {
         input.dispatchEvent(new Event("input", { bubbles: true })); // (as if typed: previews, and ops listening see it)
       });
     }
+    greyOut();
     this.hover = null;
     if (spec.pick) this.viewport.canvas.style.cursor = "crosshair";
     const drags = dragsOf(spec);
@@ -1915,7 +1931,7 @@ class App implements ToolHost {
     if (spec.slow) this.previewAfterPaint();
     else this.previewOp();
     this.positionHandle();
-    const first = inputs.find((i) => i.type === "number" || i.dataset.mm) ?? inputs[0];
+    const first = inputs.find((i) => !i.disabled && (i.type === "number" || i.dataset.mm)) ?? inputs[0];
     first?.focus();
     if (first instanceof HTMLInputElement && (first.type === "number" || first.dataset.mm)) first.select();
   }
@@ -2847,8 +2863,8 @@ class App implements ToolHost {
   private openGridfinityBaseplate(): void {
     const d = this.baseplateDefaults, g = GRIDFINITY, BED = 256;
     const fields: OpField[] = [
-      { key: "width", label: `Width (grid squares of ${g.grid} mm)`, value: d.width, step: 1, min: 1 },
-      { key: "depth", label: `Depth (grid squares of ${g.grid} mm)`, value: d.depth, step: 1, min: 1 },
+      { key: "width", label: `Width (grid squares of ${g.grid} mm)`, value: d.width, step: 1, min: 1, off: (v) => v.drawerWidth > 0 },
+      { key: "depth", label: `Depth (grid squares of ${g.grid} mm)`, value: d.depth, step: 1, min: 1, off: (v) => v.drawerDepth > 0 },
       { key: "drawerWidth", label: "Or fill a drawer: width (mm, 0 = off)", value: d.drawerWidth, step: 1, min: 0 },
       { key: "drawerDepth", label: "Fill a drawer: depth (mm, 0 = off)", value: d.drawerDepth, step: 1, min: 0 },
       { key: "magnets", label: `Magnet holes (${g.magnet.d} × ${g.magnet.depth} mm, 4 per square)`, type: "checkbox", value: d.magnets },

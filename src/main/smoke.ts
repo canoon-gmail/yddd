@@ -4773,6 +4773,10 @@ const SCENARIO_GRIDFINITY = String.raw`
   app.setSelection([]); app.run("macro.baseplate"); await settle();
   set({ drawerWidth: 300, drawerDepth: 150, magnets: 1 }); await sleep(300); await settle();
   const warnText = (document.querySelector("#op-panel .op-error") || {}).textContent || "", drDims = labels();
+  const greyed = ["width", "depth"].map((k) => document.querySelector("#op-panel [data-key=" + k + "]").disabled);
+  set({ drawerDepth: 0 }); await sleep(50);
+  const greyed2 = ["width", "depth"].map((k) => document.querySelector("#op-panel [data-key=" + k + "]").disabled);
+  set({ drawerDepth: 150 }); await sleep(300); await settle();
   await apply();
   const dr = app.doc.bodies[0], db = dr && dr.shape.boundingBox.bounds;
   const plain2 = K.gridfinityBaseplate({ width: 1, depth: 1, drawerWidth: 299, drawerDepth: 149, magnets: true });
@@ -4780,6 +4784,8 @@ const SCENARIO_GRIDFINITY = String.raw`
     dr && /^Gridfinity baseplate 7×3\b/.test(dr.name) && K.isValidShape(dr.shape) && near(db[1][0] - db[0][0], 299) && near(db[1][1] - db[0][1], 149) && near(db[1][2], 7.85) &&
     drDims.includes("7 squares + border 2.5 · 299 mm") && /print beds/.test(warnText) && K.isValidShape(plain2),
     { name: dr && dr.name, db, drDims, warnText });
+  expect("gridfinity baseplate: the squares fields greyed out while a drawer size overrides them (each on its own)",
+    greyed.join() === "true,true" && greyed2.join() === "true,false", { greyed, greyed2 });
   app.doc.reset([]);
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("gridfinity scenario failed: " + JSON.stringify(failed));

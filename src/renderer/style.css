@@ -225,6 +225,8 @@ kbd {
 }
 #op-panel select:focus { outline: none; border-color: var(--accent); }
 #op-panel label.check input { width: auto; accent-color: var(--accent); }
+#op-panel label.off { opacity: 0.45; }
+#op-panel label.off input { cursor: not-allowed; }
 #op-panel .op-error { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 4px; }
 #op-panel .op-error.waiting { color: #7cc47f; }
 #op-panel .op-error.warn { color: #f0b429; }
