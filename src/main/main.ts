@@ -205,6 +205,7 @@ function buildMenu(): void {
         { type: "separator" },
         item("Battery Case…", "macro.battery"),
         item("Gridfinity Bin…", "macro.gridfinity"),
+        item("Gridfinity Baseplate…", "macro.baseplate"),
       ],
     },
     {

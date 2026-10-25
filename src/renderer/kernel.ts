@@ -5018,3 +5018,65 @@ export function gridfinityBin(o: GridfinityBin, at: V3 = [0, 0, 0]): Solid {
   if (!isValidShape(bin)) throw new Error("Gridfinity bin: the result is not a valid solid");
   return bin;
 }
+
+/** A Gridfinity baseplate (Macro menu): `width` × `depth` grid squares, bins drop into its pockets. */
+export interface GridfinityBaseplate {
+  width: number;
+  depth: number;
+  /** Fill a drawer (mm, 0 = off): the plate this size less 0.5 mm all round, as many squares as fit, the rest a border. */
+  drawerWidth: number;
+  drawerDepth: number;
+  /** A floor under the pockets with round holes for 6 × 2 mm magnets (4 per square); off: an open frame. */
+  magnets: boolean;
+}
+
+/** Sizes of a baseplate: its outside, the grid's squares and size, the border round the grid each way, its height. */
+export function gridfinityBaseplateSizes(o: GridfinityBaseplate): { w: number; d: number; nx: number; ny: number; gridW: number; gridD: number; padX: number; padY: number; h: number; floor: number } {
+  const g = GRIDFINITY;
+  const fit = (drawer: number, squares: number) => {
+    if (!(drawer > 0)) return { size: Math.round(squares) * g.grid, n: Math.round(squares) };
+    const size = drawer - 1;
+    return { size, n: Math.floor(size / g.grid + 1e-9) };
+  };
+  const x = fit(o.drawerWidth, o.width), y = fit(o.drawerDepth, o.depth);
+  const floor = o.magnets ? g.magnet.depth + 0.8 : 0;
+  return { w: x.size, d: y.size, nx: x.n, ny: y.n, gridW: x.n * g.grid, gridD: y.n * g.grid, padX: (x.size - x.n * g.grid) / 2, padY: (y.size - y.n * g.grid) / 2, h: floor + GRIDFINITY_POCKET, floor };
+}
+
+/** A baseplate pocket's depth (sloped 0.7, straight 1.8, sloped 2.15 mm) and its corners' radius at the top. */
+const GRIDFINITY_POCKET = 4.65, GRIDFINITY_PLATE_RADIUS = 4;
+
+/**
+ * A Gridfinity baseplate, its bottom centred on `at`: a pocket per grid square (a bin's foot drops in), the pockets
+ * meeting in sharp ridges; a border to fill a drawer; with magnets a floor under the pockets, 4 holes in each. One solid.
+ */
+export function gridfinityBaseplate(o: GridfinityBaseplate, at: V3 = [0, 0, 0]): Solid {
+  const g = GRIDFINITY, R = GRIDFINITY_PLATE_RADIUS;
+  const { w, d, nx, ny, gridW, gridD, h, floor } = gridfinityBaseplateSizes(o);
+  if (o.drawerWidth > 0 && nx < 1 || o.drawerDepth > 0 && ny < 1) throw new Error(`Gridfinity baseplate: the drawer is too small for one grid square (${g.grid + 1} mm or more)`);
+  if (!(nx >= 1 && ny >= 1)) throw new Error("Gridfinity baseplate: width and depth must be 1 grid square or more");
+  const ring = (cx: number, cy: number, W: number, D: number, inset: number, z: number) =>
+    drawRoundedRectangle(W - 2 * inset, D - 2 * inset, R - inset).sketchOnPlane(new Plane([at[0] + cx, at[1] + cy, at[2] + z], [1, 0, 0], [0, 0, 1])) as Sketch;
+  // The pockets are 0.05 mm in from the grid lines: the ridges between them (and round the grid) have a 0.1 mm flat
+  // top — OpenCascade can't cut two pockets meeting in a ridge with no width (bins sit 0.05 mm higher: nothing)
+  const top = h, plate = ring(0, 0, w, d, 0, 0).extrude(top) as Solid, e = 0.05;
+  const x0 = -gridW / 2 + g.grid / 2, y0 = -gridD / 2 + g.grid / 2;
+  const pockets: Solid[] = [], holes: Solid[] = [];
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < ny; j++) {
+      const cx = x0 + i * g.grid, cy = y0 + j * g.grid;
+      const steps: [number, number][] = [[2.85 + e, floor > 0 ? floor : -0.5], [2.85 + e, floor], [2.15 + e, floor + 0.7], [2.15 + e, floor + 2.5], [e, top], [e - 0.5, top + 0.5]];
+      const [first, ...rest] = (floor > 0 ? steps.slice(1) : steps).map(([inset, z]) => ring(cx, cy, g.grid, g.grid, inset, z));
+      pockets.push(first.loftWith(rest, { ruled: true }) as Solid);
+      if (o.magnets) for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) holes.push(occCylinder(g.magnet.d / 2, g.magnet.depth + 0.5, [at[0] + cx + sx * g.magnet.from, at[1] + cy + sy * g.magnet.from, at[2] + floor - g.magnet.depth], [0, 0, 1]));
+    }
+  }
+  let out = booleanOp("subtract", plate, [...pockets, ...holes]);
+  if (!isValidShape(out)) {
+    // (the pockets all at once can fail where their tops overlap: one at a time)
+    out = plate;
+    for (const p of [...pockets, ...holes]) out = booleanOp("subtract", out, [p]);
+  }
+  if (!isValidShape(out)) throw new Error("Gridfinity baseplate: the result is not a valid solid");
+  return out;
+}

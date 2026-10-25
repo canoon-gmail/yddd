@@ -74,6 +74,10 @@ import {
   batteryCase,
   gridfinityBin,
   gridfinitySizes,
+  gridfinityBaseplate,
+  gridfinityBaseplateSizes,
+  type GridfinityBin,
+  type GridfinityBaseplate,
   GRIDFINITY,
   hasBoxRim,
   offsetRing,
@@ -658,6 +662,7 @@ class App implements ToolHost {
   /** Dividers (Macro menu): the last values. */
   private dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
   private gridfinityDefaults = { width: 2, depth: 1, height: 6, columns: 1, rows: 1, lip: 1, magnets: 0, wall: 1.2 };
+  private baseplateDefaults = { width: 3, depth: 3, drawerWidth: 0, drawerDepth: 0, magnets: 0 };
   private batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
@@ -1159,6 +1164,7 @@ class App implements ToolHost {
       case "macro.dividers": return this.openDividers(this.selectedLidBox());
       case "macro.battery": return this.openBatteryCase();
       case "macro.gridfinity": return this.openGridfinityBin();
+      case "macro.baseplate": return this.openGridfinityBaseplate();
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -2739,11 +2745,7 @@ class App implements ToolHost {
       );
     }
     // Beside the solids already there (the right of them), else at the origin.
-    let right = -Infinity;
-    for (const b of this.doc.bodies) {
-      const box = this.viewport.drawnBox(b.id);
-      if (box) right = Math.max(right, box.max.x);
-    }
+    const right = this.rightOfBodies();
     const params = (v: Record<string, number>) => {
       const t = types[v.battery];
       return {
@@ -2788,52 +2790,121 @@ class App implements ToolHost {
       { key: "magnets", label: `Magnet holes (${g.magnet.d} × ${g.magnet.depth} mm, 4 per square)`, type: "checkbox", value: d.magnets },
     ];
     if (pro) fields.push({ key: "wall", label: "Wall (mm)", value: d.wall, step: 0.1, min: 0.4 });
-    // Beside the solids already there (the right of them), else at the origin.
-    let right = -Infinity;
-    for (const b of this.doc.bodies) {
-      const box = this.viewport.drawnBox(b.id);
-      if (box) right = Math.max(right, box.max.x);
-    }
+    const squares = (n: number) => `${n} square${n === 1 ? "" : "s"}`;
     const params = (v: Record<string, number>) => ({
       width: Math.round(v.width), depth: Math.round(v.depth), height: Math.round(v.height), columns: Math.round(v.columns), rows: Math.round(v.rows),
       lip: !!v.lip, magnets: !!v.magnets, wall: pro ? v.wall : d.wall,
     });
-    const squares = (n: number) => `${n} square${n === 1 ? "" : "s"}`;
+    const right = this.rightOfBodies();
+    const place = (p: GridfinityBin): V3 => [right > -Infinity ? right + 10 + gridfinitySizes(p).w / 2 : 0, 0, 0];
+    const outcome = (p: GridfinityBin, at: V3, solid: Solid): OpOutcome => {
+      // Measured on the preview: width along the front, depth down the right side, height (and the lip) up the
+      // back right corner (clear of those two, and of the panel on the left), a compartment across the top
+      const { w, d: dd, h, cellW, cellD } = gridfinitySizes(p);
+      const x0 = at[0] - w / 2, x1 = at[0] + w / 2, y0 = -dd / 2, y1 = dd / 2, gap = 8;
+      const dims: ShownDimension[] = [
+        { a: [x0, y0, 0], b: [x1, y0, 0], o: [0, -gap, 0], text: `${squares(p.width)} · ${fmt(w)} mm` },
+        { a: [x1, y0, 0], b: [x1, y1, 0], o: [gap, 0, 0], text: `${squares(p.depth)} · ${fmt(dd)} mm` },
+        { a: [x1, y1, 0], b: [x1, y1, h], o: [gap * 0.7, gap * 0.7, 0], text: `${p.height} units · ${fmt(h)} mm` },
+      ];
+      if (p.lip) dims.push({ a: [x1, y1, h], b: [x1, y1, h + g.lip], o: [gap * 0.7, gap * 0.7, 0], text: `lip ${fmt(g.lip)}` });
+      if (p.columns > 1 || p.rows > 1) {
+        const cx = x0 + p.wall, cy = y1 - p.wall, top = p.lip ? h + g.lip : h;
+        dims.push({ a: [cx, cy, top], b: [cx + cellW, cy, top], o: [0, 0, gap * 0.6], text: `compartment ${fmt(cellW)} × ${fmt(cellD)} mm` });
+      }
+      return {
+        ghost: new Map([[-1, solid]]),
+        dims,
+        commit: () => {
+          const b = this.doc.makeBody(solid, `Gridfinity bin ${p.width}×${p.depth}×${p.height}`);
+          this.doc.commit([...this.doc.bodies, b], "Gridfinity bin");
+          return { select: [b.id], solidMode: true };
+        },
+      };
+    };
     this.startOp({
       title: "Gridfinity bin",
       label: "Gridfinity bin",
       note: "Fits Gridfinity baseplates; bins stack on the lip",
       fields,
       compute: (v) => {
-        const p = params(v);
-        const dx = right > -Infinity ? right + 10 + gridfinitySizes(p).w / 2 : 0;
-        const solid = gridfinityBin(p, [dx, 0, 0]);
-        // Measured on the preview: width along the front, depth down the right side, height (and the lip) up the
-        // back right corner (clear of those two, and of the panel on the left), a compartment across the top
-        const { w, d: dd, h, cellW, cellD } = gridfinitySizes(p);
-        const x0 = dx - w / 2, x1 = dx + w / 2, y0 = -dd / 2, y1 = dd / 2, gap = 8;
-        const dims: ShownDimension[] = [
-          { a: [x0, y0, 0], b: [x1, y0, 0], o: [0, -gap, 0], text: `${squares(p.width)} · ${fmt(w)} mm` },
-          { a: [x1, y0, 0], b: [x1, y1, 0], o: [gap, 0, 0], text: `${squares(p.depth)} · ${fmt(dd)} mm` },
-          { a: [x1, y1, 0], b: [x1, y1, h], o: [gap * 0.7, gap * 0.7, 0], text: `${p.height} units · ${fmt(h)} mm` },
-        ];
-        if (p.lip) dims.push({ a: [x1, y1, h], b: [x1, y1, h + g.lip], o: [gap * 0.7, gap * 0.7, 0], text: `lip ${fmt(g.lip)}` });
-        if (p.columns > 1 || p.rows > 1) {
-          const cx = x0 + p.wall, cy = y1 - p.wall, top = p.lip ? h + g.lip : h;
-          dims.push({ a: [cx, cy, top], b: [cx + cellW, cy, top], o: [0, 0, gap * 0.6], text: `compartment ${fmt(cellW)} × ${fmt(cellD)} mm` });
-        }
-        return {
-          ghost: new Map([[-1, solid]]),
-          dims,
-          commit: () => {
-            const b = this.doc.makeBody(solid, `Gridfinity bin ${p.width}×${p.depth}×${p.height}`);
-            this.doc.commit([...this.doc.bodies, b], "Gridfinity bin");
-            return { select: [b.id], solidMode: true };
-          },
-        };
+        const p = params(v), at = place(p);
+        return outcome(p, at, gridfinityBin(p, at));
+      },
+      // (in the background kernel: a big bin takes a second or more)
+      computeAsync: async (v) => {
+        const p = params(v), at = place(p);
+        return outcome(p, at, solidFrom(await this.bgKernel.run({ op: "gridfinity", bin: p, at })));
       },
       remember: (v) => (this.gridfinityDefaults = { ...d, ...v }),
     });
+  }
+
+  /**
+   * Macro → Gridfinity baseplate: width × depth grid squares the bins drop into — or as many as fit a drawer, a border
+   * filling the rest; magnet holes (a floor under the pockets). Beside what's there, measured on the preview.
+   */
+  private openGridfinityBaseplate(): void {
+    const d = this.baseplateDefaults, g = GRIDFINITY, BED = 256;
+    const fields: OpField[] = [
+      { key: "width", label: `Width (grid squares of ${g.grid} mm)`, value: d.width, step: 1, min: 1 },
+      { key: "depth", label: `Depth (grid squares of ${g.grid} mm)`, value: d.depth, step: 1, min: 1 },
+      { key: "drawerWidth", label: "Or fill a drawer: width (mm, 0 = off)", value: d.drawerWidth, step: 1, min: 0 },
+      { key: "drawerDepth", label: "Fill a drawer: depth (mm, 0 = off)", value: d.drawerDepth, step: 1, min: 0 },
+      { key: "magnets", label: `Magnet holes (${g.magnet.d} × ${g.magnet.depth} mm, 4 per square)`, type: "checkbox", value: d.magnets },
+    ];
+    const squares = (n: number) => `${n} square${n === 1 ? "" : "s"}`;
+    const params = (v: Record<string, number>): GridfinityBaseplate => ({ width: Math.round(v.width), depth: Math.round(v.depth), drawerWidth: v.drawerWidth, drawerDepth: v.drawerDepth, magnets: !!v.magnets });
+    const right = this.rightOfBodies();
+    const place = (p: GridfinityBaseplate): V3 => [right > -Infinity ? right + 10 + gridfinityBaseplateSizes(p).w / 2 : 0, 0, 0];
+    const outcome = (p: GridfinityBaseplate, at: V3, solid: Solid): OpOutcome => {
+      // Measured: the outside along the front and down the right side (squares, and the drawer border if any), the
+      // height up the back right corner
+      const z = gridfinityBaseplateSizes(p);
+      const x0 = at[0] - z.w / 2, x1 = at[0] + z.w / 2, y0 = -z.d / 2, y1 = z.d / 2, gap = 8;
+      const side = (n: number, size: number, pad: number) => `${squares(n)}${pad > 1e-6 ? ` + border ${fmt(pad)}` : ""} · ${fmt(size)} mm`;
+      const dims: ShownDimension[] = [
+        { a: [x0, y0, 0], b: [x1, y0, 0], o: [0, -gap, 0], text: side(z.nx, z.w, z.padX) },
+        { a: [x1, y0, 0], b: [x1, y1, 0], o: [gap, 0, 0], text: side(z.ny, z.d, z.padY) },
+        { a: [x1, y1, 0], b: [x1, y1, z.h], o: [gap * 0.7, gap * 0.7, 0], text: `${fmt(z.h)} mm` },
+      ];
+      return {
+        ghost: new Map([[-1, solid]]),
+        dims,
+        ...(Math.max(z.w, z.d) > BED ? { warn: { text: `Bigger than most print beds (${BED} mm): print it in parts — e.g. two plates side by side` } } : {}),
+        commit: () => {
+          const b = this.doc.makeBody(solid, `Gridfinity baseplate ${z.nx}×${z.ny}`);
+          this.doc.commit([...this.doc.bodies, b], "Gridfinity baseplate");
+          return { select: [b.id], solidMode: true };
+        },
+      };
+    };
+    this.startOp({
+      title: "Gridfinity baseplate",
+      label: "Gridfinity baseplate",
+      note: "Gridfinity bins drop into its squares",
+      fields,
+      compute: (v) => {
+        const p = params(v), at = place(p);
+        return outcome(p, at, gridfinityBaseplate(p, at));
+      },
+      // (in the background kernel: a drawer-sized plate takes a second or more)
+      computeAsync: async (v) => {
+        const p = params(v), at = place(p);
+        return outcome(p, at, solidFrom(await this.bgKernel.run({ op: "gridfinity", baseplate: p, at })));
+      },
+      remember: (v) => (this.baseplateDefaults = { ...d, ...v }),
+    });
+  }
+
+  /** The right side of the solids there (for a new ready-made object beside them), -Infinity if none. */
+  private rightOfBodies(): number {
+    let right = -Infinity;
+    for (const b of this.doc.bodies) {
+      const box = this.viewport.drawnBox(b.id);
+      if (box) right = Math.max(right, box.max.x);
+    }
+    return right;
   }
 
   /** The one selected face, or the face of the one selected flat face object; null for any other selection. */
@@ -7559,7 +7630,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

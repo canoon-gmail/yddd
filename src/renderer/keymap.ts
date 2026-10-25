@@ -115,6 +115,7 @@ export const COMMANDS: Command[] = [
     ["macro.dividers", "Dividers…"],
     ["macro.battery", "Battery case…"],
     ["macro.gridfinity", "Gridfinity bin…"],
+    ["macro.baseplate", "Gridfinity baseplate…"],
   ]),
   ...grp("Help", [
     ["help.keys", "Shortcuts: search, change keys"],
