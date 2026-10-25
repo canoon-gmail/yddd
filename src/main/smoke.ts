@@ -4694,6 +4694,45 @@ const SCENARIO_ORTHO = String.raw`
 })()
 `;
 
+/** Text wrapped round a curved side: each letter stood on it, facing out, in order round it; P pushes them all out. */
+const SCENARIO_WRAPTEXT = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  app.doc.reset([]);
+  await app.useTextFont(""); // (the built-in fonts)
+  // A cylinder r 30 standing on the grid; text clicked on its front (-Y) side, 20 mm up
+  const cyl = app.doc.makeBody(K.makeCylinder(G, [0, 0, 0], 30, 50), "Cup");
+  const side = cyl.shape.faces.find((f) => f.geomType !== "PLANE");
+  const t0 = performance.now();
+  const faces = K.wrappedTextFaces(cyl.shape, side.hashCode, [0, -30, 20], "ABCDE", { height: 8, align: "center", lineSpacing: 1 });
+  const ms = performance.now() - t0;
+  const info = faces.map((f) => { const c = f.center.toTuple(), n = f.normalAt().toTuple(); return { r: Math.hypot(c[0], c[1]), z: c[2], ang: Math.atan2(c[1], c[0]) * 180 / Math.PI, out: (n[0] * c[0] + n[1] * c[1]) / Math.hypot(c[0], c[1]), nz: n[2] }; });
+  const ordered = info.every((x, i) => i === 0 || x.ang > info[i - 1].ang);
+  expect("wrapped text: 5 letters round a cylinder — centres on its side (r 30), above the click (its baseline), level, facing out, left to right round it, in well under 0.5 s",
+    faces.length === 5 && info.every((x) => Math.abs(x.r - 30) < 0.5 && x.z > 20 && x.z < 28 && x.out > 0.99 && Math.abs(x.nz) < 0.01) && ordered && Math.abs((info[0].ang + info[4].ang) / 2 + 90) < 2 && ms < 500,
+    { n: faces.length, info, ms: Math.round(ms) });
+  // P on them all: each pushed straight out from where it stands
+  const letters = faces.map((f) => app.doc.makeBody(f, "Text", "face"));
+  app.doc.commit([cyl, ...letters], "wrapped"); await sleep(30);
+  app.run("mode.body"); app.setSelection(letters.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+  app.run("op.pushpull"); await sleep(100);
+  const d = document.querySelector("#op-panel input[data-key=d]"); d.value = "1"; d.dispatchEvent(new Event("input", { bubbles: true })); await sleep(300);
+  app.applyOp(); for (let k = 0; k < 100 && app.op; k++) await sleep(50);
+  const solids = app.doc.bodies.filter((b) => b.kind === "solid" && b.id !== cyl.id);
+  const reach = solids.map((b) => Math.max(...b.shape.edges.flatMap((e) => [e.startPoint, e.endPoint]).map((p) => { const [x, y] = p.toTuple(); return Math.hypot(x, y); })));
+  expect("wrapped text: P 1 mm pushes all 5 out from the side (valid solids, reaching ~31 mm from the axis)",
+    solids.length === 5 && solids.every((b) => K.isValidShape(b.shape)) && reach.every((r) => r > 30.8 && r < 31.6), { n: solids.length, reach });
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("wrap text scenario failed: " + JSON.stringify(failed));
+  return [{ label: "wrapped text", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Macro → Gridfinity bin: grid squares × units, compartments, lip, magnets; its sizes measured on the preview; a second bin stacks in the lip. */
 const SCENARIO_GRIDFINITY = String.raw`
 (async () => {
@@ -7154,10 +7193,22 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "wraptext") {
+      // (while working on it: just the wrapped text scenario)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_WRAPTEXT, true));
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "probe") {
       // (while working on something: run the JS in YDDD_PROBE in the app and print what it returns)
       const out = await win.webContents.executeJavaScript(`(async () => { const K = window.ydddKernel, app = window.ydddApp; try { return JSON.stringify(await (async () => { ${process.env.YDDD_PROBE} })()); } catch (e) { return "THREW " + (e && e.message || e); } })()`, true);
       console.log("PROBE " + out);
+      if (process.env.YDDD_PROBE_SHOT) await writeFile(process.env.YDDD_PROBE_SHOT, (await win.webContents.capturePage()).toPNG());
       app.exit(0);
       return;
     }
@@ -7370,6 +7421,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ORTHO, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BATTERY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GRIDFINITY, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_WRAPTEXT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {

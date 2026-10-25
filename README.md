@@ -32,7 +32,7 @@ Press **F1** for all the shortcuts.
   splits a box into equal compartments. *Gridfinity bin* and *Gridfinity baseplate* make bins and the plate they drop into, sized to fill your drawer.
 - **Fit for printing**: click a hole or pin and type a new diameter, or "0.2 mm bigger all
   round". Fillet, chamfer, shell.
-- **Text**: raised or cut letters on any flat face, in any installed font (Thai too).
+- **Text**: raised or cut letters on any flat face, or wrapped round a curved side (a cup, a round box), in any installed font (Thai too).
 - **Exact geometry**: an OpenCascade B-rep kernel underneath. Export STEP, STL or 3MF (one
   closed, named object per body).
 

@@ -23,6 +23,7 @@ import {
   makeCircleFace,
   makePolygonFace,
   makeTextFaces,
+  wrappedTextFaces,
   tessellate,
   type TextOptions,
   type BodyKind,
@@ -1022,10 +1023,27 @@ export class TextTool extends DrawTool {
   readonly name = "Text";
   static settings: TextSettings = { text: "Text", height: 10, align: "left", lineSpacing: 1, letterSpacing: 0, font: "" };
   protected readonly hints = [
-    "Text: click where it starts (on the grid or on a planar face)",
+    "Text: click where it starts (on the grid or on a planar face) — or on a curved side (a cup): it wraps round it",
     "Text: type in the panel · click elsewhere to move it · Enter / Create adds it",
   ];
   private at = new THREE.Vector3();
+  /** Wrapped round a curved face (clicked on one): the face and where the text's middle is. */
+  private curved: { shape: Shape; faceId: number; at: V3 } | null = null;
+  /** No wrapping (editing a flat text: a click on a curved face moves it flat). */
+  noWrap = false;
+
+  /** The text wraps round a curved face (see wrappedTextFaces): its letters can't be edited again as a text. */
+  get wrapped(): boolean {
+    return this.curved !== null;
+  }
+
+  /** The curved face under the cursor (not a planar one), and the point on it. */
+  private curvedUnder(e: PointerEvent): { shape: Shape; faceId: number; at: V3 } | null {
+    if (this.noWrap) return null;
+    const f = this.host.viewport.faceUnder(e.clientX, e.clientY);
+    if (!f || f.body.kind !== "solid" || planarFaceFrame(f.body.shape, f.faceId)) return null;
+    return { shape: f.body.shape, faceId: f.faceId, at: [f.point.x, f.point.y, f.point.z] };
+  }
   private faces: Shape[] = [];
   private error = "";
 
@@ -1064,18 +1082,27 @@ export class TextTool extends DrawTool {
   move(e: PointerEvent): void {
     this.last = e;
     if (this.stage === 1) return;
+    const c = this.curvedUnder(e);
+    if (c) return this.host.viewport.setOverlay([this.cursor(new THREE.Vector3(...c.at))]);
     this.frame = upright(this.frameUnder(e));
     const p = this.hit(e, this.host.snapStep(e));
     if (p) this.host.viewport.setOverlay([this.cursor(this.frame.point(p.u, p.v))]);
   }
 
   down(e: PointerEvent): void {
-    const frame = upright(this.frameUnder(e));
-    const prev = this.frame;
-    this.frame = frame;
-    const p = this.hit(e, this.host.snapStep(e));
-    if (!p) return void (this.frame = prev);
-    this.at = this.frame.point(p.u, p.v);
+    const curved = this.curvedUnder(e);
+    if (curved) {
+      this.curved = curved;
+      this.at.set(...curved.at);
+    } else {
+      const frame = upright(this.frameUnder(e));
+      const prev = this.frame;
+      this.frame = frame;
+      const p = this.hit(e, this.host.snapStep(e));
+      if (!p) return void (this.frame = prev);
+      this.at = this.frame.point(p.u, p.v);
+      this.curved = null;
+    }
     const first = this.stage === 0;
     if (!first) this.moved = true;
     this.stage = 1;
@@ -1104,7 +1131,9 @@ export class TextTool extends DrawTool {
     const vp = this.host.viewport;
     const s = TextTool.settings;
     try {
-      this.faces = makeTextFaces(this.frame.toKernel(), [this.at.x, this.at.y, this.at.z], s.text, s);
+      this.faces = this.curved
+        ? wrappedTextFaces(this.curved.shape, this.curved.faceId, this.curved.at, s.text, s)
+        : makeTextFaces(this.frame.toKernel(), [this.at.x, this.at.y, this.at.z], s.text, s);
       this.error = "";
     } catch (err) {
       this.faces = [];
@@ -1118,7 +1147,7 @@ export class TextTool extends DrawTool {
       seg.push(...t.edges.lines);
     }
     // (lifted a hair off the plane, so a text on a solid's face shows over it)
-    const lift = this.frame.z.clone().multiplyScalar(vp.worldPerPixel(this.at) * 0.5);
+    const lift = this.curved ? new THREE.Vector3() : this.frame.z.clone().multiplyScalar(vp.worldPerPixel(this.at) * 0.5);
     const tris = new THREE.BufferGeometry();
     tris.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
     tris.setIndex(idx);

@@ -76,6 +76,7 @@ import {
   gridfinitySizes,
   gridfinityBaseplate,
   gridfinityBaseplateSizes,
+  wrappedTextFaces,
   type GridfinityBin,
   type GridfinityBaseplate,
   GRIDFINITY,
@@ -4559,6 +4560,18 @@ class App implements ToolHost {
       text.select();
       update();
     }, (faces, s) => {
+      if (tool.wrapped) {
+        // Wrapped round a curved face: its letters stood on it — no TextRecord (they can't be refitted to edit them)
+        this.endTool();
+        const words = s.text.trim().replace(/\s+/g, " ");
+        const group = this.uniqueGroupName(`Text "${words.length > TEXT_NAME_MAX ? words.slice(0, TEXT_NAME_MAX - 1).trimEnd() + "…" : words}"`);
+        const made = faces.map((f) => ({ ...this.doc.makeBody(f, "Text", "face"), group }));
+        this.doc.commit([...this.doc.bodies, ...made], "Create text");
+        this.setMode("body");
+        this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
+        this.toast(`${group}: ${made.length} letter face${made.length > 1 ? "s" : ""} round the curve — P pushes them out; move them a little into the side, then Union to join (wrapped text can't be edited again as a text)`);
+        return;
+      }
       const record: TextRecord = { text: s.text, font: s.font ?? "", height: s.height, align: s.align, letterSpacing: s.letterSpacing ?? 0, lineSpacing: s.lineSpacing, frame: tool.placement() };
       // Named after its words: Text "I love you", longer ones cut short (Text "I love my cat a…")
       const words = s.text.trim().replace(/\s+/g, " ");
@@ -4593,6 +4606,7 @@ class App implements ToolHost {
       this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
       this.toast(`${group}: ${made.length} face${made.length > 1 ? "s" : ""} — press P to push/pull them · the pencil by it in the Bodies panel edits it`);
     });
+    tool.noWrap = !!edit;
     const dispose = tool.dispose.bind(tool);
     tool.dispose = () => {
       dispose();
@@ -7646,7 +7660,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

@@ -5080,3 +5080,70 @@ export function gridfinityBaseplate(o: GridfinityBaseplate, at: V3 = [0, 0, 0]):
   if (!isValidShape(out)) throw new Error("Gridfinity baseplate: the result is not a valid solid");
   return out;
 }
+
+/** The point of `face` nearest `p` and the face's outward normal there. */
+function onFace(face: Face, p: V3): { p: V3; n: V3 } {
+  const pnt = new oc.gp_Pnt(...p), surface = oc.BRep_Tool.Surface(face.wrapped);
+  const proj = new oc.GeomAPI_ProjectPointOnSurf(pnt, surface, oc.Extrema_ExtAlgo.Extrema_ExtAlgo_Grad);
+  const near = proj.NearestPoint(), { U, V } = proj.LowerDistanceParameters(0, 0) as { U: number; V: number };
+  const at = new oc.gp_Pnt(), nv = new oc.gp_Vec(), props = new oc.BRepGProp_Face(face.wrapped, false);
+  props.Normal(U, V, at, nv);
+  const out = { p: [near.X(), near.Y(), near.Z()] as V3, n: norm3([nv.X(), nv.Y(), nv.Z()]) };
+  for (const x of [pnt, proj, near, at, nv, props]) x.delete();
+  return out;
+}
+
+/** `shape` moved by the frame (origin; x, y, z its axes): a point (a, b, c) goes to origin + a·x + b·y + c·z. */
+function toFrame<T extends OcShape<any>>(shape: T, f: Frame): T {
+  const t = new oc.gp_Trsf();
+  t.SetValues(f.x[0], f.y[0], f.z[0], f.origin[0], f.x[1], f.y[1], f.z[1], f.origin[1], f.x[2], f.y[2], f.z[2], f.origin[2]);
+  const b = new oc.BRepBuilderAPI_Transform(shape.wrapped, t, true);
+  const out = cast(b.Shape()) as unknown as T;
+  t.delete();
+  b.delete();
+  return out;
+}
+
+/**
+ * Text wrapped on a curved face (Text tool, a click on a curved side — a cup, a round box): the text laid out flat,
+ * each letter moved and turned to stand on the face at its distance along the surface from `at` (sideways round
+ * it, level; upright: the world Z up the face), its centre on the face, facing out. Flat letters (one face per
+ * outline), as the Text tool makes — Push/Pull makes them raised; they don't follow the curve within a letter.
+ */
+export function wrappedTextFaces(shape: Shape, faceId: number, at: V3, text: string, o: TextOptions): Face[] {
+  const face = findFace(shape, faceId);
+  if (!face) throw new Error("Text: the face isn't there any more");
+  const flat = makeTextFaces({ origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }, [0, 0, 0], text, o);
+  // Up the face: the world Z laid on it (a face looking up or down: the world Y)
+  const frameAt = (n: V3) => {
+    const w: V3 = Math.abs(n[2]) > 0.95 ? [0, 1, 0] : [0, 0, 1];
+    const k = dot3(w, n), up = norm3([w[0] - k * n[0], w[1] - k * n[1], w[2] - k * n[2]]);
+    return { up, right: cross3(up, n) };
+  };
+  const move = (p: V3, d: V3, k: number): V3 => [p[0] + k * d[0], p[1] + k * d[1], p[2] + k * d[2]];
+  const centres = flat.map((f) => {
+    const [[x0, y0], [x1, y1]] = f.boundingBox.bounds;
+    return { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+  });
+  // Walk sideways along the face from the click, in small steps, both ways: where each distance along it lands
+  const start = onFace(face, at);
+  const reach = Math.max(0, ...centres.map((c) => Math.abs(c.x))) + 1;
+  const step = Math.min(0.5, o.height / 10);
+  const walk = (dir: 1 | -1) => {
+    const pts = [start];
+    let cur = start;
+    for (let s = step; s <= reach + step; s += step) {
+      cur = onFace(face, move(cur.p, frameAt(cur.n).right, dir * step));
+      pts.push(cur);
+    }
+    return pts;
+  };
+  const ahead = walk(1), behind = walk(-1);
+  const along = (x: number) => (x >= 0 ? ahead : behind)[Math.min(Math.round(Math.abs(x) / step), ahead.length - 1)];
+  return flat.map((f, i) => {
+    // The letter's centre: up the face from the line it's on, back onto the face; the letter stood there, facing out
+    const c = centres[i], base = along(c.x);
+    const q = onFace(face, move(base.p, frameAt(base.n).up, c.y)), { up, right } = frameAt(q.n);
+    return toFrame(f.clone().translate([-c.x, -c.y, 0]) as Face, { origin: q.p, x: right, y: up, z: q.n });
+  });
+}
