@@ -16,6 +16,9 @@ import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
 import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 
+/** A dimension on screen: a panel's measurement may say more than its length ("2 squares · 83.5"). */
+export type ShownDimension = Dimension & { readonly text?: string };
+
 export type SelMode = "body" | "face" | "edge";
 
 /** A selectable element. `id` is the face/edge hash (0 for whole bodies). */
@@ -1308,9 +1311,10 @@ export class Viewport {
 
   /**
    * Show the dimensions (and `preview`, one being placed): a line parallel to a–b shifted by o, with
-   * arrowheads, extension lines from a and b, and the length as text in the middle.
+   * arrowheads, extension lines from a and b, and the length as text in the middle. `preview`: also several (a panel's
+   * measurements of its preview), each with its own text if it has one.
    */
-  setDimensions(list: readonly Dimension[], selected = -1, preview: Dimension | null = null): void {
+  setDimensions(list: readonly Dimension[], selected = -1, preview: ShownDimension | readonly ShownDimension[] | null = null): void {
     for (const c of [...this.dimRoot.children]) {
       c.removeFromParent();
       (c as THREE.LineSegments).geometry.dispose();
@@ -1329,8 +1333,8 @@ export class Viewport {
     }
     this.dimLabelBox.innerHTML = "";
     this.dimLabels = [];
-    const all: [Dimension, number][] = list.map((d, i) => [d, i]);
-    if (preview) all.push([preview, -1]);
+    const all: [ShownDimension, number][] = list.map((d, i) => [d, i]);
+    for (const p of preview ? (Array.isArray(preview) ? preview : [preview as ShownDimension]) : []) all.push([p, -1]);
     for (const [d, i] of all) {
       const a = new THREE.Vector3(...d.a), b = new THREE.Vector3(...d.b), o = new THREE.Vector3(...d.o);
       const len = a.distanceTo(b);
@@ -1383,7 +1387,7 @@ export class Viewport {
         for (const w of [1, -1]) pts.push(p, p.clone().addScaledVector(u, s * arrow).addScaledVector(side, w * arrow * 0.35));
       }
       draw(pts);
-      label(num(len), a2.clone().add(b2).multiplyScalar(0.5));
+      label(d.text ?? num(len), a2.clone().add(b2).multiplyScalar(0.5));
     }
     this.requestRender();
   }

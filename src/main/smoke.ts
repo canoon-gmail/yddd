@@ -4694,6 +4694,70 @@ const SCENARIO_ORTHO = String.raw`
 })()
 `;
 
+/** Macro → Gridfinity bin: grid squares × units, compartments, lip, magnets; its sizes measured on the preview; a second bin stacks in the lip. */
+const SCENARIO_GRIDFINITY = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const near = (a, b, tol = 1e-3) => Math.abs(a - b) < tol;
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const set = (v) => { for (const [k, x] of Object.entries(v)) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (!i) continue; if (i.type === "checkbox") { i.checked = !!x; i.dispatchEvent(new Event("change", { bubbles: true })); } else { i.value = String(x); i.dispatchEvent(new Event("input", { bubbles: true })); } } };
+  const keys = () => [...document.querySelectorAll("#op-panel [data-key]")].map((i) => i.dataset.key);
+  const labels = () => [...document.querySelectorAll("#dim-labels .dim-label.preview")].map((e) => e.textContent);
+  localStorage.removeItem("yddd.pro"); document.body.classList.remove("pro");
+  app.doc.reset([]);
+  const other = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 40, 10), "Box");
+  app.doc.commit([other], "a box"); await sleep(30);
+  app.setSelection([]); let t0 = performance.now(); app.run("macro.gridfinity"); await sleep(300);
+  const openMs = performance.now() - t0;
+  const beginner = { keys: keys(), dims: labels() };
+  app.applyOp(); await sleep(50);
+  const bin = app.doc.bodies[1], bb = bin && bin.shape.boundingBox.bounds;
+  expect("gridfinity: beginner panel — width, depth, height, compartments, lip, magnets; default 2 × 1 × 6 → one valid solid 83.5 × 41.5 × 42 + lip 4.4, right of the box, on the grid",
+    beginner.keys.join() === "width,depth,height,columns,rows,lip,magnets" && bin && /^Gridfinity bin 2×1×6\b/.test(bin.name) && K.isValidShape(bin.shape) &&
+    near(bb[1][0] - bb[0][0], 83.5) && near(bb[1][1] - bb[0][1], 41.5) && near(bb[0][2], 0) && near(bb[1][2], 46.4) && near(bb[0][0], 30),
+    { keys: beginner.keys, name: bin && bin.name, bb });
+  expect("gridfinity: the preview measured — squares, units and mm; the lip",
+    beginner.dims.includes("2 squares · 83.5 mm") && beginner.dims.includes("1 square · 41.5 mm") && beginner.dims.includes("6 units · 42 mm") && beginner.dims.includes("lip 4.4"),
+    beginner.dims);
+  expect("gridfinity: measurements gone with the panel", labels().length === 0, labels());
+  app.run("edit.undo"); await sleep(30);
+  expect("gridfinity: one undo step", app.doc.bodies.length === 1, app.doc.bodies.length);
+  // Compartments and magnets
+  app.setSelection([]); app.run("macro.gridfinity"); await sleep(100);
+  set({ width: 3, depth: 2, height: 4, columns: 3, rows: 2, magnets: 1 }); await sleep(400);
+  const dims2 = labels();
+  app.applyOp(); await sleep(50);
+  const b2 = app.doc.bodies[1];
+  const o = { width: 3, depth: 2, height: 4, columns: 3, rows: 2, lip: true, magnets: false, wall: 1.2 };
+  const plain = K.gridfinityBin(o), holes = 24 * Math.PI * 3.25 ** 2 * 2.4;
+  expect("gridfinity: 3 × 2 × 4, 3 × 2 compartments, magnets → valid; 24 magnet holes (exact volume); the compartment measured",
+    b2 && K.isValidShape(b2.shape) && near(K.solidVolume(plain) - K.solidVolume(b2.shape), holes, 0.05) && dims2.some((t) => /^compartment 40\.23 × 39\.95 mm$/.test(t)),
+    { dims2, vol: b2 && K.solidVolume(b2.shape), plain: K.solidVolume(plain), holes });
+  // A second bin on top: its feet fit the lip (touching, no overlap)
+  const lower = K.gridfinityBin({ ...o, width: 1, depth: 1, height: 3 }), upper = K.translateShape(K.gridfinityBin({ ...o, width: 1, depth: 1, height: 3 }), [0, 0, 21 - 0.35]);
+  let overlap = 0;
+  try { overlap = K.solidVolume(K.booleanOp("intersect", lower, [upper])); } catch { overlap = 0; }
+  const noLip = K.gridfinityBin({ ...o, width: 1, depth: 1, height: 3, lip: false });
+  expect("gridfinity: a bin stacked on another sits in its lip (overlap under 0.5 mm³); without the lip it's 21 mm tall",
+    overlap < 0.5 && near(noLip.boundingBox.bounds[1][2], 21), { overlap, noLipTop: noLip.boundingBox.bounds[1][2] });
+  // Pro layout: the wall
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+  app.setSelection([]); app.run("macro.gridfinity"); await sleep(100);
+  const proKeys = keys();
+  app.cancelOp(); await sleep(30);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "D", code: "KeyD", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true })); await sleep(20);
+  localStorage.removeItem("yddd.pro");
+  expect("gridfinity, Pro layout: + wall", proKeys.join() === "width,depth,height,columns,rows,lip,magnets,wall", proKeys);
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("gridfinity scenario failed: " + JSON.stringify(failed));
+  return [{ label: "gridfinity bin", passed: checks.length - failed.length, total: checks.length, checks, openMs: Math.round(openMs) }];
+})()
+`;
+
 /** Macro → Battery case: AA / AAA / 18650 in a grid of holes, beside what's there; the Pro layout adds C / D / custom and the sizes. */
 const SCENARIO_BATTERY = String.raw`
 (async () => {
@@ -7055,6 +7119,24 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "gridfinity") {
+      // (while working on it: just the Gridfinity scenario)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GRIDFINITY, true));
+        // A picture of the panel's preview with its measurements
+        await win.webContents.executeJavaScript(`(async () => {
+          const app = window.ydddApp; app.doc.reset([]); app.setSelection([]); app.run("view.iso");
+          app.run("macro.gridfinity"); await new Promise((r) => setTimeout(r, 100));
+          for (const [k, x] of Object.entries({ width: 3, depth: 2, height: 4, columns: 3, rows: 2 })) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); i.value = String(x); i.dispatchEvent(new Event("input", { bubbles: true })); }
+          await new Promise((r) => setTimeout(r, 600)); app.run("view.fit"); await new Promise((r) => setTimeout(r, 300)); return 0; })()`, true);
+        await writeFile(path.join(process.env.YDDD_SMOKE!, "gridfinity.png"), (await win.webContents.capturePage()).toPNG());
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "array") {
       // (while working on it: just the array scenarios)
       for (const sc of [SCENARIO_ARRAY, SCENARIO_ARRAYFAST]) {
@@ -7237,6 +7319,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_COPYPASTE, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_ORTHO, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BATTERY, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GRIDFINITY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {

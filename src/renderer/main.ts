@@ -72,6 +72,9 @@ import {
   boxLid,
   boxDividers,
   batteryCase,
+  gridfinityBin,
+  gridfinitySizes,
+  GRIDFINITY,
   hasBoxRim,
   offsetRing,
   scaleShape,
@@ -137,7 +140,7 @@ import {
   parseStl,
 } from "./kernel";
 import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
-import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
+import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type ShownDimension } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
@@ -214,6 +217,8 @@ type OpInput = HTMLInputElement | HTMLSelectElement;
 interface OpOutcome {
   /** Shapes to preview, keyed by the body they replace (unknown/negative keys = new bodies). */
   ghost: Map<number, Shape>;
+  /** Measurements on the preview (what the panel's numbers come to), shown while it is. */
+  dims?: ShownDimension[];
   /**
    * Instead of `ghost`: preview these bodies' current meshes through a transform (instant);
    * the exact result is then only built by `commit`, which may throw.
@@ -652,6 +657,7 @@ class App implements ToolHost {
   };
   /** Dividers (Macro menu): the last values. */
   private dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
+  private gridfinityDefaults = { width: 2, depth: 1, height: 6, columns: 1, rows: 1, lip: 1, magnets: 0, wall: 1.2 };
   private batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
@@ -1152,6 +1158,7 @@ class App implements ToolHost {
       case "macro.lidOver": return this.openBoxLid(true, this.selectedLidBox());
       case "macro.dividers": return this.openDividers(this.selectedLidBox());
       case "macro.battery": return this.openBatteryCase();
+      case "macro.gridfinity": return this.openGridfinityBin();
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -2080,7 +2087,12 @@ class App implements ToolHost {
     if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
     else if (result.placed) this.viewport.showGhostPlaced(result.placed, result.hide);
     else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
+    if (result.dims || this.opDimsShown) this.showDimensions();
+    this.opDimsShown = !!result.dims;
   }
+
+  /** A panel's measurements are on screen (see OpOutcome.dims): taken off with its preview. */
+  private opDimsShown = false;
 
   private showOpError(op: NonNullable<App["op"]>, e: unknown, err: Element): void {
     op.result = null;
@@ -2089,6 +2101,8 @@ class App implements ToolHost {
     err.classList.remove("warn");
     err.classList.toggle("waiting", e instanceof OpWaiting);
     this.viewport.clearGhost();
+    if (this.opDimsShown) this.showDimensions();
+    this.opDimsShown = false;
   }
 
   private applyOp(): void {
@@ -2147,6 +2161,8 @@ class App implements ToolHost {
     this.opPanel.hidden = true;
     this.opPanel.innerHTML = "";
     this.viewport.clearGhost();
+    if (this.opDimsShown) this.showDimensions();
+    this.opDimsShown = false;
     this.hoverGuide = -1; // (Array copy lights up the guide under the cursor)
     this.showGuides(); // (Revolve / Sweep show their guide selected)
     this.viewport.canvas.style.cursor = this.selCursor();
@@ -2753,6 +2769,70 @@ class App implements ToolHost {
         };
       },
       remember: (v) => (this.batteryDefaults = { ...d, ...v }),
+    });
+  }
+
+  /**
+   * Macro → Gridfinity bin: width × depth grid squares (42 mm), height in 7 mm units, compartments, the stacking lip,
+   * magnet holes — beside what's there, its sizes measured on the preview. The Pro layout adds the wall.
+   */
+  private openGridfinityBin(): void {
+    const pro = isPro(), d = this.gridfinityDefaults, g = GRIDFINITY;
+    const fields: OpField[] = [
+      { key: "width", label: `Width (grid squares of ${g.grid} mm)`, value: d.width, step: 1, min: 1 },
+      { key: "depth", label: `Depth (grid squares of ${g.grid} mm)`, value: d.depth, step: 1, min: 1 },
+      { key: "height", label: `Height (units of ${g.unit} mm)`, value: d.height, step: 1, min: 2 },
+      { key: "columns", label: "Compartments across", value: d.columns, step: 1, min: 1 },
+      { key: "rows", label: "Compartments front to back", value: d.rows, step: 1, min: 1 },
+      { key: "lip", label: "Stacking lip", type: "checkbox", value: d.lip },
+      { key: "magnets", label: `Magnet holes (${g.magnet.d} × ${g.magnet.depth} mm, 4 per square)`, type: "checkbox", value: d.magnets },
+    ];
+    if (pro) fields.push({ key: "wall", label: "Wall (mm)", value: d.wall, step: 0.1, min: 0.4 });
+    // Beside the solids already there (the right of them), else at the origin.
+    let right = -Infinity;
+    for (const b of this.doc.bodies) {
+      const box = this.viewport.drawnBox(b.id);
+      if (box) right = Math.max(right, box.max.x);
+    }
+    const params = (v: Record<string, number>) => ({
+      width: Math.round(v.width), depth: Math.round(v.depth), height: Math.round(v.height), columns: Math.round(v.columns), rows: Math.round(v.rows),
+      lip: !!v.lip, magnets: !!v.magnets, wall: pro ? v.wall : d.wall,
+    });
+    const squares = (n: number) => `${n} square${n === 1 ? "" : "s"}`;
+    this.startOp({
+      title: "Gridfinity bin",
+      label: "Gridfinity bin",
+      note: "Fits Gridfinity baseplates; bins stack on the lip",
+      fields,
+      compute: (v) => {
+        const p = params(v);
+        const dx = right > -Infinity ? right + 10 + gridfinitySizes(p).w / 2 : 0;
+        const solid = gridfinityBin(p, [dx, 0, 0]);
+        // Measured on the preview: width along the front, depth down the right side, height (and the lip) up the
+        // back right corner (clear of those two, and of the panel on the left), a compartment across the top
+        const { w, d: dd, h, cellW, cellD } = gridfinitySizes(p);
+        const x0 = dx - w / 2, x1 = dx + w / 2, y0 = -dd / 2, y1 = dd / 2, gap = 8;
+        const dims: ShownDimension[] = [
+          { a: [x0, y0, 0], b: [x1, y0, 0], o: [0, -gap, 0], text: `${squares(p.width)} · ${fmt(w)} mm` },
+          { a: [x1, y0, 0], b: [x1, y1, 0], o: [gap, 0, 0], text: `${squares(p.depth)} · ${fmt(dd)} mm` },
+          { a: [x1, y1, 0], b: [x1, y1, h], o: [gap * 0.7, gap * 0.7, 0], text: `${p.height} units · ${fmt(h)} mm` },
+        ];
+        if (p.lip) dims.push({ a: [x1, y1, h], b: [x1, y1, h + g.lip], o: [gap * 0.7, gap * 0.7, 0], text: `lip ${fmt(g.lip)}` });
+        if (p.columns > 1 || p.rows > 1) {
+          const cx = x0 + p.wall, cy = y1 - p.wall, top = p.lip ? h + g.lip : h;
+          dims.push({ a: [cx, cy, top], b: [cx + cellW, cy, top], o: [0, 0, gap * 0.6], text: `compartment ${fmt(cellW)} × ${fmt(cellD)} mm` });
+        }
+        return {
+          ghost: new Map([[-1, solid]]),
+          dims,
+          commit: () => {
+            const b = this.doc.makeBody(solid, `Gridfinity bin ${p.width}×${p.depth}×${p.height}`);
+            this.doc.commit([...this.doc.bodies, b], "Gridfinity bin");
+            return { select: [b.id], solidMode: true };
+          },
+        };
+      },
+      remember: (v) => (this.gridfinityDefaults = { ...d, ...v }),
     });
   }
 
@@ -4719,7 +4799,8 @@ class App implements ToolHost {
   /** Draw the dimensions (and `preview`, one being placed by Measure + Tab). */
   private showDimensions(preview: Dimension | null = null): void {
     if (this.selDim >= this.doc.dimensions.length) this.selDim = -1;
-    this.viewport.setDimensions(this.doc.dimensions, this.selDim, preview);
+    const opDims = this.op?.result?.dims ?? [];
+    this.viewport.setDimensions(this.doc.dimensions, this.selDim, opDims.length ? [...(preview ? [preview] : []), ...opDims] : preview);
   }
 
   private selectDimension(i: number): void {
@@ -7478,7 +7559,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

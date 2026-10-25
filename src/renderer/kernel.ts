@@ -4921,3 +4921,100 @@ export function batteryCase(o: BatteryCase, at: V3 = [0, 0, 0]): Solid {
   if (!isValidShape(out)) throw new Error("Battery case: the result is not a valid solid");
   return out;
 }
+
+/** Gridfinity (Macro menu): the standard's fixed sizes (mm) — a grid square, a height unit, the gap round a bin. */
+export const GRIDFINITY = { grid: 42, unit: 7, gap: 0.5, radius: 3.75, foot: 4.75, lip: 4.4, magnet: { d: 6.5, depth: 2.4, from: 13 } } as const;
+
+/** A Gridfinity bin (Macro menu): `width` × `depth` grid squares, `height` units tall (the lip on top of that). */
+export interface GridfinityBin {
+  width: number;
+  depth: number;
+  height: number;
+  /** Compartments: columns along the width × rows along the depth (1 × 1: none). */
+  columns: number;
+  rows: number;
+  /** The stacking lip: the next bin's feet sit in it. */
+  lip: boolean;
+  /** Round holes under each grid square's corners for 6 × 2 mm magnets. */
+  magnets: boolean;
+  /** Walls and dividers (mm); the floor is as thick, above the feet. */
+  wall: number;
+}
+
+/**
+ * The inside sizes of a Gridfinity bin: its outside (W × D, height H not counting the lip), where its floor is, and a
+ * compartment's size (for the panel's measurements — the same numbers gridfinityBin builds from).
+ */
+export function gridfinitySizes(o: GridfinityBin): { w: number; d: number; h: number; floor: number; cellW: number; cellD: number } {
+  const g = GRIDFINITY, w = Math.round(o.width) * g.grid - g.gap, d = Math.round(o.depth) * g.grid - g.gap, h = Math.round(o.height) * g.unit;
+  const columns = Math.round(o.columns), rows = Math.round(o.rows);
+  const inW = w - 2 * o.wall, inD = d - 2 * o.wall;
+  return { w, d, h, floor: g.foot + o.wall, cellW: (inW - (columns - 1) * o.wall) / columns, cellD: (inD - (rows - 1) * o.wall) / rows };
+}
+
+/**
+ * A Gridfinity bin, its bottom centred on `at`: a foot under each grid square (sloped 0.8, straight 1.8, sloped 2.15 mm
+ * — it drops into a baseplate), a rounded body over them, the inside cut out above a floor, divider walls, the
+ * stacking lip (the feet's shape turned inside out, a 45° slope under it so it prints without supports) and magnet
+ * holes. One solid.
+ */
+export function gridfinityBin(o: GridfinityBin, at: V3 = [0, 0, 0]): Solid {
+  const g = GRIDFINITY;
+  const nx = Math.round(o.width), ny = Math.round(o.depth), nz = Math.round(o.height), columns = Math.round(o.columns), rows = Math.round(o.rows);
+  if (!(nx >= 1 && ny >= 1)) throw new Error("Gridfinity bin: width and depth must be 1 grid square or more");
+  if (!(nz >= 2)) throw new Error("Gridfinity bin: the height must be 2 units (14 mm) or more");
+  if (!(columns >= 1 && rows >= 1)) throw new Error("Gridfinity bin: compartments must be 1 or more each way");
+  if (!(o.wall >= 0.4 && o.wall <= 2.5)) throw new Error("Gridfinity bin: the wall must be 0.4 to 2.5 mm");
+  const { w, d, h, floor, cellW, cellD } = gridfinitySizes(o);
+  if (cellW < 3 || cellD < 3) throw new Error("Gridfinity bin: no room for that many compartments — fewer, or a bigger bin");
+  // A rounded rectangle `inset` in from a W × D outline (its corners following the outer 3.75 mm round), at height z
+  const ring = (cx: number, cy: number, W: number, D: number, inset: number, z: number) =>
+    drawRoundedRectangle(W - 2 * inset, D - 2 * inset, g.radius - inset).sketchOnPlane(new Plane([at[0] + cx, at[1] + cy, at[2] + z], [1, 0, 0], [0, 0, 1])) as Sketch;
+  const loft = (cx: number, cy: number, W: number, D: number, steps: [number, number][]) => {
+    const [first, ...rest] = steps.map(([inset, z]) => ring(cx, cy, W, D, inset, z));
+    return first.loftWith(rest, { ruled: true }) as Solid;
+  };
+  // The feet: one per grid square
+  const sq = g.grid - g.gap, x0 = -w / 2 + sq / 2, y0 = -d / 2 + sq / 2;
+  const feet: Solid[] = [];
+  for (let i = 0; i < nx; i++) {
+    for (let j = 0; j < ny; j++) feet.push(loft(x0 + i * g.grid, y0 + j * g.grid, sq, sq, [[2.95, 0], [2.15, 0.8], [2.15, 2.6], [0, g.foot]]));
+  }
+  // The body: from the feet's top to the bin's height (with the lip a little past its top: the lip's slope cuts
+  // through the outside at the lip's height, a sharp edge — the body's top face is cut away whole)
+  const top = o.lip ? h + g.lip + 0.3 : h;
+  const body = ring(0, 0, w, d, 0, g.foot).extrude(top - g.foot) as Solid;
+  // The inside: straight walls up from the floor; with the lip, a 45° slope in under it, then the lip's shape (0.7
+  // sloped, 1.8 straight, 1.9 sloped out to the outside at the lip's top)
+  const t = o.wall, inside = o.lip
+    ? loft(0, 0, w, d, [[t, floor], [t, h - (2.6 - t)], [2.6, h], [1.9, h + 0.7], [1.9, h + 2.5], [-0.5, h + g.lip + 0.5]])
+    : loft(0, 0, w, d, [[t, floor], [t, h + 1]]);
+  let bin = booleanOp("union", body, feet);
+  // Dividers: slabs across the inside, clipped to it (round corners), joined before the inside is cut out; with the
+  // lip they stop 1 mm below the bin's height (the next bin's feet come down to 0.35 mm below it)
+  const walls: Solid[] = [];
+  const wallTop = o.lip ? h - 1 : h, X = (x: number): V3 => [at[0] + x, at[1], at[2] + floor - 1];
+  const frame: Frame = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  for (let i = 1; i < columns; i++) walls.push(makeBox(frame, X(-w / 2 + t + i * cellW + (i - 0.5) * t), t, d, wallTop - floor + 1));
+  for (let j = 1; j < rows; j++) {
+    const y = -d / 2 + t + j * cellD + (j - 0.5) * t;
+    walls.push(makeBox(frame, [at[0], at[1] + y, at[2] + floor - 1], w, t, wallTop - floor + 1));
+  }
+  bin = booleanOp("subtract", bin, [inside]);
+  if (walls.length) {
+    const grid = walls.length > 1 ? booleanOp("union", walls[0], walls.slice(1)) : walls[0];
+    bin = booleanOp("union", bin, [booleanOp("intersect", grid, [inside])]);
+  }
+  // Magnet holes: 4 under each grid square, 13 mm from its centre each way
+  if (o.magnets) {
+    const m = g.magnet, holes: Solid[] = [];
+    for (let i = 0; i < nx; i++) {
+      for (let j = 0; j < ny; j++) {
+        for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) holes.push(occCylinder(m.d / 2, m.depth + 1, [at[0] + x0 + i * g.grid + sx * m.from, at[1] + y0 + j * g.grid + sy * m.from, at[2] - 1], [0, 0, 1]));
+      }
+    }
+    bin = booleanOp("subtract", bin, holes);
+  }
+  if (!isValidShape(bin)) throw new Error("Gridfinity bin: the result is not a valid solid");
+  return bin;
+}
