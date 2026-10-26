@@ -538,6 +538,8 @@ const SIDEBAR_KEY = "yddd.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
 const AUTO_SNAP_KEY = "yddd.autoSnap";
 /** More guides than this from one Guide tool run are grouped (Bodies panel). */
 const GUIDE_GROUP_MIN = 4;
+/** The Bodies panel: a list longer than this shows only the rows in view (thousands of rows made every change slow). */
+const OL_VIRTUAL_MIN = 400;
 
 /** The Snap step (status bar), remembered for next time. */
 const SNAP_STEP_KEY = "yddd.snapStep";
@@ -6577,6 +6579,10 @@ class App implements ToolHost {
   /** The last row clicked (without Shift) in the Bodies panel: where a Shift+click range starts. */
   private olAnchor: number | null = null;
   private olBound = false;
+  /** The body rows' ids in the panel's order (see renderOutliner); the row height and the spacers of a long list. */
+  private olIds: number[] = [];
+  private olRowH = 30;
+  private olSpacers: HTMLElement[] = [];
 
   private renderOutliner(): void {
     const el = $("outliner");
@@ -6692,7 +6698,7 @@ class App implements ToolHost {
         }
         this.setMode("body");
         const item: SelItem = { kind: "body", body: b.id, id: 0 };
-        const rows = [...el.querySelectorAll<HTMLElement>(".ol-row")].map((r) => Number(r.dataset.id));
+        const rows = this.olIds;
         if (e.shiftKey && this.olAnchor !== null && rows.includes(this.olAnchor)) {
           // Shift: every row from the last clicked one to this one, up or down (Ctrl+Shift: added to the selection).
           const [i, j] = [rows.indexOf(this.olAnchor), rows.indexOf(b.id)].sort((p, q) => p - q);
@@ -6705,6 +6711,16 @@ class App implements ToolHost {
           const exists = this.selection.some((s) => sameItem(s, item));
           this.setSelection(exists ? this.selection.filter((s) => !sameItem(s, item)) : [...this.selection, item]);
         } else this.setSelection([item]);
+      });
+      // (a long list: the rows coming into view made as it scrolls)
+      let queued = false;
+      el.parentElement!.addEventListener("scroll", () => {
+        if (queued || !el.querySelector(".ol-spacer")) return;
+        queued = true;
+        requestAnimationFrame(() => {
+          queued = false;
+          this.renderOutliner();
+        });
       });
       el.addEventListener("dblclick", (e) => {
         const cell = (e.target as HTMLElement).closest(".ol-name");
@@ -6726,11 +6742,15 @@ class App implements ToolHost {
       return;
     }
     el.querySelector(".ol-empty")?.remove();
-    // Rows in document order; a group's header where its first member is, its members right under it.
-    const order: HTMLElement[] = [];
+    // Rows in document order; a group's header where its first member is, its members right under it. Each row is made
+    // (or brought up to date) only when it's on the page: a long list shows just the rows in view (see OL_VIRTUAL_MIN).
+    const order: (() => HTMLElement)[] = [];
+    /** The body rows' ids in that order (for a Shift+click range: most rows may not be on the page). */
+    const ids: number[] = [];
     const live = new Set<number>(), liveGroups = new Set<string>();
+    const members = new Map<string, Body[]>();
+    for (const b of this.doc.bodies) if (b.group) (members.get(b.group) ?? members.set(b.group, []).get(b.group)!).push(b);
     const bodyRow = (b: Body): HTMLElement => {
-      live.add(b.id);
       const hidden = this.hidden.has(b.id);
       const look = this.doc.lookOf(b), lk = `${look.color}:${look.opacity}`;
       let entry = this.olRows.get(b.id);
@@ -6758,14 +6778,70 @@ class App implements ToolHost {
     };
     for (const b of this.doc.bodies) {
       if (!b.group) {
-        order.push(bodyRow(b));
+        live.add(b.id);
+        ids.push(b.id);
+        order.push(() => bodyRow(b));
         continue;
       }
       if (liveGroups.has(b.group)) continue; // (listed with its group)
       const g = b.group;
       liveGroups.add(g);
-      const ms = this.doc.bodies.filter((x) => x.group === g);
+      const ms = members.get(g)!;
       const open = !this.olCollapsed.has(g);
+      for (const m of ms) live.add(m.id); // (folded: kept, just not shown)
+      order.push(() => this.groupRow(g, ms, open, selected));
+      if (open) for (const m of ms) {
+        ids.push(m.id);
+        order.push(() => bodyRow(m));
+      }
+    }
+    // Guide groups (more than 4 guides from one Guide tool run), after the bodies.
+    for (const [g, n] of guideGroups) order.push(() => this.guideGroupRow(g, n));
+    for (const g of [...this.olGuideGroups.keys()]) if (!guideGroups.has(g)) this.olGuideGroups.delete(g);
+    for (const g of [...this.hiddenGuideGroups]) if (!guideGroups.has(g)) this.hiddenGuideGroups.delete(g);
+    this.olIds = ids;
+    // A long list: only the rows in view (and a few more each way) on the page, spacers for the rest
+    let rows: HTMLElement[], above = 0, below = 0;
+    if (order.length <= OL_VIRTUAL_MIN) rows = order.map((make) => make());
+    else {
+      // (the panel scrolls, the list in it: how far the list's top is above the panel's, and the panel's height)
+      const sc = el.parentElement!, top = Math.max(0, sc.getBoundingClientRect().top - el.getBoundingClientRect().top);
+      const h = this.olRowH, last = Math.min(order.length, Math.ceil((top + sc.clientHeight) / h) + 15);
+      const first = Math.max(0, Math.min(Math.floor(top / h) - 15, last - Math.ceil(sc.clientHeight / h) - 30));
+      rows = order.slice(first, last).map((make) => make());
+      [above, below] = [first * h, (order.length - last) * h];
+    }
+    const spacer = (k: 0 | 1, px: number): HTMLElement[] => {
+      if (!px) return [];
+      const sp = (this.olSpacers[k] ??= Object.assign(document.createElement("div"), { className: "ol-spacer" }));
+      sp.style.height = `${px}px`;
+      return [sp];
+    };
+    const shownRows = [...spacer(0, above), ...rows, ...spacer(1, below)];
+    // Keep DOM order in sync (no-op when already correct); rows out of view and folded members leave the DOM.
+    let prev: Element | null = null;
+    for (const row of shownRows) {
+      const want: Element | null = prev ? prev.nextElementSibling : el.firstElementChild;
+      if (want !== row) el.insertBefore(row, want);
+      prev = row;
+    }
+    const shown = new Set<Element>(shownRows);
+    for (const child of [...el.children]) if (!shown.has(child)) child.remove();
+    // (the row height — from one row's top to the next's, margins included: what the spacers stand for)
+    // (it was only guessed — or the font size changed: the spacers again, with the real height)
+    if (rows.length > 1 && rows[1].offsetTop > rows[0].offsetTop) {
+      const h = rows[1].offsetTop - rows[0].offsetTop, again = above + below > 0 && Math.abs(h - this.olRowH) > 0.5;
+      this.olRowH = h;
+      if (again) return this.renderOutliner();
+    }
+    for (const id of [...this.olRows.keys()]) if (!live.has(id)) this.olRows.delete(id);
+    for (const g of [...this.olGroups.keys()]) if (!liveGroups.has(g)) this.olGroups.delete(g);
+    for (const g of [...this.olCollapsed]) if (!liveGroups.has(g)) this.olCollapsed.delete(g);
+  }
+
+  /** A group's header row in the Bodies panel (made once, brought up to date). */
+  private groupRow(g: string, ms: Body[], open: boolean, selected: Set<number>): HTMLElement {
+    {
       const allHidden = ms.every((x) => this.hidden.has(x.id)), allLocked = ms.every((x) => x.locked);
       let head = this.olGroups.get(g);
       if (!head) {
@@ -6788,12 +6864,13 @@ class App implements ToolHost {
       if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
       head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
       head.classList.toggle("hidden", allHidden);
-      order.push(head);
-      if (open) for (const m of ms) order.push(bodyRow(m));
-      else for (const m of ms) live.add(m.id); // (kept, just not shown)
+      return head;
     }
-    // Guide groups (more than 4 guides from one Guide tool run), after the bodies.
-    for (const [g, n] of guideGroups) {
+  }
+
+  /** A guide group's row in the Bodies panel. */
+  private guideGroupRow(g: string, n: number): HTMLElement {
+    {
       let head = this.olGuideGroups.get(g);
       if (!head) {
         head = document.createElement("div");
@@ -6806,22 +6883,8 @@ class App implements ToolHost {
       if (head.innerHTML !== html) head.innerHTML = html;
       head.classList.toggle("selected", this.selGuideGroup === g);
       head.classList.toggle("hidden", hidden);
-      order.push(head);
+      return head;
     }
-    for (const g of [...this.olGuideGroups.keys()]) if (!guideGroups.has(g)) this.olGuideGroups.delete(g);
-    for (const g of [...this.hiddenGuideGroups]) if (!guideGroups.has(g)) this.hiddenGuideGroups.delete(g);
-    // Keep DOM order in sync (no-op when already correct); folded members leave the DOM.
-    let prev: Element | null = null;
-    for (const row of order) {
-      const want: Element | null = prev ? prev.nextElementSibling : el.firstElementChild;
-      if (want !== row) el.insertBefore(row, want);
-      prev = row;
-    }
-    const shown = new Set<Element>(order);
-    for (const child of [...el.children]) if (!shown.has(child)) child.remove();
-    for (const id of [...this.olRows.keys()]) if (!live.has(id)) this.olRows.delete(id);
-    for (const g of [...this.olGroups.keys()]) if (!liveGroups.has(g)) this.olGroups.delete(g);
-    for (const g of [...this.olCollapsed]) if (!liveGroups.has(g)) this.olCollapsed.delete(g);
   }
 
   /** Double-click a group's name: rename it (all its members move to the new name; one undo step). */

@@ -4746,6 +4746,51 @@ const SCENARIO_WRAPTEXT = String.raw`
 })()
 `;
 
+/** The Bodies panel with 600 objects: only the rows in view on the page; scrolled, the rows there; Shift+click a range past rows not on the page. */
+const SCENARIO_LONGLIST = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const frame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  try {
+    app.doc.reset([]); app.setSelection([]); app.run("mode.body");
+    const box = K.makeBox(G, [0, 0, 0], 2, 2, 2);
+    const bodies = Array.from({ length: 600 }, (_, i) => app.doc.makeBody(K.translateShape(box, [(i % 30) * 4, Math.floor(i / 30) * 4, 0]), "Cube"));
+    app.doc.commit(bodies, "600 cubes"); await frame();
+    const el = document.getElementById("outliner"), sc = el.parentElement;
+    const rowIds = () => [...el.querySelectorAll(".ol-row")].map((r) => Number(r.dataset.id));
+    sc.scrollTop = 0; await frame(); await frame();
+    const top = rowIds();
+    expect("long list: 600 objects — only the rows in view (and a few more) on the page, the first ones at the top", top.length > 5 && top.length < 120 && top[0] === bodies[0].id, { onPage: top.length });
+    // Scrolled to the bottom: the last rows there, the list as tall as all 600
+    sc.scrollTop = sc.scrollHeight; await frame(); await frame();
+    const bottom = rowIds();
+    const lastRow = el.querySelector('.ol-row[data-id="' + bodies[599].id + '"]');
+    const fits = lastRow && Math.abs(lastRow.getBoundingClientRect().bottom - sc.getBoundingClientRect().bottom) < 60;
+    expect("long list: scrolled to the bottom — the last rows on the page, the last one at the panel's bottom", bottom.includes(bodies[599].id) && !bottom.includes(bodies[0].id) && fits, { onPage: bottom.length, fits });
+    // Shift+click from row 1 (scrolled away) to the last: all 600
+    sc.scrollTop = 0; await frame(); await frame();
+    el.querySelector('.ol-row[data-id="' + bodies[0].id + '"] .ol-name').click(); await frame();
+    sc.scrollTop = sc.scrollHeight; await frame(); await frame();
+    el.querySelector('.ol-row[data-id="' + bodies[599].id + '"] .ol-name').dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true })); await frame();
+    expect("long list: Shift+click from the first row to the last (rows between not on the page) selects all 600", app.selection.length === 600, app.selection.length);
+    // A short list: every row on the page (as before)
+    app.doc.reset([]); app.setSelection([]);
+    app.doc.commit(bodies.slice(0, 30).map((b) => app.doc.makeBody(b.shape, "Cube")), "30 cubes"); await frame();
+    expect("long list: a short list (30) has every row on the page", rowIds().length === 30 && !el.querySelector(".ol-spacer"), rowIds().length);
+  } catch (e) {
+    expect("long list: no errors", false, String(e && e.stack || e));
+  }
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("long list scenario failed: " + JSON.stringify(failed));
+  return [{ label: "bodies panel: long list", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Macro → Random: copies of a solid scattered on a flat face — on it, inside it, apart, sizes in range; the seed repeats; align; overlap; a clicked solid's face (slanted too). */
 const SCENARIO_RANDOM = String.raw`
 (async () => {
@@ -7523,6 +7568,17 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "longlist") {
+      // (while working on it: just the Bodies panel's long list)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LONGLIST, true));
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "random") {
       // (while working on it: just Macro → Random)
       try {
@@ -7777,6 +7833,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_DIVIDELOCK, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LOCK, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RANDOM, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LONGLIST, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {
