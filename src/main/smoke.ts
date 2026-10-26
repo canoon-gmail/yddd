@@ -854,7 +854,10 @@ const SCENARIO_3 = String.raw`
     app.setSelection([]);
     app.run("tool.divideFace");
     toolClicks([[420, 0, 20], [420, 30, 20]]);
+    const kept = !!app.tool && /1 line drawn/.test(document.getElementById("tool-panel")?.textContent ?? "");
+    key("Enter", "Enter"); // (the tool stays for more lines: Enter finishes)
     const sel = app.selection[0];
+    expect("14 divide face: the tool stays for more lines (its panel: 1 line drawn), Enter finishes", kept && !app.tool && !document.getElementById("tool-panel"), { kept, tool: !!app.tool });
     expect("14 divide face splits the top face, new edge selected in Edge mode", sh().faces.length === 7 && valid(sh()) && app.mode === "edge" && app.selection.length === 1 && sel.kind === "edge", [sh().faces.length, valid(sh()), app.mode, app.selection]);
     const e = sel && sh().edges.find((x) => x.hashCode === sel.id);
     const r3 = (p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6));
@@ -2567,6 +2570,16 @@ const SCENARIO_TIP = String.raw`
     // A cone (half-angle atan(10/30)): its tip has a dot; F 2 → a ball tip, exactly r/sin − r lower, no sharp tip left
     const cone = show(K.makeCone(G, [0, 0, 0], 10, 0, 30), "Cone"); await sleep(30);
     const coneDots = app.dots.length;
+    // A selected tip: the panel says so and offers F (clicked: Round tip) — not "Nothing selected"
+    const tipDot = vp.dots.map((d) => (d.material.map ? "round" : "square") + d.geometry.attributes.position.count).join();
+    clickAt(tipDots()[0].at); await sleep(20);
+    const props = document.getElementById("props").textContent || "";
+    [...document.querySelectorAll("#props .tip-job")].find((j) => j.dataset.cmd === "op.fillet")?.click(); await sleep(30);
+    const viaPanel = app.op ? app.op.spec.title : null;
+    if (app.op) key("Escape", "Escape");
+    key("Escape", "Escape"); await sleep(10);
+    app.setSelection([{ kind: "body", body: cone.id, id: 0 }]); await sleep(10);
+    expect("tip: a tip dot is a filled circle; selected, the panel says so (round the tip, clicked → Round tip)", tipDot === "round1" && /Cone's tip/.test(props) && /round the tip/.test(props) && !/Nothing selected/.test(props) && viaPanel === "Round tip", { tipDot, props, viaPanel });
     const c = await round(2);
     const g = Math.atan(10 / 30), cb = app.doc.bodies[0];
     expect("tip: a selected cone shows one dot, at its tip; click it, F → Round tip; 2 → a ball tip (2/sin − 2 lower, valid, no sharp tip left)",
@@ -4733,6 +4746,178 @@ const SCENARIO_WRAPTEXT = String.raw`
 })()
 `;
 
+/** Macro → Random: copies of a solid scattered on a flat face — on it, inside it, apart, sizes in range; the seed repeats; align; overlap; a clicked solid's face (slanted too). */
+const SCENARIO_RANDOM = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const set = async (v) => { for (const [k, x] of Object.entries(v)) { const i = document.querySelector("#op-panel [data-key=" + k + "]"); if (!i) continue; if (i.type === "checkbox") i.checked = !!x; else i.value = String(x); i.dispatchEvent(new Event("input", { bubbles: true })); i.dispatchEvent(new Event("change", { bubbles: true })); } await sleep(250); };
+  const sel = (...ids) => app.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
+  const spots = () => (app.op?.result?.placed ?? []).map((p) => new V(200, 0, 5).applyMatrix4(p.matrix)); // (the cube's middle, placed)
+  const bb = (b) => b.shape.boundingBox.bounds;
+  try {
+    app.doc.reset([]); app.run("mode.body");
+    // A 10 mm cube (its middle at 200, 0, 5) and a 100 × 60 flat face at z = 0
+    const cube = app.doc.makeBody(K.makeBox(G, [200, 0, 0], 10, 10, 10), "Cube");
+    const plate = app.doc.makeBody(K.makeRectFace(G, [0, 0, 0], 100, 60), "Plate", "face");
+    app.doc.commit([cube, plate], "cube + plate"); await sleep(30);
+    vp.setView("iso"); app.run("view.fit"); await sleep(60);
+    // Nothing selected: says what to do
+    app.setSelection([]); app.run("macro.random"); await sleep(30);
+    const refused = !app.op && [...document.querySelectorAll(".toast.error")].some((t) => /select the object to copy/.test(t.textContent));
+    // The cube and the plate selected: 20 at once, on the plate, inside it (footprint), apart, 50–150 %
+    sel(cube.id, plate.id); app.run("macro.random"); await sleep(80);
+    await set({ count: 15, smallest: 50, biggest: 150, align: 0, spin: 1, overlap: 0, seed: 1 });
+    const scales = (app.op?.result?.placed ?? []).map((p) => new V().setFromMatrixScale(p.matrix).x);
+    const pts = spots(), r0 = Math.hypot(10, 10) / 2;
+    const inside = pts.every((p, i) => Math.abs(p.x) <= 50 - r0 * scales[i] + 1e-6 && Math.abs(p.y) <= 30 - r0 * scales[i] + 1e-6);
+    const apart = pts.every((p, i) => pts.every((q, j) => i === j || Math.hypot(p.x - q.x, p.y - q.y) >= r0 * (scales[i] + scales[j]) - 1e-6));
+    expect("random: nothing selected says what to do; cube + plate → 15 copies on the plate, footprints inside it and apart, 50–150 %",
+      refused && pts.length === 15 && inside && apart && scales.every((s) => s >= 0.5 - 1e-9 && s <= 1.5 + 1e-9) && Math.max(...scales) - Math.min(...scales) > 0.3,
+      { refused, n: pts.length, inside, apart, scales: scales.map((s) => +s.toFixed(2)) });
+    // The seed: the same one, the same spots; another, others
+    const key = () => spots().map((p) => p.toArray().map((x) => x.toFixed(4)).join()).join(";");
+    const k1 = key(); await set({ seed: 2 }); const k2 = key(); await set({ seed: 1 }); const k3 = key();
+    expect("random: the same seed, the same layout; another seed, another", k1 === k3 && k1 !== k2, { same: k1 === k3, differs: k1 !== k2 });
+    // Apply: 20 solids in a group "Random 1", one undo step, each standing on the plate (bottom at z 0), the cube unchanged
+    app.applyOp(); await sleep(150);
+    const made = app.doc.bodies.filter((b) => b.group === "Random 1");
+    const onIt = made.every((b) => Math.abs(bb(b)[0][2]) < 1e-6 && K.isValidShape(b.shape) && bb(b)[1][2] > 5 - 1e-6 && bb(b)[1][2] < 15 + 1e-6);
+    expect("random: Apply → 15 valid solids in group Random 1, each on the plate (bottom at z 0, 5–15 tall), selected; the cube stays",
+      made.length === 15 && onIt && app.selection.length === 15 && bb(app.doc.get(cube.id))[0][0] === 195, { n: made.length, onIt, sel: app.selection.length });
+    app.run("edit.undo"); await sleep(50);
+    expect("random: one undo step takes them all away", app.doc.bodies.length === 2, app.doc.bodies.length);
+    // Align: half in → middles on the plate; sunk in → tops at z 0
+    sel(cube.id, plate.id); app.run("macro.random"); await sleep(60);
+    await set({ count: 5, smallest: 100, biggest: 100, align: 1 });
+    const half = spots().every((p) => Math.abs(p.z) < 1e-6);
+    await set({ align: 2 });
+    const sunk = spots().every((p) => Math.abs(p.z + 5) < 1e-6);
+    // Too many to fit apart: says how many; Allow overlap: all of them
+    await set({ count: 300, align: 0 });
+    const warn = document.querySelector("#op-panel")?.textContent ?? "", fewer = spots().length;
+    await set({ overlap: 1 });
+    const all = spots().length;
+    expect("random: Align half in (middles on the face), sunk in (tops level with it); 300 don't fit apart (N of 300 fit), Allow overlap → all 300",
+      half && sunk && fewer < 300 && new RegExp(fewer + " of 300 fit").test(warn) && all === 300, { half, sunk, fewer, all, warn: warn.match(/\d+ of 300 fit[^·]*/)?.[0] });
+    app.cancelOp(); await sleep(30);
+    // Two objects (the cube and a 12 mm tall peg): each copy one of them at random, both kinds there, all on the plate
+    const peg = app.doc.makeBody(K.makeCylinder(G, [230, 0, 0], 3, 12), "Peg");
+    app.doc.commit([...app.doc.bodies, peg], "peg"); await sleep(30);
+    sel(cube.id, peg.id, plate.id); app.run("macro.random"); await sleep(60);
+    await set({ count: 30, smallest: 100, biggest: 100, align: 0, overlap: 0, seed: 4 });
+    const kinds = new Set((app.op?.result?.placed ?? []).map((p) => p.id));
+    const note = document.querySelector("#op-panel .op-note")?.textContent ?? "";
+    app.applyOp(); await sleep(200);
+    const mix = app.doc.bodies.filter((b) => b.group === "Random 1");
+    const cubes = mix.filter((b) => /^Cube/.test(b.name)), pegs = mix.filter((b) => /^Peg/.test(b.name));
+    const standing = cubes.every((b) => Math.abs(bb(b)[0][2]) < 1e-6 && Math.abs(bb(b)[1][2] - 10) < 1e-6) && pegs.every((b) => Math.abs(bb(b)[0][2]) < 1e-6 && Math.abs(bb(b)[1][2] - 12) < 1e-6);
+    expect("random: two objects selected → each copy one of them (both kinds, the panel names both), each on the plate at its own height",
+      kinds.size === 2 && /Cube.*Peg|Peg.*Cube/.test(note) && cubes.length > 3 && pegs.length > 3 && cubes.length + pegs.length === mix.length && standing,
+      { kinds: kinds.size, note, cubes: cubes.length, pegs: pegs.length, standing });
+    app.run("edit.undo"); await sleep(30);
+    app.doc.commit(app.doc.bodies.filter((b) => b.id !== peg.id), "no peg"); await sleep(30);
+    // Only the cube selected: click a solid's slanted face (the top of a block tilted 30°) — the copies stand out of it
+    const wedge = app.doc.makeBody(K.rotateShape(K.makeBox(G, [0, 100, 0], 80, 60, 10), 30, [0, 100, 5], [1, 0, 0]), "Tilted");
+    app.doc.commit([...app.doc.bodies, wedge], "tilted"); await sleep(30);
+    const slope = wedge.shape.faces.find((f) => { const n = f.normalAt().toTuple(); return f.geomType === "PLANE" && n[2] > 0.8 && Math.abs(n[1]) > 0.3; });
+    vp.fit([wedge.id]); await sleep(60);
+    sel(cube.id); app.run("macro.random"); await sleep(30);
+    const waiting = !app.op?.result;
+    const c = vp.toScreen(new V(...slope.center.toTuple()));
+    for (const t of ["pointermove", "pointerdown", "pointerup"]) vp.canvas.dispatchEvent(new PointerEvent(t, { clientX: c.x, clientY: c.y, button: 0, bubbles: true }));
+    await sleep(60);
+    await set({ count: 3, smallest: 100, biggest: 100, align: 0, overlap: 0 });
+    app.applyOp(); await sleep(150);
+    const n = slope.normalAt().toTuple(), p0 = slope.center.toTuple();
+    const roof = app.doc.bodies.filter((b) => b.group === "Random 1");
+    // Each copy: its lowest point along the normal on the slope, its highest 10 mm out
+    const along = (b) => { const vs = b.shape.vertices ?? []; const ds = (vs.length ? vs.map((v) => v.toTuple ? v.toTuple() : v) : b.shape.edges.flatMap((e) => [e.startPoint.toTuple(), e.endPoint.toTuple()])).map((q) => (q[0] - p0[0]) * n[0] + (q[1] - p0[1]) * n[1] + (q[2] - p0[2]) * n[2]); return [Math.min(...ds), Math.max(...ds)]; };
+    const stand = roof.map(along);
+    expect("random: only the object selected waits for a face; a click on a solid's top tilted 30° → copies standing on it (bottom on it, 10 mm out along its normal)",
+      waiting && roof.length === 3 && stand.every(([a, b]) => Math.abs(a) < 1e-6 && Math.abs(b - 10) < 1e-6), { waiting, n: roof.length, stand });
+  } catch (e) {
+    expect("random: no errors", false, String(e && e.stack || e));
+  }
+  if (app.op) app.cancelOp();
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("random scenario failed: " + JSON.stringify(failed));
+  return [{ label: "macro random", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
+/** Lock (the lock in the Bodies panel): clicks go through a locked solid, not in Select all; its row shows where it is; the lock icon; unlock, undo, saved. */
+const SCENARIO_LOCK = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const S = (p) => vp.toScreen(new V(...p));
+  const click = (p) => { const s = S(p); for (const t of ["pointermove", "pointerdown", "pointerup"]) vp.canvas.dispatchEvent(new PointerEvent(t, { clientX: s.x, clientY: s.y, button: 0, bubbles: true })); };
+  const row = (id) => document.querySelector('#outliner .ol-row[data-id="' + id + '"]');
+  try {
+    app.doc.reset([]); app.setSelection([]); app.run("mode.body");
+    // A solid, and a flat face lying on its top (a same-size copy of it)
+    const slab = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 30, 10), "Slab");
+    const face = app.doc.makeBody(K.makeRectFace(G, [10, 0, 10], 20, 30), "Face", "face");
+    app.doc.commit([slab, face], "slab + face"); await sleep(30);
+    vp.setView("iso"); app.run("view.fit"); await sleep(100);
+    // The row's lock: locked, one undo step, the lock icon on it in the viewport
+    row(slab.id).querySelector(".ol-lock").click(); await sleep(30);
+    const icons = [...document.querySelectorAll("#lock-icons .lock-icon")].filter((x) => x.style.display !== "none");
+    const ic = icons[0]?.getBoundingClientRect(), mid = S([0, 0, 5]);
+    expect("lock: the row's lock locks it (one undo step), a lock icon on its middle", app.doc.get(slab.id).locked === true && app.doc.history().undo.at(-1)?.label === "Lock" && icons.length === 1 && ic && Math.hypot(ic.left + ic.width / 2 - mid.x, ic.top + ic.height / 2 - mid.y) < 3 && row(slab.id).classList.contains("locked"),
+      { locked: app.doc.get(slab.id).locked, icons: icons.length, ic: ic && [ic.left + ic.width / 2, ic.top + ic.height / 2], mid });
+    // Clicks: on the locked solid nothing; through it, the face on its top
+    click([-15, 0, 5]); await sleep(20);
+    const onSide = app.selection.length;
+    click([-12, -10, 10]); await sleep(20);
+    const onTopBare = app.selection.length;
+    click([10, 0, 10]); await sleep(20);
+    const onFace = app.selection.map((s) => s.body);
+    expect("lock: a click on the locked solid selects nothing; on the face lying on it, the face", onSide === 0 && onTopBare === 0 && onFace.length === 1 && onFace[0] === face.id, { onSide, onTopBare, onFace });
+    // Still snapped to: its corner
+    const c = S([-20, -15, 10]), snap = vp.snapPoint(c.x, c.y);
+    expect("lock: still snapped to (its corner)", snap && snap.point.distanceTo(new V(-20, -15, 10)) < 1e-6, snap && snap.point.toArray());
+    // Select all: not the locked one
+    app.setSelection([]); app.run("edit.selectAll"); await sleep(10);
+    expect("lock: Select all leaves it out", app.selection.length === 1 && app.selection[0].body === face.id, app.selection);
+    // Its row clicked: shown where it is (lit), not selected; the panel says so; a key does nothing to it
+    row(slab.id).click(); await sleep(20);
+    const props = document.getElementById("props").textContent;
+    const lit = row(slab.id).classList.contains("located") && app.located === slab.id && app.selection.length === 0;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true, cancelable: true })); await sleep(20);
+    expect("lock: its row clicked shows it (lit, not selected; the panel: Locked, unlock it); Del leaves it", lit && /Locked/.test(props) && /unlock it/.test(props) && !!app.doc.get(slab.id), { lit, props });
+    // Unlock from the panel: selected, a click on it selects it again
+    [...document.querySelectorAll("#props .tip-job")].find((j) => j.dataset.cmd === "body.unlock")?.click(); await sleep(30);
+    const after = { locked: app.doc.get(slab.id).locked, sel: app.selection.map((s) => s.body), icons: [...document.querySelectorAll("#lock-icons .lock-icon")].length };
+    app.setSelection([]); click([-15, 0, 5]); await sleep(20);
+    expect("lock: unlock (its panel) → selected, no lock icon, clicks select it again", !after.locked && after.sel.join() === String(slab.id) && after.icons === 0 && app.selection[0]?.body === slab.id, { after, sel: app.selection });
+    // Undo: locked again (out of the selection); saved and opened: still locked
+    app.run("edit.undo"); await sleep(20);
+    const undone = app.doc.get(slab.id).locked === true && app.selection.length === 0;
+    const text = app.modelText();
+    app.loadModel(text, null); await sleep(50);
+    const back = app.doc.bodies.find((b) => b.name.startsWith("Slab"));
+    expect("lock: undo locks it again (dropped from the selection); saved and opened, still locked", undone && back?.locked === true && app.doc.bodies.find((b) => b.name.startsWith("Face"))?.locked === undefined, { undone, back: back?.locked });
+  } catch (e) {
+    expect("lock: no errors", false, String(e && e.stack || e));
+  }
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("lock scenario failed: " + JSON.stringify(failed));
+  return [{ label: "lock", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Divide face (D) from anywhere along an edge of a top that isn't at z = 0 (float32 mesh points there): the end still locks onto the X axis. */
 const SCENARIO_DIVIDELOCK = String.raw`
 (async () => {
@@ -4749,6 +4934,7 @@ const SCENARIO_DIVIDELOCK = String.raw`
   vp.setView("iso"); app.run("view.fit"); await sleep(100);
   const S = (p) => vp.toScreen(new V(...p));
   const ev = (type, s) => vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
+  const key = (k) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code: k, bubbles: true, cancelable: true }));
   app.run("tool.divideFace");
   const t = app.tool;
   const a = S([4, 70, 41.4]); ev("pointermove", a); ev("pointerdown", a); // (not a midpoint)
@@ -4757,11 +4943,55 @@ const SCENARIO_DIVIDELOCK = String.raw`
   const hud = document.querySelector("#hud")?.textContent ?? "";
   expect("divide face: from along an edge of a top at z = 41.4, the end 3 px off locks onto the X axis", t.axis === 0 && t.cur && Math.abs(t.cur.y - t.a.point.y) < 1e-9 && Math.abs(t.cur.x - 33.6) < 1e-6, { axis: t.axis, a: t.a?.point.toArray(), cur: t.cur?.toArray(), hud });
   ev("pointerdown", off);
-  const sh = app.doc.get(box.id).shape, sel = app.selection[0];
+  const panelText = () => document.getElementById("tool-panel")?.textContent ?? "";
+  const one = { tool: app.tool === t, panel: panelText() };
+  // A second line in the same go: from the first one's new edge across the other way (Y) to the far side
+  await sleep(50);
+  const b0 = S([25, 70, 41.4]), b1 = S([25, 103.2, 41.4]);
+  ev("pointermove", b0); ev("pointerdown", b0); ev("pointermove", b1); ev("pointerdown", b1);
+  const two = { tool: app.tool === t, panel: panelText() };
+  document.querySelector("#tool-panel button[data-act=done]")?.click(); await sleep(20);
+  expect("divide face: the tool stays after a line (panel: 1 line drawn), a second line (2 lines drawn), Done finishes",
+    one.tool && /1 line drawn/.test(one.panel) && two.tool && /2 lines drawn/.test(two.panel) && !app.tool && !document.getElementById("tool-panel"), { one, two });
+  const sh = app.doc.get(box.id).shape;
+  const sel = app.selection.find((s) => { const x = sh.edges.find((y) => y.hashCode === s.id); return x && Math.abs(x.startPoint.y - x.endPoint.y) < 1e-9; });
   const e = sel && sh.edges.find((x) => x.hashCode === sel.id);
   const ends = e && [e.startPoint, e.endPoint].map((p) => p.toTuple());
-  expect("divide face: the top split by an edge along X (valid, 7 faces)", K.isValidShape(sh) && sh.faces.length === 7 && ends && Math.abs(ends[0][1] - ends[1][1]) < 1e-9 && Math.abs(ends[0][2] - 41.4) < 1e-9 && Math.abs(Math.abs(ends[0][0] - ends[1][0]) - 29.6) < 1e-6, { faces: sh.faces.length, ends });
+  expect("divide face: the top split by an edge along X, then across (valid, 8 faces); both new lines selected in Edge mode",
+    K.isValidShape(sh) && sh.faces.length === 8 && app.mode === "edge" && app.selection.length >= 2 && app.selection.every((s) => s.kind === "edge") && ends && Math.abs(ends[0][2] - 41.4) < 1e-9,
+    { faces: sh.faces.length, mode: app.mode, sel: app.selection.length, ends });
+  app.run("edit.undo"); await sleep(20);
+  expect("divide face: each line is its own undo step (undo: back to 7 faces)", app.doc.get(box.id).shape.faces.length === 7, app.doc.get(box.id).shape.faces.length);
+  // Esc with a start point clicked drops just that start; Esc again finishes (nothing drawn: no change)
+  app.run("tool.divideFace"); const t2 = app.tool;
+  ev("pointermove", b0); ev("pointerdown", b0);
+  const started = !!t2.a;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  const dropped = app.tool === t2 && !t2.a;
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  await sleep(20);
+  expect("divide face: Esc drops a started line, Esc again ends the tool", started && dropped && !app.tool && app.doc.get(box.id).shape.faces.length === 7, { started, dropped, tool: !!app.tool });
+  // A line across the first one (Y, from the front edge to the back): both faces it crosses split, its two pieces selected
+  app.run("tool.divideFace"); await sleep(20);
+  const c0 = S([12, 60, 41.4]), c1 = S([12, 103.2, 41.4]);
+  ev("pointermove", c0); ev("pointerdown", c0); ev("pointermove", c1); ev("pointerdown", c1);
+  key("Enter");
+  await sleep(20);
+  const shx = app.doc.get(box.id).shape;
+  const xs = app.selection.map((s) => shx.edges.find((y) => y.hashCode === s.id)).filter(Boolean).map((x) => [x.startPoint.toTuple(), x.endPoint.toTuple()]);
+  expect("divide face: a line across an earlier one splits both faces it crosses (valid, 9 faces), its 2 pieces selected",
+    K.isValidShape(shx) && shx.faces.length === 9 && xs.length === 2 && xs.every((ends) => ends.every((p) => Math.abs(p[0] - 12) < 1e-5)), { faces: shx.faces.length, xs, toasts: [...document.querySelectorAll(".toast.error")].map((t) => t.textContent) });
   if (app.tool) app.endTool();
+  // A flat face lying exactly on a solid's face of the same size (a copy of it): a click picks the flat face (drawn on top)
+  {
+    app.doc.reset([]); app.run("mode.body"); app.setSelection([]);
+    const slab = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 40, 30, 10), "Slab");
+    const copy = app.doc.makeBody(K.makeRectFace(G, [0, 0, 10], 40, 30), "Face", "face");
+    app.doc.commit([slab, copy], "slab + face"); await sleep(30);
+    vp.setView("iso"); app.run("view.fit"); await sleep(100);
+    const picks = [[0, 0, 10], [12, 8, 10], [-15, -10, 10]].map((p) => vp.pick(S(p).x, S(p).y, "body")?.body);
+    expect("pick: a flat face on a solid's same-size face wins the click", picks.every((b) => b === copy.id), { picks, face: copy.id, slab: slab.id });
+  }
   app.doc.reset([]);
   const failed = checks.filter((c) => !c.ok);
   if (failed.length) console.error("divide lock scenario failed: " + JSON.stringify(failed));
@@ -5529,8 +5759,8 @@ const SCENARIO_CUTAXIS = String.raw`
   } catch (e) {
     expect("guide glow threw", false, String(e && e.stack || e));
   }
-  // Selecting a solid: the panel's Size comes from its drawn box (the exact box is slow on some spline
-  // faces) — still the exact size to the 0.01 shown, on round solids too.
+  // Selecting a solid: the panel's Size is the exact size to the 0.01 shown, on round solids too (only a solid with a
+  // spline face measures its drawn box: the exact one is slow there).
   try {
     const K = window.ydddKernel, G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
     const sph = app.doc.makeBody(K.makeSphereAt([0, 6000, 0], 10.37), "Sphere"), cyl = app.doc.makeBody(K.makeCylinder(G, [50, 6000, 0], 7.3, 12.5), "Cylinder");
@@ -5543,7 +5773,7 @@ const SCENARIO_CUTAXIS = String.raw`
       return { shown: row?.cells[1].textContent, exact: [0, 1, 2].map((i) => f(hi[i] - lo[i])).join(" × "), drawn: !!vp.drawnBox(b.id) };
     };
     const s = sizeOf(sph), c = sizeOf(cyl);
-    expect("Size in the panel: from the drawn box, the exact size to 0.01 (sphere, cylinder)", s.drawn && c.drawn && s.shown === s.exact && c.shown === c.exact, { s, c });
+    expect("Size in the panel: the exact size to 0.01 (sphere, cylinder)", s.drawn && c.drawn && s.shown === s.exact && c.shown === c.exact, { s, c });
     // An edge selected, then the solid: an op's preview ending (e.g. a failed fillet cancelled, then
     // Scale after a move) doesn't bring the old edge's yellow lines back where it was
     app.setSelection([{ kind: "edge", body: cyl.id, id: app.doc.get(cyl.id).shape.edges[0].hashCode }]);
@@ -5858,10 +6088,10 @@ const SCENARIO_AUTOSNAP = String.raw`
     at([194, 15, 20], "pointermove"); await sleep(20); // (≈ 2° off Y)
     const hud = document.getElementById("hud")?.textContent ?? "";
     at([194, 15, 20], "pointerdown"); at([194, 15, 20], "pointerup"); await sleep(20);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
     const sh = app.doc.get(slab.id).shape, sel = app.selection[0];
     const e = sel && sel.kind === "edge" && sh.edges.find((x) => x.hashCode === sel.id);
     const ends = e ? [e.startPoint, e.endPoint].map((p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6))).sort((p, q) => p[1] - q[1]) : null;
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
     expect("Divide face: end point near the Y direction locks parallel to Y (HUD says so)",
       JSON.stringify(ends) === JSON.stringify([[193, -15, 20], [193, 15, 20]]) && /On Y axis/.test(hud) && sh.faces.length === 7, { ends, hud, faces: sh.faces.length });
     app.doc.commit(app.doc.bodies.filter((b) => b.id !== slab.id), "remove slab");
@@ -7293,6 +7523,28 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "random") {
+      // (while working on it: just Macro → Random)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RANDOM, true));
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
+    if (process.env.YDDD_SMOKE_ONLY === "lock") {
+      // (while working on it: just the lock scenario)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LOCK, true));
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "wraptext") {
       // (while working on it: just the wrapped text scenario)
       try {
@@ -7523,6 +7775,8 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GRIDFINITY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_WRAPTEXT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_DIVIDELOCK, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LOCK, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RANDOM, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {

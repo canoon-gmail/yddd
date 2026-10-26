@@ -333,7 +333,9 @@ export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   const ends = shape.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
   const span = (k: number) => Math.max(...ends.map((p) => p[k])) - Math.min(...ends.map((p) => p[k]));
   const diag = (ends.length ? Math.hypot(span(0), span(1), span(2)) : 0) || 1;
-  const tolerance = Math.min(0.1, Math.max(0.001, diag * 2e-4));
+  // (at least 0.01 mm: finer only made small round things, e.g. a 5 mm ball, ~12 000 triangles — ~0.1 s each to mesh —
+  // where the angle already keeps them smooth; export meshes on its own, see meshForExport)
+  const tolerance = Math.min(0.1, Math.max(0.01, diag * 2e-4));
   // A live preview is redrawn on every change: 4x coarser (about a quarter of the triangles,
   // several times faster to mesh), still smooth on screen. Bodies get the full quality — except
   // busy ones (e.g. a plate with 36 round holes): a coarser angle, so small round edges (radius
@@ -2689,6 +2691,16 @@ export function edgeBetween(shape: Shape, a: V3, b: V3, tol = 1e-5): number | nu
   return null;
 }
 
+/** The straight edges lying along the segment a–b (it whole, or the pieces of it a later split left). */
+export function edgesOnSegment(shape: Shape, a: V3, b: V3, tol = 1e-5): number[] {
+  const ab = sub3(b, a), len2 = dot3(ab, ab);
+  const on = (p: V3) => {
+    const t = len2 > 0 ? Math.max(0, Math.min(1, dot3(sub3(p, a), ab) / len2)) : 0;
+    return Math.hypot(...sub3(p, [a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]])) < tol;
+  };
+  return shape.edges.filter((e) => e.geomType === "LINE" && on(e.startPoint.toTuple() as V3) && on(e.endPoint.toTuple() as V3)).map((e) => e.hashCode);
+}
+
 export const MOVE_EDGE_REFUSED = "Move edge: the edge must be straight, and the faces at its ends flat with straight edges meeting its ends (no curves or fillets there)";
 
 /**
@@ -2913,10 +2925,25 @@ function segDist(p: V3, a: V3, b: V3): number {
   return Math.hypot(...sub3(p, [a[0] + ab[0] * t, a[1] + ab[1] * t, a[2] + ab[2] * t]));
 }
 
+/** How far a point is from a face (0 inside it), or Infinity if that can't be worked out. */
+function distToFace(face: Face, p: V3): number {
+  const v = makeVertex(p);
+  const d = new oc.BRepExtrema_DistShapeShape(v.wrapped, face.wrapped);
+  try {
+    return d.IsDone() && d.NbSolution() >= 1 ? d.Value() : Infinity;
+  } catch {
+    return Infinity;
+  } finally {
+    d.delete();
+    v.delete();
+  }
+}
+
 /**
- * Split a flat face of a solid along the straight line a–b. Both points must lie
- * on the face's (straight) boundary edges; the face is found from them. The
- * neighbouring faces gain the new corner points, so the new edge can be moved.
+ * Split flat faces of a solid along the straight line a–b. Both points must lie on the (straight)
+ * boundary edges of flat faces in one plane, and the line on those faces all the way — it may cross
+ * edges between them (an earlier divide line): each face it crosses is split. The neighbouring faces
+ * gain the new corner points, so the new edges can be moved.
  */
 export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   const [lo, hi] = shape.boundingBox.bounds;
@@ -2926,21 +2953,33 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   if (len < tol * 10) throw new Error("Divide face: the two points are the same");
   const onBoundary = (f: Face, p: V3) =>
     f.edges.some((e) => e.geomType === "LINE" && segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10);
-  const face = shape.faces.find((f) => {
-    if (f.geomType !== "PLANE") return false;
-    const n = f.normalAt(f.center).normalized().toTuple() as V3;
+  const along = (k: number): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
+  const samples = [0.13, 0.29, 0.41, 0.5, 0.58, 0.71, 0.87].map(along);
+  // The flat faces in the line's plane, facing one way (the plane of a face the line starts on)
+  const flat = shape.faces.filter((f) => f.geomType === "PLANE");
+  const normal = (f: Face) => f.normalAt(f.center).normalized().toTuple() as V3;
+  const inPlane = (f: Face, n: V3) => {
     const c = f.center.toTuple() as V3;
-    if (Math.abs(dot3(sub3(a, c), n)) > tol * 10 || Math.abs(dot3(sub3(b, c), n)) > tol * 10) return false;
-    if (!onBoundary(f, a) || !onBoundary(f, b)) return false;
-    // A line along an existing edge splits nothing.
-    const m: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
-    return !onBoundary(f, m);
-  });
-  if (!face) throw new Error("Divide face: start and end on the edges of the same flat face (corners, midpoints or anywhere along an edge)");
+    return dot3(normal(f), n) > 1 - 1e-9 && Math.abs(dot3(sub3(a, c), n)) < tol * 10 && Math.abs(dot3(sub3(b, c), n)) < tol * 10;
+  };
+  let faces: Face[] = [];
+  for (const start of flat) {
+    if (!onBoundary(start, a)) continue;
+    const n = normal(start);
+    const set = flat.filter((f) => inPlane(f, n));
+    if (!set.length || !set.some((f) => onBoundary(f, b))) continue;
+    // On those faces all the way (not out over a hole or past the outline), and not just along existing edges
+    if (!samples.every((p) => set.some((f) => distToFace(f, p) < tol * 10))) continue;
+    if (samples.every((p) => set.some((f) => onBoundary(f, p)))) continue;
+    faces = set;
+    break;
+  }
+  if (!faces.length) throw new Error("Divide face: start and end on the edges of flat faces in one plane, the line on them all the way (corners, midpoints or anywhere along an edge)");
+  const face = faces.find((f) => onBoundary(f, a))!;
   // Clicked points carry float32 snap error: make them exact corners / midpoints / points on the edge.
   const exact = (p: V3): V3 => {
     let best: V3 = p, bestD = Infinity;
-    for (const e of face.edges) {
+    for (const e of faces.flatMap((x) => x.edges)) {
       if (e.geomType !== "LINE") continue;
       const s = e.startPoint.toTuple() as V3, f = e.endPoint.toTuple() as V3;
       if (segDist(p, s, f) >= tol * 10) continue;
@@ -3498,6 +3537,21 @@ export interface Axis {
 /** Points along a face's outline (each edge sampled), for side tests. */
 function outlinePoints(face: Face): V3[] {
   return face.edges.flatMap((e) => [0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1].map((t) => e.pointAt(t).toTuple() as V3));
+}
+
+/**
+ * A flat face's plane (outward normal, a point on it) and its edges as straight segments (curves cut into 24),
+ * holes' too — what's inside it is where a ray crosses them an odd number of times. Null if it isn't flat.
+ */
+export function faceSegments(shape: Shape, faceId: number): { normal: V3; point: V3; segs: [V3, V3][] } | null {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") return null;
+  const segs: [V3, V3][] = [];
+  for (const e of face.edges) {
+    const n = e.geomType === "LINE" ? 1 : 24;
+    for (let k = 0; k < n; k++) segs.push([e.pointAt(k / n).toTuple() as V3, e.pointAt((k + 1) / n).toTuple() as V3]);
+  }
+  return { normal: norm3(face.normalAt().toTuple() as V3), point: face.center.toTuple() as V3, segs };
 }
 
 /**

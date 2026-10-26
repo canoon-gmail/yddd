@@ -1865,7 +1865,7 @@ export class GuideTool implements Tool {
 // ------------------------------------------------------------------ pencil
 
 /**
- * Divide face: click two points on the edges of a flat face to split it with a line
+ * Divide face: click two points on the edges of a flat face to split it with a line — again for more lines, Enter / Done ends
  * (e.g. the two top midpoints of a box → a ridge edge that Move can lift into a gable).
  * Corners and midpoints snap automatically; anywhere along an edge works too. The end point locks
  * where the X / Y / Z axis line through the start meets the edge under the cursor when the cursor
@@ -1880,14 +1880,21 @@ export class DivideFaceTool implements Tool {
 
   constructor(
     private host: ToolHost,
-    private onDivide: (bodyId: number, a: V3, b: V3) => void,
+    /** Split the face under the line; false if it couldn't (the line is dropped, the tool goes on). */
+    private onDivide: (bodyId: number, a: V3, b: V3) => boolean,
     /** Why the body can't be divided (e.g. a flat face body, a mesh), or null if it can. */
     private refuse: (bodyId: number) => string | null = () => null,
     private shapeOf: (bodyId: number) => Shape | null = () => null,
+    /** The lines drawn so far and whether one is started (null: the tool is gone) — for its panel. */
+    private onState: (st: { lines: number; started: boolean } | null) => void = () => {},
+    /** Enter: finish. */
+    private onDone: () => void = () => {},
   ) {}
+  private lines = 0;
 
   start(): this {
-    this.host.hint("Divide face: click a point on an edge of a solid's flat face (corners / midpoints snap) · Esc cancel");
+    this.host.hint("Divide face: click a point on an edge of a solid's flat face (corners / midpoints snap) · Enter / Esc done");
+    this.onState({ lines: 0, started: false });
     return this;
   }
 
@@ -1950,15 +1957,37 @@ export class DivideFaceTool implements Tool {
       const why = this.refuse(p.body);
       if (why) return this.host.toast(why, "error");
       this.a = { point: p.point, body: p.body };
-      this.host.hint("Divide face: click the end point on another edge of the same face — move along X / Y / Z to lock the line parallel to it · Esc cancel");
+      this.host.hint("Divide face: click the end point on another edge of the same face — move along X / Y / Z to lock the line parallel to it · Esc drops the start");
+      this.onState({ lines: this.lines, started: true });
       return;
     }
     if (p.body !== this.a.body) return this.host.toast("Divide face: the end point must be on the same solid as the start", "error");
     const t = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
-    this.onDivide(p.body, t(this.a.point), t(p.point));
+    if (!this.onDivide(p.body, t(this.a.point), t(p.point))) return;
+    this.lines++;
+    this.restart();
   }
 
-  key(): boolean {
+  /** Ready for the next line's start. */
+  private restart(): void {
+    this.a = null;
+    this.cur = null;
+    this.axis = -1;
+    this.draw();
+    this.host.hud(null);
+    this.host.hint("Divide face: click a point on an edge for the next line · Enter / Esc done");
+    this.onState({ lines: this.lines, started: false });
+  }
+
+  key(e: KeyboardEvent): boolean {
+    if (e.key === "Escape" && this.a) {
+      this.restart();
+      return true;
+    }
+    if (e.key === "Enter" || e.key === "Escape") {
+      this.onDone();
+      return true;
+    }
     return false;
   }
 
@@ -1966,5 +1995,6 @@ export class DivideFaceTool implements Tool {
     this.host.viewport.setOverlay([]);
     this.host.viewport.showSnapMarker(null);
     this.host.hud(null);
+    this.onState(null);
   }
 }

@@ -76,6 +76,8 @@ interface BodyBase {
   readonly look?: Look;
   /** A Text tool letter (flat, or pushed into a solid): how it was made. */
   readonly text?: TextRecord;
+  /** Locked (the lock in the Bodies panel): not selected or changed — clicks go through it; still snapped to. */
+  readonly locked?: true;
 }
 
 /** "solid" = closed 3D body, "face" = flat planar face (extrude it with Push/Pull). */
@@ -341,7 +343,7 @@ export class Doc {
    * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
    * is an index into `bodies` (as saved in a file), turned into that body's new id.
    */
-  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = [], looks: GroupLooks = {}): void {
+  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = [], looks: GroupLooks = {}): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;

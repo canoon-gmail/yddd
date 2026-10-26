@@ -116,6 +116,15 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-name input { width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 3px; }
 .ol-eye { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; }
 .ol-eye svg { width: 16px; height: 16px; }
+.ol-lock { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0; display: flex; opacity: 0.35; }
+.ol-lock svg { width: 15px; height: 15px; }
+.ol-lock:hover { opacity: 0.9; }
+.ol-lock.on { opacity: 1; color: var(--text, #ddd); }
+.ol-row.locked .ol-name { opacity: 0.6; }
+.ol-row.located { outline: 1px dashed var(--accent, #4aa3ff); outline-offset: -1px; }
+#lock-icons { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 4; }
+.lock-icon { position: absolute; left: 0; top: 0; color: #fff; opacity: 0.45; filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.6)); }
+.lock-icon svg { width: 18px; height: 18px; display: block; }
 .ol-array { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; display: flex; }
 .ol-array svg { width: 16px; height: 16px; }
 .ol-array.off { color: var(--muted); opacity: 0.45; }

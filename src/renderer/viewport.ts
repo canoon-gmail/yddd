@@ -14,6 +14,7 @@ import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js
 import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
+import { ICONS } from "./icons";
 import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 
 /** A dimension on screen: a panel's measurement may say more than its length ("2 squares · 83.5"). */
@@ -405,6 +406,7 @@ export class Viewport {
     this.renderOverlay();
     this.renderInset();
     this.placeDimLabels();
+    this.placeLockIcons();
   }
 
   // ------------------------------------------------------------ sketch view
@@ -880,6 +882,51 @@ export class Viewport {
     mat.needsUpdate = true;
   }
 
+  /** Locked bodies (see Body.locked): clicks go through them (snapping still finds them), a lock icon on each. */
+  private locked = new Set<number>();
+  private lockBox: HTMLElement | null = null;
+  private lockIcons: { el: HTMLElement; id: number; at?: { geo: unknown; p: THREE.Vector3 | null } }[] = [];
+
+  setLocked(ids: ReadonlySet<number>): void {
+    const same = ids.size === this.locked.size && [...ids].every((id) => this.locked.has(id));
+    this.locked = new Set(ids);
+    if (!this.lockBox) {
+      this.lockBox = document.createElement("div");
+      this.lockBox.id = "lock-icons";
+      this.canvas.parentElement!.appendChild(this.lockBox);
+    }
+    if (!same) {
+      this.lockBox.innerHTML = "";
+      this.lockIcons = [...ids].map((id) => {
+        const el = document.createElement("div");
+        el.className = "lock-icon";
+        el.innerHTML = ICONS.lock;
+        this.lockBox!.appendChild(el);
+        return { el, id };
+      });
+    }
+    this.requestRender();
+  }
+
+  isLocked(id: number): boolean {
+    return this.locked.has(id);
+  }
+
+  /** Keep the lock icons on their bodies' middles (after every render), none on a hidden body. */
+  private placeLockIcons(): void {
+    const p = new THREE.Vector3();
+    for (const icon of this.lockIcons) {
+      const { el, id } = icon, v = this.views.get(id);
+      // (its drawn box's middle, worked out again only when its mesh changes)
+      if (v && icon.at?.geo !== v.mesh.geometry) icon.at = { geo: v.mesh.geometry, p: this.drawnBox(id)?.getCenter(new THREE.Vector3()) ?? null };
+      const at = v?.group.visible ? icon.at?.p : null;
+      if (at) p.copy(at).project(this.camera);
+      const off = !at || p.z < -1 || p.z > 1;
+      el.style.display = off ? "none" : "";
+      if (!off) el.style.transform = `translate(${((p.x + 1) / 2) * this.width}px, ${((1 - p.y) / 2) * this.height}px) translate(-50%, -50%)`;
+    }
+  }
+
   setHidden(ids: Set<number>): void {
     this.hidden = new Set(ids);
     for (const [id, v] of this.views) {
@@ -933,7 +980,8 @@ export class Viewport {
     };
     const viewOf = (o: THREE.Object3D) => [...this.views.values()].find((v) => v.mesh === o)!;
     // Hits at (nearly) the same depth as the nearest one are overlapping faces;
-    // prefer the smallest so small faces win over big ones underneath them.
+    // prefer the smallest so small faces win over big ones underneath them — and on a tie a flat face
+    // (a face body, drawn on top) over the solid's face it lies on (a copy of it: the same size).
     const tol = Math.max(0.05, (hits[0].distance * 2e-3) / this.depthScale);
     let best: { view: BodyView; gi: number; hit: THREE.Intersection; area: number } | null = null;
     for (const hit of hits) {
@@ -942,7 +990,8 @@ export class Viewport {
       const view = viewOf(hit.object);
       const gi = groupOf(view, hit.faceIndex);
       const area = view.faceAreas[gi];
-      if (!best || area < best.area) best = { view, gi, hit, area };
+      const tie = best && Math.abs(area - best.area) <= 1e-6 * Math.max(1, area);
+      if (!best || (tie ? view.body.kind === "face" && best.view.body.kind !== "face" : area < best.area)) best = { view, gi, hit, area };
     }
     const { view, gi, hit } = best!;
     return { view, faceId: view.faceIds[gi], point: hit.point.clone(), distance: hit.distance };
@@ -986,6 +1035,7 @@ export class Viewport {
     const b = new THREE.Vector3();
     for (const v of this.views.values()) {
       if (!(underGhost ? this.snappable(v) : v.group.visible) || (bodies && !bodies.has(v.body.id))) continue;
+      if (!underGhost && this.locked.has(v.body.id)) continue; // (not picked; snapped to, see snapAt)
       const proj = this.projected(v);
       for (let e = 0; e < v.edgeIds.length; e++) {
         if (only && !only(v.body.id, v.edgeIds[e])) continue;
@@ -1018,14 +1068,14 @@ export class Viewport {
 
   /** Nearest visible edge accepted by `only`, within `tol` pixels. */
   pickEdgeAmong(cx: number, cy: number, tol: number, only: (body: number, edgeId: number) => boolean): Pick | null {
-    const hit = this.raycastFaces(cx, cy);
+    const hit = this.raycastFaces(cx, cy, undefined, this.locked);
     const e = this.pickEdge(cx, cy, hit ? hit.distance : null, tol, only);
     return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
   }
 
   /** What is under the cursor in `mode`; with `only`, on that body alone (others are ignored, not in the way). */
   pick(cx: number, cy: number, mode: SelMode, only?: number): Pick | null {
-    const hit = this.raycastFaces(cx, cy, only);
+    const hit = this.raycastFaces(cx, cy, only, this.locked); // (locked bodies: clicked through)
     if (mode === "edge") {
       const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, only === undefined ? undefined : (b) => b === only);
       return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
@@ -1652,7 +1702,7 @@ export class Viewport {
   }
   private ringTex: THREE.Texture | null = null;
 
-  /** A white filled circle (tinted by the material's colour): the look of a selected flat face's centre dot. */
+  /** A white filled circle (tinted by the material's colour): the look of the dots (see showDots). */
   private discTexture(): THREE.Texture {
     if (this.discTex) return this.discTex;
     const c = document.createElement("canvas");
@@ -1668,28 +1718,24 @@ export class Viewport {
 
   /**
    * Dots on the selection to click (a flat face's centre: G pulls it to a point; a solid's tips: F rounds them),
-   * drawn on top; brighter hovered / selected; `round`: a round dot (a centre), else a square. An empty list hides them.
+   * drawn on top as filled circles; brighter hovered / selected. An empty list hides them.
    */
-  showDots(dots: { p: THREE.Vector3; look: "shown" | "hover" | "selected"; round?: boolean }[]): void {
+  showDots(dots: { p: THREE.Vector3; look: "shown" | "hover" | "selected" }[]): void {
     for (const d of this.dots) {
       this.scene.remove(d);
       d.geometry.dispose();
       (d.material as THREE.Material).dispose();
     }
     this.dots = [];
-    const looks = { shown: { color: 0xffffff, size: 9 }, hover: { color: 0x7fd0ff, size: 13 }, selected: { color: 0xffcc33, size: 13 } };
+    const looks = { shown: { color: 0xffffff, size: 10 }, hover: { color: 0x7fd0ff, size: 14 }, selected: { color: 0xffcc33, size: 14 } };
     for (const look of ["shown", "hover", "selected"] as const) {
-      for (const round of [false, true]) {
-        const pts = dots.filter((d) => d.look === look && !!d.round === round).map((d) => d.p);
-        if (!pts.length) continue;
-        const m = round
-          ? new THREE.PointsMaterial({ color: looks[look].color, size: looks[look].size + 1, map: this.discTexture(), sizeAttenuation: false, depthTest: false, transparent: true, alphaTest: 0.1 })
-          : new THREE.PointsMaterial({ ...looks[look], sizeAttenuation: false, depthTest: false, transparent: true });
-        const obj = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), m);
-        obj.renderOrder = 29;
-        this.scene.add(obj);
-        this.dots.push(obj);
-      }
+      const pts = dots.filter((d) => d.look === look).map((d) => d.p);
+      if (!pts.length) continue;
+      const m = new THREE.PointsMaterial({ ...looks[look], map: this.discTexture(), sizeAttenuation: false, depthTest: false, transparent: true, alphaTest: 0.1 });
+      const obj = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), m);
+      obj.renderOrder = 29;
+      this.scene.add(obj);
+      this.dots.push(obj);
     }
     this.requestRender();
   }

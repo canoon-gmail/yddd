@@ -72,4 +72,6 @@ export const ICONS: Record<string, string> = {
   xray: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" ${FILL}/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/><path d="M12 3v9M12 12l-8 4.5M12 12l8 4.5" ${SOFT} ${DASH}/>`),
   eye: svg(`<path d="M2.2 12s3.5-6 9.8-6 9.8 6 9.8 6-3.5 6-9.8 6-9.8-6-9.8-6z"/><circle cx="12" cy="12" r="2.8" ${FILL}/>`),
   eyeOff: svg(`<path d="M2.2 12s3.5-6 9.8-6 9.8 6 9.8 6-3.5 6-9.8 6-9.8-6-9.8-6z" ${SOFT}/><path d="M4 4l16 16"/>`),
+  lock: svg(`<rect x="5" y="10.5" width="14" height="10" rx="2" ${FILL}/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.3" ${DOT}/>`),
+  unlock: svg(`<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 7.6-1.7"/>`),
 };

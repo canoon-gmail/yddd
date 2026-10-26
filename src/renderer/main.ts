@@ -17,6 +17,7 @@ import {
   cutFaceByPlane,
   edgeEnds,
   edgeBetween,
+  edgesOnSegment,
   canMoveEdges,
   edgeLoopFace,
   isEdgeLoop,
@@ -54,6 +55,7 @@ import {
   importStl,
   boundingSize,
   findFace,
+  faceSegments,
   extrudeFace,
   makeSphereAt,
   seamEdgeIds,
@@ -144,6 +146,7 @@ import {
   movedIds,
   parseStl,
 } from "./kernel";
+import { scatter } from "./scatter";
 import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type ShownDimension } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
@@ -380,7 +383,7 @@ interface SavedHistory {
   ids: number[];
   dims?: Dimension[];
   arrays?: ArrayRecord[];
-  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; s: number }[];
+  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; locked?: true; s: number }[];
   shapes: string[];
   undo: SavedStep[];
   redo: SavedStep[];
@@ -661,6 +664,7 @@ class App implements ToolHost {
   };
   /** Dividers (Macro menu): the last values. */
   private dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
+  private randomDefaults = { count: 20, smallest: 50, biggest: 150, align: 0, spin: 1, overlap: 0, seed: 1 };
   private gridfinityDefaults = { width: 2, depth: 1, height: 6, columns: 1, rows: 1, lip: 1, magnets: 0, wall: 1.2 };
   private baseplateDefaults = { width: 3, depth: 3, drawerWidth: 0, drawerDepth: 0, magnets: 0 };
   private batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
@@ -1165,6 +1169,7 @@ class App implements ToolHost {
       case "macro.battery": return this.openBatteryCase();
       case "macro.gridfinity": return this.openGridfinityBin();
       case "macro.baseplate": return this.openGridfinityBaseplate();
+      case "macro.random": return this.openRandom();
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -1175,13 +1180,7 @@ class App implements ToolHost {
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
       case "tool.measure": return this.startMeasure();
-      case "tool.divideFace": {
-        const shapeOf = (id: number) => {
-          const b = this.doc.get(id);
-          return b && isBrep(b) ? b.shape : null;
-        };
-        return this.startTool(new DivideFaceTool(this, (id, a, b) => this.divideFace(id, a, b), (id) => this.divideRefusal(id), shapeOf).start());
-      }
+      case "tool.divideFace": return this.startDivideFace();
       case "edit.clearGuides":
         if (!this.doc.guides.length) return this.toast("No guide lines");
         this.selGuide = -1;
@@ -1212,9 +1211,10 @@ class App implements ToolHost {
       case "edit.arrayChange": return this.arrayCopy(true);
       case "edit.group": return this.groupSelected();
       case "edit.ungroup": return this.ungroupSelected();
+      case "body.unlock": return this.located !== null ? this.lockBodies([this.located], false) : undefined;
       case "edit.selectAll":
         this.setMode("body");
-        return this.setSelection(this.doc.bodies.filter((b) => !this.hidden.has(b.id)).map((b) => ({ kind: "body", body: b.id, id: 0 })));
+        return this.setSelection(this.doc.bodies.filter((b) => !this.hidden.has(b.id) && !b.locked).map((b) => ({ kind: "body", body: b.id, id: 0 })));
 
       case "view.fit": return this.viewport.fit();
       case "view.fitSelection": return this.viewport.fit(this.selectedBodyIds());
@@ -1289,7 +1289,8 @@ class App implements ToolHost {
   }
 
   private setSelection(items: SelItem[]): void {
-    this.selection = items;
+    this.selection = items.filter((s) => !this.doc.get(s.body)?.locked);
+    this.located = null;
     if (items.length) this.selDot = -1;
     if (items.length) this.clearGuideGroup();
     this.refreshSelection();
@@ -1493,7 +1494,7 @@ class App implements ToolHost {
   }
 
   private refreshSelection(): void {
-    this.viewport.setHighlight(this.selection, this.hover);
+    this.viewport.setHighlight(this.located !== null ? [{ kind: "body", body: this.located, id: 0 }] : this.selection, this.hover);
     this.updateDots();
     this.renderOutliner();
     this.renderProps();
@@ -2792,6 +2793,117 @@ class App implements ToolHost {
    * Macro → Gridfinity bin: width × depth grid squares (42 mm), height in 7 mm units, compartments, the stacking lip,
    * magnet holes — beside what's there, its sizes measured on the preview. The Pro layout adds the wall.
    */
+  /**
+   * Macro → Random: copies of the selected object (several: each copy one of them, at random) scattered on a flat face (clicked, or a flat face selected with
+   * it) — Count, sizes between Smallest and Biggest %, each standing on the face (its Z along the face's normal):
+   * on it, half in or sunk in; spun at random about the normal; kept on the face and, unless Allow overlap, apart.
+   * Seed: the same one, the same spots. The copies: a new group, one undo step; the object itself stays as it is.
+   */
+  private openRandom(): void {
+    const bodies = this.selectedBodyIds().map((id) => this.doc.get(id)!).filter(Boolean);
+    const sources = bodies.filter((b) => b.kind === "solid" || b.kind === "mesh");
+    if (!sources.length) return this.toast("Random: select the object to copy first (a solid or an STL mesh), then Macro → Random", "error");
+    const faceOf = (body: number, id: number) => {
+      const b = this.doc.get(body);
+      return b && isBrep(b) ? faceSegments(b.shape, id) : null;
+    };
+    /** The face to scatter on: a flat face selected with it, else clicked. */
+    let target: { body: number; face: number } | null = null;
+    const flat = bodies.find((b) => b.kind === "face");
+    if (flat && isBrep(flat)) target = { body: flat.id, face: flat.shape.faces[0].hashCode };
+    const faceAt = (e: PointerEvent) => {
+      const p = this.viewport.pick(e.clientX, e.clientY, "face");
+      return p && p.kind === "face" && faceOf(p.body, p.id) ? { body: p.body, face: p.id } : null;
+    };
+    // Each object at 100 %: its box's middle, its half height, the footprint's radius round the middle (its edges' farthest
+    // point across X–Y — a peg's own radius; a mesh: half its box's X–Y diagonal)
+    const kits = sources.map((source) => {
+      const [lo, hi] = boundsOf(source.shape);
+      const c = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2) as V3, hz = (hi[2] - lo[2]) / 2;
+      let r0 = Math.hypot(hi[0] - lo[0], hi[1] - lo[1]) / 2;
+      if (isBrep(source)) {
+        const far = Math.max(...source.shape.edges.flatMap((e) => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((k) => {
+          const p = e.pointAt(k / 15).toTuple();
+          return Math.hypot(p[0] - c[0], p[1] - c[1]);
+        })));
+        if (far > 0 && far < r0) r0 = far;
+      }
+      return { source, c, hz, r0, name: source.name.replace(/\s+\d+$/, "") };
+    });
+    const d = this.randomDefaults;
+    const ALIGN = ["On the face", "Half in", "Sunk in"]; // (its bottom / middle / top on the face)
+    this.startOp({
+      title: "Random",
+      label: "Random",
+      note: `Copies of <b>${sources.map((b) => escapeHtml(b.name)).join(", ")}</b>${sources.length > 1 ? " (each one of them, at random)" : ""} scattered on a flat face — click one (a solid's or a flat face)`,
+      fields: [
+        { key: "count", label: "Count", value: d.count, step: 1, min: 1 },
+        { key: "smallest", label: "Smallest (%)", value: d.smallest, step: 10, min: 1 },
+        { key: "biggest", label: "Biggest (%)", value: d.biggest, step: 10, min: 1 },
+        { key: "align", label: "Align", type: "select", options: ALIGN, value: d.align },
+        { key: "spin", label: "Random spin (about the face's normal)", type: "checkbox", value: d.spin },
+        { key: "overlap", label: "Allow overlap", type: "checkbox", value: d.overlap },
+        { key: "seed", label: "Seed (change it: a new layout)", value: d.seed, step: 1, min: 0 },
+      ],
+      hint: "Random: click the flat face to scatter on · Count, sizes, Align · Seed: a new layout · Enter or Apply · Esc cancel",
+      pick: (e) => {
+        const t = faceAt(e);
+        if (!t) return this.toast("Random: click a flat face", "error");
+        target = t;
+        this.previewOp();
+      },
+      hover: (e) => {
+        const t = faceAt(e);
+        this.viewport.setHighlight(this.selection, t ? { kind: "face", body: t.body, id: t.face } : null);
+        this.viewport.canvas.style.cursor = t ? "pointer" : "crosshair";
+      },
+      compute: ({ count, smallest, biggest, align, spin, overlap, seed }) => {
+        const face = target && faceOf(target.body, target.face);
+        if (!face) throw new OpWaiting("Click the flat face to scatter the copies on");
+        if (!(count >= 1) || count !== Math.round(count)) throw new Error("Count must be a whole number, 1 or more");
+        if (count > 500) throw new Error("At most 500 copies");
+        if (!(smallest > 0) || !(biggest > 0)) throw new Error("Sizes must be more than 0 %");
+        if (biggest < smallest) throw new Error("Biggest must be at least Smallest");
+        const spots = scatter(face, kits.map((k) => k.r0), { count, smallest: smallest / 100, biggest: biggest / 100, spin: !!spin, overlap: !!overlap, seed });
+        if (!spots.length) throw new Error("None fit on that face — smaller sizes, or a bigger face");
+        const n = new THREE.Vector3(...face.normal);
+        // Standing on the face: Z turned to its normal (the shortest turn; facing down: half a turn about X)
+        const z = new THREE.Vector3(0, 0, 1), axis = z.clone().cross(n);
+        const tilt = axis.length() > 1e-9 ? { axis: axis.normalize(), deg: THREE.MathUtils.radToDeg(z.angleTo(n)) } : n.z < 0 ? { axis: new THREE.Vector3(1, 0, 0), deg: 180 } : null;
+        const lift = [1, 0, -1][align] ?? 1; // (the middle that many half heights out along the normal)
+        const placeOf = (s: (typeof spots)[number]) => n.clone().multiplyScalar(lift * kits[s.pick].hz * s.scale).add(new THREE.Vector3(...s.at));
+        const matrixOf = (s: (typeof spots)[number]) => {
+          const { c } = kits[s.pick];
+          const m = new THREE.Matrix4().makeTranslation(placeOf(s));
+          if (tilt) m.multiply(new THREE.Matrix4().makeRotationAxis(tilt.axis, THREE.MathUtils.degToRad(tilt.deg)));
+          return m.multiply(new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(s.spin)))
+            .multiply(new THREE.Matrix4().makeScale(s.scale, s.scale, s.scale))
+            .multiply(new THREE.Matrix4().makeTranslation(-c[0], -c[1], -c[2]));
+        };
+        const build = (s: (typeof spots)[number]): Geom => {
+          const { source, c } = kits[s.pick];
+          let g: Geom = cloneShape(source.shape);
+          if (Math.abs(s.scale - 1) > 1e-12) g = scaleShape(g, [s.scale, s.scale, s.scale], c);
+          if (s.spin) g = rotateShape(g, s.spin, c, [0, 0, 1]);
+          if (tilt) g = rotateShape(g, tilt.deg, c, tilt.axis.toArray() as V3);
+          return translateShape(g, placeOf(s).sub(new THREE.Vector3(...c)).toArray() as V3);
+        };
+        return {
+          ghost: new Map(),
+          placed: spots.map((s) => ({ id: kits[s.pick].source.id, matrix: matrixOf(s) })),
+          warn: spots.length < count ? { text: `${spots.length} of ${count} fit — fewer, smaller, or Allow overlap`, action: overlap ? undefined : { label: "Allow overlap", set: { overlap: 1 } } } : undefined,
+          commit: () => {
+            const group = this.newGroupName("Random");
+            const copies = spots.map((s) => ({ ...this.doc.makeBody(build(s), kits[s.pick].name, kits[s.pick].source.kind), group }) as Body);
+            this.doc.commit([...this.doc.bodies, ...copies], `Random ×${copies.length}`);
+            return { select: copies.map((b) => b.id), solidMode: true, then: () => this.toast(`${copies.length} copies of ${sources.map((b) => b.name).join(", ")} as "${group}" in the Bodies panel`) };
+          },
+        };
+      },
+      remember: (v) => (this.randomDefaults = { ...d, ...v }),
+    });
+  }
+
   private openGridfinityBin(): void {
     const pro = isPro(), d = this.gridfinityDefaults, g = GRIDFINITY;
     const fields: OpField[] = [
@@ -4349,23 +4461,58 @@ class App implements ToolHost {
     return null;
   }
 
-  /** Divide face: split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
-  private divideFace(bodyId: number, a: V3, b: V3): void {
+  /**
+   * Divide face: draw lines across flat faces, one after another (each its own undo step); Done / Enter / Esc ends,
+   * the new edges left selected (G lifts them, e.g. a ridge into a gable).
+   */
+  private startDivideFace(): void {
+    this.endInteractions();
+    const shapeOf = (id: number) => {
+      const b = this.doc.get(id);
+      return b && isBrep(b) ? b.shape : null;
+    };
+    const made: { body: number; a: V3; b: V3 }[] = [];
+    const finish = () => {
+      this.endTool();
+      // (the edges found again on the final shapes: a later line can cut an earlier one in pieces; undone ones are gone)
+      const edges = made.flatMap(({ body, a, b }) => {
+        const shape = shapeOf(body);
+        return shape ? edgesOnSegment(shape, a, b, 1e-3).map((id): SelItem => ({ kind: "edge", body, id })) : [];
+      }).filter((s, i, all) => all.findIndex((x) => x.body === s.body && x.id === s.id) === i);
+      if (!made.length) return;
+      this.setMode("edge");
+      this.setSelection(edges);
+      this.toast(`${made.length} line${made.length > 1 ? "s" : ""} drawn — G moves the new edge${edges.length > 1 ? "s" : ""}`);
+    };
+    const panel = this.toolPanel("Divide face", { label: "Done ⏎", primary: true }, finish);
+    const tool = new DivideFaceTool(this, (id, a, b) => {
+      if (!this.divideFace(id, a, b)) return false;
+      made.push({ body: id, a, b });
+      return true;
+    }, (id) => this.divideRefusal(id), shapeOf, (st) => {
+      if (!st) return panel.remove();
+      panel.set(
+        `<div class="tp-count">${st.lines ? `${st.lines} line${st.lines > 1 ? "s" : ""} drawn` : "No lines yet"}</div>` +
+          (isPro() ? "" : `<div class="tp-tip">${st.started ? "Click the end point on another edge of the same face — near X / Y / Z it locks parallel. Esc drops the start." : "Click a point on an edge of a flat face (corners / midpoints snap), then the end point. Keep drawing for more lines."}</div>` +
+            `<div class="tp-tip">Done, Enter or Esc finishes.</div>`),
+      );
+    }, finish);
+    this.startTool(tool.start());
+  }
+
+  /** Divide face: split the face under the line a–b (one undo step); false (said why) if it can't. */
+  private divideFace(bodyId: number, a: V3, b: V3): boolean {
     const why = this.divideRefusal(bodyId);
-    if (why) return this.toast(why, "error");
+    if (why) return this.toast(why, "error"), false;
     const body = this.doc.get(bodyId)!;
     let shape: Solid;
     try {
       shape = splitFaceByLine(body.shape as Solid, a, b);
     } catch (e) {
-      return this.toast(errorMessage(e), "error"); // keep the tool so the user can retry
+      return this.toast(errorMessage(e), "error"), false; // keep the tool so the user can retry
     }
-    this.endTool();
     this.doc.replaceShapes(new Map([[bodyId, shape]]), "Divide face");
-    const id = edgeBetween(shape, a, b, 1e-3);
-    this.setMode("edge");
-    this.setSelection(id === null ? [] : [{ kind: "edge", body: bodyId, id }]);
-    this.toast("Face split — G moves the new edge");
+    return true;
   }
 
   /** Adjacent flat faces of an edge, each with the edge seen from that face. */
@@ -4818,7 +4965,7 @@ class App implements ToolHost {
     }
     if (this.hoverDot >= this.dots.length) this.hoverDot = -1;
     const look = (i: number) => (i === this.selDot ? "selected" : i === this.hoverDot ? "hover" : "shown");
-    this.viewport.showDots(this.op ? [] : this.dots.map((d, i) => ({ p: new THREE.Vector3(...d.at), look: look(i), round: d.face !== undefined })));
+    this.viewport.showDots(this.op ? [] : this.dots.map((d, i) => ({ p: new THREE.Vector3(...d.at), look: look(i) })));
   }
 
   /** The dot under the pointer (index into dots), -1: none. */
@@ -4834,6 +4981,7 @@ class App implements ToolHost {
   private dropDot(): void {
     this.selDot = -1;
     this.updateDots();
+    this.renderProps();
   }
 
   /** G on a flat face's centre dot: the face becomes a cone (a circle) or a pyramid, its tip that far out — or a flat top. */
@@ -6207,7 +6355,9 @@ class App implements ToolHost {
     if (this.tool instanceof MeasureTool) this.tool.refresh();
     const live = new Set(this.doc.bodies.map((b) => b.id));
     for (const id of [...this.hidden]) if (!live.has(id)) this.hidden.delete(id);
-    this.selection = this.selection.filter((s) => this.viewport.isValid(s));
+    this.viewport.setLocked(new Set(this.doc.bodies.filter((b) => b.locked).map((b) => b.id)));
+    this.selection = this.selection.filter((s) => this.viewport.isValid(s) && !this.doc.get(s.body)?.locked);
+    if (this.located !== null && !this.doc.get(this.located)?.locked) this.located = null;
     if (this.hover && !this.viewport.isValid(this.hover)) this.hover = null;
     this.refreshSelection();
     this.updateTitle();
@@ -6395,6 +6545,29 @@ class App implements ToolHost {
 
   /** Set while Union / Subtract / Intersect waits for solids: a click in the Bodies panel (a row, or a group) goes here. */
   private outlinerPick: ((ids: number[]) => void) | null = null;
+  /** A locked body clicked in the Bodies panel: lit in the viewport to show where it is (not selected), null: none. */
+  private located: number | null = null;
+
+  /** Lock / unlock bodies (one undo step): a locked one can't be selected or changed, clicks go through it. */
+  private lockBodies(ids: number[], on: boolean): void {
+    const set = new Set(ids.filter((id) => !!this.doc.get(id)?.locked !== on));
+    if (!set.size) return;
+    if (this.xf) this.stopTransform();
+    this.doc.commit(this.doc.bodies.map((b) => {
+      if (!set.has(b.id)) return b;
+      const { locked: _old, ...rest } = b;
+      return (on ? { ...rest, locked: true } : rest) as Body;
+    }), on ? "Lock" : "Unlock");
+    const names = [...set].map((id) => this.doc.get(id)?.name ?? "").join(", ");
+    if (on) this.toast(`Locked ${names} — clicks go through it; the lock in the Bodies panel unlocks it`);
+    else {
+      this.located = null;
+      this.setMode("body");
+      this.setSelection([...set].map((id) => ({ kind: "body", body: id, id: 0 })));
+      this.toast(`Unlocked ${names}`);
+    }
+  }
+
   private olRows = new Map<number, { row: HTMLElement; body: Body; hidden: boolean; lk: string }>();
   /** Group header rows by group name, and the groups folded shut. */
   private olGroups = new Map<string, HTMLElement>();
@@ -6450,7 +6623,14 @@ class App implements ToolHost {
             else this.olCollapsed.add(g);
             return this.renderOutliner();
           }
-          if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick(ms.map((b) => b.id)); // (Union / Subtract... waiting for solids)
+          if (t.closest(".ol-lock")) return this.lockBodies(ms.map((b) => b.id), !ms.every((b) => b.locked));
+          const lockedIn = ms.filter((b) => b.locked);
+          if (lockedIn.length && t.closest(".ol-edit, .ol-array, .ol-dup")) return this.toast(`${lockedIn.map((b) => b.name).join(", ")} ${lockedIn.length > 1 ? "are" : "is"} locked — unlock ${lockedIn.length > 1 ? "them" : "it"} first (the lock in the Bodies panel)`, "error");
+          if (this.outlinerPick && !t.closest(".ol-eye")) {
+            // (Union / Subtract... waiting for solids: the group's unlocked ones)
+            const free = ms.filter((b) => !b.locked).map((b) => b.id);
+            return free.length ? this.outlinerPick(free) : this.toast(`${g}: all locked — unlock them first`, "error");
+          }
           if (t.closest(".ol-edit.off")) return this.toast(t.closest<HTMLElement>(".ol-edit")!.title, "error");
           if (t.closest(".ol-edit")) {
             // The pencil on a Text group: edit its text
@@ -6479,9 +6659,10 @@ class App implements ToolHost {
             this.viewport.setHidden(this.hidden);
             return this.renderOutliner();
           }
-          // The whole group (Shift / Ctrl: added to the selection, or taken out if it's all in).
+          // The whole group (Shift / Ctrl: added to the selection, or taken out if it's all in) — its locked members left out.
+          if (ms.every((b) => b.locked)) return this.toast(`${g}: all locked — the lock unlocks them`, "error");
           this.setMode("body");
-          const items: SelItem[] = ms.map((b) => ({ kind: "body", body: b.id, id: 0 }));
+          const items: SelItem[] = ms.filter((b) => !b.locked).map((b) => ({ kind: "body", body: b.id, id: 0 }));
           if (e.shiftKey || e.ctrlKey) {
             const all = items.every((it) => this.selection.some((s) => sameItem(s, it)));
             const rest = this.selection.filter((s) => !items.some((it) => sameItem(s, it)));
@@ -6491,6 +6672,15 @@ class App implements ToolHost {
         }
         const b = bodyOf(e);
         if (!b) return;
+        if (t.closest(".ol-lock")) return this.lockBodies([b.id], !b.locked);
+        if (b.locked && !t.closest(".ol-eye")) {
+          // A locked one: shown where it is (lit, its panel says so), not selected
+          if (this.outlinerPick || (this.op?.spec.pickBody && !this.tool)) return this.toast(`${b.name} is locked — unlock it first (its lock)`, "error");
+          if (this.xf) this.stopTransform();
+          this.setSelection([]);
+          this.located = b.id;
+          return this.refreshSelection();
+        }
         if (this.outlinerPick && !t.closest(".ol-eye")) return this.outlinerPick([b.id]);
         if (this.op?.spec.pickBody && !this.tool && !t.closest(".ol-eye")) return this.op.spec.pickBody(b.id);
         if (t.closest(".ol-eye")) {
@@ -6544,7 +6734,7 @@ class App implements ToolHost {
       const hidden = this.hidden.has(b.id);
       const look = this.doc.lookOf(b), lk = `${look.color}:${look.opacity}`;
       let entry = this.olRows.get(b.id);
-      if (!entry || entry.body !== b || entry.hidden !== hidden || entry.lk !== lk) {
+      if (!entry || entry.body !== b || entry.hidden !== hidden || entry.lk !== lk) { // (a lock change: a new body object)
         const row = entry?.row ?? document.createElement("div");
         row.className = "ol-row";
         row.dataset.id = String(b.id);
@@ -6553,12 +6743,15 @@ class App implements ToolHost {
         const swatch = b.kind === "path"
           ? `<span class="ol-swatch path" title="${kind}"></span>`
           : `<span class="ol-swatch ol-look${b.kind === "solid" ? "" : " " + b.kind}" title="${kind} · click: colour and opacity" style="${swatchStyle(look)}"></span>`;
-        row.innerHTML = `${swatch}<span class="ol-name">${escapeHtml(b.name)}</span><button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+        const lock = `<button class="ol-lock${b.locked ? " on" : ""}" title="${b.locked ? "Locked: can't be selected or changed, clicks go through it — click to unlock" : "Lock: can't be selected or changed, clicks go through it (still snapped to)"}">${b.locked ? ICONS.lock : ICONS.unlock}</button>`;
+        row.innerHTML = `${swatch}<span class="ol-name">${escapeHtml(b.name)}</span>${lock}<button class="ol-eye" title="Show/hide">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
         entry = { row, body: b, hidden, lk };
         this.olRows.set(b.id, entry);
       }
       const row = entry.row;
       row.classList.toggle("selected", selected.has(b.id));
+      row.classList.toggle("located", this.located === b.id);
+      row.classList.toggle("locked", !!b.locked);
       row.classList.toggle("hidden", hidden);
       row.classList.toggle("in-group", !!b.group);
       return row;
@@ -6573,7 +6766,7 @@ class App implements ToolHost {
       liveGroups.add(g);
       const ms = this.doc.bodies.filter((x) => x.group === g);
       const open = !this.olCollapsed.has(g);
-      const allHidden = ms.every((x) => this.hidden.has(x.id));
+      const allHidden = ms.every((x) => this.hidden.has(x.id)), allLocked = ms.every((x) => x.locked);
       let head = this.olGroups.get(g);
       if (!head) {
         head = document.createElement("div");
@@ -6591,7 +6784,7 @@ class App implements ToolHost {
       const why = ms.some((x) => x.text) ? this.textEditable(g, ms) : null;
       const editBtn = !ms.some((x) => x.text) ? "" : why ? `<button class="ol-edit off" title="${escapeHtml(why)}">${ICONS.edit}</button>` : `<button class="ol-edit" title="Edit the text">${ICONS.edit}</button>`;
       const gl = this.doc.groupLooks[g] ?? {};
-      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-swatch ol-look" title="The group's colour and opacity (members without their own take it) · click to change" style="${swatchStyle(gl)}"></span><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${editBtn}${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button><button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
+      const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-swatch ol-look" title="The group's colour and opacity (members without their own take it) · click to change" style="${swatchStyle(gl)}"></span><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${editBtn}${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button>${allLocked ? `<button class="ol-lock on" title="All locked — click to unlock them">${ICONS.lock}</button>` : `<button class="ol-lock" title="Lock the group: its solids can't be selected or changed">${ICONS.unlock}</button>`}<button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
       if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
       head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
       head.classList.toggle("hidden", allHidden);
@@ -6819,7 +7012,21 @@ class App implements ToolHost {
     const sel = this.selection;
     const tip = (html: string) => `<div class="tip">${html}</div>`;
     // A hint's keys and words, clicked anywhere: runs the command (as the keys do).
-    const job = (cmd: string, keys: string, label: string) => `<span class="tip-job" data-cmd="${cmd}">${keys.split(" ").map((k) => `<kbd>${k}</kbd>`).join(" ")} ${label}</span>`;
+    const job = (cmd: string, keys: string, label: string) => `<span class="tip-job" data-cmd="${cmd}">${keys ? keys.split(" ").map((k) => `<kbd>${k}</kbd>`).join(" ") + " " : ""}${label}</span>`;
+    const found = !sel.length && this.located !== null ? this.doc.get(this.located) : undefined;
+    if (found) {
+      el.innerHTML = `<table><tr><td>Name</td><td>${escapeHtml(found.name)}</td></tr><tr><td>Locked</td><td>yes</td></tr></table>` +
+        tip(`Can't be selected or changed — clicks go through it (it's still snapped to) · ${job("body.unlock", "", "unlock it")}`);
+      return;
+    }
+    const dot = !sel.length ? this.dots[this.selDot] : undefined;
+    if (dot) {
+      const b = this.doc.get(dot.body);
+      const rows = [["Selected", dot.tip ? (dot.tip.cone ? "Cone's tip" : "Pointed tip") : "Face's centre point"], ...(b ? [["Solid", escapeHtml(b.name)]] : [])];
+      el.innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` +
+        tip(`${dot.tip ? job("op.fillet", "F", "round the tip") : job("xf.move", "G", "pull the face to a point (cone / pyramid)")} · <kbd>Esc</kbd> deselect`);
+      return;
+    }
     if (!sel.length) {
       el.innerHTML = `<div class="muted">Nothing selected</div>` +
         tip(`Solids: ${job("tool.box", "B B", "box")} · ${job("tool.cylinder", "B C", "cylinder")} · ${job("tool.sphere", "B S", "sphere")} · ${job("tool.cone", "B O", "cone")}<br>Faces: ${job("tool.rectangle", "A A", "rectangle")} · ${job("tool.circle", "A C", "circle")} · ${job("tool.polygon", "A P", "polygon")} · ${job("tool.text", "T", "text")} → ${job("op.pushpull", "P", "push/pull")}<br>${job("mode.body", "1", "solid")} · ${job("mode.face", "2", "face")} · ${job("mode.edge", "3", "edge mode")}<br>${job("help.shortcuts", "F1", "all shortcuts")}`);
@@ -6833,8 +7040,10 @@ class App implements ToolHost {
       if (sel.length === 1) {
         const b = this.doc.get(sel[0].body);
         if (b) {
-          // (its drawn box: the exact one can take ~0.7 s on a solid with a complex spline face, on every click)
-          const drawn = this.viewport.drawnBox(b.id)?.getSize(new THREE.Vector3());
+          // (its drawn box only with a spline face: the exact one can take ~0.7 s there, on every click — elsewhere it's
+          // quick, and the drawn one can be 0.01 mm short, e.g. a sphere's)
+          const analytic = isBrep(b) && b.shape.faces.every((f) => ["PLANE", "CYLINDER", "CONE", "SPHERE", "TORUS"].includes(f.geomType));
+          const drawn = analytic ? null : this.viewport.drawnBox(b.id)?.getSize(new THREE.Vector3());
           const [w, d, h] = drawn ? drawn.toArray() : boundingSize(b.shape);
           rows.unshift(["Name", escapeHtml(b.name)], ["Type", b.kind === "face" ? "Flat face" : b.kind === "mesh" ? "Mesh (STL)" : "Solid"]);
           rows.push(["Size", `${fmt(w)} × ${fmt(d)} × ${fmt(h)}`]);
@@ -7138,7 +7347,7 @@ class App implements ToolHost {
     // History: body / shape references — negative: the model's own bodies[-r - 1]; else the history's lists.
     const bodyRef = new Map<Body, number>(cur.map((b, i) => [b, -(i + 1)]));
     const shapeRef = new Map<object, number>(cur.map((b, i) => [b.shape, -(i + 1)]));
-    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; s: number }[] = [];
+    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; locked?: true; s: number }[] = [];
     const shapes: string[] = [];
     let size = 0;
     const refBody = (b: Body): number => {
@@ -7152,7 +7361,7 @@ class App implements ToolHost {
         shapeRef.set(b.shape, sr);
       }
       r = pool.length;
-      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), s: sr });
+      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), s: sr });
       bodyRef.set(b, r);
       return r;
     };
@@ -7172,7 +7381,7 @@ class App implements ToolHost {
         ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: this.geomText(b) } : { name: b.name, kind: b.kind, brep: this.geomText(b) }),
         ...(b.group ? { group: b.group } : {}),
         ...(b.text ? { text: b.text } : {}),
-        ...(b.look ? { look: b.look } : {}),
+        ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}),
       })),
       // Group colours / opacities by group name (see GroupLooks).
       ...(Object.keys(this.doc.groupLooks).length ? { looks: this.doc.groupLooks } : {}),
@@ -7195,7 +7404,7 @@ class App implements ToolHost {
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
       format: string;
-      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look }[];
+      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true }[];
       looks?: GroupLooks;
       guides?: Guide[];
       dimensions?: Dimension[];
@@ -7210,9 +7419,9 @@ class App implements ToolHost {
       if (kind === "path") return { kind: "path", shape: shape as unknown as Wire };
       return { kind: kind === "face" || kind === "solid" ? kind : kindOf(shape), shape };
     };
-    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look } => {
+    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true } => {
       const group = typeof b.group === "string" && b.group ? { group: b.group } : {};
-      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}) };
+      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}) };
     });
     const looks = json.looks ?? {};
     this.endInteractions();
@@ -7231,7 +7440,7 @@ class App implements ToolHost {
             const p = h.bodies[r];
             let shape = p.s < 0 ? current[-p.s - 1].shape : shapeOf.get(p.s);
             if (!shape) shapeOf.set(p.s, (shape = geom(p.kind, h.shapes[p.s]).shape));
-            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}) } as Body;
+            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}), ...(p.locked ? { locked: true as const } : {}) } as Body;
             made.set(r, b);
           }
           return b;
