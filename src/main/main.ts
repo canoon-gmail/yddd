@@ -172,6 +172,8 @@ function buildMenu(): void {
         item("Redo", "edit.redo", "CmdOrCtrl+R"),
         { type: "separator" },
         item("Duplicate", "edit.duplicate", "CmdOrCtrl+D"),
+        item("Repeat Last", "xf.repeat", "Shift+R"),
+        item("Delete", "edit.delete", "Delete"),
         item("Select All", "edit.selectAll", "CmdOrCtrl+A"),
         { type: "separator" },
         item("Group", "edit.group", "CmdOrCtrl+G"),

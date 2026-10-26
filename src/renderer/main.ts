@@ -465,9 +465,6 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
       { cmd: "op.sweep", icon: "sweep", label: "Sweep" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis" },
       { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide" },
-      { cmd: "tool.divideFace", icon: "pencil", label: "Draw line on face" },
-      { cmd: "tool.guide", icon: "guide", label: "Guide line" },
-      { cmd: "edit.clearGuides", icon: "clearGuides", label: "Clear guides" },
     ],
   },
   {
@@ -493,11 +490,11 @@ const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
   },
   {
     title: "Measure",
-    items: [{ cmd: "tool.measure", icon: "measure", label: "Measure" }],
-  },
-  {
-    title: "Delete",
-    items: [{ cmd: "edit.delete", icon: "delete", label: "Delete" }],
+    items: [
+      { cmd: "tool.measure", icon: "measure", label: "Measure" },
+      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face" },
+      { cmd: "tool.guide", icon: "guide", label: "Guide line" },
+    ],
   },
   {
     title: "History",
@@ -556,7 +553,7 @@ const CHORD_MS = 1500;
 
 const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 /** Toolbar commands that go into the recent strip (mode switches, undo/redo, views, X-ray and Delete have their own keys / buttons). */
-const NOT_RECENT = new Set(["Select", "History", "View", "X-ray", "Delete"]);
+const NOT_RECENT = new Set(["Select", "History", "View", "X-ray"]);
 const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 const RECENT_MAX = 10;
 /** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
@@ -629,7 +626,7 @@ class App implements ToolHost {
   /** The background kernel (a second OpenCascade in a worker) for slow operations: see kernelWorker.ts. */
   private bgKernel = new KernelWorker();
   /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
-  /** The move / rotate gizmo session; `frame`: a move along turned axes (G / G G on a round or slanted edge: Z along its circle's axis / along the edge). */
+  /** The move / rotate gizmo session; `frame`: a move along turned axes (G / Shift+G on a round or slanted edge: Z along its circle's axis / along the edge). */
   private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; frame?: GizmoFrame; edges?: SelItem[]; guide?: number } | null = null;
   /** Latest edge-move drag offset waiting for its (once per frame) preview. */
   private edgePreview: V3 | null = null;
@@ -3602,7 +3599,7 @@ class App implements ToolHost {
    */
   private startSplitFace(): void {
     if (!this.doc.guides.length) {
-      this.toast("Split face: draw a guide line first (Shift+G — two points or parallel to an edge)", "error");
+      this.toast("Split face: draw a guide line first (Guide line, next to Measure — two points or parallel to an edge)", "error");
       return;
     }
     let faces: SelItem[] = this.selection.filter((s) => s.kind === "face" && this.doc.get(s.body)?.kind === "solid");
@@ -3846,6 +3843,7 @@ class App implements ToolHost {
     const cutOff: Body[] = [];
     const facePieces: number[] = [];
     const uppers = new Map<number, Body>(); // solid id → its upper piece
+    const upperExtra: Body[] = [], lowerExtra = new Map<number, Body[]>(); // more pieces on a side (not joined to the first)
     let arrays = this.doc.arrays, newGroup: string | null = null;
     try {
       const { point, normal } = this.cutPlane(line, ids);
@@ -3878,8 +3876,18 @@ class App implements ToolHost {
         }
         const { above, below } = halves.get(id)!;
         if (!above || !below) throw new Error(`Cut: the ${typeof line === "number" ? "guide's" : "axis" in line ? "axis'" : "path's"} cut plane does not pass through "${body.name}"`);
-        kept.set(id, below);
-        uppers.set(id, inGroupOf(this.doc.makeBody(above, "Solid"), body));
+        // A side in separate pieces (a U cut across its arms): one object per piece, largest first
+        // (an array / circular copy cut like its source stays as it is, so it stays one).
+        const loose = !like.has(id) && !recs.some((r) => r.sources.includes(id));
+        const parts = (s: Solid) => {
+          const ps = loose ? solidPieces(s) : [];
+          return ps.length > 1 ? ps.map((p) => ({ p, v: solidVolume(p) })).sort((a, b) => b.v - a.v).map(({ p }) => p) : [s];
+        };
+        const [low, ...lowRest] = parts(below), [top, ...topRest] = parts(above);
+        kept.set(id, low);
+        lowerExtra.set(id, lowRest.map((p) => inGroupOf(this.doc.makeBody(p, "Solid"), body)));
+        uppers.set(id, inGroupOf(this.doc.makeBody(top, "Solid"), body));
+        upperExtra.push(...topRest.map((p) => inGroupOf(this.doc.makeBody(p, "Solid"), body)));
       }
       // Many upper pieces (e.g. a circular copy's 17): a group of their own, so they're moved, hidden
       // or deleted together; an array / circular copy cut the same all round stays one, in both halves.
@@ -3899,25 +3907,26 @@ class App implements ToolHost {
           return halves.map(([r, shapeOf]) => this.recutRecord(r, rec, shapeOf));
         });
       }
-      cutOff.push(...uppers.values());
+      cutOff.push(...uppers.values(), ...upperExtra.map((b) => (newGroup ? { ...b, group: newGroup } : b)));
     } catch (e) {
       this.toast(errorMessage(e), "error");
       return;
     }
     if (say) await say(`Drawing ${ids.length + cutOff.length} pieces…`);
-    this.doc.commit([...this.doc.bodies.map((bd) => (kept.has(bd.id) ? withShape(bd, kept.get(bd.id)!) : bd)), ...cutOff], "Cut", this.doc.guides, this.doc.dimensions, arrays);
-    const solidPieces = cutOff.filter((b) => b.kind !== "face");
-    if (!solidPieces.length) {
+    this.doc.commit([...this.doc.bodies.flatMap((bd) => (kept.has(bd.id) ? [withShape(bd, kept.get(bd.id)!), ...(lowerExtra.get(bd.id) ?? [])] : [bd])), ...cutOff], "Cut", this.doc.guides, this.doc.dimensions, arrays);
+    const upperSolids = cutOff.filter((b) => b.kind !== "face");
+    if (!upperSolids.length) {
       // Only faces: select all the pieces (each can be moved / pushed on its own).
       this.setSelection(facePieces.map((id) => ({ kind: "body", body: id, id: 0 })));
       this.toast(`Cut into ${facePieces.length} separate faces — they are selected`);
       return;
     }
     // Select the upper pieces, so Del removes them straight away.
-    this.setSelection(solidPieces.map((bd) => ({ kind: "body", body: bd.id, id: 0 })));
+    const pieces = ids.length + cutOff.length + [...lowerExtra.values()].reduce((n, l) => n + l.length, 0);
+    this.setSelection(upperSolids.map((bd) => ({ kind: "body", body: bd.id, id: 0 })));
     this.toast(newGroup
-      ? `Cut into ${ids.length * 2} objects — the ${solidPieces.length} upper pieces are a new group, ${newGroup}, selected (Del removes it)`
-      : `Cut into ${ids.length * 2} objects — the upper part is selected (Del removes it)`);
+      ? `Cut into ${pieces} objects — the ${upperSolids.length} upper pieces are a new group, ${newGroup}, selected (Del removes it)`
+      : `Cut into ${pieces} objects — the upper ${upperSolids.length === 1 ? "part is" : `${upperSolids.length} pieces are`} selected (Del removes ${upperSolids.length === 1 ? "it" : "them"})`);
   }
 
   /**
@@ -4331,16 +4340,16 @@ class App implements ToolHost {
     if (!next.length) this.toast("Edge moved (it merged into a neighbouring face)");
   }
 
-  /** Why Draw line on face can't work on this body (shown to the user), or null if it can. */
+  /** Why Divide face can't work on this body (shown to the user), or null if it can. */
   private divideRefusal(bodyId: number): string | null {
     const body = this.doc.get(bodyId);
-    if (!body) return "Draw line on face: click an edge of a solid";
-    if (body.kind === "face") return `Draw line on face works on solids only — "${body.name}" is a flat face. Push/Pull it (P) into a solid first.`;
-    if (body.kind === "mesh") return `Draw line on face can't edit "${body.name}" — it's an imported STL mesh`;
+    if (!body) return "Divide face: click an edge of a solid";
+    if (body.kind === "face") return `Divide face works on solids only — "${body.name}" is a flat face. Push/Pull it (P) into a solid first.`;
+    if (body.kind === "mesh") return `Divide face can't edit "${body.name}" — it's an imported STL mesh`;
     return null;
   }
 
-  /** Draw line on face (D): split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
+  /** Divide face: split the face under the line a–b; the new edge is left selected (G lifts it, e.g. into a gable). */
   private divideFace(bodyId: number, a: V3, b: V3): void {
     const why = this.divideRefusal(bodyId);
     if (why) return this.toast(why, "error");
@@ -4352,7 +4361,7 @@ class App implements ToolHost {
       return this.toast(errorMessage(e), "error"); // keep the tool so the user can retry
     }
     this.endTool();
-    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Draw line on face");
+    this.doc.replaceShapes(new Map([[bodyId, shape]]), "Divide face");
     const id = edgeBetween(shape, a, b, 1e-3);
     this.setMode("edge");
     this.setSelection(id === null ? [] : [{ kind: "edge", body: bodyId, id }]);
@@ -4809,7 +4818,7 @@ class App implements ToolHost {
     }
     if (this.hoverDot >= this.dots.length) this.hoverDot = -1;
     const look = (i: number) => (i === this.selDot ? "selected" : i === this.hoverDot ? "hover" : "shown");
-    this.viewport.showDots(this.op ? [] : this.dots.map((d, i) => ({ p: new THREE.Vector3(...d.at), look: look(i) })));
+    this.viewport.showDots(this.op ? [] : this.dots.map((d, i) => ({ p: new THREE.Vector3(...d.at), look: look(i), round: d.face !== undefined })));
   }
 
   /** The dot under the pointer (index into dots), -1: none. */
@@ -4960,7 +4969,7 @@ class App implements ToolHost {
   }
 
   /**
-   * G / G G: the edge under the cursor to slide along, and the turned axes for the move gizmo (Z the
+   * G / Shift+G: the edge under the cursor to slide along, and the turned axes for the move gizmo (Z the
    * way to slide). A round edge (circle / arc, any solid): Z along its axis (the way facing the eye),
    * X to its centre. A slanted straight edge: Z along the edge (an edge along X / Y / Z: none — the
    * plain gizmo slides that way already).
@@ -5050,7 +5059,7 @@ class App implements ToolHost {
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
   }
 
-  /** Keep an explicit gizmo pivot (from G G) on the moved bodies. */
+  /** Keep an explicit gizmo pivot (from Shift+G) on the moved bodies. */
   private shiftPivot(rs: TransformResult[]): void {
     const p = this.xf?.pivot;
     if (!p) return;
@@ -7008,7 +7017,7 @@ class App implements ToolHost {
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
-      ["D", "Draw line on face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap; move the end along X / Y / Z and it locks parallel to that axis, the line in the axis colour); the new edge is selected"],
+      ["Toolbar → Divide face", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap; move the end along X / Y / Z and it locks parallel to that axis, the line in the axis colour); the new edge is selected"],
       ["G with a guide line selected", `Move the guide with the gizmo (${this.viewport.snapTip("points / other guides")}) · Tab: exact ΔX,ΔY,ΔZ · Enter done`],
       ["G with edges selected", "Move edge: drag the edge, reshaping its flat-faced solid (bent faces split into triangles)"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
@@ -7025,10 +7034,10 @@ class App implements ToolHost {
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
-      ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Shift+G for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
+      ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Guide line for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; a straight path: Twist ° turns it evenly on the way — a propeller blade — and End size % makes the far end smaller / larger); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
-      ["Shift+G", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
+      ["Toolbar → Guide line", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
       ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line) — or a slanted straight edge: slide along it, the blue arrow in mm steps, Tab: the distance along it"],
@@ -7037,9 +7046,9 @@ class App implements ToolHost {
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
-      ["G G", "Move from point (G pressed twice): show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
+      ["Shift+G", "Move from point: show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
-      ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like Shift+G)"],
+      ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like the Guide line tool)"],
       ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
@@ -7660,7 +7669,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

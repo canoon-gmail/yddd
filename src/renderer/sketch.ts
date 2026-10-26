@@ -1923,7 +1923,6 @@ export class SketchTool implements Tool {
       return true;
     }
     if ((k === "g" || k === "G") && !e.shiftKey) {
-      // (G G too: the sketch keeps the key, so it never reaches the app's Move from point)
       if (this.mode === "select") this.startMove();
       else this.host.hint("Move: select outlines / paths first (Esc: Select, click them), then G");
       return true;

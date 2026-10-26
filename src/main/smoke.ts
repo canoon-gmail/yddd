@@ -442,12 +442,12 @@ const SCENARIO_3 = String.raw`
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Z", code: "KeyZ", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
   expect("9 Ctrl+Shift+Z redoes too", app.doc.bodies.length === 3, app.doc.bodies.length);
 
-  // 10) G G (Move from point): click a mark → move gizmo appears at that mark; dragging keeps the pivot on the body
+  // 10) Shift+G (Move from point): click a mark → move gizmo appears at that mark; dragging keeps the pivot on the body
   {
     const id = app.doc.bodies[0].id;
     app.setSelection([{ kind: "body", body: id, id: 0 }]);
     vp.fit(); await sleep(50);
-    key("g", "KeyG"); key("g", "KeyG");
+    key("G", "KeyG", { shiftKey: true });
     const vis = vp.visiblePoints(vp.pivotCandidates([id]));
     const mark = vis.find((c) => c.kind === "vertex") || vis[0];
     const mp = mark.point.toArray().map(r);
@@ -838,7 +838,7 @@ const SCENARIO_3 = String.raw`
     expect("13j Shift+D on a non-flat loop threw", false, String(e && e.stack || e));
   }
 
-  // 14) Draw line on face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
+  // 14) Divide face (L): split the top face between the two long-edge midpoints, then G lifts the ridge → gable roof
   try {
     const valid = window.ydddKernel.isValidShape;
     app.run("mode.body");
@@ -855,7 +855,7 @@ const SCENARIO_3 = String.raw`
     app.run("tool.divideFace");
     toolClicks([[420, 0, 20], [420, 30, 20]]);
     const sel = app.selection[0];
-    expect("14 draw line on face splits the top face, new edge selected in Edge mode", sh().faces.length === 7 && valid(sh()) && app.mode === "edge" && app.selection.length === 1 && sel.kind === "edge", [sh().faces.length, valid(sh()), app.mode, app.selection]);
+    expect("14 divide face splits the top face, new edge selected in Edge mode", sh().faces.length === 7 && valid(sh()) && app.mode === "edge" && app.selection.length === 1 && sel.kind === "edge", [sh().faces.length, valid(sh()), app.mode, app.selection]);
     const e = sel && sh().edges.find((x) => x.hashCode === sel.id);
     const r3 = (p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6));
     expect("14 new edge runs exactly between the midpoints", e && eq([r3(e.startPoint), r3(e.endPoint)].sort(), [[420, 0, 20], [420, 30, 20]].sort()), e && [r3(e.startPoint), r3(e.endPoint)]);
@@ -864,7 +864,7 @@ const SCENARIO_3 = String.raw`
     dialog([0, 0, 10]);
     key("Enter", "Enter");
     expect("14 G lifts the ridge: gable house (7 faces, 30 tall)", valid(sh()) && eq(size(bx), [40, 30, 30]) && sh().faces.length === 7, [valid(sh()), size(bx), sh().faces.length]);
-    // 14b) Draw line on face on a flat rectangle face: refused with an error toast, face unchanged, tool stays
+    // 14b) Divide face on a flat rectangle face: refused with an error toast, face unchanged, tool stays
     app.setSelection([]);
     app.run("tool.rectangle"); ev("pointermove", [400, 100, 0]); key("Tab", "Tab"); dialog([40, 30]);
     const rf = last(), rfFaces = rf.shape.faces ? rf.shape.faces.length : 1, toasts = document.querySelectorAll(".toast.error").length;
@@ -879,7 +879,7 @@ const SCENARIO_3 = String.raw`
     app.setSelection([{ kind: "body", body: bx, id: 0 }]); app.run("view.fitSelection"); await sleep(50); app.setSelection([]); // camera back for the next steps
     app.run("mode.body");
   } catch (e) {
-    expect("14 draw line on face threw", false, String(e && e.stack || e));
+    expect("14 divide face threw", false, String(e && e.stack || e));
   }
 
   // 15) Offset face with round corners: 40 x 30 top grows by 5 (4 arcs), shrinks by 5 (still 4 arcs)
@@ -2076,7 +2076,7 @@ const SCENARIO_HOUSE = String.raw`
   const before = toasts().length, vols = {};
   for (let i = 0; i < total; i++) {
     if (titles[i] === "Push the wing back") {
-      // By hand, as the step says: G G on the wing, press the top of its back gable, drag (then Ctrl + Shift) onto the main ridge
+      // By hand, as the step says: Shift+G on the wing, press the top of its back gable, drag (then Ctrl + Shift) onto the main ridge
       const vp = app.viewport, V = vp.camera.position.constructor, canvas = vp.canvas;
       const pe = (type, p, mods = {}) => { const sc = window.__see(new V(p[0], p[1], p[2])); canvas.dispatchEvent(new PointerEvent(type, { clientX: sc.x, clientY: sc.y, button: 0, bubbles: true, ...mods })); };
       const wing = app.doc.bodies.find((b) => b.name === "Wing 1");
@@ -2088,7 +2088,7 @@ const SCENARIO_HOUSE = String.raw`
       for (const y of [-25, -12, -3]) pe("pointermove", [-43, y, 65], mods);
       pe("pointermove", [-42, 0, 65], mods); pe("pointerup", [-42, 0, 65], mods); await sleep(30);
       const wb = app.doc.get(wing.id).shape.boundingBox.bounds, r = (v) => Math.round(v * 1e6) / 1e6;
-      expect("house: G G from the wing's back gable top, Ctrl + Shift onto the main ridge → exactly 35 back", tool === "Move from point" && [wb[0].map(r), wb[1].map(r)].join() === "-80,-95,0,-10,0,65", { tool, lo: wb[0].map(r), hi: wb[1].map(r) });
+      expect("house: Shift+G from the wing's back gable top, Ctrl + Shift onto the main ridge → exactly 35 back", tool === "Move from point" && [wb[0].map(r), wb[1].map(r)].join() === "-80,-95,0,-10,0,65", { tool, lo: wb[0].map(r), hi: wb[1].map(r) });
       app.run("edit.undo"); await sleep(30);
       app.setSelection([]);
     }
@@ -4733,6 +4733,42 @@ const SCENARIO_WRAPTEXT = String.raw`
 })()
 `;
 
+/** Divide face (D) from anywhere along an edge of a top that isn't at z = 0 (float32 mesh points there): the end still locks onto the X axis. */
+const SCENARIO_DIVIDELOCK = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel, vp = app.viewport;
+  const V = vp.camera.position.constructor;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  app.doc.reset([]); app.setSelection([]); app.run("mode.body");
+  // 29.6 × 43.2 × 41.4 box at x 4..33.6, y 60..103.2 (as in a user's file): its top at z = 41.4
+  const box = app.doc.makeBody(K.makeBox(G, [18.8, 81.6, 0], 29.6, 43.2, 41.4), "Box");
+  app.doc.commit([box], "box"); await sleep(30);
+  vp.setView("iso"); app.run("view.fit"); await sleep(100);
+  const S = (p) => vp.toScreen(new V(...p));
+  const ev = (type, s) => vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, bubbles: true }));
+  app.run("tool.divideFace");
+  const t = app.tool;
+  const a = S([4, 70, 41.4]); ev("pointermove", a); ev("pointerdown", a); // (not a midpoint)
+  const far = S([33.6, 70, 41.4]), off = { x: far.x, y: far.y + 3 }; // 3 px off where the X line meets the far edge
+  ev("pointermove", off);
+  const hud = document.querySelector("#hud")?.textContent ?? "";
+  expect("divide face: from along an edge of a top at z = 41.4, the end 3 px off locks onto the X axis", t.axis === 0 && t.cur && Math.abs(t.cur.y - t.a.point.y) < 1e-9 && Math.abs(t.cur.x - 33.6) < 1e-6, { axis: t.axis, a: t.a?.point.toArray(), cur: t.cur?.toArray(), hud });
+  ev("pointerdown", off);
+  const sh = app.doc.get(box.id).shape, sel = app.selection[0];
+  const e = sel && sh.edges.find((x) => x.hashCode === sel.id);
+  const ends = e && [e.startPoint, e.endPoint].map((p) => p.toTuple());
+  expect("divide face: the top split by an edge along X (valid, 7 faces)", K.isValidShape(sh) && sh.faces.length === 7 && ends && Math.abs(ends[0][1] - ends[1][1]) < 1e-9 && Math.abs(ends[0][2] - 41.4) < 1e-9 && Math.abs(Math.abs(ends[0][0] - ends[1][0]) - 29.6) < 1e-6, { faces: sh.faces.length, ends });
+  if (app.tool) app.endTool();
+  app.doc.reset([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("divide lock scenario failed: " + JSON.stringify(failed));
+  return [{ label: "divide face: axis lock", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 /** Macro → Gridfinity bin: grid squares × units, compartments, lip, magnets; its sizes measured on the preview; a second bin stacks in the lip. */
 const SCENARIO_GRIDFINITY = String.raw`
 (async () => {
@@ -5432,6 +5468,23 @@ const SCENARIO_CUTAXIS = String.raw`
       /Along: Path/.test(text) && !app.tool && solids.length === 2 && vols.every((v) => Math.abs(v - 4000) < 1e-3) && tall.every((h) => h === 20) && !!app.doc.get(path.id),
       { text, vols, tall, n: app.doc.bodies.length });
   }
+  // Cut across both arms of a U (the base on one side): the arms' side in 2 separate pieces → one object each (3 in all)
+  {
+    app.doc.reset([]);
+    const u = K.booleanOp("subtract", K.makeBox(G, [0, 0, 0], 30, 30, 10), [K.makeBox(G, [0, 5, 0], 20, 30, 10)]);
+    const ub = app.doc.makeBody(u, "U");
+    const path = app.doc.makeBody(K.sketchPath([{ kind: "line", a: [-20, 5, 0], b: [20, 5, 0] }]), "Path", "path");
+    app.doc.commit([ub, path], "U + path");
+    app.run("view.top"); await sleep(20);
+    const total = K.solidVolume(u);
+    app.opCut([ub.id], { path: path.id }); await sleep(100);
+    const solids = app.doc.bodies.filter((b) => b.kind === "solid");
+    const vols = solids.map((b) => +K.solidVolume(b.shape).toFixed(3));
+    const arms = solids.filter((b) => b.shape.boundingBox.bounds[0][1] > 4.9);
+    expect("cut across both arms of a U: 3 objects of one solid each (the 2 arm ends apart), volume kept",
+      solids.length === 3 && solids.every((b) => K.solidPieces(b.shape).length === 1 && K.isValidShape(b.shape)) && arms.length === 2 && Math.abs(vols.reduce((a, v) => a + v, 0) - total) < 1e-3,
+      { vols, total, n: app.doc.bodies.length, sel: app.selection.length });
+  }
   // Split face (Shift+C) with nothing selected: the panel waits — the guide then the face, or the face then the guide
   const splitOrder = async (guideFirst) => {
     app.doc.reset([]);
@@ -5513,25 +5566,26 @@ const SCENARIO_CUTAXIS = String.raw`
     app.run("mode.body");
     expect("a fillet the kernel can't make: a readable error, with the largest radius that works", /can't round this edge at 50 mm — the largest that works is about \d/.test(filletErr) && !/object/.test(filletErr), filletErr);
     app.doc.undo();
-    // G G centre to centre: pressing a rod's end centre shows the other solids' centres as marks; dropping
-    // on the cup's top centre puts the rod's end exactly there
+    // Shift+G centre to centre: pressing a rod's top centre shows the other solids' centres as marks; dropping
+    // on the cup's top centre puts the rod's top exactly there (its bottom centre: hidden behind the rod; its middle: shown)
     const cup = app.doc.makeBody(K.makeCylinder(G, [0, 7000, 0], 10, 5), "Cup"), rod = app.doc.makeBody(K.makeCylinder(G, [40, 7000, 0], 2, 20), "Rod");
     app.doc.commit([...app.doc.bodies, cup, rod], "cup and rod");
     app.setSelection([{ kind: "body", body: cup.id, id: 0 }, { kind: "body", body: rod.id, id: 0 }]);
+    vp.setView("iso"); // (seen from above: the rod's top centre in sight)
     app.run("view.fitSelection"); await sleep(700); // (the view glides there)
     app.setSelection([{ kind: "body", body: rod.id, id: 0 }]);
     app.setAutoSnap(true, false); // (as by default: these scenarios run with it off)
     app.run("xf.moveFrom"); await sleep(30);
     const pe = (type, p, buttons) => { const s = vp.toScreen(new V(...p)); vp.canvas.dispatchEvent(new PointerEvent(type, { clientX: s.x, clientY: s.y, button: 0, buttons, pointerId: 1, isPrimary: true, pointerType: "mouse", bubbles: true })); };
     const at = (q, p) => Math.hypot(q.x - p[0], q.y - p[1], q.z - p[2]) < 1e-6;
-    const tool = app.tool, baseShown = !!tool?.pivots.some((p) => at(p.point, [40, 7000, 0]));
-    pe("pointermove", [40, 7000, 0], 0); pe("pointerdown", [40, 7000, 0], 1); await sleep(20);
+    const tool = app.tool, marks = { top: !!tool?.pivots.some((p) => at(p.point, [40, 7000, 20])), bottom: !!tool?.pivots.some((p) => at(p.point, [40, 7000, 0])), middle: !!tool?.pivots.some((p) => at(p.point, [40, 7000, 10])), n: tool?.pivots.length }, baseShown = marks.top && !marks.bottom && marks.middle;
+    pe("pointermove", [40, 7000, 20], 0); pe("pointerdown", [40, 7000, 20], 1); await sleep(20);
     const targetShown = !!tool?.targets.some((p) => at(p.point, [0, 7000, 5]));
     pe("pointermove", [0, 7000, 5], 1); await sleep(20); pe("pointerup", [0, 7000, 5], 0); await sleep(30);
     const [lo, hi] = app.doc.get(rod.id).shape.boundingBox.bounds, bottom = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]].map(r);
-    expect("G G: the rod's end centre is a start mark, the cup's top centre a target; dropped there exactly", baseShown && targetShown && bottom.join() === "0,7000,5", { baseShown, targetShown, bottom });
+    expect("Shift+G: the rod's top centre is a start mark (not its hidden bottom one; its middle too), the cup's top centre a target; dropped there exactly", baseShown && targetShown && bottom.join() === "0,7000,-15", { marks, targetShown, bottom });
     if (app.tool) window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
-    // G G on a round edge (a slanted cup's rim): the gizmo turned to its circle — Z along its axis; a Z drag
+    // Shift+G on a round edge (a slanted cup's rim): the gizmo turned to its circle — Z along its axis; a Z drag
     // of 2.4 moves the rod exactly 2 along it (1 mm steps), Tab "Z (along axis)" 5 → 5 in all, still centred
     {
       const u = [0.70089, -0.41139, 0.58269], C = [0, 8000, 0], F = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: u };
@@ -5565,7 +5619,7 @@ const SCENARIO_CUTAXIS = String.raw`
       if (ins[0]) ins[0].value = "5";
       dlg?.requestSubmit(); await sleep(30);
       const typed = along();
-      expect("G G on a round edge: gizmo turned (Z along the circle's axis); Z drag 2.4 → 2 along it, Tab Z 5 → 5, centred",
+      expect("Shift+G on a round edge: gizmo turned (Z along the circle's axis); Z drag 2.4 → 2 along it, Tab Z 5 → 5, centred",
         turned && dragged.t === 2 && dragged.off === 0 && labels[0] === "Along the axis (mm)" && hiddenMore === 2 && axisLine && typed.t === 5 && typed.off === 0, { turned, axisLine, dragged, labels, hiddenMore, typed });
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
       app.setSelection([]);
@@ -5750,7 +5804,7 @@ const SCENARIO_AUTOSNAP = String.raw`
   window.dispatchEvent(new PointerEvent("pointermove", { clientX: 5, clientY: 5, ctrlKey: false, bubbles: true }));
   expect("auto snap: on — the move gizmo snaps without Ctrl, not with it; the hint says Ctrl is free", gizmoSnap === app.snap && gizmoFree === null && /Ctrl: free/.test(hint), { gizmoSnap, gizmoFree, hint });
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
-  // G G: Move from point (G alone: the move gizmo; a second G switches; Shift+G does nothing now)
+  // Shift+G: Move from point (G alone: the move gizmo; a second G no longer switches)
   app.setSelection([{ kind: "body", body: cube.id, id: 0 }]);
   const gk = (o = {}) => window.dispatchEvent(new KeyboardEvent("keydown", { key: o.shiftKey ? "G" : "g", code: "KeyG", bubbles: true, cancelable: true, ...o }));
   gk(); await sleep(20);
@@ -5762,16 +5816,38 @@ const SCENARIO_AUTOSNAP = String.raw`
   gk({ shiftKey: true }); await sleep(20);
   const shiftG = { xf: !!app.xf, tool: app.tool?.name ?? null };
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
-  expect("G = move gizmo, G G = Move from point, Shift+G = Guide line", oneG.xf && !oneG.tool && twoG.tool === "Move from point" && !twoG.xf && !shiftG.xf && shiftG.tool === "Guide line", { oneG, twoG, shiftG });
-  // D: Draw line on face (L no longer)
+  expect("G = move gizmo, G G = still the move gizmo, Shift+G = Move from point", oneG.xf && !oneG.tool && twoG.xf && !twoG.tool && !shiftG.xf && shiftG.tool === "Move from point", { oneG, twoG, shiftG });
+  // D, L: nothing (Divide face has no key)
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "d", code: "KeyD", bubbles: true, cancelable: true })); await sleep(20);
   const dTool = app.tool?.name ?? null;
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "l", code: "KeyL", bubbles: true, cancelable: true })); await sleep(20);
   const lTool = app.tool?.name ?? null;
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
-  expect("D = Draw line on face (L does nothing now)", dTool === "Draw line on face" && lTool === null, { dTool, lTool });
-  // Draw line on face: an end point a little off the Y direction locks where the Y axis line through the start meets the far edge
+  expect("D and L do nothing (Divide face has no key)", dTool === null && lTool === null, { dTool, lTool });
+  // Shift+G marks: no midpoints of curved edges (a rounded box's arcs), and none closer than 14 px on screen (a corner wins)
+  {
+    const rb = app.doc.makeBody(K.filletEdges(K.makeBox(G, [300, 0, 0], 20, 20, 20), null, 2), "Rounded");
+    app.doc.commit([...app.doc.bodies, rb], "rounded");
+    const lines = rb.shape.edges.filter((e) => e.geomType === "LINE").length, arcs = rb.shape.edges.length - lines;
+    const mids = vp.pivotCandidates([rb.id]).filter((p) => p.kind === "midpoint").length;
+    app.setSelection([{ kind: "body", body: rb.id, id: 0 }]); vp.setView("iso"); vp.fit([rb.id]); await sleep(50);
+    app.run("xf.moveFrom"); await sleep(30);
+    const near = (pv) => { let m = Infinity; const s = pv.map((p) => vp.toScreen(p.point)); for (let i = 0; i < s.length; i++) for (let j = i + 1; j < s.length; j++) m = Math.min(m, Math.hypot(s[i].x - s[j].x, s[i].y - s[j].y)); return m; };
+    const fitGap = near(app.tool.pivots), fitN = app.tool.pivots.length;
+    const rings = vp.pivotDots.filter((d) => d.material.map).map((d) => d.geometry.attributes.position.count).join(), centres = app.tool.pivots.filter((p) => p.kind === "center").length;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
+    const p = new V(300, 0, 0), kept = vp.spreadOnScreen([{ point: p, kind: "midpoint" }, { point: p.clone(), kind: "vertex" }]);
+    expect("Shift+G marks: no curved-edge midpoints, none closer than 14 px, a corner kept over a midpoint, centres drawn as rings", centres > 0 && rings === String(centres) && arcs > 0 && mids === lines && fitN > 0 && fitGap >= 14 && kept.length === 1 && kept[0].kind === "vertex", { lines, arcs, mids, fitN, fitGap, centres, rings, kept: kept.map((k) => k.kind) });
+    // (a selected flat face's centre dot: round, filled)
+    const topF = app.doc.get(rb.id).shape.faces.find((f) => f.geomType === "PLANE" && Math.abs(f.center.z - 10) < 1e-6);
+    app.run("mode.face"); app.setSelection([{ kind: "face", body: rb.id, id: topF.hashCode }]); await sleep(30);
+    const faceDot = vp.dots.map((d) => (d.material.map ? "round" : "square") + d.geometry.attributes.position.count).join();
+    app.setSelection([]); app.run("mode.body");
+    expect("a selected flat face's centre dot is round", faceDot === "round1", faceDot);
+    app.doc.commit(app.doc.bodies.filter((b) => b.id !== rb.id), "rounded gone");
+  }
+  // Divide face: an end point a little off the Y direction locks where the Y axis line through the start meets the far edge
   {
     const slab = app.doc.makeBody(K.makeBox(G, [200, 0, 0], 40, 30, 20), "Slab"); // (x 180…220, y −15…15, z 0…20)
     app.doc.commit([...app.doc.bodies, slab], "slab");
@@ -5786,7 +5862,7 @@ const SCENARIO_AUTOSNAP = String.raw`
     const e = sel && sel.kind === "edge" && sh.edges.find((x) => x.hashCode === sel.id);
     const ends = e ? [e.startPoint, e.endPoint].map((p) => [p.x, p.y, p.z].map((n) => +n.toFixed(6))).sort((p, q) => p[1] - q[1]) : null;
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true })); await sleep(20);
-    expect("Draw line on face: end point near the Y direction locks parallel to Y (HUD says so)",
+    expect("Divide face: end point near the Y direction locks parallel to Y (HUD says so)",
       JSON.stringify(ends) === JSON.stringify([[193, -15, 20], [193, 15, 20]]) && /On Y axis/.test(hud) && sh.faces.length === 7, { ends, hud, faces: sh.faces.length });
     app.doc.commit(app.doc.bodies.filter((b) => b.id !== slab.id), "remove slab");
     app.run("mode.body"); app.setSelection([]); vp.fit(); await sleep(20);
@@ -5861,6 +5937,19 @@ const SCENARIO_AUTOSNAP = String.raw`
   expect("snap: in X-ray the corner behind the cube does snap (it shows through)", xrSnap && xrSnap.point.distanceTo(P) < 1e-6, xrSnap && { kind: xrSnap.kind, p: xrSnap.point.toArray().map((n) => +n.toFixed(3)) });
   const visSnap = vp.snapPoint(vp.toScreen(new V(10, -10, 20)).x + 2, vp.toScreen(new V(10, -10, 20)).y + 1);
   expect("snap: a visible corner still snaps", visSnap && visSnap.kind === "vertex" && visSnap.point.distanceTo(new V(10, -10, 20)) < 1e-6, visSnap && visSnap.point.toArray());
+  // Push/Pull hides the solid under its preview: the solid's own corners and edges still snap (a pulled face level with them)
+  {
+    const top = vp.toScreen(new V(0, 0, 20)), hit = vp.faceUnder(top.x, top.y);
+    app.setSelection(hit ? [{ kind: "face", body: hit.body.id, id: hit.faceId }] : []);
+    app.run("op.pushpull"); await sleep(300); vp.stamp++;
+    const shown = hit && vp.views.get(hit.body.id).group.visible;
+    const c = vp.toScreen(new V(10, -10, 0)), own = vp.snapPoint(c.x + 2, c.y + 1);
+    const ed = vp.toScreen(new V(10, 0, 0)), ownEdge = vp.snapPoint(ed.x, ed.y + 1);
+    app.cancelOp(); await sleep(30);
+    expect("snap: during Push/Pull (solid hidden under its preview) its own corner and edge still snap",
+      hit && !shown && own?.kind === "vertex" && own.point.distanceTo(new V(10, -10, 0)) < 1e-6 && ownEdge && Math.abs(ownEdge.point.z) < 1e-6,
+      { hit: !!hit, shown, own: own && [own.kind, own.point.toArray()], ownEdge: ownEdge && [ownEdge.kind, ownEdge.point.toArray()] });
+  }
   app.run("edit.undo"); await sleep(30); vp.stamp++;
   const sx = vp.toScreen(new V(40, 0, 0));
   const withAxes = vp.snapPoint(sx.x, sx.y), noAxes = vp.snapPoint(sx.x, sx.y, undefined, { axes: false });
@@ -5993,7 +6082,7 @@ const SCENARIO_SKETCH = String.raw`
   await key("g"); await key("5");
   expect("sketch: other commands wait (G, view keys)", app.tool && app.tool.name === "Sketch" && vp.camera.getWorldDirection(new V()).z < -0.999, app.tool && app.tool.name);
   await key("g"); await key("g");
-  expect("sketch: G G (a chord) doesn't end the sketch", app.tool && app.tool.name === "Sketch", app.tool && app.tool.name);
+  expect("sketch: G G doesn't end the sketch", app.tool && app.tool.name === "Sketch", app.tool && app.tool.name);
   const z = 20, at = (x, y) => [x, y, z];
   // L shape (300 mm²) with a round hole (r 2) in it
   for (const p of [[-10, -10], [10, -10], [10, 0], [0, 0], [0, 10], [-10, 10], [-10, -10]]) await click(at(...p));
@@ -7193,6 +7282,17 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "dividelock") {
+      // (while working on it: just the draw-line axis lock)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_DIVIDELOCK, true));
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "wraptext") {
       // (while working on it: just the wrapped text scenario)
       try {
@@ -7422,6 +7522,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BATTERY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_GRIDFINITY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_WRAPTEXT, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_DIVIDELOCK, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENT, true));
     {

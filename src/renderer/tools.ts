@@ -14,6 +14,7 @@ import type { Viewport, SnapKind, GizmoFrame } from "./viewport";
 import {
   planarFaceFrame,
   axisCrossEdge,
+  nearestOnEdge,
   makeBox,
   makeCylinder,
   makeSphereAt,
@@ -1206,7 +1207,7 @@ export class PointMoveTool implements Tool {
   private exclude: Set<number>;
   private pivots: { point: THREE.Vector3; kind: SnapKind }[] = [];
   private press: { x: number; y: number } | null = null;
-  private all: { point: THREE.Vector3; kind: SnapKind }[] = [];
+  private all: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] = [];
   /** Once a base is picked: the other solids' centre marks to drop it on. */
   private targets: { point: THREE.Vector3; kind: SnapKind }[] = [];
   private camKey = "";
@@ -1237,13 +1238,13 @@ export class PointMoveTool implements Tool {
     if (key === this.camKey) return;
     this.camKey = key;
     if (this.base) {
-      this.targets = vp.centerTargets(this.exclude);
-      vp.showPivotDots(this.targets.map((p) => p.point));
+      this.targets = vp.spreadOnScreen(vp.centerTargets(this.exclude));
+      vp.showPivotDots(this.targets);
     } else {
-      // (centres: unless another solid hides them — e.g. a rod's end in a hole, behind the rod itself)
-      const centres = new Set(vp.visiblePoints(this.all.filter((p) => p.kind === "center"), this.exclude));
-      this.pivots = [...centres, ...vp.visiblePoints(this.all.filter((p) => p.kind !== "center"))];
-      vp.showPivotDots(this.pivots.map((p) => p.point));
+      // (only marks in sight: none behind a solid, the moved one included — but the solid's middle and a sphere's centre, inside it)
+      // (marks closer than 14 px on screen: one of them — zoom in for the others)
+      this.pivots = vp.spreadOnScreen([...this.all.filter((p) => p.inside), ...vp.visiblePoints(this.all.filter((p) => !p.inside))]);
+      vp.showPivotDots(this.pivots);
     }
   }
 
@@ -1864,14 +1865,14 @@ export class GuideTool implements Tool {
 // ------------------------------------------------------------------ pencil
 
 /**
- * Draw line on face (D): click two points on the edges of a flat face to split it with a line
+ * Divide face: click two points on the edges of a flat face to split it with a line
  * (e.g. the two top midpoints of a box → a ridge edge that Move can lift into a gable).
  * Corners and midpoints snap automatically; anywhere along an edge works too. The end point locks
  * where the X / Y / Z axis line through the start meets the edge under the cursor when the cursor
  * runs (nearly) along that axis on screen: a line parallel to an axis without hunting for it.
  */
 export class DivideFaceTool implements Tool {
-  readonly name = "Draw line on face";
+  readonly name = "Divide face";
   private a: { point: THREE.Vector3; body: number } | null = null;
   private cur: THREE.Vector3 | null = null;
   /** World axis (0 = X, 1 = Y, 2 = Z) the end point is locked onto, or -1. */
@@ -1886,7 +1887,7 @@ export class DivideFaceTool implements Tool {
   ) {}
 
   start(): this {
-    this.host.hint("Draw line on face: click a point on an edge of a solid's flat face (corners / midpoints snap) · Esc cancel");
+    this.host.hint("Divide face: click a point on an edge of a solid's flat face (corners / midpoints snap) · Esc cancel");
     return this;
   }
 
@@ -1899,7 +1900,17 @@ export class DivideFaceTool implements Tool {
     if (sp && (sp.kind === "vertex" || sp.kind === "midpoint")) return { point: sp.point, body: edge.body, kind: sp.kind };
     const lock = this.a && edge.kind === "edge" ? this.axisOnEdge(e, edge.body, edge.id) : null;
     if (lock) return { point: lock.point, body: edge.body, kind: "axis", axis: lock.k };
-    return { point: edge.point.clone(), body: edge.body, kind: "axis" };
+    return { point: this.onExactEdge(edge.body, edge.id, edge.point), body: edge.body, kind: "axis" };
+  }
+
+  /**
+   * The point redone on the exact B-rep edge: the display mesh is float32 (a top at z = 41.4 is hit at
+   * 41.4000015), and an axis line through a start that far off misses the other edges — no lock.
+   */
+  private onExactEdge(body: number, edgeId: number, p: THREE.Vector3): THREE.Vector3 {
+    const shape = this.shapeOf(body);
+    const q = shape ? nearestOnEdge(shape, edgeId, p.toArray() as V3) : null;
+    return q ? new THREE.Vector3(...q) : p.clone();
   }
 
   /** End point locked on a world axis through the start (see axisLockPoint): where that axis line meets the edge, if it does. */
@@ -1934,15 +1945,15 @@ export class DivideFaceTool implements Tool {
 
   down(e: PointerEvent): void {
     const p = this.pointAt(e);
-    if (!p) return this.host.hint("Draw line on face: click on an edge (corners / midpoints snap)");
+    if (!p) return this.host.hint("Divide face: click on an edge (corners / midpoints snap)");
     if (!this.a) {
       const why = this.refuse(p.body);
       if (why) return this.host.toast(why, "error");
       this.a = { point: p.point, body: p.body };
-      this.host.hint("Draw line on face: click the end point on another edge of the same face — move along X / Y / Z to lock the line parallel to it · Esc cancel");
+      this.host.hint("Divide face: click the end point on another edge of the same face — move along X / Y / Z to lock the line parallel to it · Esc cancel");
       return;
     }
-    if (p.body !== this.a.body) return this.host.toast("Draw line on face: the end point must be on the same solid as the start", "error");
+    if (p.body !== this.a.body) return this.host.toast("Divide face: the end point must be on the same solid as the start", "error");
     const t = (v: THREE.Vector3): V3 => [v.x, v.y, v.z];
     this.onDivide(p.body, t(this.a.point), t(p.point));
   }

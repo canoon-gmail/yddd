@@ -41,7 +41,6 @@ export const ICONS: Record<string, string> = {
   cut: svg(`<path d="M3.5 14v5a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1v-8z" ${FILL}/><path d="M3.5 11.2V6a1 1 0 0 1 1-1h15a1 1 0 0 1 1 1v2.2" ${SOFT}/><path d="M2 13L22 9.5" stroke-width="2" ${DASH}/>`),
   splitFace: svg(`<rect x="4" y="5" width="16" height="14" rx="1.5" ${SOFT}/><path d="M4 14.5L20 9.5V17.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z" ${FILL}/><path d="M2 15.1L22 8.9" stroke-width="1.9" ${DASH}/>`),
   guide: svg(`<rect x="4" y="6" width="16" height="12" rx="1" ${SOFT}/><path d="M2 18.5L22 5.5" stroke-width="2" stroke-dasharray="3 2.5"/><circle cx="7" cy="15.2" r="1.7" ${DOT}/><circle cx="17" cy="8.8" r="1.7" ${DOT}/>`),
-  clearGuides: svg(`<path d="M2 16L18 5.5" ${SOFT} stroke-dasharray="2.8 2.4"/><path d="M4 20L20 9.5" ${SOFT} stroke-dasharray="2.8 2.4"/><circle cx="17.5" cy="17.5" r="4.5" ${FILL}/><path d="M15.7 15.7l3.6 3.6M19.3 15.7l-3.6 3.6"/>`),
 
   // Booleans.
   union: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 1 0 12 6.8z" ${FILL}/>`),
@@ -61,7 +60,6 @@ export const ICONS: Record<string, string> = {
 
   // Utility & History.
   measure: svg(`<path d="M3 16.5L16.5 3 21 7.5 7.5 21z" ${FILL}/><path d="M7 12.5l1.8 1.8M9.5 10l2.4 2.4M12 7.5l1.8 1.8M14.5 5l2.4 2.4"/>`),
-  delete: svg(`<path d="M4.5 6.5h15M9.5 6.5V4.2a.8.8 0 0 1 .8-.8h3.4a.8.8 0 0 1 .8.8v2.3"/><path d="M6.5 6.5l.9 13a1.2 1.2 0 0 0 1.2 1.1h6.8a1.2 1.2 0 0 0 1.2-1.1l.9-13" ${FILL}/><path d="M10 10.5v6M14 10.5v6"/>`),
   undo: svg(`<path d="M8.5 13.5L4 9l4.5-4.5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>`),
   redo: svg(`<path d="M15.5 13.5L20 9l-4.5-4.5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>`),
 

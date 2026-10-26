@@ -70,7 +70,8 @@ interface BodyView {
   slot: { mesh: THREE.Mesh; vOffset: number } | null;
   /** Lazily built snap points (see snapsOf). */
   /** `inner`: points inside the body (sphere centres) — snappable through the body's own surface. */
-  snaps?: { pts: Float64Array; kinds: Uint8Array; inner: Uint8Array; proj: Float32Array | null; projStamp: number };
+  /** `curved`: 1 for the midpoint of a curved edge (not a Move from point mark). */
+  snaps?: { pts: Float64Array; kinds: Uint8Array; inner: Uint8Array; curved: Uint8Array; proj: Float32Array | null; projStamp: number };
 }
 
 /** Object snap kinds, in priority order. */
@@ -912,10 +913,10 @@ export class Viewport {
     return this.raycaster.ray.clone();
   }
 
-  private raycastFaces(cx: number, cy: number, only?: number, skip?: Set<number>): { view: BodyView; faceId: number; point: THREE.Vector3; distance: number } | null {
+  private raycastFaces(cx: number, cy: number, only?: number, skip?: Set<number>, underGhost = false): { view: BodyView; faceId: number; point: THREE.Vector3; distance: number } | null {
     this.setRay(cx, cy);
     const meshes: THREE.Object3D[] = [];
-    for (const v of this.views.values()) if (v.group.visible && (only === undefined || v.body.id === only) && !skip?.has(v.body.id)) meshes.push(v.mesh);
+    for (const v of this.views.values()) if ((underGhost ? this.snappable(v) : v.group.visible) && (only === undefined || v.body.id === only) && !skip?.has(v.body.id)) meshes.push(v.mesh);
     const hits = this.raycaster.intersectObjects(meshes, false);
     if (!hits.length || hits[0].faceIndex == null) return null;
     const groupOf = (view: BodyView, faceIndex: number): number => {
@@ -972,6 +973,8 @@ export class Viewport {
     only?: (body: number, edgeId: number) => boolean,
     /** Bodies to look at (others are skipped before their edges are projected). */
     bodies?: Set<number>,
+    /** Also the bodies hidden under an op's preview (see snappable). */
+    underGhost = false,
   ): { view: BodyView; edgeId: number; point: THREE.Vector3; d: number } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left;
@@ -982,7 +985,7 @@ export class Viewport {
     const a = new THREE.Vector3();
     const b = new THREE.Vector3();
     for (const v of this.views.values()) {
-      if (!v.group.visible || (bodies && !bodies.has(v.body.id))) continue;
+      if (!(underGhost ? this.snappable(v) : v.group.visible) || (bodies && !bodies.has(v.body.id))) continue;
       const proj = this.projected(v);
       for (let e = 0; e < v.edgeIds.length; e++) {
         if (only && !only(v.body.id, v.edgeIds[e])) continue;
@@ -1053,19 +1056,21 @@ export class Viewport {
     const pts: number[] = [];
     const kinds: number[] = [];
     const inner: number[] = [];
+    const curved: number[] = [];
     const seen = new Set<string>();
-    const add = (x: number, y: number, z: number, kind: number, isInner = 0) => {
+    const add = (x: number, y: number, z: number, kind: number, isInner = 0, isCurved = 0) => {
       const key = `${kind}:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}`;
       if (seen.has(key)) return;
       seen.add(key);
       pts.push(x, y, z);
       kinds.push(kind);
       inner.push(isInner);
+      curved.push(isCurved);
     };
     const E = v.edgePos;
     // Exact (double precision) B-rep geometry, so snapped values match the model exactly;
     // the float32 display mesh is only the fallback.
-    if (v.body.kind === "mesh") return (v.snaps = { pts: new Float64Array(), kinds: new Uint8Array(), inner: new Uint8Array(), proj: null, projStamp: -1 }); // no edges / faces to snap to
+    if (v.body.kind === "mesh") return (v.snaps = { pts: new Float64Array(), kinds: new Uint8Array(), inner: new Uint8Array(), curved: new Uint8Array(), proj: null, projStamp: -1 }); // no edges / faces to snap to
     const exactEdges = new Map(v.body.shape.edges.map((ed) => [ed.hashCode, ed]));
     const exactFaces = new Map(v.body.shape.faces.map((fc) => [fc.hashCode, fc]));
     for (let e = 0; e < v.edgeIds.length; e++) {
@@ -1089,7 +1094,7 @@ export class Viewport {
             add(p0[0], p0[1], p0[2], 0);
             add(p1[0], p1[1], p1[2], 0);
             const m = ed.pointAt(0.5).toTuple();
-            add(m[0], m[1], m[2], 2);
+            add(m[0], m[1], m[2], 2, 0, ed.geomType === "LINE" ? 0 : 1);
           }
           continue;
         } catch {
@@ -1119,7 +1124,7 @@ export class Viewport {
         const len = Math.hypot(E[k * 3 + 3] - E[k * 3], E[k * 3 + 4] - E[k * 3 + 1], E[k * 3 + 5] - E[k * 3 + 2]);
         if (acc + len >= total / 2) {
           const t = len > 0 ? (total / 2 - acc) / len : 0;
-          add(E[k * 3] + (E[k * 3 + 3] - E[k * 3]) * t, E[k * 3 + 1] + (E[k * 3 + 4] - E[k * 3 + 1]) * t, E[k * 3 + 2] + (E[k * 3 + 5] - E[k * 3 + 2]) * t, 2);
+          add(E[k * 3] + (E[k * 3 + 3] - E[k * 3]) * t, E[k * 3 + 1] + (E[k * 3 + 4] - E[k * 3 + 1]) * t, E[k * 3 + 2] + (E[k * 3 + 5] - E[k * 3 + 2]) * t, 2, 0, n > 2 ? 1 : 0);
           break;
         }
         acc += len;
@@ -1166,7 +1171,7 @@ export class Viewport {
       }
       if (A > 0) add(cx / A, cy / A, cz / A, 1);
     }
-    v.snaps = { pts: Float64Array.from(pts), kinds: Uint8Array.from(kinds), inner: Uint8Array.from(inner), proj: null, projStamp: -1 };
+    v.snaps = { pts: Float64Array.from(pts), kinds: Uint8Array.from(kinds), inner: Uint8Array.from(inner), curved: Uint8Array.from(curved), proj: null, projStamp: -1 };
     return v.snaps;
   }
 
@@ -1197,10 +1202,18 @@ export class Viewport {
   }
 
   /** Is `point` behind a visible solid (not counting `skip`), seen from the eye? Points on a face are not; in X-ray none are. */
+  /**
+   * Whether a body's points snap: shown, or hidden only under an op's preview (Push/Pull, Fillet… hide the body while
+   * its preview shows) — so e.g. a face pulled out snaps level with the solid's own corners and edges.
+   */
+  private snappable(v: BodyView): boolean {
+    return !this.hidden.has(v.body.id);
+  }
+
   private hiddenFrom(point: THREE.Vector3, skip?: Set<number>): boolean {
     if (this.xray) return false;
     const meshes: THREE.Object3D[] = [];
-    for (const v of this.views.values()) if (v.group.visible && !skip?.has(v.body.id)) meshes.push(v.mesh);
+    for (const v of this.views.values()) if (this.snappable(v) && !skip?.has(v.body.id)) meshes.push(v.mesh);
     if (!meshes.length) return false;
     const eye = this.camera.position;
     const dir = point.clone().sub(eye);
@@ -1223,11 +1236,11 @@ export class Viewport {
     const px = cx - r.left, py = cy - r.top;
     // (what's in front, leaving out the excluded bodies — e.g. the one being moved — so points hidden
     // behind the rest still don't count; in X-ray nothing is hidden: points behind show, so they snap)
-    const faceHit = this.xray ? null : this.raycastFaces(cx, cy, undefined, exclude);
+    const faceHit = this.xray ? null : this.raycastFaces(cx, cy, undefined, exclude, true);
     const cands: { score: number; view: BodyView; i: number }[] = [];
     const p = new THREE.Vector3();
     for (const [id, v] of this.views) {
-      if (!v.group.visible || exclude?.has(id)) continue;
+      if (!this.snappable(v) || exclude?.has(id)) continue;
       const s = this.snapsOf(v);
       if (s.projStamp !== this.stamp || !s.proj) {
         const n = s.kinds.length;
@@ -1285,7 +1298,7 @@ export class Viewport {
     if (!best) {
       // No point nearby: the closer of an axis / guide line and anywhere along a visible edge.
       let ax = this.axisSnap(px, py, cx, cy, faceHit?.distance, opts?.axes ?? true);
-      let ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_PX * 0.75, exclude?.size ? (b) => !exclude.has(b) : undefined);
+      let ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_PX * 0.75, exclude?.size ? (b) => !exclude.has(b) : undefined, undefined, true);
       // (not one behind a solid the cursor is just off)
       if (ax && this.hiddenFrom(ax.point, exclude)) ax = null;
       if (ed && this.hiddenFrom(ed.point, exclude)) ed = null;
@@ -1525,16 +1538,19 @@ export class Viewport {
     return best.k;
   }
 
-  /** Pivot candidates of bodies: their snap points plus each body's bounding-box centre. */
-  pivotCandidates(ids: number[]): { point: THREE.Vector3; kind: SnapKind }[] {
-    const out: { point: THREE.Vector3; kind: SnapKind }[] = [];
+  /**
+   * Pivot candidates of bodies: their snap points (not curved edges' midpoints) plus each body's bounding-box centre;
+   * `inside`: a point inside the solid (its box centre, a sphere's centre), so never in sight.
+   */
+  pivotCandidates(ids: number[]): { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] {
+    const out: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] = [];
     for (const id of ids) {
       const v = this.views.get(id);
       if (!v) continue;
       const s = this.snapsOf(v);
-      for (let i = 0; i < s.kinds.length; i++) out.push({ point: new THREE.Vector3().fromArray(s.pts, i * 3), kind: SNAP_KINDS[s.kinds[i]] });
+      for (let i = 0; i < s.kinds.length; i++) if (!s.curved[i]) out.push({ point: new THREE.Vector3().fromArray(s.pts, i * 3), kind: SNAP_KINDS[s.kinds[i]], inside: !!s.inner[i] });
       const box = new THREE.Box3().setFromBufferAttribute(v.mesh.geometry.attributes.position as THREE.BufferAttribute);
-      out.push({ point: box.getCenter(new THREE.Vector3()), kind: "center" });
+      out.push({ point: box.getCenter(new THREE.Vector3()), kind: "center", inside: true });
     }
     return out;
   }
@@ -1573,6 +1589,17 @@ export class Viewport {
     });
   }
 
+  /** Marks at least `px` screen pixels apart: of marks closer than that only one is kept (corners, then centres, then midpoints, then points inside a solid). */
+  spreadOnScreen<T extends { point: THREE.Vector3; kind: SnapKind; inside?: boolean }>(pts: T[], px = 14): T[] {
+    const rank = (p: T) => (p.inside ? 3 : p.kind === "vertex" ? 0 : p.kind === "center" ? 1 : 2);
+    const kept: { p: T; x: number; y: number }[] = [];
+    for (const p of [...pts].sort((a, b) => rank(a) - rank(b))) {
+      const s = this.toScreen(p.point);
+      if (!kept.some((k) => Math.hypot(k.x - s.x, k.y - s.y) < px)) kept.push({ p, x: s.x, y: s.y });
+    }
+    return kept.map((k) => k.p);
+  }
+
   /** Nearest of `pts` to the cursor within `maxPx` screen pixels. */
   nearestOnScreen<T extends { point: THREE.Vector3 }>(cx: number, cy: number, pts: T[], maxPx = 12): T | null {
     let best: T | null = null, bd = maxPx;
@@ -1587,30 +1614,63 @@ export class Viewport {
     return best;
   }
 
-  /** Show fixed-size dots at `pts` (drawn on top), or hide them with null. */
-  showPivotDots(pts: THREE.Vector3[] | null): void {
-    if (this.pivotDots) {
-      this.scene.remove(this.pivotDots);
-      this.pivotDots.geometry.dispose();
-      (this.pivotDots.material as THREE.Material).dispose();
-      this.pivotDots = null;
+  /** Show fixed-size marks at `pts` (drawn on top): centres as small rings, other points as squares; null hides them. */
+  showPivotDots(pts: { point: THREE.Vector3; kind: SnapKind }[] | null): void {
+    for (const d of this.pivotDots) {
+      this.scene.remove(d);
+      d.geometry.dispose();
+      (d.material as THREE.Material).dispose();
     }
-    if (pts?.length) {
-      const g = new THREE.BufferGeometry().setFromPoints(pts);
-      const m = new THREE.PointsMaterial({ color: 0x1e88ff, size: 9, sizeAttenuation: false, depthTest: false, transparent: true });
-      this.pivotDots = new THREE.Points(g, m);
-      this.pivotDots.renderOrder = 29;
-      this.scene.add(this.pivotDots);
+    this.pivotDots = [];
+    for (const centre of [false, true]) {
+      const at = (pts ?? []).filter((p) => (p.kind === "center") === centre).map((p) => p.point);
+      if (!at.length) continue;
+      const m = centre
+        ? new THREE.PointsMaterial({ color: 0x1e88ff, size: 10, map: this.ringTexture(), sizeAttenuation: false, depthTest: false, transparent: true, alphaTest: 0.1 })
+        : new THREE.PointsMaterial({ color: 0x1e88ff, size: 9, sizeAttenuation: false, depthTest: false, transparent: true });
+      const obj = new THREE.Points(new THREE.BufferGeometry().setFromPoints(at), m);
+      obj.renderOrder = 29;
+      this.scene.add(obj);
+      this.pivotDots.push(obj);
     }
     this.requestRender();
   }
-  private pivotDots: THREE.Points | null = null;
+  private pivotDots: THREE.Points[] = [];
+
+  /** A white ring (tinted by the material's colour): the look of a centre mark. */
+  private ringTexture(): THREE.Texture {
+    if (this.ringTex) return this.ringTex;
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d")!;
+    g.strokeStyle = "#fff";
+    g.lineWidth = 13;
+    g.beginPath();
+    g.arc(32, 32, 25, 0, Math.PI * 2);
+    g.stroke();
+    return (this.ringTex = new THREE.CanvasTexture(c));
+  }
+  private ringTex: THREE.Texture | null = null;
+
+  /** A white filled circle (tinted by the material's colour): the look of a selected flat face's centre dot. */
+  private discTexture(): THREE.Texture {
+    if (this.discTex) return this.discTex;
+    const c = document.createElement("canvas");
+    c.width = c.height = 64;
+    const g = c.getContext("2d")!;
+    g.fillStyle = "#fff";
+    g.beginPath();
+    g.arc(32, 32, 30, 0, Math.PI * 2);
+    g.fill();
+    return (this.discTex = new THREE.CanvasTexture(c));
+  }
+  private discTex: THREE.Texture | null = null;
 
   /**
    * Dots on the selection to click (a flat face's centre: G pulls it to a point; a solid's tips: F rounds them),
-   * drawn on top; brighter hovered / selected. An empty list hides them.
+   * drawn on top; brighter hovered / selected; `round`: a round dot (a centre), else a square. An empty list hides them.
    */
-  showDots(dots: { p: THREE.Vector3; look: "shown" | "hover" | "selected" }[]): void {
+  showDots(dots: { p: THREE.Vector3; look: "shown" | "hover" | "selected"; round?: boolean }[]): void {
     for (const d of this.dots) {
       this.scene.remove(d);
       d.geometry.dispose();
@@ -1619,13 +1679,17 @@ export class Viewport {
     this.dots = [];
     const looks = { shown: { color: 0xffffff, size: 9 }, hover: { color: 0x7fd0ff, size: 13 }, selected: { color: 0xffcc33, size: 13 } };
     for (const look of ["shown", "hover", "selected"] as const) {
-      const pts = dots.filter((d) => d.look === look).map((d) => d.p);
-      if (!pts.length) continue;
-      const m = new THREE.PointsMaterial({ ...looks[look], sizeAttenuation: false, depthTest: false, transparent: true });
-      const obj = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), m);
-      obj.renderOrder = 29;
-      this.scene.add(obj);
-      this.dots.push(obj);
+      for (const round of [false, true]) {
+        const pts = dots.filter((d) => d.look === look && !!d.round === round).map((d) => d.p);
+        if (!pts.length) continue;
+        const m = round
+          ? new THREE.PointsMaterial({ color: looks[look].color, size: looks[look].size + 1, map: this.discTexture(), sizeAttenuation: false, depthTest: false, transparent: true, alphaTest: 0.1 })
+          : new THREE.PointsMaterial({ ...looks[look], sizeAttenuation: false, depthTest: false, transparent: true });
+        const obj = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), m);
+        obj.renderOrder = 29;
+        this.scene.add(obj);
+        this.dots.push(obj);
+      }
     }
     this.requestRender();
   }
