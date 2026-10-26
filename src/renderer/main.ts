@@ -4076,11 +4076,12 @@ class App implements ToolHost {
       return;
     }
     const [targetId, ...toolIds] = ids;
-    const heavy = this.heavyBoolean(ids);
-    this.runBusy(heavy, `${label} of ${ids.length} solids…`, async () => {
+    // Always in the background behind the busy dialog: how long one takes can't be told from the solids
+    // (a swept spout joined to a sphere, 11 faces: ~9 s); the dialog fades in late, so a quick one doesn't show it.
+    this.runBusy(true, `${label} of ${ids.length} solids…`, async () => {
       let made: number[] | null;
       try {
-        made = await this.applyBoolean(op, targetId, toolIds, label, false, heavy);
+        made = await this.applyBoolean(op, targetId, toolIds, label, false, true);
       } catch (err) {
         if (err instanceof JobCancelled) return this.toast(`${label} stopped — nothing changed`);
         return this.fail(err);
@@ -4095,6 +4096,11 @@ class App implements ToolHost {
   private busyNow = false;
   /** The busy dialog's Stop (Esc): set while a step that can be stopped runs. */
   private busyStop: (() => void) | null = null;
+
+  /** Resolves once no busy step is running (the smoke test: a boolean's result is in after it). */
+  async whenIdle(): Promise<void> {
+    while (this.busyNow) await new Promise((r) => setTimeout(r, 20));
+  }
 
   /**
    * Run `work` — `heavy`: behind a busy dialog painted first, so the app is seen working rather than
@@ -4136,11 +4142,6 @@ class App implements ToolHost {
         this.busyStop = null;
       }
     });
-  }
-
-  /** A boolean likely to take a while (it shows the busy dialog): see heavy. */
-  private heavyBoolean(ids: number[]): boolean {
-    return this.heavy(ids.map((id) => this.doc.get(id)).filter((b): b is Body => !!b));
   }
 
   /** Solids likely to take a while to combine or draw (the busy dialog): 6 or more at once, or 400+ faces. */
@@ -4250,12 +4251,12 @@ class App implements ToolHost {
         this.toast(`Booleans work on solids — "${face.name}" is a flat face. Push/Pull it first.`, "error");
         return;
       }
-      const heavy = this.heavyBoolean([targetId, ...ids]);
-      this.runBusy(heavy, `${label === "Subtract" ? "Subtracting" : label === "Union" ? "Joining" : "Intersecting"} ${ids.length} solid${ids.length > 1 ? "s" : ""}…`, async () => {
+      // (always in the background: see boolean)
+      this.runBusy(true, `${label === "Subtract" ? "Subtracting" : label === "Union" ? "Joining" : "Intersecting"} ${ids.length} solid${ids.length > 1 ? "s" : ""}…`, async () => {
         try {
           const tools = ids.map((id) => this.doc.get(id)!);
           const records = this.doc.arrays.filter((r) => [...r.sources, ...r.copies].some((id) => ids.includes(id)));
-          if (await this.applyBoolean(op, targetId, ids, label, op === "subtract" && keep, heavy)) {
+          if (await this.applyBoolean(op, targetId, ids, label, op === "subtract" && keep, true)) {
             if (op === "subtract") usedRecords.push(...records.filter((r) => !usedRecords.includes(r)));
             count += ids.length;
             if (op === "subtract") used.push(...tools);

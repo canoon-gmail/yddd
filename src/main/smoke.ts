@@ -47,7 +47,7 @@ const SCENARIO = String.raw`
   // 3) Union
   app.run("mode.body");
   app.setSelection([{ kind: "body", body: 1, id: 0 }, { kind: "body", body: 2, id: 0 }]);
-  app.run("bool.union");
+  app.run("bool.union"); await app.whenIdle();
   state("union");
   vp.fit(); await sleep(50);
 
@@ -103,7 +103,7 @@ const SCENARIO_2 = String.raw`
   app.stopTransform();
   state("sphere moved");
   app.setSelection([{ kind: "body", body: 1, id: 0 }, { kind: "body", body: sphereId, id: 0 }]);
-  app.run("bool.subtract");
+  app.run("bool.subtract"); await app.whenIdle();
   state("subtract sphere");
 
   // 7) Undo / redo
@@ -249,7 +249,7 @@ const SCENARIO_2 = String.raw`
   app.setSelection([{ kind: "body", body: b2, id: 0 }]);
   app.run("bool.union");
   vp.fit(); await sleep(50);
-  toolClicks([[105, -25, 35]]);
+  toolClicks([[105, -25, 35]]); await app.whenIdle();
   log.push({ label: "pick boolean", removed: before - app.doc.bodies.length, kept: !!app.doc.get(b2), gone: !app.doc.get(b3) });
 
   // 12a) Default startup camera: a rectangle in empty space lies on the floor (z = 0)
@@ -359,7 +359,7 @@ const SCENARIO_3 = String.raw`
 
   // 3) Union plate + tower (select both, +)
   app.setSelection([{ kind: "body", body: base, id: 0 }, { kind: "body", body: tower, id: 0 }]);
-  app.run("bool.union");
+  app.run("bool.union"); await app.whenIdle();
   const part = app.doc.bodies.find((b) => b.kind === "solid").id;
   expect("3 union → one body", app.doc.bodies.length === 1, app.doc.bodies.length);
   expect("3 union size", eq(size(part), [60, 40, 25]), size(part));
@@ -393,7 +393,7 @@ const SCENARIO_3 = String.raw`
   expect("6 cylinder made", app.doc.get(cyl).kind === "solid" && size(cyl)[0] === 8, size(cyl));
   const facesBefore = app.doc.get(part).shape.faces.length;
   app.setSelection([{ kind: "body", body: part, id: 0 }, { kind: "body", body: cyl, id: 0 }]);
-  app.run("bool.subtract");
+  app.run("bool.subtract"); await app.whenIdle();
   expect("6 subtract leaves one body", app.doc.bodies.length === 1, app.doc.bodies.length);
   expect("6 hole adds a face", app.doc.get(part).shape.faces.length > facesBefore, [facesBefore, app.doc.get(part).shape.faces.length]);
 
@@ -1631,7 +1631,7 @@ const SCENARIO_3 = String.raw`
     const a = app.doc.makeBody(K.makeCylinder(G, [200, 0, 0], 20, h), "Cylinder"), b = app.doc.makeBody(K.makeCylinder(G, [215, 10, 0], 12, h32), "Cylinder");
     app.doc.commit([...app.doc.bodies, a, b], "two cylinders");
     app.setSelection([{ kind: "body", body: a.id, id: 0 }, { kind: "body", body: b.id, id: 0 }]);
-    app.run("bool.union");
+    app.run("bool.union"); await app.whenIdle();
     const u = app.doc.get(a.id)?.shape;
     const tops = u ? u.faces.filter((f) => f.geomType === "PLANE" && f.center.z > 1).length : -1;
     expect("32 union of cylinders off by float32 rounding: one solid, single top face", !!u && K.isValidShape(u) && !app.doc.get(b.id) && tops === 1 && u.faces.length === 4,
@@ -1678,12 +1678,12 @@ const SCENARIO_3 = String.raw`
     const sel = (...bs) => app.setSelection(bs.map((b) => ({ kind: "body", body: b.id, id: 0 })));
     const a = add(0, "Box A"), b = add(30, "Box B");
     const n0 = app.doc.bodies.length;
-    sel(a, b); app.run("bool.union");
+    sel(a, b); app.run("bool.union"); await app.whenIdle();
     const apartMsg = lastToast(), apartKept = app.doc.bodies.length === n0 && !!app.doc.get(a.id) && !!app.doc.get(b.id);
     const c = add(10, "Box C"); // touches A, B still apart
-    sel(a, c, b); app.run("bool.union");
+    sel(a, c, b); app.run("bool.union"); await app.whenIdle();
     const threeMsg = lastToast(), threeKept = !!app.doc.get(c.id) && !!app.doc.get(b.id);
-    sel(a, c); app.run("bool.union");
+    sel(a, c); app.run("bool.union"); await app.whenIdle();
     const joined = app.doc.get(a.id)?.shape;
     const want = '"' + a.name + '" and "' + b.name + '" don' + "'t touch — nothing to join";
     expect("34 union: solids apart refused and named, touching ones joined",
@@ -1704,7 +1704,7 @@ const SCENARIO_3 = String.raw`
     app.doc.commit([...app.doc.bodies, bar, blk], "bar + block");
     const n0 = app.doc.bodies.length;
     app.setSelection([{ kind: "body", body: bar.id, id: 0 }, { kind: "body", body: blk.id, id: 0 }]);
-    app.run("bool.subtract"); await sleep(30); // (the pieces are selected after an await)
+    app.run("bool.subtract"); await app.whenIdle();
     const n1 = app.doc.bodies.length, sel = app.selection.map((s) => s.body);
     const pieces = sel.map((id) => app.doc.get(id)?.shape).filter(Boolean);
     const len = (sh) => { const [a, b] = sh.boundingBox.bounds; return r(b[0] - a[0]); };
@@ -4897,6 +4897,64 @@ const SCENARIO_RANDOM = String.raw`
 `;
 
 /** Lock (the lock in the Bodies panel): clicks go through a locked solid, not in Select all; its row shows where it is; the lock icon; unlock, undo, saved. */
+/** Union / Subtract / Intersect always run in the background kernel behind the busy dialog (how slow one is can't be told from its solids). */
+const SCENARIO_BOOLBUSY = String.raw`
+(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const app = window.ydddApp, K = window.ydddKernel;
+  const checks = [];
+  const expect = (label, ok, got) => checks.push({ label, ok: !!ok, got });
+  const G = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  const key = (k, code) => window.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, bubbles: true, cancelable: true }));
+  const sel = (...bs) => app.setSelection(bs.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+  try {
+    for (let i = 0; i < 300 && !app.bgKernel.ready; i++) await sleep(50);
+    app.doc.reset([]); app.setSelection([]); app.run("mode.body");
+    const two = () => {
+      const a = app.doc.makeBody(K.makeBox(G, [0, 0, 0], 20, 20, 10), "Box"), b = app.doc.makeBody(K.makeCylinder(G, [0, 0, 0], 5, 20), "Cylinder");
+      app.doc.commit([a, b], "two"); return [a, b];
+    };
+    // Two simple solids (was: right away, no dialog — a swept spout on a sphere, 11 faces, froze the window ~9 s)
+    let [a, b] = two(); sel(a, b);
+    const t0 = performance.now();
+    app.run("bool.union");
+    const busy = !!document.getElementById("busy"), stop = !!document.querySelector("#busy .busy-stop"), notYet = app.doc.bodies.length === 2;
+    await app.whenIdle();
+    const ms = performance.now() - t0, u = app.doc.get(a.id);
+    expect("union of 2 simple solids: in the background (busy dialog with Stop, the model unchanged until it's done), then one solid",
+      busy && stop && notYet && !document.getElementById("busy") && app.doc.bodies.length === 1 && !!u && K.isValidShape(u.shape),
+      { busy, stop, notYet, bodies: app.doc.bodies.length, ms: Math.round(ms) });
+    // Quick: done before the dialog fades in (0.25 s), so it isn't seen
+    expect("a quick union is done before the dialog shows (under 250 ms)", ms < 250, Math.round(ms));
+    // Subtract the same way: the hole
+    app.doc.reset([]); [a, b] = two(); sel(a, b);
+    app.run("bool.subtract"); await app.whenIdle();
+    const s = app.doc.get(a.id), want = 20 * 20 * 10 - Math.PI * 25 * 10;
+    expect("subtract in the background: box − cylinder", !!s && app.doc.bodies.length === 1 && Math.abs(K.solidVolume(s.shape) - want) < 0.5, s && K.solidVolume(s.shape));
+    // Esc right away: stopped, nothing changed
+    app.doc.reset([]); [a, b] = two(); sel(a, b);
+    const v0 = app.doc.version;
+    app.run("bool.union"); key("Escape", "Escape"); await app.whenIdle();
+    expect("Esc right away stops it: both solids kept, model unchanged", app.doc.bodies.length === 2 && app.doc.version === v0, { bodies: app.doc.bodies.length });
+    // The pick way: box, −, click the cylinder in the Bodies panel
+    app.doc.reset([]); [a, b] = two(); sel(a);
+    key("-", "Minus"); await sleep(20);
+    app.outlinerPick([b.id]);
+    const pBusy = !!document.getElementById("busy");
+    await app.whenIdle();
+    const count = document.querySelector("#tool-panel .tp-count")?.textContent;
+    key("Escape", "Escape"); await sleep(20);
+    expect("−, then click: in the background too, counted in the panel", pBusy && app.doc.bodies.length === 1 && count === "1 done", { pBusy, bodies: app.doc.bodies.length, count });
+  } catch (e) {
+    expect("boolean busy scenario threw", false, String(e && e.stack || e));
+  }
+  app.doc.reset([]); app.setSelection([]);
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length) console.error("boolean busy scenario failed: " + JSON.stringify(failed));
+  return [{ label: "boolean busy", passed: checks.length - failed.length, total: checks.length, checks }];
+})()
+`;
+
 const SCENARIO_LOCK = String.raw`
 (async () => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -5282,7 +5340,7 @@ const SCENARIO_KEEPTOOL = String.raw`
   app.setSelection([{ kind: "body", body: bar.id, id: 0 }]);
   key("-", "Minus"); await sleep(20);
   const before = !keepBox();
-  ev("pointermove", [-17.5, 0, 40]); ev("pointerdown", [-17.5, 0, 40]); await sleep(80);
+  ev("pointermove", [-17.5, 0, 40]); ev("pointerdown", [-17.5, 0, 40]); await sleep(80); await app.whenIdle();
   const gone = !app.doc.get(cup.id) && app.doc.bodies.length === 2;
   const offered = keepBox() && !keepBox().checked;
   tick(true); await sleep(30);
@@ -5303,7 +5361,7 @@ const SCENARIO_KEEPTOOL = String.raw`
   app.setSelection([{ kind: "body", body: cup.id, id: 0 }]);
   key("+", "Equal"); await sleep(20);
   const handle = app.doc.bodies.find((b) => b.id !== cup.id);
-  app.outlinerPick && app.outlinerPick([handle.id]); await sleep(50);
+  app.outlinerPick && app.outlinerPick([handle.id]); await sleep(50); await app.whenIdle();
   const unionBox = !!keepBox();
   panel()?.querySelector("button[data-act=done]")?.click(); await sleep(30);
   const one = app.doc.bodies.length === 1 && Math.round(K.solidVolume(app.doc.bodies[0].shape));
@@ -5318,7 +5376,7 @@ const SCENARIO_KEEPTOOL = String.raw`
     app.setSelection([{ kind: "body", body: cup.id, id: 0 }]);
     key("-", "Minus"); await sleep(20);
     const first = panel()?.textContent;
-    app.outlinerPick && app.outlinerPick([c2.id]); await sleep(50);
+    app.outlinerPick && app.outlinerPick([c2.id]); await sleep(50); await app.whenIdle();
     const after = panel()?.textContent;
     key("Escape", "Escape"); await sleep(20);
     document.body.classList.toggle("pro", wasPro);
@@ -5645,7 +5703,7 @@ const SCENARIO_TOOLPANEL = String.raw`
     app.setSelection([{ kind: "body", body: a.id, id: 0 }]);
     key(k, code); await sleep(20);
     const open = { tool: app.tool && app.tool.name, title: panel()?.querySelector("h4")?.textContent, text: panel()?.textContent };
-    ev("pointermove", [0, 0, 25]); ev("pointerdown", [0, 0, 25]); await sleep(50);
+    ev("pointermove", [0, 0, 25]); ev("pointerdown", [0, 0, 25]); await sleep(50); await app.whenIdle();
     const after = { bodies: app.doc.bodies.length, count: panel()?.querySelector(".tp-count")?.textContent, tool: app.tool && app.tool.name };
     panel()?.querySelector("button[data-act=done]")?.click(); await sleep(20);
     expect(name + ": the tool shows a panel (target, what to click), counts what's done, Done finishes and closes it",
@@ -7110,7 +7168,7 @@ const SCENARIO_MESH = String.raw`
   app.run("op.fillet");
   app.setSelection([{ kind: "body", body: 1, id: 0 }, { kind: "body", body: mid, id: 0 }]);
   app.run("bool.union");
-  await sleep(50);
+  await sleep(50); await app.whenIdle();
   check("push/pull, fillet, union on a mesh: refused, model unchanged", app.doc.bodies.length === before && app.doc.version === version, { n: app.doc.bodies.length });
   app.endInteractions(); app.setSelection([]);
 
@@ -7590,6 +7648,17 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
       app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
       return;
     }
+    if (process.env.YDDD_SMOKE_ONLY === "boolbusy") {
+      // (while working on it: just booleans in the background)
+      try {
+        report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BOOLBUSY, true));
+      } catch (e) {
+        errors.push("scenario failed: " + String((e as Error)?.stack ?? e));
+      }
+      console.log("SMOKE_REPORT " + JSON.stringify({ report, errors }, null, 1));
+      app.exit(report.every((s) => (s as { passed: number; total: number }).passed === (s as { total: number }).total) ? 0 : 1);
+      return;
+    }
     if (process.env.YDDD_SMOKE_ONLY === "lock") {
       // (while working on it: just the lock scenario)
       try {
@@ -7832,6 +7901,7 @@ export async function runSmoke(win: BrowserWindow, outDir: string): Promise<void
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_WRAPTEXT, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_DIVIDELOCK, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LOCK, true));
+    report = report.concat(await win.webContents.executeJavaScript(SCENARIO_BOOLBUSY, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RANDOM, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_LONGLIST, true));
     report = report.concat(await win.webContents.executeJavaScript(SCENARIO_RECENTSTRIP, true));
