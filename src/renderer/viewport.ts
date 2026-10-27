@@ -163,6 +163,8 @@ export class Viewport {
   private overlayRoot = new THREE.Group();
   private guideRoot = new THREE.Group();
   private dimRoot = new THREE.Group();
+  /** The X / Y / Z axis lines (left out of a snapshot). */
+  private axes: THREE.Line[] = [];
   /** Dimension text labels (HTML over the canvas) and the 3D point each one sits at. */
   private dimLabels: { el: HTMLElement; at: THREE.Vector3 }[] = [];
   private dimLabelBox: HTMLElement | null = null;
@@ -355,11 +357,8 @@ export class Viewport {
       return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
     };
     // Red (+X), Green (+Y), Blue (+Z upward into positive space)
-    g.add(
-      axis([0, 0, 0], [500, 0, 0], 0xd9534f),
-      axis([0, 0, 0], [0, 500, 0], 0x5cb85c),
-      axis([0, 0, 0], [0, 0, 50000], 0x4a90e2)
-    );
+    this.axes = [axis([0, 0, 0], [500, 0, 0], 0xd9534f), axis([0, 0, 0], [0, 500, 0], 0x5cb85c), axis([0, 0, 0], [0, 0, 50000], 0x4a90e2)];
+    g.add(...this.axes);
     g.renderOrder = -1;
     return g;
   }
@@ -407,6 +406,50 @@ export class Viewport {
     this.renderInset();
     this.placeDimLabels();
     this.placeLockIcons();
+  }
+
+  /**
+   * The view as a PNG, without the axes, paths, guides, dimensions, highlights or the view cube; on the viewport's
+   * background (the canvas itself is see-through).
+   */
+  snapshot(): Promise<Uint8Array> {
+    const { sel, hover } = this.hl;
+    const glow = { body: this.glowBody, sel: this.glowSel };
+    const shown = [...this.axes, this.guideRoot, this.dimRoot, this.overlayRoot];
+    const was = shown.map((o) => o.visible);
+    this.setHighlight([], null);
+    for (const o of shown) o.visible = false;
+    this.mats.pathEdge.visible = false;
+    this.flushBatches();
+    this.renderer.render(this.scene, this.camera); // (read straight after: the drawing buffer isn't kept)
+    const w = this.canvas.width, h = this.canvas.height;
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext("2d")!;
+    // #viewport's background: radial-gradient(ellipse at 50% 30%, #4a4f57 0%, #2c2f34 60%, #1f2125 100%) (farthest corner)
+    const rx = (w / 2) * Math.hypot(1, 0.7 / 0.3), ry = rx * ((0.3 * h) / (w / 2));
+    ctx.save();
+    ctx.translate(w / 2, 0.3 * h);
+    ctx.scale(1, ry / rx);
+    const bg = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+    bg.addColorStop(0, "#4a4f57");
+    bg.addColorStop(0.6, "#2c2f34");
+    bg.addColorStop(1, "#1f2125");
+    ctx.fillStyle = bg;
+    ctx.fillRect(-w, -h * (rx / ry), 2 * w, 2 * h * (rx / ry));
+    ctx.restore();
+    ctx.drawImage(this.canvas, 0, 0);
+    shown.forEach((o, i) => (o.visible = was[i]));
+    this.mats.pathEdge.visible = true;
+    this.setHighlight(sel, hover);
+    this.glowBody = glow.body;
+    this.glowSel = glow.sel;
+    this.stamp++;
+    this.render();
+    return new Promise((done, fail) =>
+      out.toBlob((b) => (b ? b.arrayBuffer().then((a) => done(new Uint8Array(a)), fail) : fail(new Error("Couldn't make the image"))), "image/png")
+    );
   }
 
   // ------------------------------------------------------------ sketch view
@@ -537,11 +580,13 @@ export class Viewport {
     const ids = movedIds(src.from, body.shape);
     if (!ids) return undefined;
     const { R, t } = src;
+    // (a copy that grew too — Macro → Random's: its normals scaled back to length 1)
+    const grow = Math.hypot(R[0], R[3], R[6]), back = Math.abs(grow - 1) > 1e-12 ? 1 / grow : 1;
     const map = (a: ArrayLike<number>, shift: boolean) => {
-      const out = new Array<number>(a.length);
+      const out = new Array<number>(a.length), f = shift ? 1 : back;
       for (let i = 0; i < a.length; i += 3) {
         const x = a[i], y = a[i + 1], z = a[i + 2];
-        for (let r = 0; r < 3; r++) out[i + r] = R[r * 3] * x + R[r * 3 + 1] * y + R[r * 3 + 2] * z + (shift ? t[r] : 0);
+        for (let r = 0; r < 3; r++) out[i + r] = (R[r * 3] * x + R[r * 3 + 1] * y + R[r * 3 + 2] * z) * f + (shift ? t[r] : 0);
       }
       return out;
     };

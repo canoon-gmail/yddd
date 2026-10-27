@@ -218,13 +218,13 @@ function boolean(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D | Shape
     try {
       // Glue edits its arguments in place even in non-destructive mode: give it deep copies,
       // never the document's own solid.
-      const r = booleanOnce(kind, deepCopy(a), tools.map(deepCopy), true);
+      const r = booleanOnce(kind, deepCopy(a), tools.map(deepCopy), "shift");
       if (isValidShape(r as Shape)) return r;
     } catch {
       // glue not applicable: the normal boolean below
     }
   }
-  return booleanOnce(kind, a, tools, false);
+  return booleanOnce(kind, a, tools, "off");
 }
 
 /**
@@ -259,7 +259,7 @@ export function asPreview<T>(fn: () => T): T {
 /** Distance (mm) below which booleans treat faces and edges as coinciding. */
 const BOOLEAN_FUZZ = 1e-5;
 
-function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], glue: boolean): Shape3D {
+function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], glue: "off" | "shift" | "full"): Shape3D {
   const builder =
     kind === "fuse" ? new oc.BRepAlgoAPI_Fuse() : kind === "cut" ? new oc.BRepAlgoAPI_Cut() : new oc.BRepAlgoAPI_Common();
   const args = new oc.NCollection_List_TopoDS_Shape();
@@ -276,7 +276,7 @@ function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], 
     // Oriented bounding boxes to rule out face pairs that can't touch: axis-aligned ones of solids
     // turned off X / Y / Z (e.g. a circular copy's sweeps round a cylinder) all overlap — 7 s → 1 s.
     builder.SetUseOBB(true);
-    if (glue) builder.SetGlue(oc.BOPAlgo_GlueEnum.BOPAlgo_GlueShift);
+    if (glue !== "off") builder.SetGlue(glue === "full" ? oc.BOPAlgo_GlueEnum.BOPAlgo_GlueFull : oc.BOPAlgo_GlueEnum.BOPAlgo_GlueShift);
     builder.Build();
     if (builder.HasErrors()) throw new Error(`boolean ${kind} failed`);
     builder.SimplifyResult(true, true, 1e-3);
@@ -389,7 +389,7 @@ const HEAVY_POLES = 400;
 /**
  * Coarser display-mesh settings for a heavy B-spline face — e.g. a profile swept along a long freeform path
  * (degree 6 × 9, 217 × 6 control points: 410 000 triangles, 6 s, at the usual settings for a 3 × 25 mm tube) —
- * to 0.8% of its size (that tube: 12 000 triangles, 0.12 s); null for any other face. Only what is drawn: the
+ * to 0.3% of its size; null for any other face. Only what is drawn: the
  * solid, STEP and the STL / 3MF quality stay as they are.
  */
 function heavyMeshOpts(f: Face, opts: { tolerance: number; angularTolerance: number }): { tolerance: number; angularTolerance: number } | null {
@@ -409,8 +409,9 @@ function heavyMeshOpts(f: Face, opts: { tolerance: number; angularTolerance: num
   const ends = f.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
   const span = (k: number) => Math.max(...ends.map((p) => p[k])) - Math.min(...ends.map((p) => p[k]));
   const size = Math.hypot(span(0), span(1), span(2)) || 1;
-  const tolerance = Math.max(opts.tolerance, size * 8e-3);
-  return tolerance > opts.tolerance ? { tolerance, angularTolerance: Math.max(opts.angularTolerance, 0.5) } : null;
+  // (0.3% and 17°: was 0.8% and 29°, faceted on a fat tapered tube — a spout's 13 facets round; that long tube: 16 000)
+  const tolerance = Math.max(opts.tolerance, size * 3e-3);
+  return tolerance > opts.tolerance ? { tolerance, angularTolerance: Math.max(opts.angularTolerance, 0.3) } : null;
 }
 
 function meshFaces(shape: Shape, opts: { tolerance: number; angularTolerance: number }): { mesh: ShapeMesh; whole: boolean } {
@@ -1552,12 +1553,12 @@ function stretchPushPull(shape: Solid, moved: Face[], n: V3, distance: number): 
     let joined: Shape3D | null = null;
     try {
       // Glue edits its arguments in place, and the split pieces share faces with `shape`: copies.
-      joined = booleanOnce("fuse", deepCopy(inner[0]), parts.map(deepCopy), true);
+      joined = booleanOnce("fuse", deepCopy(inner[0]), parts.map(deepCopy), "shift");
       if (!isValidShape(joined as Shape)) joined = null;
     } catch {
       joined = null;
     }
-    if (!joined) joined = booleanOnce("fuse", inner[0], parts, false);
+    if (!joined) joined = booleanOnce("fuse", inner[0], parts, "off");
     const out = joined.simplify();
     return isValidShape(out) && [...iterTopo(out.wrapped, "solid")].length === 1 ? out : null;
   } catch {
@@ -3850,22 +3851,93 @@ function biarcs(e: Edge): Edge[] | null {
   return fit(0, 1, 0) ? out : null;
 }
 
-function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean): Solid {
-  const path = arcSpine(spine);
-  const sweep = (w: Wire) => genericSweep(w, path, { transitionMode: round ? "round" : "right" });
+function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean, endScale = 1): Solid {
+  const tapered = Math.abs(endScale - 1) > 1e-9;
+  // Tapered along one freeform curve: along the curve itself, the size law even with its length — one smooth light
+  // surface. (Along fitted arcs the size's slope kinks a little where two arcs meet — their bends differ — showing
+  // as rings, and the surface pieces are heavy: 15 000+ triangles for a spout, not 600.)
+  const raw = tapered && spine.edges.length === 1 && spine.edges[0].geomType !== "LINE" && spine.edges[0].geomType !== "CIRCLE";
+  const path = raw ? spine : arcSpine(spine);
+  const law = () => {
+    if (raw) return lengthLaw(spine.edges[0], endScale);
+    if (!tapered) return null;
+    // (OpenCascade spreads the law over the whole path, arc pieces and all: the size changes evenly along its length)
+    const len = measureLength(path), lin = new oc.Law_Linear();
+    lin.Set(0, 1, len, endScale);
+    return lin.Trim(0, len, 1e-6);
+  };
+  const opts = () => ({ transitionMode: (round ? "round" : "right") as "round" | "right", law: law() as never });
+  const sweep = (w: Wire) => genericSweep(w, path, opts()) as Solid;
+  // A ring (a face with holes): the outline and each hole swept as skins, closed with the profile at each end — not
+  // the hole's solid cut out of the outline's (a cut between two freeform tubes: ~1.5 s, every preview change)
+  if (holes.length) {
+    const fast = sweptRing(outer, holes, (w) => genericSweep(w, path, opts(), true) as unknown as [Shape, Wire, Wire]);
+    if (fast) return fast;
+  }
   let solid = sweep(outer);
   if (holes.length) solid = boolean("cut", solid, holes.map(sweep));
   if (!isValidShape(solid) || solidVolume(solid) <= 1e-9) throw new Error("Sweep: the result is not a valid solid — the profile may be too big for the path's bends");
   return solid;
 }
 
+/** A profile with holes swept as skins (`skin`: the skin of one loop, its start and end outlines) sewn with flat end caps; null if that fails. */
+function sweptRing(outer: Wire, holes: Wire[], skin: (w: Wire) => [Shape, Wire, Wire]): Solid | null {
+  const sewing = new oc.BRepBuilderAPI_Sewing(1e-6, true, true, true, false);
+  try {
+    const o = skin(outer), hs = holes.map(skin);
+    for (const s of [o, ...hs]) sewing.Add(s[0].wrapped);
+    sewing.Add(makeFace(o[1], hs.map((h) => h[1])).wrapped);
+    sewing.Add(makeFace(o[2], hs.map((h) => h[2])).wrapped);
+    sewing.Perform(new oc.Message_ProgressRange());
+    const shells = [...iterTopo(sewing.SewedShape(), "shell")];
+    if (shells.length !== 1) return null;
+    const mk = new oc.BRepBuilderAPI_MakeSolid(oc.TopoDS.Shell(shells[0] as never));
+    const made = mk.Solid();
+    mk.delete();
+    oc.BRepLib.OrientClosedSolid(made);
+    const solid = cast(made) as Solid;
+    return isValidShape(solid) && solidVolume(solid) > 1e-9 ? solid : null;
+  } catch {
+    return null;
+  } finally {
+    sewing.delete();
+  }
+}
+
+/**
+ * A size law along one edge, 1 at its start to `endScale` at its end, changing evenly with the length along it (a
+ * freeform curve's parameter doesn't run evenly with its length).
+ */
+function lengthLaw(e: Edge, endScale: number): unknown {
+  const ad = new oc.BRepAdaptor_Curve(e.wrapped), u0 = ad.FirstParameter(), u1 = ad.LastParameter(), N = 256;
+  const at = (u: number): V3 => { const p = ad.Value(u), v: V3 = [p.X(), p.Y(), p.Z()]; p.delete(); return v; };
+  const s = [0];
+  let prev = at(u0);
+  for (let i = 1; i <= N; i++) {
+    const p = at(u0 + ((u1 - u0) * i) / N);
+    s.push(s[i - 1] + Math.hypot(...sub3(p, prev)));
+    prev = p;
+  }
+  ad.delete();
+  const pts = new oc.NCollection_Array1_gp_Pnt2d(1, N + 1);
+  for (let i = 0; i <= N; i++) {
+    const p = new oc.gp_Pnt2d(i / N, 1 + ((endScale - 1) * s[i]) / s[N]);
+    pts.SetValue(i + 1, p);
+    p.delete();
+  }
+  const law = new oc.Law_Interpol();
+  law.Set(pts, false);
+  pts.delete();
+  return law;
+}
+
 /**
  * A flat face swept along an open path into a new solid. `toPath`: the face is first moved so its
  * centre sits on the path's end nearest it, turned square to the path there and then `turnDeg` about
  * the path; otherwise it is swept where it is. `round`: round corners where the path turns sharply (else mitred).
- * `scale`: the profile's size (1 = as drawn), about the path's end it starts from. A straight path only:
- * `twistDeg` turns the profile that much about the path by its far end (+ = the way `turnDeg` turns it), `endScale`
- * its size there (× scale) — both evenly along the way.
+ * `scale`: the profile's size (1 = as drawn), about the path's end it starts from. `endScale`: its size at the far
+ * end (× scale), changing evenly along the way (a curved path too — e.g. a spout). A straight path only: `twistDeg`
+ * turns the profile that much about the path by its far end (+ = the way `turnDeg` turns it), evenly along the way.
  */
 export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0, scale = 1, twistDeg = 0, endScale = 1): Solid {
   let face = findFace(shape, faceId);
@@ -3884,11 +3956,13 @@ export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: bool
   if (Math.abs(twistDeg) > 1e-9 || Math.abs(endScale - 1) > 1e-9) {
     const start = nearestEnd(face, path)!, end = pathEnds(path).find((e) => Math.hypot(...sub3(e.point, start.point)) > 1e-6);
     const len = end ? Math.hypot(...sub3(end.point, start.point)) : 0;
-    if (!end || Math.abs(measureLength(path) - len) > 1e-6 * Math.max(1, len)) throw new Error("Sweep: Twist and End size need a straight path (a line or guide line)");
-    return twistedSweep(face.clone().outerWire(), face.clone().innerWires(), start.point, end.point, twistDeg, endScale);
+    const straight = !!end && Math.abs(measureLength(path) - len) <= 1e-6 * Math.max(1, len);
+    if (straight) return twistedSweep(face.clone().outerWire(), face.clone().innerWires(), start.point, end.point, twistDeg, endScale);
+    if (Math.abs(twistDeg) > 1e-9) throw new Error("Sweep: Twist needs a straight path (a line or guide line)");
+    // (End size along a curved path: below)
   }
   // outerWire / innerWires delete the face they are called on.
-  return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round);
+  return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round, endScale);
 }
 
 /**
@@ -4175,11 +4249,103 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       // one tool at a time below
     }
   }
+  if (op === "union" && tools.length === 1) {
+    const glued = gluedUnion(target, tools[0]);
+    if (glued) return glued.simplify() as Solid;
+  }
   let result = target;
   for (const tool of tools) {
     result = boolean(op === "union" ? "fuse" : op === "subtract" ? "cut" : "common", result, tool);
   }
   return result.simplify();
+}
+
+/**
+ * Two solids joined on a face they share whole (e.g. a face pushed out into a new solid, joined back), touching
+ * nowhere else: OpenCascade's full glue — it skips intersecting their faces, ~100× faster (a swept spout and its
+ * pushed-out mouth: 8.7 s → 0.1 s, the same result). Null (the usual boolean then) if they share no face, the
+ * result isn't valid or a point of either lies inside the other (they cross somewhere: glue would be wrong).
+ */
+function gluedUnion(a: Solid, b: Solid): Shape3D | null {
+  const fa = a.faces, fb = b.faces;
+  if (fa.length + fb.length > 60) return null;
+  const facts = (f: Face) => ({ type: f.geomType, area: measureArea(f), c: f.center.toTuple() as V3 });
+  const ia = new Map<number, ReturnType<typeof facts>>(), ib = new Map<number, ReturnType<typeof facts>>();
+  const ofA = (i: number) => ia.get(i) ?? (ia.set(i, facts(fa[i])), ia.get(i)!);
+  const ofB = (j: number) => ib.get(j) ?? (ib.set(j, facts(fb[j])), ib.get(j)!);
+  const sharedA = new Set<number>(), sharedB = new Set<number>();
+  try {
+    for (let i = 0; i < fa.length; i++) {
+      for (let j = 0; j < fb.length; j++) {
+        if (fa[i].geomType !== fb[j].geomType) continue;
+        const x = ofA(i), y = ofB(j);
+        const tol = 1e-6 * Math.max(1, x.area);
+        if (Math.abs(x.area - y.area) <= tol && Math.hypot(...sub3(x.c, y.c)) <= 1e-5 * Math.max(1, Math.sqrt(x.area))) {
+          sharedA.add(fa[i].hashCode);
+          sharedB.add(fb[j].hashCode);
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!sharedA.size) return null;
+  try {
+    const r = booleanOnce("fuse", a, [b], "full");
+    if (!isValidShape(r as Shape)) return null;
+    return pointsOutside(a, sharedA, b) && pointsOutside(b, sharedB, a) ? r : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether no point of `a`'s display mesh (but on its faces in `skip`) lies inside `b` — by a ray through `b`'s mesh
+ * (crossing it an odd number of times), and for a point found inside, its exact distance to `b`'s faces (one on `b`'s
+ * surface, e.g. along the edge they share, counts as outside: the mesh's chords are off it a little).
+ */
+function pointsOutside(a: Solid, skip: Set<number>, b: Solid): boolean {
+  const ma = tessellate(a).faces, mb = tessellate(b).faces;
+  const P = mb.vertices, T = mb.triangles;
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let k = 0; k < P.length; k++) {
+    lo[k % 3] = Math.min(lo[k % 3], P[k]);
+    hi[k % 3] = Math.max(hi[k % 3], P[k]);
+  }
+  // The vertices on `a`'s other faces, at most ~600 of them (evenly picked)
+  const ids = new Set<number>();
+  for (const g of ma.faceGroups) {
+    if (skip.has(g.faceId)) continue;
+    for (let k = g.start; k < g.start + g.count; k++) ids.add(ma.triangles[k]);
+  }
+  const all = [...ids], step = Math.max(1, Math.floor(all.length / 600));
+  const D: V3 = [0.5773, 0.5774, 0.5775]; // (a ray off the axes: not along an edge of a box's mesh)
+  const inside = (p: V3) => {
+    if (p.some((x, k) => x < lo[k] || x > hi[k])) return false;
+    let n = 0;
+    for (let t = 0; t < T.length; t += 3) {
+      const i0 = T[t] * 3, i1 = T[t + 1] * 3, i2 = T[t + 2] * 3;
+      const e1: V3 = [P[i1] - P[i0], P[i1 + 1] - P[i0 + 1], P[i1 + 2] - P[i0 + 2]], e2: V3 = [P[i2] - P[i0], P[i2 + 1] - P[i0 + 1], P[i2 + 2] - P[i0 + 2]];
+      const h = cross3(D, e2), det = dot3(e1, h);
+      if (Math.abs(det) < 1e-12) continue;
+      const s: V3 = [p[0] - P[i0], p[1] - P[i0 + 1], p[2] - P[i0 + 2]], u = dot3(s, h) / det;
+      if (u < 0 || u > 1) continue;
+      const q = cross3(s, e1), v = dot3(D, q) / det;
+      if (v < 0 || u + v > 1) continue;
+      if (dot3(e2, q) / det > 0) n++;
+    }
+    return n % 2 === 1;
+  };
+  const shell = makeCompound(b.faces) as unknown as Shape;
+  let exact = 0;
+  for (let k = 0; k < all.length; k += step) {
+    const i = all[k] * 3, p: V3 = [ma.vertices[i], ma.vertices[i + 1], ma.vertices[i + 2]];
+    if (!inside(p)) continue;
+    if (++exact > 40) return false; // (many: they likely cross — the usual boolean, not 40+ slow distances)
+    const v = makeVertex(p as never) as unknown as Shape;
+    if (measureDistanceBetween(v as never, shell as never) > 1e-3) return false;
+  }
+  return true;
 }
 
 export function translateShape<T extends Geom>(shape: T, v: V3): T {
@@ -4248,9 +4414,18 @@ export function boundsOf(shape: Geom): [V3, V3] {
 /** Faces' and edges' ids of `from` → those of `to`, a moved copy of it (same order); null if they don't line up. */
 export function movedIds(from: Geom, to: Geom): { faces: Map<number, number>; edges: Map<number, number> } | null {
   if (isMesh(from) || isMesh(to)) return null;
-  const pair = (a: { hashCode: number }[], b: { hashCode: number }[]) => (a.length === b.length ? new Map(a.map((x, i) => [x.hashCode, b[i].hashCode])) : null);
-  const faces = pair(from.faces, to.faces), edges = pair(from.edges, to.edges);
+  const pair = (a: number[], b: number[]) => (a.length === b.length ? new Map(a.map((x, i) => [x, b[i]])) : null);
+  const [fa, ea] = idsOf(from), [fb, eb] = idsOf(to);
+  const faces = pair(fa, fb), edges = pair(ea, eb);
   return faces && edges ? { faces, edges } : null;
+}
+
+/** A shape's faces' and edges' ids, in order (remembered: one shape is the source of thousands of copies). */
+const idCache = new WeakMap<object, [number[], number[]]>();
+function idsOf(s: Shape | Wire): [number[], number[]] {
+  let ids = idCache.get(s);
+  if (!ids) idCache.set(s, (ids = [s instanceof Wire ? [] : s.faces.map((f) => f.hashCode), s.edges.map((e) => e.hashCode)]));
+  return ids;
 }
 
 /**
@@ -4276,6 +4451,70 @@ export function probePoints(shape: Geom, max = 8): V3[] {
     ex.delete();
   }
   return out;
+}
+
+/**
+ * Shapes read from a file that are copies of earlier ones — moved, turned and evenly scaled (e.g. Macro → Random's,
+ * any copy moved): noted so (see noteMoved), so they're drawn with the earlier one's triangles instead of each meshed
+ * (thousands of copies: seconds). A copy lists the same faces, edges and corners in the same order: its corners and
+ * a point on each edge must be the earlier one's, placed — checked to 1e-6 of its size. Ones noted already are
+ * left as they are. Returns how many were noted.
+ */
+export function linkSimilarCopies(shapes: readonly Geom[]): number {
+  const keyOf = (s: Shape, pts: V3[]) => {
+    const faces = s.faces;
+    return `${faces.length}/${pts.length}/${faces.map((f) => f.geomType[0]).join("")}`;
+  };
+  // (its corners — and when they don't fix it, fewer than 3 or all in a line (a cylinder, a ball), a point on each edge)
+  const pointsOf = (s: Shape): V3[] => {
+    const pts = probePoints(s, Infinity); // (all: a copy changed anywhere — a face pushed — mustn't pass)
+    const a = pts[0], far = a && pts.reduce((b, p) => (Math.hypot(...sub3(p, a)) > Math.hypot(...sub3(b, a)) ? p : b), a);
+    const flat = !far || pts.every((p) => Math.hypot(...cross3(sub3(far, a), sub3(p, a))) < 1e-9 * (1 + dot3(sub3(far, a), sub3(far, a))));
+    return flat ? [...pts, ...s.edges.slice(0, 64).map((e) => e.pointAt(0.37).toTuple() as V3)] : pts;
+  };
+  const firsts = new Map<string, { shape: Shape; pts: V3[] }[]>();
+  let n = 0;
+  for (const g of shapes) {
+    if (isMesh(g) || g instanceof Wire || rigid.has(g)) continue;
+    const shape = g as Shape, pts = pointsOf(shape), key = keyOf(shape, pts);
+    const known = firsts.get(key) ?? firsts.set(key, []).get(key)!;
+    const hit = known.slice(0, 8).map((k) => ({ k, m: similarity(k.pts, pts) })).find((x) => x.m);
+    if (hit) {
+      noteRigid(shape, hit.k.shape, hit.m!.M, hit.m!.t);
+      n++;
+    } else known.push({ shape, pts });
+  }
+  return n;
+}
+
+/** p ↦ M·p + t taking points P onto Q (turned, evenly scaled, moved; not mirrored), if one does — every point within 1e-6 of the size. */
+function similarity(P: V3[], Q: V3[]): { M: number[]; t: V3 } | null {
+  if (P.length !== Q.length || P.length < 2) return null;
+  const mid = (A: V3[]) => [0, 1, 2].map((k) => A.reduce((s, p) => s + p[k], 0) / A.length) as V3;
+  const cp = mid(P), cq = mid(Q), Pc = P.map((p) => sub3(p, cp)), Qc = Q.map((q) => sub3(q, cq));
+  const len2 = (A: V3[]) => A.reduce((s, p) => s + dot3(p, p), 0);
+  const sp = len2(Pc), sq = len2(Qc);
+  if (!(sp > 1e-18)) return null;
+  const k = Math.sqrt(sq / sp);
+  // A frame from two of the points (the farthest out, then the one most across it), in each
+  const i = Pc.reduce((b, p, j) => (dot3(p, p) > dot3(Pc[b], Pc[b]) ? j : b), 0);
+  const across = (j: number) => Math.hypot(...cross3(Pc[i], Pc[j]));
+  const j = Pc.reduce((b, _, m) => (across(m) > across(b) ? m : b), 0);
+  if (across(j) < 1e-9 * Math.max(1, sp)) return null; // (all in a line: the turn about it is unknown)
+  const frame = (a: V3, b: V3): V3[] => {
+    const e1 = norm3(a), e2 = norm3(sub3(b, e1.map((v) => v * dot3(b, e1)) as V3));
+    return [e1, e2, cross3(e1, e2)];
+  };
+  const F = frame(Pc[i], Pc[j]), H = frame(Qc[i], Qc[j]);
+  // R = H·Fᵀ (columns: H's axes against F's), M = k·R
+  const M = [0, 1, 2].flatMap((r) => [0, 1, 2].map((c) => k * (H[0][r] * F[0][c] + H[1][r] * F[1][c] + H[2][r] * F[2][c])));
+  const t = [0, 1, 2].map((r) => cq[r] - (M[r * 3] * cp[0] + M[r * 3 + 1] * cp[1] + M[r * 3 + 2] * cp[2])) as V3;
+  const tol = 1e-6 * (1 + Math.sqrt(sq / Q.length) + Math.hypot(...cq));
+  for (let m = 0; m < P.length; m++) {
+    const p = P[m], q = Q[m];
+    for (let r = 0; r < 3; r++) if (Math.abs(M[r * 3] * p[0] + M[r * 3 + 1] * p[1] + M[r * 3 + 2] * p[2] + t[r] - q[r]) > tol) return null;
+  }
+  return { M, t };
 }
 
 export function rotateShape<T extends Geom>(shape: T, angleDeg: number, center: V3, axis: V3): T {
@@ -4696,7 +4935,11 @@ export function scaleShape<T extends Geom>(shape: T, f: V3, center: V3): T;
 export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
   if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
   if (isMesh(shape)) return shape.transformed([f[0], 0, 0, 0, f[1], 0, 0, 0, f[2]], [center[0] * (1 - f[0]), center[1] * (1 - f[1]), center[2] * (1 - f[2])]);
-  if (Math.abs(f[0] - f[1]) < 1e-9 && Math.abs(f[1] - f[2]) < 1e-9) return shape.clone().scale(f[0], center) as Shape;
+  if (Math.abs(f[0] - f[1]) < 1e-9 && Math.abs(f[1] - f[2]) < 1e-9) {
+    // (evenly: noted as a moved copy that grew — drawn with its triangles, scaled; e.g. Macro → Random's copies)
+    const k = f[0];
+    return noteRigid(shape.clone().scale(k, center) as Shape, shape, [k, 0, 0, 0, k, 0, 0, 0, k], [center[0] * (1 - k), center[1] * (1 - k), center[2] * (1 - k)]);
+  }
   if (shape instanceof Wire) {
     // A path of straight lines stretches point by point; arcs would turn into ellipses.
     if (shape.edges.some((e) => e.geomType !== "LINE")) throw new Error("Scale: a path with arcs can only be scaled evenly (the same % in X, Y and Z)");
@@ -5201,3 +5444,4 @@ export function wrappedTextFaces(shape: Shape, faceId: number, at: V3, text: str
     return toFrame(f.clone().translate([-c.x, -c.y, 0]) as Face, { origin: q.p, x: right, y: up, z: q.n });
   });
 }
+

@@ -29,6 +29,7 @@ export const COMMANDS: Command[] = [
     ["file.exportStep", "Export STEP…"],
     ["file.exportStl", "Export STL…"],
     ["file.export3mf", "Export 3MF… (Bambu Studio, PrusaSlicer, Cura)"],
+    ["file.exportImage", "Save View as Image…"],
     ["file.settings", "Settings…"],
   ]),
   ...grp("Edit", [
@@ -140,6 +141,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "file.save": ["Ctrl+S"],
   "file.saveAs": ["Ctrl+Shift+S"],
   "file.exportStl": ["Ctrl+Shift+E"],
+  "file.exportImage": ["Ctrl+P"],
   "edit.undo": ["Ctrl+Z"],
   "edit.redo": ["Ctrl+R", "Ctrl+Shift+Z"],
   "edit.delete": ["X", "Delete"],

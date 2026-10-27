@@ -375,7 +375,8 @@ export class Doc {
     this.redoStack = h.redo;
     this.counters = new Map(h.counters);
     const ids = [current, ...h.undo, ...h.redo].flatMap((e) => e.bodies.map((b) => b.id));
-    this.nextId = Math.max(h.nextId, ...ids.map((id) => id + 1), 1);
+    // (a loop, not Math.max(...ids): 50 steps of 5 000 objects is more arguments than the stack takes)
+    this.nextId = ids.reduce((m, id) => Math.max(m, id + 1), Math.max(h.nextId, 1));
     this.filePath = filePath;
     this.dirty = false;
     this.version++;

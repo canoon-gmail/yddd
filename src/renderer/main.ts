@@ -18,6 +18,7 @@ import {
   edgeEnds,
   edgeBetween,
   edgesOnSegment,
+  linkSimilarCopies,
   canMoveEdges,
   edgeLoopFace,
   isEdgeLoop,
@@ -1245,6 +1246,7 @@ class App implements ToolHost {
       case "file.exportStep": void this.fileExport("step"); return;
       case "file.exportStl": void this.fileExport("stl"); return;
       case "file.export3mf": void this.fileExport("3mf"); return;
+      case "file.exportImage": void this.fileExportImage(); return;
       case "file.settings": return this.settingsDialog();
 
       case "help.shortcuts": return this.toggleHelp();
@@ -1867,6 +1869,8 @@ class App implements ToolHost {
         input.type = "number";
         input.step = String(f.step ?? 1);
         if (f.min !== undefined) input.min = String(f.min);
+        // (a field that can't go below 0 — a thickness, a wall: no minus sign typed; the other way is a checkbox)
+        if (f.min !== undefined && f.min >= 0) input.addEventListener("keydown", (e) => e.key === "-" && e.preventDefault());
         input.value = String(f.value);
       }
       input.dataset.key = f.key;
@@ -3306,6 +3310,7 @@ class App implements ToolHost {
     // A profile away from the path always moves onto it (sweeping it where it is would give a solid off to
     // the side); one already at the path's end stays put unless "Centre" is ticked.
     let onPath = false;
+    const straight = !!guide || (!!pathBody && !!this.straightPath(pathBody.id));
     if (body && wire) {
       try {
         onPath = profileOnPath(body.shape, profile!.faceId, wire);
@@ -3316,8 +3321,8 @@ class App implements ToolHost {
       fields.push({ key: "turn", label: "Turn profile (°)", value: this.defaults.sweepTurn, step: 5 });
       // (the profile's size for this sweep only — e.g. smaller to fit a tight bend; the face itself stays)
       fields.push({ key: "size", label: "Profile size (%)", value: 100, step: 5 });
-      // (a straight path: turned / sized evenly on the way — e.g. a propeller blade)
-      fields.push({ key: "twist", label: "Twist (°)", value: 0, step: 5 });
+      // (turned evenly on the way — a straight path only, e.g. a propeller blade; sized evenly on any path, e.g. a spout)
+      fields.push({ key: "twist", label: "Twist (°)", value: 0, step: 5, off: () => !straight });
       fields.push({ key: "endSize", label: "End size (%)", value: 100, step: 5 });
     }
     if (body?.kind === "solid") fields.push({ key: "newBody", label: "New solid", value: this.defaults.joinNew ? 1 : 0, type: "checkbox" });
@@ -3360,7 +3365,7 @@ class App implements ToolHost {
       hint: `Sweep: ${todo ? `${todo} · ` : "click another face / path / guide line to change it · Enter apply · "}Esc cancel`,
       compute: ({ round, toPath, turn, size, twist, endSize, newBody }) => {
         if (!body || !wire) throw new OpWaiting(todo);
-        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100, twist || 0, (endSize ?? 100) / 100), !!newBody, "Sweep");
+        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100, straight ? twist || 0 : 0, (endSize ?? 100) / 100), !!newBody, "Sweep");
       },
       remember: ({ round, turn, newBody }) => {
         this.defaults.sweepRound = round;
@@ -6350,14 +6355,18 @@ class App implements ToolHost {
     if (this.justLoaded) {
       this.justLoaded = false;
       this.linkArrayCopies();
+      linkSimilarCopies(this.doc.bodies.map((b) => b.shape)); // (other copies — moved, turned, scaled: drawn from one mesh)
     }
+    // Hidden ids of bodies gone (an undone add, New / Open) dropped here and in the viewport too, before it builds
+    // anything: a body back by Redo (same id) would otherwise come back hidden while its eye says shown.
+    const live = new Set(this.doc.bodies.map((b) => b.id));
+    for (const id of [...this.hidden]) if (!live.has(id)) this.hidden.delete(id);
+    this.viewport.setHidden(this.hidden);
     this.viewport.sync(this.doc.bodies);
     this.viewport.setLooks(new Map(this.doc.bodies.map((b) => [b.id, this.doc.lookOf(b)])));
     this.showGuides();
     this.showDimensions();
     if (this.tool instanceof MeasureTool) this.tool.refresh();
-    const live = new Set(this.doc.bodies.map((b) => b.id));
-    for (const id of [...this.hidden]) if (!live.has(id)) this.hidden.delete(id);
     this.viewport.setLocked(new Set(this.doc.bodies.filter((b) => b.locked).map((b) => b.id)));
     this.selection = this.selection.filter((s) => this.viewport.isValid(s) && !this.doc.get(s.body)?.locked);
     if (this.located !== null && !this.doc.get(this.located)?.locked) this.located = null;
@@ -7308,7 +7317,7 @@ class App implements ToolHost {
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
       ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Guide line for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
-      ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; a straight path: Twist ° turns it evenly on the way — a propeller blade — and End size % makes the far end smaller / larger); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
+      ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; End size % makes the far end smaller / larger, evenly on the way — a spout along a curved path; a straight path: Twist ° turns it evenly on the way — a propeller blade); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Toolbar → Guide line", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
@@ -7639,12 +7648,14 @@ class App implements ToolHost {
 
   private async fileImportStep(): Promise<void> {
     const file = await window.yddd.openFile({ title: "Import STEP", filters: [{ name: "STEP", extensions: ["step", "stp"] }], binary: true });
-    if (!file) return;
+    if (file) await this.importStepData(file.data as Uint8Array, file.path.split(/[\\/]/).pop()!.replace(/\.(step|stp)$/i, ""));
+  }
+
+  /** Add a STEP file's solids to the model (see fileImportStep). */
+  async importStepData(data: Uint8Array, base: string): Promise<void> {
     try {
       // Read in the background kernel (with the display meshes): the app stays live while a big file loads
-      const data = file.data as Uint8Array;
       const shapes = this.bgKernel.ready ? (this.toast("Reading the STEP file…"), (await this.bgKernel.run({ op: "importStep", data })).solids.map(solidFrom)) : await importStep(data);
-      const base = file.path.split(/[\\/]/).pop()!.replace(/\.(step|stp)$/i, "");
       const bodies = shapes.map((s) => this.doc.makeBody(s, base));
       this.doc.commit([...this.doc.bodies, ...bodies], "Import STEP");
       this.viewport.fit();
@@ -7932,6 +7943,18 @@ class App implements ToolHost {
       this.fail(e);
     }
   }
+
+  /** The view as a PNG (no axes, paths, guides). */
+  private async fileExportImage(): Promise<void> {
+    try {
+      const data = await this.viewport.snapshot();
+      const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.yddd$/, "") ?? "view";
+      const path = await window.yddd.saveFile({ title: "Save View as Image", defaultPath: `${base}.png`, filters: [{ name: "PNG image", extensions: ["png"] }], data });
+      if (path) this.toast(`Saved the view to ${path.split(/[\\/]/).pop()}`);
+    } catch (e) {
+      this.fail(e);
+    }
+  }
 }
 
 // ================================================================ bootstrap
@@ -7942,7 +7965,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

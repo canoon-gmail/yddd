@@ -305,18 +305,96 @@ function uploadVideoStream(uploadUrl, filePath, fileSize) {
   });
 }
 
+const VIDEO_PRESETS = {
+  'compartment-box': {
+    title: '3D Print a Compartment Storage Box in 12s — YDDD CAD Tutorial (Macro → Dividers)',
+    description: `Model a 6-compartment 3D-printable storage organizer box with internal divider walls and lid lip clearance in 12 seconds using YDDD, a simple direct-modeling 3D CAD app for Linux.
+
+0:00 Step 1/4: Floor Face (Press A: 160 × 100 mm)
+0:03 Step 2/4: Macro → Box from Face… (Wall 3.0 mm, Floor 3.0 mm, Inside Height 40.0 mm)
+0:06 Step 3/4: Macro → Dividers… (Columns: 3, Rows: 2, Wall: 2.4 mm, Below the rim: 3.0 mm for lid lip)
+0:09 Step 4/4: Ready to 3D Print (6 equal compartments fused into 1 watertight solid)
+
+GitHub Repository & Linux .deb Download: https://github.com/canoon-gmail/yddd
+Feedback & Questions: ydddmodel@gmail.com
+Built with Electron, TypeScript, Three.js, and OpenCascade (replicad).`,
+    tags: [
+      'YDDD',
+      '3D Printing',
+      'Functional Print',
+      'Storage Box',
+      'Gridfinity Alternative',
+      '3D CAD',
+      'Linux CAD',
+      'Direct Modeling',
+      'OpenCascade',
+    ],
+  },
+  'box-lid': {
+    title: 'Design a Fitted 3D Printed Box Lid in 11s — YDDD CAD Tutorial (Macro → Box Lid)',
+    description: `Create a slip-fit 3D-printable box lid with 0.3 mm FDM clearance tolerance in seconds using "Macro → Box Lid: Over the Box…" in YDDD.
+
+0:00 Step 1/4: Select Open-Top Storage Box
+0:02 Step 2/4: Macro → Box Lid: Over the Box… (Clearance 0.3 mm, Top 2.4 mm, Skirt 8.0 mm)
+0:06 Step 3/4: Top Edge Grip Chamfer (Press 3, Shift+F: 1.5 mm)
+0:08 Step 4/4: Exploded Clearance View & Ready to Print
+
+GitHub Repository & Linux .deb Download: https://github.com/canoon-gmail/yddd
+Feedback & Questions: ydddmodel@gmail.com`,
+    tags: ['YDDD', '3D Printing', 'Box Lid', 'Functional Print', '3D CAD', 'Linux CAD', 'Direct Modeling'],
+  },
+  'cable-clip': {
+    title: 'Model an Under-Desk Cable Organizer with Live Hole Resize — YDDD 3D CAD',
+    description: `Design a 3D-printable under-desk cable clip and resize cylindrical bores on the fly (3 + S) without history-tree rebuilds in YDDD.
+
+GitHub Repository & Linux .deb Download: https://github.com/canoon-gmail/yddd
+Feedback & Questions: ydddmodel@gmail.com`,
+    tags: ['YDDD', '3D Printing', 'Cable Organizer', 'Functional Print', '3D CAD', 'Linux CAD'],
+  },
+  'l-bracket': {
+    title: 'Model a Heavy-Duty 3D Printed L-Bracket with Fillet & Gusset Rib — YDDD CAD',
+    description: `Build a reinforced 90° structural mounting bracket with a 6.0 mm stress-relief fillet, diagonal gusset rib, and M4 mounting bores in YDDD.
+
+GitHub Repository & Linux .deb Download: https://github.com/canoon-gmail/yddd
+Feedback & Questions: ydddmodel@gmail.com`,
+    tags: ['YDDD', '3D Printing', 'L Bracket', 'Functional Print', '3D CAD', 'Linux CAD'],
+  },
+  'thai-sign': {
+    title: '3D Printed Bilingual Thai & English Nameplate (Multi-Color 3MF) — YDDD CAD',
+    description: `Create a dual-color 3D-printable nameplate ("CANOON LAB ห้องทำงาน") using built-in Noto Sans Thai Bold typography, Push/Pull 3D extrusion, and multi-body 3MF export in YDDD.
+
+GitHub Repository & Linux .deb Download: https://github.com/canoon-gmail/yddd
+Feedback & Questions: ydddmodel@gmail.com`,
+    tags: ['YDDD', '3D Printing', 'Thai Font', '3MF', 'Nameplate', '3D CAD', 'Linux CAD'],
+  },
+};
+
 async function main() {
   const args = process.argv.slice(2);
   let videoPath = path.resolve('birdhouse-tutorial.mp4');
   let privacyStatus = 'public';
+  let customTitle = null;
+  let customDesc = null;
+  let customTags = null;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--privacy' && args[i + 1]) {
       privacyStatus = args[++i];
+    } else if (args[i] === '--file' && args[i + 1]) {
+      videoPath = path.resolve(args[++i]);
+    } else if (args[i] === '--title' && args[i + 1]) {
+      customTitle = args[++i];
+    } else if (args[i] === '--description' && args[i + 1]) {
+      customDesc = args[++i];
+    } else if (args[i] === '--tags' && args[i + 1]) {
+      customTags = args[++i].split(',').map((t) => t.trim()).filter(Boolean);
     } else if (!args[i].startsWith('--')) {
       videoPath = path.resolve(args[i]);
     }
   }
+
+  const stem = path.basename(videoPath, path.extname(videoPath));
+  const preset = VIDEO_PRESETS[stem];
 
   if (!fs.existsSync(videoPath)) {
     console.error(`Error: Video file not found at ${videoPath}`);
@@ -360,9 +438,9 @@ re-run:
   const fileSize = fs.statSync(videoPath).size;
   const metadata = {
     snippet: {
-      title: DEFAULT_TITLE,
-      description: DEFAULT_DESCRIPTION,
-      tags: DEFAULT_TAGS,
+      title: customTitle || preset?.title || DEFAULT_TITLE,
+      description: customDesc || preset?.description || DEFAULT_DESCRIPTION,
+      tags: customTags || preset?.tags || DEFAULT_TAGS,
       categoryId: '28', // Science & Technology
       defaultLanguage: 'en',
     },
