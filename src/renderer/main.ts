@@ -56,7 +56,6 @@ import {
   importStl,
   boundingSize,
   findFace,
-  faceSegments,
   extrudeFace,
   makeSphereAt,
   seamEdgeIds,
@@ -74,21 +73,12 @@ import {
   boxFromFace,
   boxLid,
   boxDividers,
-  batteryCase,
   gridfinityBin,
-  gridfinitySizes,
   gridfinityBaseplate,
-  gridfinityBaseplateSizes,
   wrappedTextFaces,
-  type GridfinityBin,
-  type GridfinityBaseplate,
-  GRIDFINITY,
-  hasBoxRim,
   offsetRing,
   scaleShape,
   guidePlaneNormal,
-  matchStraightEdge,
-  matchCircleEdge,
   pushPullMoves,
   edgesAlong,
   asPreview,
@@ -147,9 +137,8 @@ import {
   movedIds,
   parseStl,
 } from "./kernel";
-import { scatter } from "./scatter";
 import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
-import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type ShownDimension } from "./viewport";
+import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
@@ -164,197 +153,16 @@ import { SketchTool, type SketchFrame } from "./sketch";
 import { byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, XRAY_OPACITY_KEY } from "./format";
 import { eventKey, isDefault, keyTable, keysPanelOpen, keysText, loadKeys, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
 import type { TutCtx, Tutorial } from "./tutorials";
+import * as macros from "./macros";
+import { $, escapeHtml, fmt, isPro } from "./ui";
+import { dragsOf, OpWaiting, parsePercent, type OpDrag, type OpField, type OpInput, type OpOutcome, type OpSpec } from "./ops";
+import { extrudedFrom, inGroupOf, LOOK_PRESETS, notEditable, notMesh, relinkDimensions, swatchStyle, withTextOf } from "./bodies";
+import { HISTORY_BYTES, SAVED_HISTORY, type SavedHistory, type SavedStep } from "./savefile";
+import { EDGE_CURSOR, loadRecent, MODE_HINTS, RECENT_ITEMS, RECENT_MAX, RECENT_USE_KEY, RECENT_KEY, SKETCH_COMMANDS, TOOLBAR, TOOLBAR_ITEMS, type ToolbarItem } from "./toolbar";
 
-/** Linked dimensions follow their edge / circle into the bodies' new shapes (unlinked if it can't be found). */
-function relinkDimensions(dims: readonly Dimension[], prev: readonly Body[], next: readonly Body[]): readonly Dimension[] {
-  return dims.map((d) => {
-    if (d.body === undefined) return d;
-    const before = prev.find((b) => b.id === d.body), after = next.find((b) => b.id === d.body);
-    if (before && after && before.shape === after.shape) return d;
-    const { body: _, ...unlinked } = d;
-    if (!before || !after || !isBrep(before) || !isBrep(after)) return unlinked;
-    try {
-      const e = d.kind === "radius" ? matchCircleEdge(after.shape, before.shape, d.a, d.b, d.n!) : matchStraightEdge(after.shape, before.shape, d.a, d.b);
-      return e ? { ...d, a: e[0], b: e[1] } : unlinked;
-    } catch {
-      return unlinked;
-    }
-  });
-}
 
-/** Why an editing command can't run on a mesh body (an imported STL). */
-const meshOnly = (action: string, name: string) => `${action}: "${name}" is a mesh (imported STL) — it can be moved, rotated, scaled, copied and exported, not edited`;
-/** Why an editing command can't run on a mesh or a path. */
-const notEditable = (action: string, b: Body) =>
-  b.kind === "path" ? `${action}: "${b.name}" is a path (open lines from a sketch) — it can be moved, rotated, scaled, copied and deleted, not edited` : meshOnly(action, b.name);
 
-const notMesh = (g: Geom): g is Shape => !isMesh(g);
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const fmt = (n: number) => String(Math.round(n * 100) / 100);
-const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-
-interface OpField {
-  key: string;
-  label: string;
-  /** Number value, or 0/1 for checkboxes. */
-  value: number;
-  step?: number;
-  min?: number;
-  /** "select": `value` is the index into `options`. */
-  type?: "number" | "checkbox" | "select";
-  /** Greyed out (can't be changed) while this is true of the panel's values — e.g. a field another one overrides. */
-  off?: (values: Record<string, number>) => boolean;
-  options?: string[];
-  /**
-   * A % field that also takes sizes: the size (mm) at 100 % — then "+10mm" / "-10mm" (that much
-   * bigger / smaller), "60mm" (that size) and "+10%" / "-10%" work besides a plain %.
-   */
-  mm?: number;
-}
-
-/** A % field's text (see OpField.mm) as a %; NaN if it isn't one of the forms. */
-function parsePercent(text: string, mm?: number): number {
-  const m = /^([+-]?)(\d*\.?\d+)(mm|%)?$/.exec(text.trim().toLowerCase().replace(/\s+/g, ""));
-  if (!m) return NaN;
-  const [, sign, num, unit] = m, n = Number(num) * (sign === "-" ? -1 : 1);
-  if (unit === "mm") return mm && mm > 1e-9 ? ((sign ? mm + n : n) / mm) * 100 : NaN;
-  return unit === "%" && sign ? 100 + n : n;
-}
-
-type OpInput = HTMLInputElement | HTMLSelectElement;
-
-/** Result of a parametric operation: what to preview and how to commit it. */
-interface OpOutcome {
-  /** Shapes to preview, keyed by the body they replace (unknown/negative keys = new bodies). */
-  ghost: Map<number, Shape>;
-  /** Measurements on the preview (what the panel's numbers come to), shown while it is. */
-  dims?: ShownDimension[];
-  /**
-   * Instead of `ghost`: preview these bodies' current meshes through a transform (instant);
-   * the exact result is then only built by `commit`, which may throw.
-   */
-  xform?: { ids: number[]; matrix: THREE.Matrix4 };
-  /**
-   * Instead of `ghost`: bodies on screen drawn through a matrix each (copies — an id may come several times;
-   * `replaces`: the body itself, moved), see Viewport.showGhostPlaced. Instant; `commit` builds the real ones.
-   */
-  placed?: { id: number; matrix: THREE.Matrix4; replaces?: boolean }[];
-  /** Bodies the result removes: hidden while it is previewed. */
-  hide?: number[];
-  /** Hide the selected edges' highlight while previewed (they change with it, e.g. a resized hole's rim). */
-  hideSelection?: boolean;
-  /** It worked, but not quite as asked (e.g. some edges left sharp): shown in the panel (Apply still works), with a button to set fields. */
-  warn?: { text: string; action?: { label: string; set: Record<string, number> } };
-  /** Apply to the document. Returns the body ids to select afterwards (`then`: run once the panel has closed). */
-  commit(): { select: number[]; solidMode?: boolean; then?: () => void };
-}
-
-/**
- * Mouse-drag control: moving the mouse along `dir` (through `origin`) changes field `key`.
- * `unit` = world mm per unit of the field (default 1), e.g. for a percentage; `mul` names a
- * percentage field that also stretches the handle's distance (e.g. overall scale for an axis handle).
- * `look`/`color` style the handle; `line` draws a line from `origin` to it.
- */
-interface OpDrag {
-  origin: V3;
-  dir: V3;
-  key: string;
-  /** Smallest value the drag gives (e.g. a fillet radius can't reach 0). */
-  min?: number;
-  unit?: number;
-  /** Shown with the value while dragging (default: % with a `unit`, else mm). */
-  units?: string;
-  mul?: string;
-  look?: "arrow" | "box" | "ring";
-  color?: string;
-  line?: boolean;
-  title?: string;
-  /**
-   * Shift while dragging sets the checkbox field `key` (off without Shift); while it's on, the
-   * handle runs from `origin` along `dir` with `unit` instead (e.g. Scale about the centre, not the base).
-   */
-  shift?: { key: string; origin: V3; dir: V3; unit: number };
-}
-
-interface OpSpec {
-  title: string;
-  label: string;
-  fields: OpField[];
-  compute(values: Record<string, number>): OpOutcome;
-  /**
-   * The same worked out in the background kernel (kernelWorker.ts), used once it has loaded: the app stays live
-   * meanwhile and Esc stops it at once. `compute` stays for before that (and if it can't start).
-   */
-  computeAsync?(values: Record<string, number>): Promise<OpOutcome>;
-  remember?(values: Record<string, number>): void;
-  /** One or more drag handles (see OpDrag). */
-  drag?: OpDrag | OpDrag[];
-  /**
-   * Instant approximate preview used while dragging when `compute` is slow (returns false if it
-   * can't help for these values); the real preview follows once the drag pauses.
-   */
-  fastDrag?(values: Record<string, number>): boolean;
-  /** Shown above the fields (HTML), e.g. what has been picked. */
-  note?: string;
-  /** Status bar hint instead of the usual one. */
-  hint?: string;
-  /** The op picks things in the viewport: a click there goes here (not to selection or Apply). */
-  pick?(e: PointerEvent): void;
-  /** With `pick`: the pointer moved over the viewport (e.g. light up what a click would pick). */
-  hover?(e: PointerEvent): void;
-  /** Its preview takes a while (e.g. a fillet round a gear's 171 edges: ~1 s): the panel shows first, "Working…", then the preview. */
-  slow?: boolean;
-  /** The op picks objects: a click on a row in the Bodies panel goes here (not to selection). */
-  pickBody?(id: number): void;
-  /** Labelled marks in the view to click (e.g. Array copy's ±X / ±Y / ±Z): see OpChoice. */
-  choices?: OpChoice[];
-  /** Caption of the apply button (default "Apply ⏎"). */
-  applyLabel?: string;
-}
-
-/** A labelled mark at `at` (a faint line to it from `from`): a click sets field `key` to `value`; lit while it has it. */
-interface OpChoice {
-  at: V3;
-  from?: V3;
-  key: string;
-  value: number;
-  label: string;
-  color: string;
-  title?: string;
-}
-
-/** Colour presets in the colour pop-up (common filament colours). */
-const LOOK_PRESETS = ["#f2f2f2", "#2b2b2b", "#9aa5b1", "#d93b3b", "#f4a259", "#e9c46a", "#4caf50", "#3b82f6", "#8e5bd8", "#ec6fb0"];
-
-/** A Bodies panel swatch's inline style for a look (nothing = the CSS default for its kind). */
-function swatchStyle(l: Look): string {
-  return (l.color ? `--sw: ${l.color};` : "") + (l.opacity !== undefined && l.opacity < 1 ? `opacity: ${Math.max(0.25, l.opacity)};` : "");
-}
-
-/** A body made from `from` (a copy, extruded, split off...) has its colour / opacity. */
-function withLookOf<T extends Body>(made: T, from: Body): T {
-  return from.look ? { ...made, look: from.look } : made;
-}
-
-/** A copy of a Text tool letter is one too (its text can be edited, see TextRecord); it keeps its look. */
-function withTextOf<T extends Body>(made: T, from: Body): T {
-  return withLookOf(from.text ? { ...made, text: from.text } : made, from);
-}
-
-/** A new body made from `from` (extruded, cut off, split off...) goes in the same group, with the same look. */
-function inGroupOf<T extends Body>(made: T, from: Body): T {
-  return withLookOf(from.group ? { ...made, group: from.group } : made, from);
-}
-
-/** Names flat faces get automatically ("Circle 3", "Face 1"...): a solid pushed from one is called "Solid N" instead. */
-const AUTO_FACE_NAME = /^(Rectangle|Circle|Polygon|Text|Face|Sketch|Ring)( \d+)?$/;
-
-/** The solid a flat face object was pushed / pulled into: its group, and the name the user gave it. */
-function extrudedFrom<T extends Body>(made: T, face: Body): T {
-  const named = AUTO_FACE_NAME.test(face.name) ? made : { ...made, name: face.name };
-  return withTextOf(inGroupOf(named, face), face);
-}
 
 /** The Text tool's last font (a built-in one's key or a system font's file; "" = Noto Sans), localStorage. */
 const TEXT_FONT_KEY = "yddd.textFont";
@@ -364,39 +172,10 @@ const BUILT_IN_FAMILY = (family: string) => `${family} (built in)`;
 /** Longest text a Text group's name shows (in quotes), the rest cut short with "…". */
 const TEXT_NAME_MAX = 16;
 
-/** Undo steps a saved file keeps (and redo steps): reopened, Undo goes back that far. */
-const SAVED_HISTORY = 50;
-/** ...unless the history's own shapes reach this much text first (e.g. a big STL moved many times). */
-const HISTORY_BYTES = 30e6;
-
-/** One undo / redo step in a file: its bodies as references (see modelText). */
-interface SavedStep {
-  label: string;
-  bodies: number[];
-  guides?: Guide[];
-  dims?: Dimension[];
-  arrays?: ArrayRecord[];
-  looks?: GroupLooks;
-}
-
-/** The undo history part of a .yddd file. */
-interface SavedHistory {
-  ids: number[];
-  dims?: Dimension[];
-  arrays?: ArrayRecord[];
-  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; locked?: true; s: number }[];
-  shapes: string[];
-  undo: SavedStep[];
-  redo: SavedStep[];
-  counters?: [string, number][];
-  nextId?: number;
-}
 
 /** Menu command prefix for File → Open Recent (the file's path follows). */
 const OPEN_RECENT = "file.openRecent:";
 
-/** Thrown by an op's compute while it waits for a pick (not a mistake): shown as a prompt, not in red. */
-class OpWaiting extends Error {}
 
 /** What Cut cuts along: a guide line (its index), a world axis line (0 = X, 1 = Y, 2 = Z), or a straight path (its body id). */
 type CutLine = number | { axis: number } | { path: number };
@@ -416,120 +195,8 @@ const BUSY_DRAW_MS = 300;
 /** Op previews slower than this (ms) are not redone on every drag frame. */
 const SLOW_PREVIEW_MS = 60;
 
-const dragsOf = (spec: OpSpec): OpDrag[] => (!spec.drag ? [] : Array.isArray(spec.drag) ? spec.drag : [spec.drag]);
 
-interface ToolbarItem {
-  cmd: string;
-  icon: string;
-  label: string;
-}
 
-const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[] = [
-  {
-    title: "Select",
-    items: [
-      { cmd: "mode.body", icon: "solid", label: "Solid" },
-      { cmd: "mode.face", icon: "face", label: "Face" },
-      { cmd: "mode.edge", icon: "edge", label: "Edge" },
-    ],
-  },
-  {
-    title: "Solid",
-    drawer: true,
-    items: [
-      { cmd: "tool.box", icon: "box", label: "Box" },
-      { cmd: "tool.cylinder", icon: "cylinder", label: "Cylinder" },
-      { cmd: "tool.sphere", icon: "sphere", label: "Sphere" },
-      { cmd: "tool.cone", icon: "cone", label: "Cone" },
-    ],
-  },
-  {
-    title: "Face",
-    drawer: true,
-    items: [
-      { cmd: "tool.rectangle", icon: "rectangle", label: "Rectangle" },
-      { cmd: "tool.circle", icon: "circle", label: "Circle" },
-      { cmd: "tool.polygon", icon: "polygon", label: "Polygon" },
-      { cmd: "tool.text", icon: "text", label: "Text" },
-      { cmd: "tool.sketch", icon: "sketch", label: "Sketch" },
-    ],
-  },
-  {
-    title: "Modify",
-    drawer: true,
-    items: [
-      { cmd: "op.pushpull", icon: "pushpull", label: "Push/Pull" },
-      { cmd: "op.fillet", icon: "fillet", label: "Fillet" },
-      { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer" },
-      { cmd: "op.shell", icon: "shell", label: "Shell" },
-      { cmd: "op.offset", icon: "offset", label: "Offset" },
-      { cmd: "op.revolve", icon: "revolve", label: "Revolve" },
-      { cmd: "edit.circular", icon: "circular", label: "Circular copy" },
-      { cmd: "edit.mirror", icon: "mirror", label: "Mirror" },
-      { cmd: "op.sweep", icon: "sweep", label: "Sweep" },
-      { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis" },
-      { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide" },
-    ],
-  },
-  {
-    title: "Boolean",
-    drawer: true,
-    items: [
-      { cmd: "bool.union", icon: "union", label: "Union" },
-      { cmd: "bool.subtract", icon: "subtract", label: "Subtract" },
-      { cmd: "bool.intersect", icon: "intersect", label: "Intersect" },
-    ],
-  },
-  {
-    title: "Transform",
-    drawer: true,
-    items: [
-      { cmd: "xf.move", icon: "move", label: "Move" },
-      { cmd: "xf.moveFrom", icon: "moveFrom", label: "Move from point" },
-      { cmd: "xf.rotate", icon: "rotate", label: "Rotate" },
-      { cmd: "xf.scale", icon: "scale", label: "Scale" },
-      { cmd: "xf.repeat", icon: "repeat", label: "Repeat last" },
-      { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate" },
-    ],
-  },
-  {
-    title: "Measure",
-    items: [
-      { cmd: "tool.measure", icon: "measure", label: "Measure" },
-      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face" },
-      { cmd: "tool.guide", icon: "guide", label: "Guide line" },
-    ],
-  },
-  {
-    title: "History",
-    items: [
-      { cmd: "edit.undo", icon: "undo", label: "Undo" },
-      { cmd: "edit.redo", icon: "redo", label: "Redo" },
-    ],
-  },
-  {
-    title: "View",
-    drawer: true,
-    items: [
-      { cmd: "view.fit", icon: "fit", label: "Fit" },
-      { cmd: "view.iso", icon: "iso", label: "Iso" },
-      { cmd: "view.top", icon: "top", label: "Top" },
-      { cmd: "view.front", icon: "front", label: "Front" },
-      { cmd: "view.right", icon: "right", label: "Right" },
-    ],
-  },
-  {
-    title: "X-ray",
-    items: [{ cmd: "view.xray", icon: "xray", label: "X-ray" }],
-  },
-];
-
-/** Commands that work during a sketch (anything else waits for Done / Cancel). */
-const SKETCH_COMMANDS = new Set(["view.fit", "view.fitSelection", "view.xray", "view.pro", "help.shortcuts", "help.keys"]);
-
-/** Macro → Battery case: the batteries everyone has (diameter × length, mm), and the Pro layout's more. */
-const BATTERIES = [{ name: "AA", diameter: 14.5, length: 50.5 }, { name: "AAA", diameter: 10.5, length: 44.5 }, { name: "18650", diameter: 18.6, length: 65.2 }];
-const PRO_BATTERIES = [{ name: "C", diameter: 26.2, length: 50 }, { name: "D", diameter: 34.2, length: 61.5 }];
 
 /** localStorage: Pro layout on ("1"). */
 const PRO_KEY = "yddd.pro";
@@ -545,58 +212,27 @@ const OL_VIRTUAL_MIN = 400;
 /** The Snap step (status bar), remembered for next time. */
 const SNAP_STEP_KEY = "yddd.snapStep";
 
-/** Edge mode's pointer: the arrow with a small "E" by it. */
-const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28"><path d="M2 2 L2 19 L6.5 15 L9.5 22 L12.5 20.7 L9.6 14 L15.5 14 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/>` +
-    `<text x="16" y="26" font-family="sans-serif" font-size="12" font-weight="bold" fill="#ffe066" stroke="#000" stroke-width="2.5" paint-order="stroke">E</text></svg>`,
-)}") 2 2, default`;
-const isPro = () => document.body.classList.contains("pro");
 
 /** A text field keeps these (its own select all, copy, paste, cut, undo, redo). */
 const FIELD_KEYS = new Set(["Ctrl+A", "Ctrl+C", "Ctrl+V", "Ctrl+X", "Ctrl+Z", "Ctrl+Shift+Z", "Ctrl+Y"]);
 /** A two-key shortcut's second key counts this long (ms) after the first. */
 const CHORD_MS = 1500;
 
-const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
-/** Toolbar commands that go into the recent strip (mode switches, undo/redo, views, X-ray and Delete have their own keys / buttons). */
-const NOT_RECENT = new Set(["Select", "History", "View", "X-ray"]);
-const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
-const RECENT_MAX = 10;
 /** Face mode: how close (px) a click must be to a selected face's edge to switch to Edge mode. */
 const FACE_EDGE_PICK_PX = 14;
-/** v2: the strip saved before "tool.line" became "tool.divideFace" is dropped (see loadRecent). */
-const RECENT_KEY = "yddd.recentCmds.v2";
-const RECENT_KEY_OLD = "yddd.recentCmds";
-/** The strip's commands, least recently used first (which slot a new command takes over). */
-const RECENT_USE_KEY = "yddd.recentUse";
 /** Largest STL (triangles) imported as editable solids; bigger ones stay meshes. */
 const STL_SOLID_MAX = 20000;
 
 /** Last STL export quality (localStorage). */
 const STL_QUALITY_KEY = "yddd.stlQuality";
 
-function loadRecent(): string[] {
-  localStorage.removeItem(RECENT_KEY_OLD);
-  try {
-    const v = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
-    return Array.isArray(v) ? v.filter((c) => RECENT_ITEMS.has(c)).slice(-RECENT_MAX) : [];
-  } catch {
-    return [];
-  }
-}
 
-const MODE_HINTS: Record<SelMode, string> = {
-  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag or Alt+drag orbit · Shift+drag pan · Wheel / two-finger slide zoom",
-  face: "Face mode: click faces (P push/pull, H shell; a flat face's centre dot, then G: a cone / pyramid), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
-  edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge — a closed loop of edges: a face copy).  Shift+click to add · Right-click a solid → Solid mode",
-};
-
-class App implements ToolHost {
+export class App implements ToolHost {
   readonly doc = new Doc();
   readonly viewport: Viewport;
 
   private mode: SelMode = "body";
-  private selection: SelItem[] = [];
+  selection: SelItem[] = [];
   private hover: SelItem | null = null;
   private hidden = new Set<number>();
   private tool: Tool | null = null;
@@ -630,7 +266,7 @@ class App implements ToolHost {
     wanted?: boolean;
   } | null = null;
   /** The background kernel (a second OpenCascade in a worker) for slow operations: see kernelWorker.ts. */
-  private bgKernel = new KernelWorker();
+  bgKernel = new KernelWorker();
   /** Move/rotate gizmo session; with `edges` it moves those edges (reshaping their solids) instead of whole bodies. */
   /** The move / rotate gizmo session; `frame`: a move along turned axes (G / Shift+G on a round or slanted edge: Z along its circle's axis / along the edge). */
   private xf: { mode: "translate" | "rotate"; ids: number[]; pivot?: V3; frame?: GizmoFrame; edges?: SelItem[]; guide?: number } | null = null;
@@ -659,18 +295,18 @@ class App implements ToolHost {
   private rightDownAt: { x: number; y: number } | null = null;
   private hoverQueued: PointerEvent | null = null;
   /** Box from Face (Macro menu): the last values. */
-  private boxDefaults = { wall: 2, bottom: 2, height: 30, round: 0, radius: 3 };
+  boxDefaults = { wall: 2, bottom: 2, height: 30, round: 0, radius: 3 };
   /** Box Lid (Macro menu): the last values, per type (inside lip / over the box). */
-  private lidDefaults = {
+  lidDefaults = {
     in: { thickness: 2, depth: 3, wall: 1.5, clearance: 0 },
     over: { thickness: 2, depth: 5, wall: 1.5, clearance: 0 },
   };
   /** Dividers (Macro menu): the last values. */
-  private dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
-  private randomDefaults = { count: 20, smallest: 50, biggest: 150, align: 0, spin: 1, overlap: 0, seed: 1 };
-  private gridfinityDefaults = { width: 2, depth: 1, height: 6, columns: 1, rows: 1, lip: 1, magnets: 0, wall: 1.2 };
-  private baseplateDefaults = { width: 3, depth: 3, drawerWidth: 0, drawerDepth: 0, magnets: 0 };
-  private batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
+  dividerDefaults = { columns: 3, rows: 2, wall: 1.2, topGap: 0 };
+  randomDefaults = { count: 20, smallest: 50, biggest: 150, align: 0, spin: 1, overlap: 0, seed: 1 };
+  gridfinityDefaults = { width: 2, depth: 1, height: 6, columns: 1, rows: 1, lip: 1, magnets: 0, wall: 1.2 };
+  baseplateDefaults = { width: 3, depth: 3, drawerWidth: 0, drawerDepth: 0, magnets: 0 };
+  batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
   private hudEl = $("hud");
@@ -1165,14 +801,14 @@ class App implements ToolHost {
       case "tool.sketch": return this.startSketch();
 
       case "op.pushpull": return this.opPushPull();
-      case "macro.box": return this.opBoxFromFace();
-      case "macro.lidIn": return this.openBoxLid(false, this.selectedLidBox());
-      case "macro.lidOver": return this.openBoxLid(true, this.selectedLidBox());
-      case "macro.dividers": return this.openDividers(this.selectedLidBox());
-      case "macro.battery": return this.openBatteryCase();
-      case "macro.gridfinity": return this.openGridfinityBin();
-      case "macro.baseplate": return this.openGridfinityBaseplate();
-      case "macro.random": return this.openRandom();
+      case "macro.box": return macros.opBoxFromFace(this);
+      case "macro.lidIn": return macros.openBoxLid(this, false, macros.selectedLidBox(this));
+      case "macro.lidOver": return macros.openBoxLid(this, true, macros.selectedLidBox(this));
+      case "macro.dividers": return macros.openDividers(this, macros.selectedLidBox(this));
+      case "macro.battery": return macros.openBatteryCase(this);
+      case "macro.gridfinity": return macros.openGridfinityBin(this);
+      case "macro.baseplate": return macros.openGridfinityBaseplate(this);
+      case "macro.random": return macros.openRandom(this);
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
@@ -1312,7 +948,7 @@ class App implements ToolHost {
     }
   }
 
-  private selectedBodyIds(): number[] {
+  selectedBodyIds(): number[] {
     return [...new Set(this.selection.map((s) => s.body))];
   }
 
@@ -1832,7 +1468,7 @@ class App implements ToolHost {
 
   // ================================================================ parametric operations (panel + live preview)
 
-  private startOp(spec: OpSpec): void {
+  startOp(spec: OpSpec): void {
     this.endInteractions();
     const panel = this.opPanel;
     panel.innerHTML = `<h4>${spec.title}</h4>${spec.note ? `<div class="op-note">${spec.note}</div>` : ""}`;
@@ -2000,7 +1636,7 @@ class App implements ToolHost {
     }
   }
 
-  private opValues(): { values: Record<string, number>; key: string } {
+  opValues(): { values: Record<string, number>; key: string } {
     const values: Record<string, number> = {};
     const exact = this.op!.exact;
     for (const i of this.op!.inputs) {
@@ -2029,7 +1665,7 @@ class App implements ToolHost {
     requestAnimationFrame(() => setTimeout(() => this.op === op && this.previewOp(), 0));
   }
 
-  private previewOp(): OpOutcome | null {
+  previewOp(): OpOutcome | null {
     const op = this.op;
     if (!op) return null;
     const { values, key } = this.opValues();
@@ -2543,494 +2179,8 @@ class App implements ToolHost {
     });
   }
 
-  /**
-   * Macro → Box from Face: an open-top box round a flat face — the face is its inside (floor and inner outline);
-   * walls grow out from it, the bottom down under it (a face object becomes the box; on a solid's face, a new
-   * solid) — wall, bottom, inside depth, and optionally round vertical edges. The panel opens at once and
-   * waits for the face if none is selected; a click on another flat face (or a face object's row) changes it.
-   */
-  private opBoxFromFace(): void {
-    this.openBoxFromFace(this.oneFaceTarget());
-  }
-
-  private openBoxFromFace(target: { bodyId: number; faceId: number } | null): void {
-    const tb = target && this.doc.get(target.bodyId);
-    const body = tb && isBrep(tb) && findFace(tb.shape, target!.faceId)?.geomType === "PLANE" ? tb : null;
-    const faceId = body ? target!.faceId : 0;
-    // What a click picks: a flat face (of a face object or a solid), or something it can't use
-    type Target = { bodyId: number; faceId: number } | "bad" | null;
-    const targetAt = (e: PointerEvent): Target => {
-      const hit = this.viewport.pick(e.clientX, e.clientY, "face");
-      const b = hit && this.doc.get(hit.body);
-      if (!hit || !b) return null;
-      return hit.kind === "face" && isBrep(b) && findFace(b.shape, hit.id)?.geomType === "PLANE" ? { bodyId: b.id, faceId: hit.id } : "bad";
-    };
-    const targetOf = (id: number): Target => {
-      const b = this.doc.get(id);
-      return b?.kind === "face" && b.shape.faces[0]?.geomType === "PLANE" ? { bodyId: b.id, faceId: b.shape.faces[0].hashCode } : "bad";
-    };
-    const take = (t: Target) => {
-      if (!t) return;
-      if (t === "bad") return this.toast("Box from Face: click a flat face — of a face object (Rectangle, Circle, a sketch...) or a solid", "error");
-      spec.remember!(this.opValues().values); // (the panel opens again with them)
-      this.openBoxFromFace(t);
-    };
-    const picked: SelItem[] = body ? [body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: faceId }] : [];
-    const todo = "click a flat face: it's the box's inside (floor and inner outline)";
-    const d = this.boxDefaults;
-    const spec: OpSpec = {
-      title: "Box from Face",
-      label: "Box from Face",
-      note: `Face: ${body ? escapeHtml(body.kind === "face" ? body.name : `a face of ${body.name}`) : "—"}`,
-      hint: `Box from Face: ${body ? "click another flat face to change it · Enter apply · " : `${todo} · `}Esc cancel`,
-      fields: [
-        { key: "wall", label: "Wall (mm)", value: d.wall, step: 0.5, min: 0 },
-        { key: "bottom", label: "Bottom (mm)", value: d.bottom, step: 0.5, min: 0 },
-        { key: "height", label: "Inside depth (mm)", value: d.height, step: 1, min: 0 },
-        { key: "round", label: "Round vertical edges", value: d.round, type: "checkbox" },
-        { key: "radius", label: "Inside radius (mm)", value: d.radius, step: 0.5, min: 0 },
-      ],
-      compute: ({ wall, bottom, height, round, radius }) => {
-        if (!body) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
-        const solid = boxFromFace(body.shape, faceId, { wall, bottom, height, radius: round ? radius : 0 });
-        // A face object becomes the box; on a solid's face it's a new solid
-        const replace = body.kind === "face";
-        return {
-          ghost: new Map([[replace ? body.id : -1, solid]]),
-          commit: () => {
-            const nb = inGroupOf(this.doc.makeBody(solid, "Box"), body);
-            this.doc.commit(replace ? this.doc.bodies.map((b) => (b.id === body.id ? nb : b)) : [...this.doc.bodies, nb], "Box from Face");
-            return { select: [nb.id], solidMode: true };
-          },
-        };
-      },
-      remember: ({ wall, bottom, height, round, radius }) => (this.boxDefaults = { wall, bottom, height, round, radius }),
-      pick: (e) => take(targetAt(e)),
-      pickBody: (id) => take(targetOf(id)),
-      hover: (e) => {
-        const t = targetAt(e);
-        this.viewport.setHighlight(picked, t && t !== "bad" ? { kind: "face", body: t.bodyId, id: t.faceId } : null);
-        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t ? "pointer" : "crosshair";
-      },
-    };
-    this.startOp(spec);
-    this.viewport.setHighlight(picked, null);
-  }
-
-  /** The one selected solid (or a face of it), for Box Lid; null for anything else. */
-  private selectedLidBox(): number | null {
-    const ids = [...new Set(this.selection.map((s) => s.body))];
-    return ids.length === 1 && this.doc.get(ids[0])?.kind === "solid" ? ids[0] : null;
-  }
-
-  /**
-   * Macro → Box Lid: a lid for an open-top box (Box from Face, Shell...), closed on it — `over` false: a plate on the
-   * rim with a lip fitting in the opening; true: a cap, bigger, its skirt round the box's outside. The panel waits for
-   * the box if none is selected; a click on another one changes it.
-   */
-  private openBoxLid(over: boolean, boxId: number | null): void {
-    const tb = boxId === null ? undefined : this.doc.get(boxId);
-    const box = tb?.kind === "solid" ? tb : null;
-    const kind = over ? "Lid over the box" : "Lid with inside lip";
-    // What a click picks: a solid with an open top, or something it can't use
-    const targetOf = (id: number | null | undefined): number | "bad" | null => {
-      if (id === null || id === undefined) return null;
-      const b = this.doc.get(id);
-      return b?.kind === "solid" && hasBoxRim(b.shape as Solid) ? b.id : "bad";
-    };
-    const take = (t: number | "bad" | null) => {
-      if (t === null) return;
-      if (t === "bad") return this.toast(`${kind}: click an open-top box — a solid with a flat rim round its opening (Box from Face, Shell...)`, "error");
-      spec.remember!(this.opValues().values); // (the panel opens again with them)
-      this.openBoxLid(over, t);
-    };
-    const at = (e: PointerEvent) => targetOf(this.viewport.pick(e.clientX, e.clientY, "body")?.body);
-    const d = over ? this.lidDefaults.over : this.lidDefaults.in;
-    const part = over ? "Skirt" : "Lip";
-    const todo = "click the open-top box to make it for";
-    const spec: OpSpec = {
-      title: over ? "Box Lid — over the box" : "Box Lid — inside lip",
-      label: kind,
-      note: `Box: ${box ? escapeHtml(box.name) : "—"}`,
-      hint: `${kind}: ${box ? "click another box to change it · Enter apply · " : `${todo} · `}Esc cancel`,
-      fields: [
-        { key: "thickness", label: "Lid thickness (mm)", value: d.thickness, step: 0.5, min: 0 },
-        { key: "depth", label: `${part} depth (mm${over ? "" : ", 0: none"})`, value: d.depth, step: 0.5, min: 0 },
-        { key: "wall", label: `${part} wall (mm${over ? "" : ", 0: solid"})`, value: d.wall, step: 0.5, min: 0 },
-        { key: "clearance", label: "Clearance (mm)", value: d.clearance, step: 0.1, min: 0 },
-      ],
-      compute: ({ thickness, depth, wall, clearance }) => {
-        if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
-        const lid = boxLid(box.shape as Solid, { over, thickness, lipDepth: depth, lipWall: wall, clearance });
-        return {
-          ghost: new Map([[-1, lid]]),
-          commit: () => {
-            const nb = inGroupOf(this.doc.makeBody(lid, "Lid"), box);
-            this.doc.commit([...this.doc.bodies, nb], kind);
-            return { select: [nb.id], solidMode: true };
-          },
-        };
-      },
-      remember: ({ thickness, depth, wall, clearance }) => (this.lidDefaults[over ? "over" : "in"] = { thickness, depth, wall, clearance }),
-      pick: (e) => take(at(e)),
-      pickBody: (id) => take(targetOf(id)),
-      hover: (e) => {
-        const t = at(e);
-        this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], typeof t === "number" ? { kind: "body", body: t, id: 0 } : null);
-        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t !== null ? "pointer" : "crosshair";
-      },
-    };
-    this.startOp(spec);
-    this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], null);
-  }
-
-  /**
-   * Macro → Dividers: walls in an open-top box (Box from Face, Shell...) — a grid of equal compartments, columns along
-   * its long side, rows across it; the walls from the floor up to a gap under the rim (room for a lid's lip), fused into
-   * the box. The panel waits for the box if none is selected; a click on another one changes it.
-   */
-  private openDividers(boxId: number | null): void {
-    const tb = boxId === null ? undefined : this.doc.get(boxId);
-    const box = tb?.kind === "solid" && hasBoxRim(tb.shape as Solid) ? tb : null;
-    const targetOf = (id: number | null | undefined): number | "bad" | null => {
-      if (id === null || id === undefined) return null;
-      const b = this.doc.get(id);
-      return b?.kind === "solid" && hasBoxRim(b.shape as Solid) ? b.id : "bad";
-    };
-    const take = (t: number | "bad" | null) => {
-      if (t === null) return;
-      if (t === "bad") return this.toast("Dividers: click an open-top box — a solid with a flat rim round its opening (Box from Face, Shell...)", "error");
-      spec.remember!(this.opValues().values); // (the panel opens again with them)
-      this.openDividers(t);
-    };
-    const at = (e: PointerEvent) => targetOf(this.viewport.pick(e.clientX, e.clientY, "body")?.body);
-    const d = this.dividerDefaults;
-    const todo = "click the open-top box to divide";
-    const spec: OpSpec = {
-      title: "Dividers",
-      label: "Dividers",
-      note: `Box: ${box ? escapeHtml(box.name) : "—"}`,
-      hint: `Dividers: ${box ? "click another box to change it · Enter apply · " : `${todo} · `}Esc cancel`,
-      fields: [
-        { key: "columns", label: "Columns (along the long side)", value: d.columns, step: 1, min: 1 },
-        { key: "rows", label: "Rows (across it)", value: d.rows, step: 1, min: 1 },
-        { key: "wall", label: "Wall (mm)", value: d.wall, step: 0.2, min: 0 },
-        { key: "topGap", label: "Below the rim (mm, room for a lid's lip)", value: d.topGap, step: 0.5, min: 0 },
-      ],
-      compute: ({ columns, rows, wall, topGap }) => {
-        if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
-        const solid = boxDividers(box.shape as Solid, { columns, rows, wall, topGap });
-        return {
-          ghost: new Map([[box.id, solid]]),
-          commit: () => {
-            this.doc.commit(this.doc.bodies.map((b) => (b.id === box.id ? withShape(b, solid) : b)), "Dividers");
-            return { select: [box.id], solidMode: true };
-          },
-        };
-      },
-      remember: ({ columns, rows, wall, topGap }) => (this.dividerDefaults = { columns, rows, wall, topGap }),
-      pick: (e) => take(at(e)),
-      pickBody: (id) => take(targetOf(id)),
-      hover: (e) => {
-        const t = at(e);
-        this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], typeof t === "number" ? { kind: "body", body: t, id: 0 } : null);
-        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t !== null ? "pointer" : "crosshair";
-      },
-    };
-    this.startOp(spec);
-    this.viewport.setHighlight(box ? [{ kind: "body", body: box.id, id: 0 }] : [], null);
-  }
-
-  /**
-   * Macro → Battery case: a block with a grid of holes the batteries stand in (AA, AAA, 18650), beside what's
-   * there. The Pro layout has more: C and D cells, a custom size, the hole depth, clearance, wall and floor.
-   */
-  private openBatteryCase(): void {
-    const pro = isPro(), d = this.batteryDefaults;
-    const types = pro ? [...BATTERIES, ...PRO_BATTERIES] : BATTERIES;
-    const options = types.map((t) => `${t.name} (${fmt(t.diameter)} × ${fmt(t.length)} mm)`);
-    if (pro) options.push("Custom (size below)");
-    const fields: OpField[] = [
-      { key: "battery", label: "Battery", type: "select", options, value: Math.min(d.battery, options.length - 1) },
-      { key: "columns", label: "Columns", value: d.columns, step: 1, min: 1 },
-      { key: "rows", label: "Rows", value: d.rows, step: 1, min: 1 },
-    ];
-    if (pro) {
-      fields.push(
-        { key: "depth", label: "Hole depth (% of the battery)", value: d.depth, step: 5, min: 1 },
-        { key: "clearance", label: "Clearance (mm, added to the hole)", value: d.clearance, step: 0.1, min: 0 },
-        { key: "wall", label: "Wall (mm)", value: d.wall, step: 0.2, min: 0.4 },
-        { key: "floor", label: "Floor (mm)", value: d.floor, step: 0.2, min: 0.4 },
-        { key: "diameter", label: "Custom diameter (mm)", value: d.diameter, step: 0.5, min: 1 },
-        { key: "length", label: "Custom length (mm)", value: d.length, step: 1, min: 1 },
-      );
-    }
-    // Beside the solids already there (the right of them), else at the origin.
-    const right = this.rightOfBodies();
-    const params = (v: Record<string, number>) => {
-      const t = types[v.battery];
-      return {
-        diameter: t ? t.diameter : v.diameter, length: t ? t.length : v.length, columns: v.columns, rows: v.rows,
-        depth: pro ? v.depth : d.depth, clearance: pro ? v.clearance : d.clearance, wall: pro ? v.wall : d.wall, floor: pro ? v.floor : d.floor,
-      };
-    };
-    this.startOp({
-      title: "Battery case",
-      label: "Battery case",
-      fields,
-      compute: (v) => {
-        const p = params(v), t = types[v.battery];
-        let solid = batteryCase(p);
-        if (right > -Infinity) solid = translateShape(solid, [right + 10 - solid.boundingBox.bounds[0][0], 0, 0]);
-        return {
-          ghost: new Map([[-1, solid]]),
-          commit: () => {
-            const b = this.doc.makeBody(solid, `Battery case ${t ? t.name : `${fmt(p.diameter)} mm`}`);
-            this.doc.commit([...this.doc.bodies, b], "Battery case");
-            return { select: [b.id], solidMode: true };
-          },
-        };
-      },
-      remember: (v) => (this.batteryDefaults = { ...d, ...v }),
-    });
-  }
-
-  /**
-   * Macro → Gridfinity bin: width × depth grid squares (42 mm), height in 7 mm units, compartments, the stacking lip,
-   * magnet holes — beside what's there, its sizes measured on the preview. The Pro layout adds the wall.
-   */
-  /**
-   * Macro → Random: copies of the selected object (several: each copy one of them, at random) scattered on a flat face (clicked, or a flat face selected with
-   * it) — Count, sizes between Smallest and Biggest %, each standing on the face (its Z along the face's normal):
-   * on it, half in or sunk in; spun at random about the normal; kept on the face and, unless Allow overlap, apart.
-   * Seed: the same one, the same spots. The copies: a new group, one undo step; the object itself stays as it is.
-   */
-  private openRandom(): void {
-    const bodies = this.selectedBodyIds().map((id) => this.doc.get(id)!).filter(Boolean);
-    const sources = bodies.filter((b) => b.kind === "solid" || b.kind === "mesh");
-    if (!sources.length) return this.toast("Random: select the object to copy first (a solid or an STL mesh), then Macro → Random", "error");
-    const faceOf = (body: number, id: number) => {
-      const b = this.doc.get(body);
-      return b && isBrep(b) ? faceSegments(b.shape, id) : null;
-    };
-    /** The face to scatter on: a flat face selected with it, else clicked. */
-    let target: { body: number; face: number } | null = null;
-    const flat = bodies.find((b) => b.kind === "face");
-    if (flat && isBrep(flat)) target = { body: flat.id, face: flat.shape.faces[0].hashCode };
-    const faceAt = (e: PointerEvent) => {
-      const p = this.viewport.pick(e.clientX, e.clientY, "face");
-      return p && p.kind === "face" && faceOf(p.body, p.id) ? { body: p.body, face: p.id } : null;
-    };
-    // Each object at 100 %: its box's middle, its half height, the footprint's radius round the middle (its edges' farthest
-    // point across X–Y — a peg's own radius; a mesh: half its box's X–Y diagonal)
-    const kits = sources.map((source) => {
-      const [lo, hi] = boundsOf(source.shape);
-      const c = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2) as V3, hz = (hi[2] - lo[2]) / 2;
-      let r0 = Math.hypot(hi[0] - lo[0], hi[1] - lo[1]) / 2;
-      if (isBrep(source)) {
-        const far = Math.max(...source.shape.edges.flatMap((e) => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].map((k) => {
-          const p = e.pointAt(k / 15).toTuple();
-          return Math.hypot(p[0] - c[0], p[1] - c[1]);
-        })));
-        if (far > 0 && far < r0) r0 = far;
-      }
-      return { source, c, hz, r0, name: source.name.replace(/\s+\d+$/, "") };
-    });
-    const d = this.randomDefaults;
-    const ALIGN = ["On the face", "Half in", "Sunk in"]; // (its bottom / middle / top on the face)
-    this.startOp({
-      title: "Random",
-      label: "Random",
-      note: `Copies of <b>${sources.map((b) => escapeHtml(b.name)).join(", ")}</b>${sources.length > 1 ? " (each one of them, at random)" : ""} scattered on a flat face — click one (a solid's or a flat face)`,
-      fields: [
-        { key: "count", label: "Count", value: d.count, step: 1, min: 1 },
-        { key: "smallest", label: "Smallest (%)", value: d.smallest, step: 10, min: 1 },
-        { key: "biggest", label: "Biggest (%)", value: d.biggest, step: 10, min: 1 },
-        { key: "align", label: "Align", type: "select", options: ALIGN, value: d.align },
-        { key: "spin", label: "Random spin (about the face's normal)", type: "checkbox", value: d.spin },
-        { key: "overlap", label: "Allow overlap", type: "checkbox", value: d.overlap },
-        { key: "seed", label: "Seed (change it: a new layout)", value: d.seed, step: 1, min: 0 },
-      ],
-      hint: "Random: click the flat face to scatter on · Count, sizes, Align · Seed: a new layout · Enter or Apply · Esc cancel",
-      pick: (e) => {
-        const t = faceAt(e);
-        if (!t) return this.toast("Random: click a flat face", "error");
-        target = t;
-        this.previewOp();
-      },
-      hover: (e) => {
-        const t = faceAt(e);
-        this.viewport.setHighlight(this.selection, t ? { kind: "face", body: t.body, id: t.face } : null);
-        this.viewport.canvas.style.cursor = t ? "pointer" : "crosshair";
-      },
-      compute: ({ count, smallest, biggest, align, spin, overlap, seed }) => {
-        const face = target && faceOf(target.body, target.face);
-        if (!face) throw new OpWaiting("Click the flat face to scatter the copies on");
-        if (!(count >= 1) || count !== Math.round(count)) throw new Error("Count must be a whole number, 1 or more");
-        if (count > 500) throw new Error("At most 500 copies");
-        if (!(smallest > 0) || !(biggest > 0)) throw new Error("Sizes must be more than 0 %");
-        if (biggest < smallest) throw new Error("Biggest must be at least Smallest");
-        const spots = scatter(face, kits.map((k) => k.r0), { count, smallest: smallest / 100, biggest: biggest / 100, spin: !!spin, overlap: !!overlap, seed });
-        if (!spots.length) throw new Error("None fit on that face — smaller sizes, or a bigger face");
-        const n = new THREE.Vector3(...face.normal);
-        // Standing on the face: Z turned to its normal (the shortest turn; facing down: half a turn about X)
-        const z = new THREE.Vector3(0, 0, 1), axis = z.clone().cross(n);
-        const tilt = axis.length() > 1e-9 ? { axis: axis.normalize(), deg: THREE.MathUtils.radToDeg(z.angleTo(n)) } : n.z < 0 ? { axis: new THREE.Vector3(1, 0, 0), deg: 180 } : null;
-        const lift = [1, 0, -1][align] ?? 1; // (the middle that many half heights out along the normal)
-        const placeOf = (s: (typeof spots)[number]) => n.clone().multiplyScalar(lift * kits[s.pick].hz * s.scale).add(new THREE.Vector3(...s.at));
-        const matrixOf = (s: (typeof spots)[number]) => {
-          const { c } = kits[s.pick];
-          const m = new THREE.Matrix4().makeTranslation(placeOf(s));
-          if (tilt) m.multiply(new THREE.Matrix4().makeRotationAxis(tilt.axis, THREE.MathUtils.degToRad(tilt.deg)));
-          return m.multiply(new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(s.spin)))
-            .multiply(new THREE.Matrix4().makeScale(s.scale, s.scale, s.scale))
-            .multiply(new THREE.Matrix4().makeTranslation(-c[0], -c[1], -c[2]));
-        };
-        const build = (s: (typeof spots)[number]): Geom => {
-          const { source, c } = kits[s.pick];
-          let g: Geom = cloneShape(source.shape);
-          if (Math.abs(s.scale - 1) > 1e-12) g = scaleShape(g, [s.scale, s.scale, s.scale], c);
-          if (s.spin) g = rotateShape(g, s.spin, c, [0, 0, 1]);
-          if (tilt) g = rotateShape(g, tilt.deg, c, tilt.axis.toArray() as V3);
-          return translateShape(g, placeOf(s).sub(new THREE.Vector3(...c)).toArray() as V3);
-        };
-        return {
-          ghost: new Map(),
-          placed: spots.map((s) => ({ id: kits[s.pick].source.id, matrix: matrixOf(s) })),
-          warn: spots.length < count ? { text: `${spots.length} of ${count} fit — fewer, smaller, or Allow overlap`, action: overlap ? undefined : { label: "Allow overlap", set: { overlap: 1 } } } : undefined,
-          commit: () => {
-            const group = this.newGroupName("Random");
-            const copies = spots.map((s) => ({ ...this.doc.makeBody(build(s), kits[s.pick].name, kits[s.pick].source.kind), group }) as Body);
-            this.doc.commit([...this.doc.bodies, ...copies], `Random ×${copies.length}`);
-            return { select: copies.map((b) => b.id), solidMode: true, then: () => this.toast(`${copies.length} copies of ${sources.map((b) => b.name).join(", ")} as "${group}" in the Bodies panel`) };
-          },
-        };
-      },
-      remember: (v) => (this.randomDefaults = { ...d, ...v }),
-    });
-  }
-
-  private openGridfinityBin(): void {
-    const pro = isPro(), d = this.gridfinityDefaults, g = GRIDFINITY;
-    const fields: OpField[] = [
-      { key: "width", label: `Width (grid squares of ${g.grid} mm)`, value: d.width, step: 1, min: 1 },
-      { key: "depth", label: `Depth (grid squares of ${g.grid} mm)`, value: d.depth, step: 1, min: 1 },
-      { key: "height", label: `Height (units of ${g.unit} mm)`, value: d.height, step: 1, min: 2 },
-      { key: "columns", label: "Compartments across", value: d.columns, step: 1, min: 1 },
-      { key: "rows", label: "Compartments front to back", value: d.rows, step: 1, min: 1 },
-      { key: "lip", label: "Stacking lip", type: "checkbox", value: d.lip },
-      { key: "magnets", label: `Magnet holes (${g.magnet.d} × ${g.magnet.depth} mm, 4 per square)`, type: "checkbox", value: d.magnets },
-    ];
-    if (pro) fields.push({ key: "wall", label: "Wall (mm)", value: d.wall, step: 0.1, min: 0.4 });
-    const squares = (n: number) => `${n} square${n === 1 ? "" : "s"}`;
-    const params = (v: Record<string, number>) => ({
-      width: Math.round(v.width), depth: Math.round(v.depth), height: Math.round(v.height), columns: Math.round(v.columns), rows: Math.round(v.rows),
-      lip: !!v.lip, magnets: !!v.magnets, wall: pro ? v.wall : d.wall,
-    });
-    const right = this.rightOfBodies();
-    const place = (p: GridfinityBin): V3 => [right > -Infinity ? right + 10 + gridfinitySizes(p).w / 2 : 0, 0, 0];
-    const outcome = (p: GridfinityBin, at: V3, solid: Solid): OpOutcome => {
-      // Measured on the preview: width along the front, depth down the right side, height (and the lip) up the
-      // back right corner (clear of those two, and of the panel on the left), a compartment across the top
-      const { w, d: dd, h, cellW, cellD } = gridfinitySizes(p);
-      const x0 = at[0] - w / 2, x1 = at[0] + w / 2, y0 = -dd / 2, y1 = dd / 2, gap = 8;
-      const dims: ShownDimension[] = [
-        { a: [x0, y0, 0], b: [x1, y0, 0], o: [0, -gap, 0], text: `${squares(p.width)} · ${fmt(w)} mm` },
-        { a: [x1, y0, 0], b: [x1, y1, 0], o: [gap, 0, 0], text: `${squares(p.depth)} · ${fmt(dd)} mm` },
-        { a: [x1, y1, 0], b: [x1, y1, h], o: [gap * 0.7, gap * 0.7, 0], text: `${p.height} units · ${fmt(h)} mm` },
-      ];
-      if (p.lip) dims.push({ a: [x1, y1, h], b: [x1, y1, h + g.lip], o: [gap * 0.7, gap * 0.7, 0], text: `lip ${fmt(g.lip)}` });
-      if (p.columns > 1 || p.rows > 1) {
-        const cx = x0 + p.wall, cy = y1 - p.wall, top = p.lip ? h + g.lip : h;
-        dims.push({ a: [cx, cy, top], b: [cx + cellW, cy, top], o: [0, 0, gap * 0.6], text: `compartment ${fmt(cellW)} × ${fmt(cellD)} mm` });
-      }
-      return {
-        ghost: new Map([[-1, solid]]),
-        dims,
-        commit: () => {
-          const b = this.doc.makeBody(solid, `Gridfinity bin ${p.width}×${p.depth}×${p.height}`);
-          this.doc.commit([...this.doc.bodies, b], "Gridfinity bin");
-          return { select: [b.id], solidMode: true };
-        },
-      };
-    };
-    this.startOp({
-      title: "Gridfinity bin",
-      label: "Gridfinity bin",
-      note: "Fits Gridfinity baseplates; bins stack on the lip",
-      fields,
-      compute: (v) => {
-        const p = params(v), at = place(p);
-        return outcome(p, at, gridfinityBin(p, at));
-      },
-      // (in the background kernel: a big bin takes a second or more)
-      computeAsync: async (v) => {
-        const p = params(v), at = place(p);
-        return outcome(p, at, solidFrom(await this.bgKernel.run({ op: "gridfinity", bin: p, at })));
-      },
-      remember: (v) => (this.gridfinityDefaults = { ...d, ...v }),
-    });
-  }
-
-  /**
-   * Macro → Gridfinity baseplate: width × depth grid squares the bins drop into — or as many as fit a drawer, a border
-   * filling the rest; magnet holes (a floor under the pockets). Beside what's there, measured on the preview.
-   */
-  private openGridfinityBaseplate(): void {
-    const d = this.baseplateDefaults, g = GRIDFINITY, BED = 256;
-    const fields: OpField[] = [
-      { key: "width", label: `Width (grid squares of ${g.grid} mm)`, value: d.width, step: 1, min: 1, off: (v) => v.drawerWidth > 0 },
-      { key: "depth", label: `Depth (grid squares of ${g.grid} mm)`, value: d.depth, step: 1, min: 1, off: (v) => v.drawerDepth > 0 },
-      { key: "drawerWidth", label: "Or fill a drawer: width (mm, 0 = off)", value: d.drawerWidth, step: 1, min: 0 },
-      { key: "drawerDepth", label: "Fill a drawer: depth (mm, 0 = off)", value: d.drawerDepth, step: 1, min: 0 },
-      { key: "magnets", label: `Magnet holes (${g.magnet.d} × ${g.magnet.depth} mm, 4 per square)`, type: "checkbox", value: d.magnets },
-    ];
-    const squares = (n: number) => `${n} square${n === 1 ? "" : "s"}`;
-    const params = (v: Record<string, number>): GridfinityBaseplate => ({ width: Math.round(v.width), depth: Math.round(v.depth), drawerWidth: v.drawerWidth, drawerDepth: v.drawerDepth, magnets: !!v.magnets });
-    const right = this.rightOfBodies();
-    const place = (p: GridfinityBaseplate): V3 => [right > -Infinity ? right + 10 + gridfinityBaseplateSizes(p).w / 2 : 0, 0, 0];
-    const outcome = (p: GridfinityBaseplate, at: V3, solid: Solid): OpOutcome => {
-      // Measured: the outside along the front and down the right side (squares, and the drawer border if any), the
-      // height up the back right corner
-      const z = gridfinityBaseplateSizes(p);
-      const x0 = at[0] - z.w / 2, x1 = at[0] + z.w / 2, y0 = -z.d / 2, y1 = z.d / 2, gap = 8;
-      const side = (n: number, size: number, pad: number) => `${squares(n)}${pad > 1e-6 ? ` + border ${fmt(pad)}` : ""} · ${fmt(size)} mm`;
-      const dims: ShownDimension[] = [
-        { a: [x0, y0, 0], b: [x1, y0, 0], o: [0, -gap, 0], text: side(z.nx, z.w, z.padX) },
-        { a: [x1, y0, 0], b: [x1, y1, 0], o: [gap, 0, 0], text: side(z.ny, z.d, z.padY) },
-        { a: [x1, y1, 0], b: [x1, y1, z.h], o: [gap * 0.7, gap * 0.7, 0], text: `${fmt(z.h)} mm` },
-      ];
-      return {
-        ghost: new Map([[-1, solid]]),
-        dims,
-        ...(Math.max(z.w, z.d) > BED ? { warn: { text: `Bigger than most print beds (${BED} mm): print it in parts — e.g. two plates side by side` } } : {}),
-        commit: () => {
-          const b = this.doc.makeBody(solid, `Gridfinity baseplate ${z.nx}×${z.ny}`);
-          this.doc.commit([...this.doc.bodies, b], "Gridfinity baseplate");
-          return { select: [b.id], solidMode: true };
-        },
-      };
-    };
-    this.startOp({
-      title: "Gridfinity baseplate",
-      label: "Gridfinity baseplate",
-      note: "Gridfinity bins drop into its squares",
-      fields,
-      compute: (v) => {
-        const p = params(v), at = place(p);
-        return outcome(p, at, gridfinityBaseplate(p, at));
-      },
-      // (in the background kernel: a drawer-sized plate takes a second or more)
-      computeAsync: async (v) => {
-        const p = params(v), at = place(p);
-        return outcome(p, at, solidFrom(await this.bgKernel.run({ op: "gridfinity", baseplate: p, at })));
-      },
-      remember: (v) => (this.baseplateDefaults = { ...d, ...v }),
-    });
-  }
-
   /** The right side of the solids there (for a new ready-made object beside them), -Infinity if none. */
-  private rightOfBodies(): number {
+  rightOfBodies(): number {
     let right = -Infinity;
     for (const b of this.doc.bodies) {
       const box = this.viewport.drawnBox(b.id);
@@ -3040,7 +2190,7 @@ class App implements ToolHost {
   }
 
   /** The one selected face, or the face of the one selected flat face object; null for any other selection. */
-  private oneFaceTarget(): { bodyId: number; faceId: number } | null {
+  oneFaceTarget(): { bodyId: number; faceId: number } | null {
     if (this.selection.length !== 1) return null;
     const s = this.selection[0];
     if (s.kind === "face") return { bodyId: s.body, faceId: s.id };
@@ -4102,7 +3252,7 @@ class App implements ToolHost {
   /** The busy dialog's Stop (Esc): set while a step that can be stopped runs. */
   private busyStop: (() => void) | null = null;
 
-  /** Resolves once no busy step is running (the smoke test: a boolean's result is in after it). */
+  /** Resolves once no busy step is running (tests: a boolean's result is in after it). */
   async whenIdle(): Promise<void> {
     while (this.busyNow) await new Promise((r) => setTimeout(r, 20));
   }
@@ -6530,7 +5680,7 @@ class App implements ToolHost {
     return `${name} ${n}`;
   }
 
-  private newGroupName(base = "Group"): string {
+  newGroupName(base = "Group"): string {
     const used = new Set(this.doc.bodies.map((b) => b.group));
     let n = 1;
     while (used.has(`${base} ${n}`)) n++;
@@ -7965,7 +7115,7 @@ async function boot(): Promise<void> {
     await initKernel();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the smoke test and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

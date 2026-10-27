@@ -6,8 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 const RENDERER_DIR = path.join(__dirname, "..", "renderer");
-// Smoke runs keep their own settings / storage: they can run next to the user's open YDDD and leave its settings alone.
-if (process.env.YDDD_SMOKE) app.setPath("userData", path.join(process.env.YDDD_SMOKE, "user-data"));
+// Test runs keep their own settings / storage: they can run next to the user's open YDDD and leave its settings alone.
+if (process.env.YDDD_TEST) app.setPath("userData", path.join(process.env.YDDD_TEST, "user-data"));
 const DEV_URL = process.env.VITE_DEV_SERVER_URL;
 // No usable GPU (a VM, missing drivers): let WebGL fall back to Chromium's software renderer (SwiftShader)
 // instead of failing. A working GPU is still used. "Unsafe" is about untrusted web pages; YDDD only loads its own code.
@@ -55,11 +55,11 @@ function send(cmd: string): void {
 // ---------------------------------------------------------------- File → Open Recent
 
 const RECENT_MAX = 10;
-/** Recently opened / saved models, newest first (a smoke run uses its own list, so it never touches the user's). */
+/** Recently opened / saved models, newest first (a test run uses its own list, so it never touches the user's). */
 let recent: string[] = [];
 
 function recentFile(): string {
-  return process.env.YDDD_SMOKE ? path.join(process.env.YDDD_SMOKE, "recent.json") : path.join(app.getPath("userData"), "recent.json");
+  return process.env.YDDD_TEST ? path.join(process.env.YDDD_TEST, "recent.json") : path.join(app.getPath("userData"), "recent.json");
 }
 
 function loadRecent(): void {
@@ -311,7 +311,7 @@ function registerIpc(): void {
 
   ipcMain.handle("ask", async (_e, req: { message: string; detail?: string; buttons: string[] }) => {
     if (!win) return -1;
-    if (process.env.YDDD_SMOKE) return 0; // unattended: take the first (default) answer
+    if (process.env.YDDD_TEST) return 0; // unattended: take the first (default) answer
     const res = await dialog.showMessageBox(win, { type: "question", message: req.message, detail: req.detail, buttons: req.buttons, defaultId: 0, cancelId: req.buttons.length - 1 });
     return res.response;
   });
@@ -347,9 +347,9 @@ let forceClose = false;
 /** The window's renderer died (crash / killed): its recovery file must survive. */
 let crashed = false;
 
-/** Where unsaved work is autosaved (a smoke run uses its own, so it never touches the user's). */
+/** Where unsaved work is autosaved (a test run uses its own, so it never touches the user's). */
 function recoveryFile(): string {
-  return process.env.YDDD_SMOKE ? path.join(process.env.YDDD_SMOKE, "recovery.yddd") : path.join(app.getPath("userData"), "recovery.yddd");
+  return process.env.YDDD_TEST ? path.join(process.env.YDDD_TEST, "recovery.yddd") : path.join(app.getPath("userData"), "recovery.yddd");
 }
 
 async function clearRecovery(): Promise<void> {
@@ -418,7 +418,7 @@ async function createWindow(): Promise<void> {
         }, 3000);
       }, 100);
     };
-    if (process.env.YDDD_SMOKE) return restart(); // unattended
+    if (process.env.YDDD_TEST) return restart(); // unattended
     void dialog
       .showMessageBox(win, {
         type: "error",
@@ -433,9 +433,11 @@ async function createWindow(): Promise<void> {
   if (DEV_URL) await win.loadURL(DEV_URL + q);
   // The page stays at app://y3d (the app's old name): its origin keys the saved settings (localStorage).
   else await win.loadURL("app://y3d/index.html" + q);
-  if (process.env.YDDD_SMOKE) {
-    const { runSmoke } = await import("./smoke.js");
-    await runSmoke(win, process.env.YDDD_SMOKE);
+  if (process.env.YDDD_TEST) {
+    // (local only, not in the repo: a variable path so the build doesn't need the file)
+    const tests = "./test.js";
+    const { runTests } = await import(tests);
+    await runTests(win, process.env.YDDD_TEST);
   } else if (process.env.YDDD_BENCH) {
     const { runBench } = await import("./bench.js");
     await runBench(win);
@@ -443,8 +445,8 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
-  // A smoke run starts clean (a leftover recovery file would stop it with the Recover question).
-  if (process.env.YDDD_SMOKE) await clearRecovery();
+  // A test run starts clean (a leftover recovery file would stop it with the Recover question).
+  if (process.env.YDDD_TEST) await clearRecovery();
   registerAppProtocol();
   registerIpc();
   loadRecent();

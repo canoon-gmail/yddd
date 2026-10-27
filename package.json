@@ -15,8 +15,6 @@
     "start": "npm run build && electron .",
     "start:stress": "npm run build && YDDD_STRESS=${N:-2000} electron .",
     "dev": "npm run build:main && node scripts/dev.mjs",
-    "smoke": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke electron .",
-    "smoke:half": "npm run build && YDDD_SMOKE=/tmp/yddd-smoke YDDD_SMOKE_HALF=1 electron .",
     "bench": "npm run build && YDDD_STRESS=${N:-2000} YDDD_BENCH=1 electron .",
     "bench:ops": "npm run build && YDDD_BENCH=ops electron .",
     "dist": "npm run build && electron-builder --linux deb",
