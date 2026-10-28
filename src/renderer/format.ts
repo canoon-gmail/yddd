@@ -24,3 +24,19 @@ export const circleSize = {
   get label() { return byDiameter() ? "Diameter" : "Radius"; },
   get tag() { return byDiameter() ? "Ø" : "R"; },
 };
+
+/** Inches typed with a number: "3.34in" / "3.34\"" (also after a comma: "2in,1in"). */
+const INCH = /^\s*([+-]?(?:\d+\.?\d*|\.\d+))\s*(?:in|")\s*$/i;
+
+/** A typed length in mm: a plain number is mm (as Number(): "" is 0); "3.34in" or "3.34\"" is inches (×25.4). */
+export const parseLen = (s: string): number => {
+  const m = INCH.exec(s);
+  return m ? Math.round(Number(m[1]) * 25.4 * 1e6) / 1e6 : Number(s);
+};
+
+/** A typed-number collector's next text when key `k` starts / finishes an inch unit ("in" or "), else null. */
+export const typedUnit = (typed: string, k: string): string | null => {
+  if ((k === '"' || k === "i" || k === "I") && /\d\.?$/.test(typed)) return typed + (k === '"' ? '"' : "i");
+  if ((k === "n" || k === "N") && /\di$/.test(typed)) return typed + "n";
+  return null;
+};

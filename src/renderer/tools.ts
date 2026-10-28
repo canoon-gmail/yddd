@@ -33,7 +33,7 @@ import {
   type Shape,
   type V3,
 } from "./kernel";
-import { circleSize } from "./format";
+import { circleSize, parseLen, typedUnit } from "./format";
 
 export interface ToolHost {
   viewport: Viewport;
@@ -296,12 +296,13 @@ abstract class DrawTool implements Tool {
       return true;
     }
     if (this.stage === 0) return false;
-    if (/^[0-9.,\-]$/.test(e.key) || (/^[xX*]$/.test(e.key) && /\d$/.test(this.typed))) {
-      this.typed += e.key === "*" ? "x" : e.key.toLowerCase(); // 40x25 = 40,25
+    const inch = typedUnit(this.typed, e.key); // 3.34in / 3.34" = 84.836 mm
+    if (inch !== null || /^[0-9.,\-]$/.test(e.key) || (/^[xX*]$/.test(e.key) && /\d$/.test(this.typed))) {
+      this.typed = inch ?? this.typed + (e.key === "*" ? "x" : e.key.toLowerCase()); // 40x25 = 40,25
     } else if (e.key === "Backspace" && this.typed) {
       this.typed = this.typed.slice(0, -1);
     } else if (e.key === "Enter" && this.typed) {
-      const nums = this.typed.split(/[,x]/).map(Number);
+      const nums = this.typed.split(/[,x]/).map(parseLen);
       this.typed = "";
       if (nums.every((n) => Number.isFinite(n))) this.applyTyped(nums);
     } else {
@@ -1344,12 +1345,13 @@ export class PointMoveTool implements Tool {
   }
 
   key(e: KeyboardEvent): boolean {
-    if (/^[0-9.,\-]$/.test(e.key)) {
-      this.typed += e.key;
+    const inch = typedUnit(this.typed, e.key);
+    if (inch !== null || /^[0-9.,\-]$/.test(e.key)) {
+      this.typed = inch ?? this.typed + e.key;
     } else if (e.key === "Backspace" && this.typed) {
       this.typed = this.typed.slice(0, -1);
     } else if (e.key === "Enter" && this.typed) {
-      const n = this.typed.split(",").map(Number);
+      const n = this.typed.split(",").map(parseLen);
       this.typed = "";
       if (n.length <= 3 && n.every(Number.isFinite)) this.finish([n[0] ?? 0, n[1] ?? 0, n[2] ?? 0]);
     } else {
@@ -1833,20 +1835,20 @@ export class GuideTool implements Tool {
     }
     if (e.key === "Tab") {
       this.dialog();
-    } else if (/^[0-9.]$/.test(e.key)) {
-      this.typed += e.key;
+    } else if (typedUnit(this.typed, e.key) !== null || /^[0-9.]$/.test(e.key)) {
+      this.typed = typedUnit(this.typed, e.key) ?? this.typed + e.key;
     } else if (e.key === "Backspace" && this.typed) {
       this.typed = this.typed.slice(0, -1);
     } else if (e.key === "Enter") {
-      if (this.typed && Number.isFinite(Number(this.typed))) this.dist = Number(this.typed);
+      if (this.typed && Number.isFinite(parseLen(this.typed))) this.dist = parseLen(this.typed);
       this.typed = "";
       this.apply();
       return true;
     } else {
       return false;
     }
-    if (this.typed && Number.isFinite(Number(this.typed))) {
-      this.dist = Number(this.typed);
+    if (this.typed && Number.isFinite(parseLen(this.typed))) {
+      this.dist = parseLen(this.typed);
       this.draw();
       this.showHud();
     }

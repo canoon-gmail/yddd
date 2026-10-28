@@ -137,6 +137,7 @@ function buildMenu(): void {
       submenu: [
         item("New", "file.new", "CmdOrCtrl+N"),
         item("Open…", "file.open", "CmdOrCtrl+O"),
+        item("Open Picture…", "file.openPicture"),
         {
           label: "Open Recent",
           submenu: recent.length
@@ -209,6 +210,7 @@ function buildMenu(): void {
         item("Battery Case…", "macro.battery"),
         item("Gridfinity Bin…", "macro.gridfinity"),
         item("Gridfinity Baseplate…", "macro.baseplate"),
+        item("Gear…", "macro.gear"),
         { type: "separator" },
         item("Random…", "macro.random"),
       ],

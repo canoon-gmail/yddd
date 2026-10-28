@@ -17,17 +17,17 @@ export interface OpField {
   options?: string[];
   /**
    * A % field that also takes sizes: the size (mm) at 100 % — then "+10mm" / "-10mm" (that much
-   * bigger / smaller), "60mm" (that size) and "+10%" / "-10%" work besides a plain %.
+   * bigger / smaller), "60mm" (that size) and "+10%" / "-10%" work besides a plain % — inches too ("2in", "+1\"").
    */
   mm?: number;
 }
 
 /** A % field's text (see OpField.mm) as a %; NaN if it isn't one of the forms. */
 export function parsePercent(text: string, mm?: number): number {
-  const m = /^([+-]?)(\d*\.?\d+)(mm|%)?$/.exec(text.trim().toLowerCase().replace(/\s+/g, ""));
+  const m = /^([+-]?)(\d*\.?\d+)(mm|in|"|%)?$/.exec(text.trim().toLowerCase().replace(/\s+/g, ""));
   if (!m) return NaN;
-  const [, sign, num, unit] = m, n = Number(num) * (sign === "-" ? -1 : 1);
-  if (unit === "mm") return mm && mm > 1e-9 ? ((sign ? mm + n : n) / mm) * 100 : NaN;
+  const [, sign, num, unit] = m, n = Number(num) * (sign === "-" ? -1 : 1) * (unit === "in" || unit === '"' ? 25.4 : 1);
+  if (unit === "mm" || unit === "in" || unit === '"') return mm && mm > 1e-9 ? ((sign ? mm + n : n) / mm) * 100 : NaN;
   return unit === "%" && sign ? 100 + n : n;
 }
 
@@ -128,6 +128,9 @@ export interface OpChoice {
   from?: V3;
   key: string;
   value: number;
+  /** Instead of setting `key`: run this on a click (lit while `on`). */
+  pick?: () => void;
+  on?: boolean;
   label: string;
   color: string;
   title?: string;

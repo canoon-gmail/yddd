@@ -1,6 +1,6 @@
 /**
  * The Macro menu: ready-made parts and box tools (Box from Face, Box Lid, Dividers, Battery case,
- * Random, Gridfinity bin / baseplate), each an op panel on the App.
+ * Random, Gridfinity bin / baseplate, Gear), each an op panel on the App.
  */
 import * as THREE from "three";
 import {
@@ -17,6 +17,11 @@ import {
   gridfinitySizes,
   gridfinityBaseplate,
   gridfinityBaseplateSizes,
+  gearFace,
+  gearSizes,
+  gearPlace,
+  gearMate,
+  type Gear,
   type GridfinityBin,
   type GridfinityBaseplate,
   GRIDFINITY,
@@ -338,7 +343,7 @@ export function openRandom(app: App): void {
   app.startOp({
     title: "Random",
     label: "Random",
-    note: `Copies of <b>${sources.map((b) => escapeHtml(b.name)).join(", ")}</b>${sources.length > 1 ? " (each one of them, at random)" : ""} scattered on a flat face — click one (a solid's or a flat face)`,
+    note: `Copies of <b>${sources.map((b) => escapeHtml(b.name)).join(", ")}</b>${sources.length > 1 ? " (each one of them, at random)" : ""} scattered on a flat face<span class="op-help"> — click one (a solid's or a flat face)</span>`,
     fields: [
       { key: "count", label: "Count", value: d.count, step: 1, min: 1 },
       { key: "smallest", label: "Smallest (%)", value: d.smallest, step: 10, min: 1 },
@@ -454,7 +459,7 @@ export function openGridfinityBin(app: App): void {
   app.startOp({
     title: "Gridfinity bin",
     label: "Gridfinity bin",
-    note: "Fits Gridfinity baseplates; bins stack on the lip",
+    note: `<span class="op-help">Fits Gridfinity baseplates; bins stack on the lip</span>`,
     fields,
     compute: (v) => {
       const p = params(v), at = place(p);
@@ -511,7 +516,7 @@ export function openGridfinityBaseplate(app: App): void {
   app.startOp({
     title: "Gridfinity baseplate",
     label: "Gridfinity baseplate",
-    note: "Gridfinity bins drop into its squares",
+    note: `<span class="op-help">Gridfinity bins drop into its squares</span>`,
     fields,
     compute: (v) => {
       const p = params(v), at = place(p);
@@ -523,5 +528,97 @@ export function openGridfinityBaseplate(app: App): void {
       return outcome(p, at, solidFrom(await app.bgKernel.run({ op: "gridfinity", baseplate: p, at })));
     },
     remember: (v) => (app.baseplateDefaults = { ...d, ...v }),
+  });
+}
+
+/**
+ * Macro → Gear: a spur gear's outline as a flat face on the ground (beside what's there) — teeth, module (or the
+ * outside diameter), pressure angle, clearance; the outside and pitch diameters measured on the preview. The
+ * rest is by hand: Push/Pull it into a solid, a hole in the middle... With a gear selected (made here, flat or pushed
+ * up): a gear to mesh with it instead — see openGearMate.
+ */
+export function openGear(app: App): void {
+  const from = [...new Set(app.selection.map((s) => s.body))].map((id) => app.doc.get(id)).find((b) => b?.gear && isBrep(b));
+  if (from) return openGearMate(app, from);
+  const d = app.gearDefaults;
+  const fields: OpField[] = [
+    { key: "teeth", label: "Teeth", value: d.teeth, step: 1, min: 4 },
+    { key: "module", label: "Module (mm of pitch diameter per tooth)", value: d.module, step: 0.25, min: 0.1, off: (v) => v.outside > 0 },
+    { key: "outside", label: "Or outside diameter (mm, 0 = off)", value: d.outside, step: 1, min: 0 },
+    { key: "angle", label: "Pressure angle (°)", value: d.angle, step: 1, min: 10 },
+    { key: "clearance", label: "Clearance (mm, thinner teeth so printed gears don't bind)", value: d.clearance, step: 0.05, min: 0 },
+  ];
+  const params = (v: Record<string, number>): Gear => {
+    const teeth = Math.round(v.teeth);
+    return { teeth, module: v.outside > 0 ? v.outside / (teeth + 2) : v.module, pressureAngle: v.angle, clearance: v.clearance };
+  };
+  const right = app.rightOfBodies();
+  app.startOp({
+    title: "Gear",
+    label: "Gear",
+    note: `<span class="op-help">A flat outline: Push/Pull (P) it into a gear. Two gears mesh with the same module and pressure angle, their centres the two pitch radii apart</span>`,
+    fields,
+    compute: (v) => {
+      const p = params(v), z = gearSizes(p);
+      const at: V3 = [right > -Infinity ? right + 10 + z.ra : 0, 0, 0];
+      const face = gearFace(p, at);
+      const gap = 6;
+      const dims: ShownDimension[] = [
+        { a: [at[0] - z.ra, at[1] - z.ra, 0], b: [at[0] + z.ra, at[1] - z.ra, 0], o: [0, -gap, 0], text: `outside Ø ${fmt(2 * z.ra)} mm` },
+        { a: [at[0] - z.rp, at[1] + z.ra, 0], b: [at[0] + z.rp, at[1] + z.ra, 0], o: [0, gap, 0], text: `pitch Ø ${fmt(2 * z.rp)} mm · module ${fmt(p.module)}` },
+      ];
+      return {
+        ghost: new Map([[-1, face]]),
+        dims,
+        commit: () => {
+          const b = { ...app.doc.makeBody(face, `Gear ${p.teeth} teeth`, "face"), gear: { teeth: p.teeth, module: p.module, angle: p.pressureAngle, clearance: p.clearance } };
+          app.doc.commit([...app.doc.bodies, b], "Gear");
+          return { select: [b.id], solidMode: true };
+        },
+      };
+    },
+    remember: (v) => (app.gearDefaults = { ...d, ...v }),
+  });
+}
+
+/**
+ * Macro → Gear with a gear selected: "Mate with …" — a gear meshing with it (its module, pressure angle and clearance,
+ * scaled as it is now): teeth, or a ratio of its teeth; placed the two pitch radii away (Around: which side, from the
+ * world X along its plane), turned so the teeth sit in each other's gaps, a flat face on its lowest end face.
+ */
+function openGearMate(app: App, from: Body): void {
+  const r = from.gear!, g: Gear = { teeth: r.teeth, module: r.module, pressureAngle: r.angle, clearance: r.clearance };
+  const place = gearPlace((from as Extract<Body, { kind: "solid" | "face" }>).shape, g);
+  if (!place) return app.toast(`Gear: can't find the teeth of "${from.name}" any more (changed, or scaled unevenly) — a new gear: Macro → Gear with nothing selected`, "error");
+  const d = app.gearMateDefaults;
+  const fields: OpField[] = [
+    { key: "teeth", label: "Teeth", value: d.teeth, step: 1, min: 4, off: (v) => v.ratio > 0 },
+    { key: "ratio", label: `Or ratio (its teeth ÷ ${r.teeth}, 0 = off)`, value: d.ratio, step: 0.5, min: 0 },
+    { key: "around", label: "Around (°, 0 = to the right)", value: d.around, step: 15 },
+  ];
+  const teethOf = (v: Record<string, number>) => Math.max(4, Math.round(v.ratio > 0 ? r.teeth * v.ratio : v.teeth));
+  app.startOp({
+    title: `Mate with ${escapeHtml(from.name)}`,
+    label: "Gear",
+    note: `<span class="op-help">Module ${fmt(r.module * place.scale)}, ${fmt(r.angle)}°, clearance ${fmt(r.clearance * place.scale)} — as the selected gear. A new gear of its own: Macro → Gear with nothing selected</span>`,
+    fields,
+    compute: (v) => {
+      const n = teethOf(v), m = gearMate(g, place, n, v.around);
+      const z = gearSizes(m.gear), gap = 6, c = place.center;
+      const dims: ShownDimension[] = [
+        { a: c, b: m.center, o: place.normal.map((k) => k * gap) as V3, text: `centres ${fmt(m.distance)} mm · ratio ${fmt(n / r.teeth)} : 1` },
+        { a: [m.center[0] - z.ra, m.center[1] - z.ra, m.center[2]], b: [m.center[0] + z.ra, m.center[1] - z.ra, m.center[2]], o: [0, -gap, 0], text: `${n} teeth · outside Ø ${fmt(2 * z.ra)} mm` },
+      ];
+      return {
+        ghost: new Map([[-1, m.face]]),
+        dims,
+        commit: () => {
+          const b = { ...app.doc.makeBody(m.face, `Gear ${n} teeth`, "face"), gear: { teeth: n, module: m.gear.module, angle: m.gear.pressureAngle, clearance: m.gear.clearance } };
+          app.doc.commit([...app.doc.bodies, b], "Gear");
+          return { select: [b.id], solidMode: true };
+        },
+      };
+    },
+    remember: (v) => (app.gearMateDefaults = { ...d, ...v }),
   });
 }

@@ -19,11 +19,13 @@
  * handle along the line (too big: the largest that fits); the box's Done rounds them (one undo step), then more.
  * Ctrl+Z / Backspace undo a step.
  */
+import { PICTURE_TYPES } from "./picture";
 import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
 import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
-import { circleSize, num } from "./format";
+import { circleSize, num, parseLen, typedUnit } from "./format";
 import { ICONS } from "./icons";
+import { scanGrid, type GP, type ScanOptions } from "./scan";
 
 /** A point in the sketch plane: [u, v] along the frame's x / y. */
 type P = [number, number];
@@ -37,7 +39,7 @@ type P = [number, number];
 type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P } | { kind: "spline"; a: P; b: P; pts: P[]; w: number[]; thru?: P[]; closed?: boolean };
 /** A closed outline; `g`: its join group (outlines joined with J become one face at Done). */
 type Loop = ({ kind: "path"; segs: Seg[] } | { kind: "circle"; c: P; r: number }) & { g?: number };
-type Mode = "select" | "line" | "arc" | "spline" | "rect" | "circle" | "round" | "picture";
+type Mode = "select" | "line" | "arc" | "spline" | "rect" | "circle" | "round" | "picture" | "scan";
 /** A selectable part of the sketch: a closed outline or an open path (by index). */
 type Item = { kind: "loop" | "open"; i: number };
 const sameItem = (a: Item | null, b: Item | null) => !!a && !!b && a.kind === b.kind && a.i === b.i;
@@ -105,9 +107,29 @@ interface StoredPicture {
 const pictures = new Map<string, StoredPicture>();
 /** The same plane (the same face) gives the same key: its normal and distance from the origin. */
 const planeKey = (f: SketchFrame) => [...f.z.toArray().map((v) => v.toFixed(3)), f.origin.dot(f.z).toFixed(2)].join(",");
-const PICTURE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp" };
 
 /** A small square thumbnail of a picture (the whole picture, centred). */
+/** A picture's grey values (0 = black, 1 = white; transparent = white), row 0 at the top — at most 2048 px across. */
+const greys = new WeakMap<THREE.Texture, { g: Float32Array; w: number; h: number }>();
+function greyOf(tex: THREE.Texture): { g: Float32Array; w: number; h: number } {
+  let r = greys.get(tex);
+  if (r) return r;
+  const img = tex.image as HTMLImageElement | HTMLCanvasElement;
+  const k = Math.min(1, 2048 / Math.max(img.width, img.height, 1)), w = Math.max(1, Math.round(img.width * k)), h = Math.max(1, Math.round(img.height * k));
+  const cv = document.createElement("canvas");
+  cv.width = w;
+  cv.height = h;
+  const c = cv.getContext("2d", { willReadFrequently: true })!;
+  c.drawImage(img, 0, 0, w, h);
+  const d = c.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const a = d[4 * i + 3] / 255;
+    g[i] = a * ((0.299 * d[4 * i] + 0.587 * d[4 * i + 1] + 0.114 * d[4 * i + 2]) / 255) + (1 - a);
+  }
+  greys.set(tex, (r = { g, w, h }));
+  return r;
+}
+
 function thumbOf(tex: THREE.Texture): HTMLCanvasElement {
   const img = tex.image as HTMLImageElement | HTMLCanvasElement, cv = document.createElement("canvas"), n = 44;
   cv.width = cv.height = n;
@@ -320,6 +342,37 @@ function throughSpline(q: P[], closed: boolean): Extract<Seg, { kind: "spline" }
     pts.push(A, mul(add(A, B), 0.5), B, b);
   }
   return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: pts.map(() => 1), thru: [...q], closed };
+}
+
+/**
+ * Scan's Smooth: points (closed: round back to the first) as smooth curves that keep their corners — split where the
+ * line turns more than 55°, each piece between corners one smooth curve through its points (two points: a straight
+ * line); no corners at all, closed: one smooth closed curve.
+ */
+function smoothRun(q: P[], closed: boolean): Seg[] {
+  const n = q.length, turn = (i: number) => {
+    const a = sub(q[i], q[(i - 1 + n) % n]), b = sub(q[(i + 1) % n], q[i]);
+    return Math.abs(Math.atan2(cross(a, b), a[0] * b[0] + a[1] * b[1]));
+  };
+  const corners: number[] = [];
+  for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) if (turn(i) > (55 * Math.PI) / 180) corners.push(i);
+  if (closed && !corners.length) return n >= 3 ? [throughSpline(q, true)] : [];
+  const piece = (run: P[]): Seg[] => (run.length >= 3 ? [throughSpline(run, false)] : [{ kind: "line", a: run[0], b: run[1] }]);
+  if (!closed) {
+    const cuts = [0, ...corners, n - 1], out: Seg[] = [];
+    for (let k = 0; k + 1 < cuts.length; k++) out.push(...piece(q.slice(cuts[k], cuts[k + 1] + 1)));
+    return out;
+  }
+  const out: Seg[] = [];
+  for (let k = 0; k < corners.length; k++) {
+    const a = corners[k], b = corners[(k + 1) % corners.length], run: P[] = [];
+    for (let i = a; ; i = (i + 1) % n) {
+      run.push(q[i]);
+      if (i === b && run.length > 1) break;
+    }
+    out.push(...piece(run));
+  }
+  return out;
 }
 
 /** A freeform curve that is a Spline (back from a saved face / path: its points found again), else it as it is. */
@@ -566,6 +619,8 @@ export class SketchTool implements Tool {
   private lock = -1;
   /** The sketch points the cursor is lined up with (same X: k = 0, same Y: k = 1), drawn as dashed guides. */
   private aligned: { ref: P; k: 0 | 1 }[] = [];
+  /** The last cursor point was placed free (Auto snap + Ctrl): no arc snapping to a quarter / half turn either. */
+  private free = false;
   private typed = "";
   private undoStack: string[] = [];
   private last: PointerEvent | null = null;
@@ -587,8 +642,8 @@ export class SketchTool implements Tool {
   /** The mode to go back to when Picture mode ends (a click off the picture). */
   private prevMode: Mode = "select";
   /**
-   * Picture mode: its handles at its bottom-right corner — a square on the corner (scale) and a ring a little
-   * past it (rotate), both about its centre; `drag`: the one being dragged (from `at`; the picture's size and
+   * Picture mode: its handles at its bottom-right corner — a two-headed arrow on the corner (scale) and a curved
+   * arrow a little past it (rotate), both about its centre; `drag`: the one being dragged (from `at`; the picture's size and
    * turn then), `hover`: the one under the cursor.
    */
   private picGrip: { hover: "scale" | "rotate" | null; drag: { kind: "scale" | "rotate"; at: P; w: number; turned: number } | null } = { hover: null, drag: null };
@@ -596,6 +651,14 @@ export class SketchTool implements Tool {
   private picPts: P[] = [];
   /** Picture mode: a press — dragging moves the picture, else a click (a Match point). */
   private picDrag: { x: number; y: number; at: P; c0: P; moved: boolean } | null = null;
+  /** Scan: the area (lowest / highest corner in the plane), a first click waiting for the 2nd corner, a drag drawing it, what it found. */
+  private scanArea: [P, P] | null = null;
+  private scanFirst: P | null = null;
+  private scanDrag: { x: number; y: number; at: P; to: P; moved: boolean } | null = null;
+  private scanFound: { loops: Loop[]; opens: Seg[][]; level: number } | null = null;
+  private scanTimer = 0;
+  /** Scan's settings (kept while the app runs): Faces / Outlines, Dark below (null: automatic), Even out lighting, specks (px), Smooth. */
+  private static scanOpts: ScanOptions & { smooth: boolean } = { kind: "face", dark: null, even: true, specks: 20, smooth: true };
   private readonly mats = {
     line: new THREE.LineBasicMaterial({ color: 0xffd166, depthTest: false, transparent: true }),
     open: new THREE.LineBasicMaterial({ color: 0xff69b4, depthTest: false, transparent: true }),
@@ -634,6 +697,32 @@ export class SketchTool implements Tool {
       else if (b.dataset.act === "scale") this.scaling ? this.endScale(true) : this.startScale();
       else if (b.dataset.act === "move") this.moving ? this.endMove(true) : this.startMove();
       else if (b.dataset.act === "round-done") this.roundDone();
+      else if (b.dataset.act === "scan-add") this.scanAdd();
+      else if (b.dataset.act === "scan-auto") {
+        SketchTool.scanOpts.dark = null;
+        this.runScan();
+      }
+    });
+    // Scan's settings: scanned again (a slider / typed number: once it rests a moment)
+    const scanField = (f: HTMLInputElement | HTMLSelectElement, soon: boolean) => {
+      const k = f.dataset.scan, o = SketchTool.scanOpts;
+      if (!k) return;
+      if (k === "kind") o.kind = f.value === "outline" ? "outline" : "face";
+      else if (k === "dark") o.dark = Number(f.value) / 100;
+      else if (k === "even") o.even = (f as HTMLInputElement).checked;
+      else if (k === "smooth") o.smooth = (f as HTMLInputElement).checked;
+      else if (k === "specks" && Number(f.value) >= 0) o.specks = Number(f.value);
+      clearTimeout(this.scanTimer);
+      if (soon) this.scanTimer = window.setTimeout(() => this.runScan(), 60);
+      else this.runScan();
+    };
+    this.panel.addEventListener("input", (e) => {
+      const f = e.target as HTMLInputElement;
+      if (f.dataset.scan === "dark" || f.dataset.scan === "specks") scanField(f, true);
+    });
+    this.panel.addEventListener("change", (e) => {
+      const f = e.target as HTMLInputElement;
+      if (f.dataset.scan && f.dataset.scan !== "dark" && f.dataset.scan !== "specks") scanField(f, false);
     });
     // Round corner's radius field: as typed (too big: the largest that fits, shown once it's left), Enter: Done
     this.panel.addEventListener("input", (e) => {
@@ -666,6 +755,7 @@ export class SketchTool implements Tool {
       else if (act === "picture") void this.loadPicture();
       else if (!p) return;
       else if (act === "pic") this.setMode(this.mode === "picture" ? this.prevMode : "picture"); // (on / off)
+      else if (act === "pic-scan") this.setMode("scan");
       else if (act === "pic-remove") {
         this.removePicture();
         this.host.toast("Picture removed");
@@ -732,7 +822,7 @@ export class SketchTool implements Tool {
         <label class="row"><span>Scale</span><input type="number" data-act="pic-scale" data-step="5" min="0" step="any" title="Size, % of the size it was loaded at — mouse wheel: ±5 (Shift: ±1)"><em>%</em></label>
         <label class="row"><span>Rotate</span><input type="number" data-act="pic-rotate" data-step="5" step="any" title="Turn, ° (+ = counter-clockwise) — mouse wheel: ±5 (Shift: ±1)"><em>°</em></label>
         <label class="row"><span>Opacity</span><input type="range" data-act="pic-opacity" data-step="5" min="5" max="100" step="1" value="${opacity}" title="How solid the picture is: 100% hides what is behind it — mouse wheel: ±5 (Shift: ±1)"><output>${opacity}%</output></label>
-        <div class="row"><button type="button" class="btn" data-act="pic-remove">Remove picture</button></div>
+        <div class="row"><button type="button" class="btn" data-act="pic-scan" title="Scan: drag over the picture (or click 2 corners) — its dark areas become outlines (faces), or its drawn lines paths">Scan…</button><button type="button" class="btn" data-act="pic-remove">Remove picture</button></div>
       </div></div>`;
     wrap.querySelector(".pic-thumb")!.appendChild(p.thumb);
     this.corner.appendChild(wrap);
@@ -812,7 +902,7 @@ export class SketchTool implements Tool {
   private picGripPos(kind: "scale" | "rotate"): P {
     const p = this.pic!, k = this.picCorners()[1];
     if (kind === "scale") return k;
-    return add(k, mul(norm(sub(k, p.c)), 22 * this.host.viewport.worldPerPixel(this.world(k))));
+    return add(k, mul(norm(sub(k, p.c)), 40 * this.host.viewport.worldPerPixel(this.world(k))));
   }
 
   /** The picture's handle under the cursor. */
@@ -826,19 +916,16 @@ export class SketchTool implements Tool {
     return null;
   }
 
-  /** Dragging a picture handle: scale (by the cursor's distance from the centre) or rotate (by its turn about it); when snapping: 5% / 15° steps. */
+  /** Dragging a picture handle: scale (by the cursor's distance from the centre) or rotate (by its turn about it) — smoothly, no steps. */
   private picGripTo(e: PointerEvent): void {
     const p = this.pic!, g = this.picGrip.drag!, q = this.planeAt(e);
     if (!q) return;
-    const ctrl = this.host.snapStep(e) > 0;
     if (g.kind === "scale") {
-      let pct = ((g.w * dist(q, p.c)) / Math.max(dist(g.at, p.c), 1e-9) / p.w0) * 100;
-      if (ctrl) pct = Math.round(pct / 5) * 5;
+      const pct = ((g.w * dist(q, p.c)) / Math.max(dist(g.at, p.c), 1e-9) / p.w0) * 100;
       if (pct > 0.5) this.placePicture((p.w0 * pct) / 100 / p.w);
     } else {
-      let deg = ((g.turned + Math.atan2(q[1] - p.c[1], q[0] - p.c[0]) - Math.atan2(g.at[1] - p.c[1], g.at[0] - p.c[0])) * 180) / Math.PI;
-      if (ctrl) deg = Math.round(deg / 15) * 15;
-      this.placePicture(1, null, (deg * Math.PI) / 180 - p.turned);
+      const ang = g.turned + Math.atan2(q[1] - p.c[1], q[0] - p.c[0]) - Math.atan2(g.at[1] - p.c[1], g.at[0] - p.c[0]);
+      this.placePicture(1, null, ang - p.turned);
     }
     this.update();
   }
@@ -849,6 +936,61 @@ export class SketchTool implements Tool {
     if (!p) return false;
     const d = sub(q, p.c), cs = Math.cos(p.ang), sn = Math.sin(p.ang);
     return Math.abs(d[0] * cs + d[1] * sn) <= p.w / 2 && Math.abs(-d[0] * sn + d[1] * cs) <= p.h / 2;
+  }
+
+  /** Scan: the area from two corners (too small: none) — scanned at once. */
+  private setScanArea(a: P, b: P): void {
+    const px = this.host.viewport.worldPerPixel(this.world(a));
+    if (Math.abs(a[0] - b[0]) < 3 * px || Math.abs(a[1] - b[1]) < 3 * px) return this.update();
+    this.scanArea = [[Math.min(a[0], b[0]), Math.min(a[1], b[1])], [Math.max(a[0], b[0]), Math.max(a[1], b[1])]];
+    this.runScan();
+  }
+
+  /**
+   * Scan the area: the picture's grey values on a grid over it (its own pixels, or coarser for a big area: at most
+   * 800 across), turned into outlines / paths (see scanGrid) — lines, or with Smooth one smooth curve each.
+   */
+  private runScan(): void {
+    const p = this.pic, ar = this.scanArea, o = SketchTool.scanOpts;
+    if (!p || !ar) {
+      this.scanFound = null;
+      return this.update();
+    }
+    const g = greyOf(p.tex), [[x0, y0], [x1, y1]] = ar;
+    const cell = Math.max(p.w / g.w, Math.max(x1 - x0, y1 - y0) / 800);
+    const w = Math.max(2, Math.round((x1 - x0) / cell)), h = Math.max(2, Math.round((y1 - y0) / cell));
+    const cw = (x1 - x0) / w, ch = (y1 - y0) / h, cs = Math.cos(p.ang), sn = Math.sin(p.ang);
+    const grey = new Float32Array(w * h);
+    const at = (x: number, y: number) => (x < 0 || y < 0 || x >= g.w || y >= g.h ? 1 : g.g[y * g.w + x]);
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        // (the cell's centre on the picture: its pixel, between the 4 nearest)
+        const dx = x0 + (i + 0.5) * cw - p.c[0], dy = y0 + (j + 0.5) * ch - p.c[1];
+        const u = ((dx * cs + dy * sn) / p.w + 0.5) * g.w - 0.5, v = (0.5 - (-dx * sn + dy * cs) / p.h) * g.h - 0.5;
+        const iu = Math.floor(u), iv = Math.floor(v), fu = u - iu, fv = v - iv;
+        grey[j * w + i] = (at(iu, iv) * (1 - fu) + at(iu + 1, iv) * fu) * (1 - fv) + (at(iu, iv + 1) * (1 - fu) + at(iu + 1, iv + 1) * fu) * fv;
+      }
+    }
+    const r = scanGrid(grey, w, h, o, o.smooth ? 1.2 : 0.8);
+    const toP = ([gx, gy]: GP): P => [x0 + gx * cw, y0 + gy * ch];
+    const loopOf = (q: P[]): Loop => ({ kind: "path", segs: o.smooth ? smoothRun(q, true) : q.map((a, i) => ({ kind: "line", a, b: q[(i + 1) % q.length] }) as Seg) });
+    const openOf = (q: P[]): Seg[] => (o.smooth ? smoothRun(q, false) : q.slice(1).map((b, i) => ({ kind: "line", a: q[i], b }) as Seg));
+    this.scanFound = { loops: r.loops.map((l) => loopOf(l.map(toP))), opens: r.paths.map((l) => openOf(l.map(toP))), level: r.level };
+    this.update();
+  }
+
+  /** Scan: what was found goes into the sketch (one undo step); then another area. */
+  private scanAdd(): void {
+    const f = this.scanFound;
+    if (!f || (!f.loops.length && !f.opens.length)) return this.host.hint(this.scanArea ? "Scan: nothing found — try Dark below, Even out lighting or smaller specks" : "Scan: drag over the picture first (or click 2 corners)");
+    this.undoStack.push(JSON.stringify(this.state()));
+    this.loops = [...this.loops, ...f.loops];
+    this.opens = [...this.opens, ...f.opens];
+    this.version++;
+    this.scanArea = this.scanFound = null;
+    const n = f.loops.length, m = f.opens.length;
+    this.host.toast(`Scan: added ${[n ? `${n} outline${n > 1 ? "s" : ""}` : "", m ? `${m} path${m > 1 ? "s" : ""}` : ""].filter(Boolean).join(" and ")}`);
+    this.update();
   }
 
   /** Drop the picture (and forget it for this plane). */
@@ -911,6 +1053,7 @@ export class SketchTool implements Tool {
     this.saved = { camera: vp.cameraState(), xray: vp.xray };
     vp.lookAtPlane(this.center, this.frame.z, this.frame.y);
     vp.viewLocked = true;
+    vp.setZAxisVisible(false);
     if (!vp.xray) vp.setXray(true);
     this.update();
     return this;
@@ -919,6 +1062,7 @@ export class SketchTool implements Tool {
   dispose(): void {
     const vp = this.host.viewport;
     vp.viewLocked = false;
+    vp.setZAxisVisible(true);
     vp.setInset(false);
     if (this.saved) {
       vp.restoreCamera(this.saved.camera);
@@ -984,12 +1128,12 @@ export class SketchTool implements Tool {
 
   // ------------------------------------------------------------ pointer
 
-  /** Cursor point in the plane: the sketch's own points, then the model's points, else the plane (grid when snapping). Auto snap + Ctrl: free, no points. */
+  /** Cursor point in the plane: the sketch's own points, then the model's points, else the plane (grid when snapping). Auto snap + Ctrl: free — no points, grid, level / upright lock or lining up. */
   private pointAt(e: PointerEvent): P | null {
     const vp = this.host.viewport;
     this.lock = -1;
     this.aligned = [];
-    const free = vp.autoSnap && e.ctrlKey;
+    const free = (this.free = vp.autoSnap && e.ctrlKey);
     let best: { p: P; kind: "vertex" | "midpoint" | "center"; score: number } | null = null;
     for (const { p, kind } of free ? [] : this.ownPoints()) {
       const s = vp.toScreen(this.world(p));
@@ -1013,6 +1157,7 @@ export class SketchTool implements Tool {
     let p = this.local(q);
     const step = this.host.snapStep(e);
     if (step > 0) p = [Math.round(p[0] / step) * step, Math.round(p[1] / step) * step];
+    if (free) return p;
     // Lines lock horizontal / vertical (in the plane) near those directions.
     const from = this.cur;
     if (from && this.mode === "line") {
@@ -1041,6 +1186,15 @@ export class SketchTool implements Tool {
 
   move(e: PointerEvent): void {
     this.last = e;
+    if (this.mode === "scan") {
+      const q = this.planeAt(e), dr = this.scanDrag;
+      this.cursor = q;
+      if (dr && q) {
+        dr.to = q;
+        if (Math.hypot(e.clientX - dr.x, e.clientY - dr.y) >= DRAG_PX) dr.moved = true;
+      }
+      return this.update();
+    }
     if (this.mode === "picture") {
       if (this.picGrip.drag) return this.picGripTo(e);
       const grip = this.picGripAt(e);
@@ -1365,6 +1519,14 @@ export class SketchTool implements Tool {
   }
 
   up(e: PointerEvent): void {
+    if (this.scanDrag && e.button === 0) {
+      // A drag: the area; a click: its first corner (the next click, the other)
+      const dr = this.scanDrag;
+      this.scanDrag = null;
+      if (dr.moved) return this.setScanArea(dr.at, dr.to);
+      this.scanFirst = dr.at;
+      return this.update();
+    }
     if (this.roundGrip.drag && e.button === 0) {
       this.roundGrip.drag = false;
       this.host.hud(null);
@@ -1636,6 +1798,40 @@ export class SketchTool implements Tool {
     this.update();
   }
 
+  /**
+   * Shift+D: copies of the selected outlines / paths, in place, selected, with the move gizmo on them
+   * (as in the main view). One undo step for the copy; a move after it is another. Joined outlines
+   * stay joined to each other in the copy (a new group), not to the originals.
+   */
+  private duplicateSelected(): void {
+    if (this.mode !== "select" || !this.selected.length) return this.host.hint("Duplicate: select outlines / paths first (Esc: Select, click them), then Shift+D");
+    if (this.scaling) this.endScale(true);
+    if (this.moving) this.endMove(true);
+    this.undoStack.push(JSON.stringify(this.state()));
+    this.version++;
+    let g = Math.max(-1, ...this.loops.map((l) => l.g ?? -1)) + 1;
+    const groups = new Map<number, number>();
+    const copies: Item[] = [];
+    for (const it of [...this.selected].sort((a, b) => a.i - b.i)) {
+      if (it.kind === "loop") {
+        const l: Loop = structuredClone(this.loops[it.i]);
+        if (l.g !== undefined) {
+          if (!groups.has(l.g)) groups.set(l.g, g++);
+          l.g = groups.get(l.g);
+        }
+        this.loops.push(l);
+        copies.push({ kind: "loop", i: this.loops.length - 1 });
+      } else {
+        this.opens.push(structuredClone(this.opens[it.i]));
+        copies.push({ kind: "open", i: this.opens.length - 1 });
+      }
+    }
+    this.selected = copies;
+    this.hoverItem = null;
+    this.host.toast(`${copies.length === 1 ? "Copied" : `${copies.length} copied`} — move it (drag the gizmo, or type dx,dy + Enter)`);
+    this.startMove();
+  }
+
   /** Delete the selected outlines / paths (one undo step). */
   private deleteSelected(): void {
     if (!this.selected.length) return;
@@ -1652,6 +1848,17 @@ export class SketchTool implements Tool {
 
   down(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (this.mode === "scan") {
+      const at = this.planeAt(e);
+      if (!at) return;
+      if (this.scanFirst) {
+        const a = this.scanFirst;
+        this.scanFirst = null;
+        return this.setScanArea(a, at);
+      }
+      this.scanDrag = { x: e.clientX, y: e.clientY, at, to: at, moved: false };
+      return this.update();
+    }
     if (this.mode === "picture") {
       const at = this.planeAt(e), grip = this.picGripAt(e);
       if (grip && at && this.pic) {
@@ -1882,7 +2089,7 @@ export class SketchTool implements Tool {
       const a0 = ang(from);
       let sweep = sd > 0 ? wrap(ang(p) - a0) : wrap(a0 - ang(p));
       const quarter = Math.round(sweep / (Math.PI / 2)) * (Math.PI / 2);
-      if (quarter > 0 && quarter < TAU && Math.abs(sweep - quarter) < (5 * Math.PI) / 180) sweep = quarter;
+      if (!this.free && quarter > 0 && quarter < TAU && Math.abs(sweep - quarter) < (5 * Math.PI) / 180) sweep = quarter;
       if (sweep < 1e-6) return null;
       let end: P = [c[0] + r * Math.cos(a0 + sd * sweep), c[1] + r * Math.sin(a0 + sd * sweep)];
       if (this.first && dist(end, this.first) < 1e-6) end = this.first; // back at the start: close exactly
@@ -1892,7 +2099,7 @@ export class SketchTool implements Tool {
     if (!r) {
       // Through the cursor — within 5° of a half circle: exactly one.
       const g = threePointArc(from, p, this.arcEnd), k = g && arcGeom(g as Extract<Seg, { kind: "arc" }>);
-      if (!g || !k || Math.abs(Math.abs(k.sweep) - Math.PI) > (5 * Math.PI) / 180) return g;
+      if (!g || !k || this.free || Math.abs(Math.abs(k.sweep) - Math.PI) > (5 * Math.PI) / 180) return g;
       const u = norm(sub(this.arcEnd, from)), sd = cross(u, sub(p, from)) < 0 ? -1 : 1, half = dist(from, this.arcEnd) / 2;
       return threePointArc(from, add(mul(add(from, this.arcEnd), 0.5), mul([-u[1] * sd, u[0] * sd], half)), this.arcEnd);
     }
@@ -1914,6 +2121,19 @@ export class SketchTool implements Tool {
       return true;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (this.mode === "scan") {
+      // Esc drops the area (nothing: back to drawing, below); Enter adds what was found; no typed numbers
+      if (k === "Escape" && (this.scanFirst || this.scanArea || this.scanDrag)) {
+        this.scanFirst = this.scanArea = this.scanFound = this.scanDrag = null;
+        this.update();
+        return true;
+      }
+      if (k === "Enter") {
+        this.scanAdd();
+        return true;
+      }
+      if (/^[0-9.,\-]$/.test(k)) return true;
+    }
     if (k === "Escape" && this.scaling && !this.typed) {
       this.endScale(false);
       return true;
@@ -1942,12 +2162,16 @@ export class SketchTool implements Tool {
         this.setMode("select"); // nothing being drawn: Select
         return true;
       } else if (this.selected.length) this.selected = [];
-      else this.host.hint("Sketch: click Done to keep the closed outlines as faces, or Cancel to drop the sketch");
+      else this.host.hint("Sketch: click Exit Sketch Mode to keep the closed outlines as faces");
       this.update();
       return true;
     }
     if ((k === "s" || k === "S") && !e.shiftKey && this.mode === "select") {
       if (!this.scaling) this.startScale();
+      return true;
+    }
+    if ((k === "d" || k === "D") && e.shiftKey) {
+      this.duplicateSelected();
       return true;
     }
     if ((k === "j" || k === "J") && !e.shiftKey) {
@@ -1964,8 +2188,9 @@ export class SketchTool implements Tool {
       this.deleteSelected();
       return true;
     }
-    if (/^[0-9.,\-]$/.test(k) || (/^[xX*]$/.test(k) && /\d$/.test(this.typed))) {
-      this.typed += k === "*" ? "x" : k.toLowerCase(); // 23x30 = 23,30
+    const inch = typedUnit(this.typed, k); // 3.34in / 3.34" = 84.836 mm
+    if (inch !== null || /^[0-9.,\-]$/.test(k) || (/^[xX*]$/.test(k) && /\d$/.test(this.typed))) {
+      this.typed = inch ?? this.typed + (k === "*" ? "x" : k.toLowerCase()); // 23x30 = 23,30
       this.update();
       return true;
     }
@@ -2007,7 +2232,7 @@ export class SketchTool implements Tool {
     if (this.scaling) this.endScale(false);
     if (this.moving) this.endMove(true); // (moved with the gizmo: kept)
     // (a line being drawn ends here, as with Enter — while still in its tool, so undo goes back to it)
-    if (this.first && (mode === "select" || mode === "round" || (mode === "spline") !== (this.mode === "spline"))) this.endLines();
+    if (this.first && (mode === "select" || mode === "round" || mode === "scan" || (mode === "spline") !== (this.mode === "spline"))) this.endLines();
     if (mode === "picture" && this.mode !== "picture") this.prevMode = this.mode;
     // (corners picked to round: rounded on the way out, as lines being drawn end)
     if (this.mode === "round" && mode !== "round" && this.roundPicks.length) this.roundDone();
@@ -2023,7 +2248,9 @@ export class SketchTool implements Tool {
     this.picPts = [];
     this.picDrag = null;
     this.picGrip = { hover: null, drag: null };
-    if (mode === "picture") {
+    if (mode !== "scan") this.scanArea = this.scanFound = null;
+    this.scanFirst = this.scanDrag = null;
+    if (mode === "picture" || mode === "scan") {
       this.selected = [];
       this.aligned = [];
       this.host.viewport.showSnapMarker(null);
@@ -2042,12 +2269,33 @@ export class SketchTool implements Tool {
     this.update();
   }
 
+  /** Scan's box shows its settings and what was found (fields being changed left as they are). */
+  private syncScanBox(): void {
+    const o = SketchTool.scanOpts, f = this.scanFound, q = <T extends Element>(sel: string) => this.panel.querySelector<T>(sel);
+    const set = (el: HTMLInputElement | HTMLSelectElement | null, v: string) => el && el !== document.activeElement && el.value !== v && (el.value = v);
+    const dark = Math.round(100 * (o.dark ?? f?.level ?? 0.5));
+    set(q("[data-scan=kind]"), o.kind);
+    set(q("[data-scan=dark]"), String(dark));
+    set(q("[data-scan=specks]"), String(o.specks));
+    const even = q<HTMLInputElement>("[data-scan=even]"), smooth = q<HTMLInputElement>("[data-scan=smooth]");
+    if (even) even.checked = o.even;
+    if (smooth) smooth.checked = o.smooth;
+    const out = q("[data-scan-out=dark]");
+    if (out) out.textContent = `${dark}%${o.dark === null ? " auto" : ""}`;
+    const auto = q<HTMLButtonElement>("[data-act=scan-auto]");
+    if (auto) auto.disabled = o.dark === null;
+    const found = q("[data-scan-out=found]"), n = f?.loops.length ?? 0, m = f?.opens.length ?? 0;
+    if (found) found.textContent = !this.scanArea ? "drag over the picture" : n || m ? [n ? `${n} outline${n > 1 ? "s" : ""}` : "", m ? `${m} path${m > 1 ? "s" : ""}` : ""].filter(Boolean).join(" · ") : "nothing found";
+    const add = q<HTMLButtonElement>("[data-act=scan-add]");
+    if (add) add.disabled = !(n || m);
+  }
+
   /**
    * Typed numbers + Enter: line length (or dx,dy); rectangle w,h (or wxh); circle radius (or diameter: File → Settings); arc radius; x,y for
    * a first point.
    */
   private applyTyped(): void {
-    const vals = this.typed.split(/[,x]/).filter((s) => s !== "").map(Number);
+    const vals = this.typed.split(/[,x]/).filter((s) => s !== "").map(parseLen);
     this.typed = "";
     if (!vals.length || vals.some((v) => !Number.isFinite(v))) return this.update();
     if (this.mode === "picture") {
@@ -2359,6 +2607,19 @@ export class SketchTool implements Tool {
     }
     // The picture's outline, while it's being worked on (Picture mode).
     if (pic && this.mode === "picture") lines(this.picCorners(), this.mats.sel, true);
+    if (this.mode === "scan") {
+      // The area (being dragged / from the first corner to the cursor), and what was found in it — blue until added
+      const box = (a: P, b: P) => lines([a, [b[0], a[1]], b, [a[0], b[1]]], this.mats.rubber, true);
+      if (this.scanDrag?.moved) box(this.scanDrag.at, this.scanDrag.to);
+      else if (this.scanFirst && this.cursor) box(this.scanFirst, this.cursor);
+      if (this.scanFirst) dot(this.scanFirst);
+      if (this.scanArea) box(...this.scanArea);
+      const f = this.scanFound;
+      if (f) {
+        for (const l of f.loops) lines(loopPolygon(l), this.mats.sel, true);
+        for (const o of f.opens) pathLine([...o.flatMap(segPoints), o[o.length - 1].b], this.mats.sel);
+      }
+    }
     if (this.mode === "picture") {
       const [a1, a2, b1] = this.picPts;
       for (const p of this.picPts) dot(p);
@@ -2583,22 +2844,34 @@ export class SketchTool implements Tool {
       hud = `Move ${num(mv.d[0])}, ${num(mv.d[1])} mm`;
       moveAt = g.x;
     }
-    // Picture mode: its handles (the one under the cursor / dragged bigger) — the scale square, the rotate ring.
+    // Picture mode: its handles (the one under the cursor / dragged bigger) — the scale two-headed arrow along the
+    // diagonal, the rotate curved arrow.
     if (pic && this.mode === "picture" && !this.picPts.length) {
       const pg = this.picGrip, k = this.picGripPos("scale"), w = vp.worldPerPixel(this.world(k));
       const big = (kind: "scale" | "rotate") => pg.hover === kind || pg.drag?.kind === kind;
-      const cs = Math.cos(pic.ang), sn = Math.sin(pic.ang), r = (q: P): P => [q[0] * cs - q[1] * sn, q[0] * sn + q[1] * cs];
-      const sz = w * (big("scale") ? 7 : 5), sq = ([[-1, -1], [1, -1], [1, 1], [-1, 1]] as P[]).map(([i, j]) => add(k, r([i * sz, j * sz])));
-      const fill = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(sq.map(([u, v]) => new THREE.Vector2(u, v)))), this.gizmoMat(0x4fd1ff, "fill"));
-      fill.matrixAutoUpdate = false;
-      fill.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
-      objs.push(fill);
-      const ro = this.picGripPos("rotate"), rr = w * (big("rotate") ? 7 : 5);
-      lines(Array.from({ length: 24 }, (_, i) => [ro[0] + rr * Math.cos((i / 24) * TAU), ro[1] + rr * Math.sin((i / 24) * TAU)] as P), this.gizmoMat(0xffd84a, "line") as THREE.LineBasicMaterial, true);
-      lines([k, ro], this.gizmoMat(0xffd84a, "line") as THREE.LineBasicMaterial);
+      const tri = (pts: P[], color: number) => {
+        const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(pts.map(([u, v]) => new THREE.Vector2(u, v)))), this.gizmoMat(color, "fill"));
+        m.matrixAutoUpdate = false;
+        m.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
+        objs.push(m);
+      };
+      // (a head at `tip` pointing along `d`, `hl` long, `hw` half wide)
+      const head = (tip: P, d: P, hl: number, hw: number, color: number) => {
+        const b = sub(tip, mul(d, hl)), n: P = [-d[1], d[0]];
+        tri([tip, add(b, mul(n, hw)), sub(b, mul(n, hw))], color);
+      };
+      const d = norm(sub(k, pic.c)), sz = w * (big("scale") ? 15 : 12), hs = sz * 0.6;
+      lines([sub(k, mul(d, sz - hs)), add(k, mul(d, sz - hs))], this.gizmoMat(0x4fd1ff, "line") as THREE.LineBasicMaterial);
+      head(add(k, mul(d, sz)), d, hs, hs * 0.7, 0x4fd1ff);
+      head(sub(k, mul(d, sz)), mul(d, -1), hs, hs * 0.7, 0x4fd1ff);
+      const ro = this.picGripPos("rotate"), rr = w * (big("rotate") ? 11 : 9), a0 = Math.atan2(d[1], d[0]) + Math.PI / 4, span = 1.5 * Math.PI;
+      const arc = Array.from({ length: 25 }, (_, i) => a0 + (i / 24) * span).map((a) => [ro[0] + rr * Math.cos(a), ro[1] + rr * Math.sin(a)] as P);
+      lines(arc, this.gizmoMat(0xffd84a, "line") as THREE.LineBasicMaterial);
+      const ae = a0 + span;
+      head(add(arc[arc.length - 1], mul([-Math.sin(ae), Math.cos(ae)], rr * 0.55)), [-Math.sin(ae), Math.cos(ae)], rr * 0.7, rr * 0.5, 0xffd84a);
       if (pg.drag || pg.hover) {
         const deg = (((pic.turned * 180) / Math.PI + 540) % 360) - 180;
-        hud = (pg.drag?.kind ?? pg.hover) === "scale" ? `Scale ${num((pic.w / pic.w0) * 100)}%${pg.drag ? ` · ${this.host.viewport.stepTip("5% steps")}` : ""}` : `Rotate ${num(Math.abs(deg) < 1e-9 ? 0 : deg)}°${pg.drag ? ` · ${this.host.viewport.stepTip("15° steps")}` : ""}`;
+        hud = (pg.drag?.kind ?? pg.hover) === "scale" ? `${num(pic.w)} × ${num(pic.h)} mm · ${num((pic.w / pic.w0) * 100)}%` : `Rotate ${num(Math.abs(deg) < 1e-9 ? 0 : deg)}°`;
         gripAt = (pg.drag?.kind ?? pg.hover) === "rotate" ? ro : k;
       }
     }
@@ -2633,11 +2906,13 @@ export class SketchTool implements Tool {
   }
 
   private renderPanel(): void {
+    // (Select: the arrow; drawing: the crosshair)
+    this.host.viewport.canvas.style.cursor = this.mode === "select" ? "default" : "crosshair";
     const nSel = this.selected.length;
     const tips: Record<Mode, string> = {
       select: this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
         : this.scaling ? `Scale / rotate: drag the red square (X), green (Y), the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} or the blue ring (rotate) — ${this.host.viewport.stepTip("round steps, 15°")} · Tab: exact %, ° · Enter / click elsewhere: apply · Esc / right click: cancel`
-        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Spline's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
+        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Spline's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
       line: this.first ? "Click the next point · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
@@ -2646,14 +2921,19 @@ export class SketchTool implements Tool {
         ? `Click the next point — a smooth curve runs through them all · click the start point to close (after 2 more) · Enter / double-click: done (left open: a path) · Esc: drop it`
         : "Click where the curve starts · then click each point it passes through (later: Select it and drag its points)",
       round: "Click the corners to round (where two straight lines meet; an outline / inside it: all its corners; again: unpick) · drag the yellow handle, or type the radius · Done (in the box, or Enter) rounds them — then pick more · Esc: unpick all",
+      scan: !this.pic ? "Scan: no picture — click the picture icon (bottom left) to load one"
+        : this.scanFirst ? "Scan: click the area's other corner"
+        : this.scanFound ? "Scan: blue = what was found — change the settings in the box to scan again · Enter / Add: into the sketch · drag again: another area · Esc: drop it"
+        : "Scan: drag over the part of the picture to trace (or click 2 corners) · Faces: dark areas become outlines (Exit Sketch Mode: faces) · Outlines: drawn lines become paths along their middle · Esc: back",
       rect: this.anchor ? "Click the opposite corner · type width,height (or 23x30) + Enter" : "Click the first corner",
       circle: this.anchor ? `Click a point on the circle · type the ${circleSize.word} + Enter` : "Click the centre",
       picture: !this.pic ? "No picture — click the picture icon (bottom left) to load one"
-        : ["Drag the picture to move it · its corner: the square scales, the ring rotates · type a % + Enter to scale it · Match: click a point on the picture · click off the picture: back to drawing", "Match: click a 2nd point on the picture", "Match: click where the 1st point belongs (on the model / sketch)", "Match: click where the 2nd point belongs"][this.picPts.length]
+        : ["Drag the picture to move it · its corner: the two-headed arrow scales, the curved arrow rotates · type a % + Enter to scale it · Match: click a point on the picture · click off the picture: back to drawing", "Match: click a 2nd point on the picture", "Match: click where the 1st point belongs (on the model / sketch)", "Match: click where the 2nd point belongs"][this.picPts.length]
           + " · the menu by the thumbnail (bottom left): scale, rotate, opacity · thumbnail again: done · Del: remove it · L A R C: draw",
     };
     const btn = (m: Mode, label: string, key: string) => `<button type="button" class="btn${this.mode === m ? " primary" : ""}" data-mode="${m}" title="${label} (${key})">${label} <kbd>${key}</kbd></button>`;
     const closed = this.loops.length, open = this.opens.length;
+    const scanBtn = this.pic ? `<button type="button" class="btn${this.mode === "scan" ? " primary" : ""}" data-mode="scan" title="Scan the picture: drag over a part of it — dark areas become outlines (faces), or drawn lines paths">Scan</button>` : "";
     const moveBtn = this.mode === "select" ? `<button type="button" class="btn${this.moving ? " primary" : ""}" data-act="move" ${nSel ? "" : "disabled"} title="Move the selection with the gizmo: X / Y arrows, the square free — G (or type dx,dy + Enter)">Move <kbd>G</kbd></button>` : "";
     const scaleBtn = this.mode === "select" ? `<button type="button" class="btn${this.scaling ? " primary" : ""}" data-act="scale" ${nSel ? "" : "disabled"} title="Scale or rotate the selection about its centre: the squares / yellow ring scale, the blue ring rotates — S (or type a % + Enter)">Scale / Rotate <kbd>S</kbd></button>` : "";
     // (Join while drawing too: there it goes to Select, to pick the outlines)
@@ -2661,24 +2941,36 @@ export class SketchTool implements Tool {
     // Round corner: its box — the radius (typed or dragged; too big: the largest that fits), the corners picked, Done.
     const nPick = this.roundPicks.length;
     const roundBox = this.mode === "round" ? `<div class="round-box"><b>Round corner</b><label>Radius <input type="number" data-round="r" min="0" step="0.5"> mm</label><span class="muted">${nPick ? `${nPick} corner${nPick > 1 ? "s" : ""}` : "pick corners"}</span><button type="button" class="btn primary" data-act="round-done" ${nPick ? "" : "disabled"} title="Round the picked corners (Enter) — then pick more">Done</button></div>` : "";
+    // Scan: its box — what to make, Dark below (automatic until moved; Auto: back), Even out lighting, specks, Smooth, Add.
+    // (no values in the HTML: a slider being dragged isn't replaced — they're set below)
+    const scanBox = this.mode === "scan" ? `<div class="round-box scan-box"><b>Scan</b>
+      <label><select data-scan="kind"><option value="face">Faces (edges of dark areas)</option><option value="outline">Outlines (middle of drawn lines)</option></select></label>
+      <label title="Grey levels below this count as drawing — automatic until moved">Dark below <input type="range" data-scan="dark" min="1" max="99" step="1"><output data-scan-out="dark"></output></label>
+      <button type="button" class="btn" data-act="scan-auto" title="Dark below: worked out from the area again">Auto</button>
+      <label class="check" title="Each spot against the light round it: shadows and uneven light don't count"><input type="checkbox" data-scan="even"> Even out lighting</label>
+      <label title="Dark (and light) bits smaller than this are dropped: dust, paper texture">Ignore specks under <input type="number" data-scan="specks" min="0" step="5"> px</label>
+      <label class="check" title="One smooth curve each instead of straight pieces (corners come out rounded)"><input type="checkbox" data-scan="smooth"> Smooth</label>
+      <span class="muted" data-scan-out="found"></span>
+      <button type="button" class="btn primary" data-act="scan-add" title="Put what was found (blue) into the sketch — Enter">Add</button></div>` : "";
     const html = `<h4>Sketch on ${this.what}</h4>
-      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("spline", "Spline", "Shift+A")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round corner", "F")}${moveBtn}${scaleBtn}${joinBtn}</div>
-      ${roundBox}
+      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("spline", "Spline", "Shift+A")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round corner", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}</div>
+      ${roundBox}${scanBox}
       <div class="tip">${tips[this.mode]}</div>
       <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · Tab: exact values · ${this.mode === "select" ? "L A Shift+A R C: draw · F: round corners" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>
-      <div class="op-buttons"><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces">Done</button><button type="button" class="btn" data-act="cancel" title="Drop the sketch">Cancel</button></div>`;
-    // Pro layout: one row of modes, Done / Cancel — no tips.
+      <div class="op-buttons"><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>`;
+    // Pro layout: one row of modes, Exit Sketch Mode — no tips. (Cancel: hidden, for the smoke test)
     const pro = document.body.classList.contains("pro");
-    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("spline", "Spline", "⇧A")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round", "F")}${moveBtn}${scaleBtn}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Done</button><button type="button" class="btn" data-act="cancel" title="Drop the sketch">Cancel</button></div>${roundBox}`;
+    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("spline", "Spline", "⇧A")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>${roundBox}${scanBox}`;
     const out = pro ? proHtml : html;
     this.panel.classList.toggle("compact", pro);
     if (out !== this.panelHtml) this.panel.innerHTML = this.panelHtml = out;
     const rf = this.panel.querySelector<HTMLInputElement>("input[data-round=r]");
     if (rf && rf !== document.activeElement && rf.value !== num(roundR)) rf.value = num(roundR);
+    if (this.mode === "scan") this.syncScanBox();
     this.corner.querySelector(".pic-wrap")?.classList.toggle("on", this.mode === "picture"); // (lit, its menu open)
     this.syncPicMenu();
     if (pro && this.mode === "picture") return this.host.hint(`Sketch — picture: ${tips.picture}`);
     if (pro) return this.host.hint(this.mode === "select" ? `Sketch — select${nSel ? `: ${nSel}, Del deletes` : ""} — L A R C: draw` : "Sketch — L line, A arc, Shift+A spline, R rect, C circle, F round corner — Enter: done");
-    this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · Shift+A spline · R rectangle · C circle · F round corner · Done / Cancel in the panel`);
+    this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · Shift+A spline · R rectangle · C circle · F round corner · Exit Sketch Mode in the panel`);
   }
 }

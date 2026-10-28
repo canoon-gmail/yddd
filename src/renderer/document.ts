@@ -3,6 +3,7 @@
  * Every edit produces a new snapshot (array of Body); bodies and their shapes
  * are never mutated, so snapshots can share them.
  */
+import type { PictureRecord } from "./picture";
 import { isMesh, type Geom, type Shape, type TriMesh, type V3, type Wire } from "./kernel";
 
 /** A construction (guide) line: a snap target only, not geometry. */
@@ -34,11 +35,14 @@ export interface Dimension {
    * "radius": a circle's / arc's radius — `a` its centre, `b` a point on it, `n` its axis (`o` unused);
    * with `body` it follows that circle.
    * "angle": the angle at `b` between b→a and b→`c`, drawn as an arc of radius `r` round `b` (`o` unused).
+   * "label": a note — an arrow pointing at `a`, its `text` at `b` (`o` unused).
    */
-  readonly kind?: "radius" | "angle";
+  readonly kind?: "radius" | "angle" | "label";
   readonly n?: V3;
   readonly c?: V3;
   readonly r?: number;
+  /** A label's words. */
+  readonly text?: string;
 }
 
 /**
@@ -54,6 +58,17 @@ export interface TextRecord {
   readonly letterSpacing: number;
   readonly lineSpacing: number;
   readonly frame: { readonly origin: V3; readonly x: V3; readonly y: V3; readonly z: V3 };
+}
+
+/**
+ * A Macro → Gear gear's numbers as made (mm, degrees). Where it is (centre, axis, which way a tooth points) and
+ * any even scaling since are read off its shape (a tooth's tip arc), so moving / turning it needs nothing here.
+ */
+export interface GearRecord {
+  readonly teeth: number;
+  readonly module: number;
+  readonly angle: number;
+  readonly clearance: number;
 }
 
 /** How a body looks on screen (the swatch in the Bodies panel). Unset = its group's, else the default. */
@@ -78,6 +93,10 @@ interface BodyBase {
   readonly text?: TextRecord;
   /** Locked (the lock in the Bodies panel): not selected or changed — clicks go through it; still snapped to. */
   readonly locked?: true;
+  /** A picture (File → Open Picture…): the image on this flat face. */
+  readonly picture?: PictureRecord;
+  /** Made by Macro → Gear (flat, or pushed into a solid): its numbers — a mating gear is made from them. */
+  readonly gear?: GearRecord;
 }
 
 /** "solid" = closed 3D body, "face" = flat planar face (extrude it with Push/Pull). */
@@ -343,7 +362,7 @@ export class Doc {
    * Start over with the given bodies (used by New / Open). Clears history. A dimension's `body` here
    * is an index into `bodies` (as saved in a file), turned into that body's new id.
    */
-  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = [], looks: GroupLooks = {}): void {
+  reset(bodies: (BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord })[] = [], filePath: string | null = null, guides: readonly Guide[] = [], dims: readonly Dimension[] = [], arrays: readonly ArrayRecord[] = [], looks: GroupLooks = {}): void {
     this.guideList = guides;
     this.counters.clear();
     this.nextId = 1;

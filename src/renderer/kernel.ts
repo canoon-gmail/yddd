@@ -18,6 +18,8 @@ import notoSerif from "../../vendor/fonts/NotoSerif-Regular.ttf?url";
 import notoSerifBold from "../../vendor/fonts/NotoSerif-Bold.ttf?url";
 import notoThai from "../../vendor/fonts/NotoSansThai-Regular.ttf?url";
 import notoThaiBold from "../../vendor/fonts/NotoSansThai-Bold.ttf?url";
+import notoSymbols from "../../vendor/fonts/NotoSansSymbols-Regular.ttf?url";
+import notoSymbols2 from "../../vendor/fonts/NotoSansSymbols2-Regular.ttf?url";
 import {
   setOC,
   Plane,
@@ -34,6 +36,7 @@ import {
   makeFace,
   makeLine,
   makeThreePointArc,
+  makeBSplineApproximation,
   makeSolid,
   makeVertex,
   measureArea,
@@ -531,8 +534,10 @@ export function seamEdgeIds(shape: Shape): Set<number> {
 /**
  * Faces of a tube-like surface made of smoothly joined pieces — a profile swept along a Spline (its arc pieces) or
  * revolved: a chain of curved faces meeting smoothly (hidden joins, see seamEdgeIds) with a torus in it and running
- * smoothly into no flat face (that would be a fillet: a rounded box, a cylinder's rounded top). A click on one picks
- * the whole solid — one slice of a tube is no use on its own. Cached per shape.
+ * smoothly into no flat face (that would be a fillet: a rounded box, a cylinder's rounded top) and meeting no other
+ * curved face at a sharp edge (then it isn't a bare tube: e.g. a revolved ring end with a rounded rim on a swept
+ * tube, or a tube joined to a ball). A click on one picks the whole solid — one slice of a tube is no use on its own.
+ * Cached per shape.
  */
 export function smoothSurfaceFaces(shape: Shape): Set<number> {
   const known = smoothSurfaceCache.get(shape);
@@ -550,7 +555,7 @@ export function smoothSurfaceFaces(shape: Shape): Set<number> {
     // The chain: curved faces reached across hidden joins
     const chain: Face[] = [start];
     seen.add(start.hashCode);
-    let tangentFlat = false;
+    let tangentFlat = false, sharpCurved = false;
     for (let i = 0; i < chain.length; i++) {
       for (const id of new Set(chain[i].edges.map((e) => e.hashCode))) {
         const two = facesOf.get(id);
@@ -559,13 +564,14 @@ export function smoothSurfaceFaces(shape: Shape): Set<number> {
         if (other.geomType === "PLANE") {
           const e = edges.get(id);
           if (!tangentFlat && e && smoothJoin(e, chain[i], other)) tangentFlat = true;
-        } else if (seams.has(id) && !seen.has(other.hashCode)) {
+        } else if (!seams.has(id)) sharpCurved = true;
+        else if (!seen.has(other.hashCode)) {
           seen.add(other.hashCode);
           chain.push(other);
         }
       }
     }
-    if (chain.length > 1 && !tangentFlat && chain.some((f) => f.geomType === "TORUS")) for (const f of chain) out.add(f.hashCode);
+    if (chain.length > 1 && !tangentFlat && !sharpCurved && chain.some((f) => f.geomType === "TORUS")) for (const f of chain) out.add(f.hashCode);
   }
   return out;
 }
@@ -868,6 +874,8 @@ export const BUILT_IN_FONTS: { family: string; style: string; key: string; url: 
   { family: "Noto Serif", style: "Bold", key: "builtin:NotoSerif-Bold", url: notoSerifBold },
   { family: "Noto Sans Thai", style: "Regular", key: "builtin:NotoSansThai-Regular", url: notoThai },
   { family: "Noto Sans Thai", style: "Bold", key: "builtin:NotoSansThai-Bold", url: notoThaiBold },
+  { family: "Noto Sans Symbols", style: "Regular", key: "builtin:NotoSansSymbols-Regular", url: notoSymbols },
+  { family: "Noto Sans Symbols 2", style: "Regular", key: "builtin:NotoSansSymbols2-Regular", url: notoSymbols2 },
 ];
 
 /**
@@ -888,12 +896,13 @@ type OtFont = NonNullable<ReturnType<typeof getFont>>;
 
 /**
  * Split a line into runs, each in one font: the chosen one, or — for letters it hasn't got — the built-in
- * Noto Sans, then Noto Sans Thai (bold ones for a bold font). So Thai shows in any font, and Latin in the Thai one.
+ * Noto Sans, then Noto Sans Thai (bold ones for a bold font), then Noto Sans Symbols 2 / Symbols (♥ ★ ☺ ♪...). So Thai
+ * and symbols show in any font, and Latin in the Thai one.
  */
 function fontRuns(line: string, family: string, font: OtFont): { text: string; family: string }[] {
   const os2 = font.tables.os2 as { usWeightClass?: number } | undefined;
   const bold = (os2?.usWeightClass ?? 400) >= 600;
-  const fallbacks = [bold ? "builtin:NotoSans-Bold" : "default", bold ? "builtin:NotoSansThai-Bold" : "builtin:NotoSansThai-Regular"];
+  const fallbacks = [bold ? "builtin:NotoSans-Bold" : "default", bold ? "builtin:NotoSansThai-Bold" : "builtin:NotoSansThai-Regular", "builtin:NotoSansSymbols2-Regular", "builtin:NotoSansSymbols-Regular"];
   const runs: { text: string; family: string }[] = [];
   for (const ch of line) {
     const has = (f: string) => {
@@ -1800,7 +1809,11 @@ export function edgeInfo(shape: Shape, edgeId: number): EdgeInfo | null {
   if (!e) return null;
   const length = measureLength(e);
   if (e.geomType === "LINE") return { type: "line", length };
-  if (e.geomType !== "CIRCLE") return { type: "curve", length };
+  if (e.geomType !== "CIRCLE") {
+    const c = curveCircle(e);
+    if (!c) return { type: "curve", length };
+    return c.angle > 359.999 ? { type: "circle", length, radius: c.radius, center: c.center } : { type: "arc", length, radius: c.radius, center: c.center, angle: c.angle };
+  }
   const ad = new oc.BRepAdaptor_Curve(e.wrapped);
   try {
     const c = ad.Circle(), loc = c.Location();
@@ -1811,6 +1824,35 @@ export function edgeInfo(shape: Shape, edgeId: number): EdgeInfo | null {
     return angle > 359.999 ? { type: "circle", length, radius, center } : { type: "arc", length, radius, center, angle };
   } finally {
     ad.delete();
+  }
+}
+
+/**
+ * A curve edge that is a circle or an arc all the same — e.g. a B-spline a revolve or a boolean left where an exact
+ * circle would do: its centre, axis, radius and angle (degrees; 360 closed); null if it isn't one (24 points along
+ * it all on one circle, within a millionth of the curve's size).
+ */
+function curveCircle(e: Edge): { center: V3; normal: V3; radius: number; angle: number } | null {
+  try {
+    const N = 24, pts = Array.from({ length: N + 1 }, (_, i) => e.pointAt(i / N).toTuple() as V3);
+    const [p, q, w] = [pts[0], pts[N / 3], pts[(2 * N) / 3]];
+    const a = sub3(q, p), b = sub3(w, p), n = cross3(a, b), nn = dot3(n, n);
+    if (nn < 1e-18) return null;
+    const k1 = cross3(n, a), k2 = cross3(b, n), aa = dot3(a, a), bb = dot3(b, b);
+    const center = [0, 1, 2].map((i) => p[i] + (bb * k1[i] + aa * k2[i]) / (2 * nn)) as V3;
+    const normal = norm3(n), radius = Math.hypot(...sub3(p, center));
+    // (tight, by the curve's own size: a nearly straight curve fits a huge circle loosely — a twisted sweep's seam)
+    const span = Math.max(...[0, 1, 2].map((k) => Math.max(...pts.map((x) => x[k])) - Math.min(...pts.map((x) => x[k]))));
+    const tol = Math.max(1e-7, span * 1e-6);
+    if (!pts.every((x) => Math.abs(Math.hypot(...sub3(x, center)) - radius) < tol && Math.abs(dot3(sub3(x, center), normal)) < tol)) return null;
+    let angle = 0;
+    for (let i = 0; i < N; i++) {
+      const u = norm3(sub3(pts[i], center)), v = norm3(sub3(pts[i + 1], center));
+      angle += Math.acos(Math.max(-1, Math.min(1, dot3(u, v))));
+    }
+    return { center, normal, radius, angle: (angle * 180) / Math.PI };
+  } catch {
+    return null;
   }
 }
 
@@ -1870,7 +1912,8 @@ export function matchStraightEdge(shape: Shape, old: Shape, a: V3, b: V3): [V3, 
 /** A circle or arc edge's centre, unit normal (its axis) and radius; null for other edges. */
 export function circleOf(shape: Shape, edgeId: number): { center: V3; normal: V3; radius: number } | null {
   const e = shape.edges.find((x) => x.hashCode === edgeId);
-  if (!e || e.geomType !== "CIRCLE") return null;
+  if (!e || e.geomType === "LINE") return null;
+  if (e.geomType !== "CIRCLE") return curveCircle(e);
   const ad = new oc.BRepAdaptor_Curve(e.wrapped);
   const c = ad.Circle(), loc = c.Location(), ax = c.Axis(), dir = ax.Direction();
   try {
@@ -1899,7 +1942,8 @@ export interface RoundRim {
  * no round wall on it, or the rim doesn't go all the way round — a slot's round end).
  */
 export function roundRim(shape: Shape, edgeId: number): RoundRim | null {
-  const c = circleOf(shape, edgeId);
+  // (exact circles only: the turn below adds up CIRCLE edges)
+  const c = shape.edges.find((e) => e.hashCode === edgeId)?.geomType === "CIRCLE" ? circleOf(shape, edgeId) : null;
   if (!c) return slantedRim(shape, edgeId);
   const edge = shape.edges.find((e) => e.hashCode === edgeId)!;
   // All the way round: the arcs of this circle (a rim can be in pieces) add up to a full turn.
@@ -2157,6 +2201,54 @@ export interface HoleLoop {
   rim: number[];
 }
 
+/**
+ * The edge and the edges running on from it smoothly, end to end (a tangent chain): at each end the one edge that
+ * carries on in the same direction (within ~10°) — e.g. all the short pieces of a curve where a spout meets a pot, or
+ * a loop of lines and arcs round a rounded corner. Stops at a corner or where it's back at the start. Seams (hidden,
+ * not pickable) are left out. Ids in order along the chain.
+ */
+export function edgeChain(shape: Shape, edgeId: number): number[] {
+  const seams = seamEdgeIds(shape);
+  const edges = shape.edges.filter((e) => e.hashCode === edgeId || !seams.has(e.hashCode));
+  const first = edges.find((e) => e.hashCode === edgeId);
+  if (!first) return [];
+  const ends = new Map(edges.map((e) => [e.hashCode, {
+    a: e.startPoint.toTuple() as V3, b: e.endPoint.toTuple() as V3,
+    // Directions leaving the edge at its start / end (out of it, along the curve's tangent)
+    ta: norm3(e.tangentAt(0).toTuple().map((v) => -v) as V3), tb: norm3(e.tangentAt(1).toTuple() as V3),
+  }]));
+  const size = Math.max(1, ...[...ends.values()].flatMap((x) => [...x.a, ...x.b].map(Math.abs)));
+  const tol = 1e-6 * size, same = (p: V3, q: V3) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < tol;
+  const COS = Math.cos((10 * Math.PI) / 180);
+  const chain = [edgeId], used = new Set(chain);
+  // From one end of the edge `id` (its point `p`, leaving along `dir`): the next edge, or null.
+  const next = (p: V3, dir: V3): { id: number; p: V3; dir: V3 } | null => {
+    let best: { id: number; p: V3; dir: V3 } | null = null, bestDot = COS;
+    for (const [id, x] of ends) {
+      if (used.has(id)) continue;
+      // Entering it at its start, it runs on along −ta (= its tangent there) and leaves at its end; and the other way.
+      for (const [at, into, leaveP, leaveDir] of [[x.a, x.ta, x.b, x.tb], [x.b, x.tb, x.a, x.ta]] as const) {
+        if (!same(at, p)) continue;
+        const d = -dot3(dir, into);
+        if (d > bestDot) (bestDot = d), (best = { id, p: leaveP, dir: leaveDir });
+      }
+    }
+    return best;
+  };
+  const f = ends.get(edgeId)!;
+  for (const [p0, d0, add] of [[f.b, f.tb, (id: number) => chain.push(id)], [f.a, f.ta, (id: number) => chain.unshift(id)]] as const) {
+    let at: { p: V3; dir: V3 } | null = { p: p0, dir: d0 };
+    while (at) {
+      const n = next(at.p, at.dir);
+      if (!n) break;
+      used.add(n.id);
+      add(n.id);
+      at = n;
+    }
+  }
+  return chain;
+}
+
 export function holeAt(shape: Shape, edgeId: number): HoleLoop | null {
   const edge = shape.edges.find((e) => e.hashCode === edgeId);
   if (!edge) return null;
@@ -2227,7 +2319,7 @@ export function matchCircleEdge(shape: Shape, old: Shape, center: V3, rim: V3, n
   const tol = 1e-6 * Math.max(1, diag);
   const r0 = Math.hypot(...sub3(rim, center)), dir = norm3(sub3(rim, center));
   const circles = shape.edges.flatMap((e) => {
-    const c = e.geomType === "CIRCLE" ? circleOf(shape, e.hashCode) : null;
+    const c = e.geomType !== "LINE" ? circleOf(shape, e.hashCode) : null;
     return c && Math.abs(dot3(c.normal, normal)) > 1 - 1e-9 ? [{ id: e.hashCode, ...c }] : [];
   });
   const at = (c: (typeof circles)[number]): [V3, V3] => {
@@ -3851,19 +3943,60 @@ function biarcs(e: Edge): Edge[] | null {
   return fit(0, 1, 0) ? out : null;
 }
 
-function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean, endScale = 1): Solid {
+/**
+ * A path of several pieces meeting smoothly (tangent at every join, e.g. arcs end to end) as one freeform curve
+ * through it, within ARC_SPINE_TOL, running the same way: a tapered sweep along it is one smooth surface — along the
+ * pieces, OpenCascade sweeps each on its own and the size's slope kinks where they meet (rings on a spout). Null if a
+ * join is a corner or the curve can't be fitted.
+ */
+function smoothSpine(path: Wire): Wire | null {
+  const edges = path.edges;
+  if (edges.length < 2) return null;
+  const ends = edges.flatMap((e) => [
+    { p: e.startPoint.toTuple() as V3, t: norm3(e.tangentAt(0).toTuple() as V3) },
+    { p: e.endPoint.toTuple() as V3, t: norm3(e.tangentAt(1).toTuple() as V3) },
+  ]);
+  for (let i = 0; i < ends.length; i++)
+    for (let j = i + 1; j < ends.length; j++)
+      if (i >> 1 !== j >> 1 && Math.hypot(...sub3(ends[i].p, ends[j].p)) < 1e-6 && Math.abs(dot3(ends[i].t, ends[j].t)) < 1 - 1e-6) return null;
+  const len = measureLength(path), n = Math.min(600, Math.max(64, Math.ceil(len / 0.5)));
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    // (points evenly along it by length, through the wire's own direction)
+    const cc = keep(new oc.BRepAdaptor_CompCurve(path.wrapped, true)), u0 = cc.FirstParameter(), u1 = cc.LastParameter();
+    const pts = keep(new oc.NCollection_Array1_gp_Pnt(1, n + 1));
+    for (let i = 0; i <= n; i++) pts.SetValue(i + 1, keep(cc.Value(u0 + ((u1 - u0) * i) / n)));
+    const fit = keep(new oc.GeomAPI_PointsToBSpline(pts, 3, 8, oc.GeomAbs_Shape.GeomAbs_C2, ARC_SPINE_TOL));
+    if (!fit.IsDone()) return null;
+    const mk = keep(new oc.BRepBuilderAPI_MakeEdge(fit.Curve() as never));
+    const wire = assembleWire([cast(mk.Edge()) as Edge]);
+    return Math.hypot(...sub3(wire.startPoint.toTuple() as V3, path.startPoint.toTuple() as V3)) < 1e-4 ? wire : null;
+  } catch {
+    return null;
+  } finally {
+    tmp.forEach((o) => o.delete());
+  }
+}
+
+/** `reversed`: the profile starts from the path's last point, so its size runs from `endScale` there back to 1. */
+function sweepLoops(outer: Wire, holes: Wire[], spine: Wire, round: boolean, endScale = 1, reversed = false): Solid {
   const tapered = Math.abs(endScale - 1) > 1e-9;
   // Tapered along one freeform curve: along the curve itself, the size law even with its length — one smooth light
   // surface. (Along fitted arcs the size's slope kinks a little where two arcs meet — their bends differ — showing
   // as rings, and the surface pieces are heavy: 15 000+ triangles for a spout, not 600.)
-  const raw = tapered && spine.edges.length === 1 && spine.edges[0].geomType !== "LINE" && spine.edges[0].geomType !== "CIRCLE";
-  const path = raw ? spine : arcSpine(spine);
+  // Pieces meeting smoothly (a path of arcs): tapered, as one curve too.
+  const one = (tapered && smoothSpine(spine)) || spine;
+  const raw = tapered && one.edges.length === 1 && one.edges[0].geomType !== "LINE" && one.edges[0].geomType !== "CIRCLE";
+  const path = raw ? one : arcSpine(spine);
   const law = () => {
-    if (raw) return lengthLaw(spine.edges[0], endScale);
+    if (raw) return lengthLaw(one.edges[0], endScale, reversed);
     if (!tapered) return null;
     // (OpenCascade spreads the law over the whole path, arc pieces and all: the size changes evenly along its length)
     const len = measureLength(path), lin = new oc.Law_Linear();
-    lin.Set(0, 1, len, endScale);
+    // (the size along the path's own direction: from the profile's end at 1, whichever end that is)
+    if (reversed) lin.Set(0, endScale, len, 1);
+    else lin.Set(0, 1, len, endScale);
     return lin.Trim(0, len, 1e-6);
   };
   const opts = () => ({ transitionMode: (round ? "round" : "right") as "round" | "right", law: law() as never });
@@ -3905,10 +4038,10 @@ function sweptRing(outer: Wire, holes: Wire[], skin: (w: Wire) => [Shape, Wire, 
 }
 
 /**
- * A size law along one edge, 1 at its start to `endScale` at its end, changing evenly with the length along it (a
- * freeform curve's parameter doesn't run evenly with its length).
+ * A size law along one edge, 1 at its start to `endScale` at its end (`reversed`: `endScale` at its start to 1),
+ * changing evenly with the length along it (a freeform curve's parameter doesn't run evenly with its length).
  */
-function lengthLaw(e: Edge, endScale: number): unknown {
+function lengthLaw(e: Edge, endScale: number, reversed = false): unknown {
   const ad = new oc.BRepAdaptor_Curve(e.wrapped), u0 = ad.FirstParameter(), u1 = ad.LastParameter(), N = 256;
   const at = (u: number): V3 => { const p = ad.Value(u), v: V3 = [p.X(), p.Y(), p.Z()]; p.delete(); return v; };
   const s = [0];
@@ -3921,7 +4054,7 @@ function lengthLaw(e: Edge, endScale: number): unknown {
   ad.delete();
   const pts = new oc.NCollection_Array1_gp_Pnt2d(1, N + 1);
   for (let i = 0; i <= N; i++) {
-    const p = new oc.gp_Pnt2d(i / N, 1 + ((endScale - 1) * s[i]) / s[N]);
+    const f = reversed ? 1 - s[i] / s[N] : s[i] / s[N], p = new oc.gp_Pnt2d(i / N, 1 + (endScale - 1) * f);
     pts.SetValue(i + 1, p);
     p.delete();
   }
@@ -3938,31 +4071,38 @@ function lengthLaw(e: Edge, endScale: number): unknown {
  * `scale`: the profile's size (1 = as drawn), about the path's end it starts from. `endScale`: its size at the far
  * end (× scale), changing evenly along the way (a curved path too — e.g. a spout). A straight path only: `twistDeg`
  * turns the profile that much about the path by its far end (+ = the way `turnDeg` turns it), evenly along the way.
+ * `start`: the path end to start from (the one nearest it); none = the end nearest the face. Another end than the one the
+ * face sits at moves the face there (as `toPath`).
  */
-export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0, scale = 1, twistDeg = 0, endScale = 1): Solid {
+export function sweepFace(shape: Shape, faceId: number, path: Wire, toPath: boolean, round: boolean, turnDeg = 0, scale = 1, twistDeg = 0, endScale = 1, start?: V3): Solid {
   let face = findFace(shape, faceId);
   if (!face || face.geomType !== "PLANE") throw new Error("Sweep: the profile must be a flat face");
-  if (!pathEnds(path).length) throw new Error("Sweep: the path must be open (it has no ends)");
+  const ends = pathEnds(path);
+  if (!ends.length) throw new Error("Sweep: the path must be open (it has no ends)");
+  const near = nearestEnd(face, path)!;
+  const from = start ? ends.reduce((a, b) => (Math.hypot(...sub3(b.point, start)) < Math.hypot(...sub3(a.point, start)) ? b : a)) : near;
+  if (Math.hypot(...sub3(from.point, near.point)) > 1e-6) toPath = true;
   if (toPath) {
-    const end = nearestEnd(face, path)!, c = face.center.toTuple() as V3, n = norm3(face.normalAt().toTuple() as V3);
+    const end = from, c = face.center.toTuple() as V3, n = norm3(face.normalAt().toTuple() as V3);
     const ax = cross3(n, end.dir), s = Math.hypot(...ax);
     if (s > 1e-9) face = rotateShape(face, (Math.atan2(s, dot3(n, end.dir)) * 180) / Math.PI, c, ax);
     face = translateShape(face, sub3(end.point, c));
     if (Math.abs(turnDeg) > 1e-9) face = rotateShape(face, turnDeg, end.point, end.dir);
   }
   if (!(scale > 0)) throw new Error("Sweep: Profile size must be more than 0%");
-  if (Math.abs(scale - 1) > 1e-9) face = scaleShape(face, [scale, scale, scale], nearestEnd(face, path)!.point);
+  if (Math.abs(scale - 1) > 1e-9) face = scaleShape(face, [scale, scale, scale], from.point);
   if (!(endScale > 0)) throw new Error("Sweep: End size must be more than 0%");
   if (Math.abs(twistDeg) > 1e-9 || Math.abs(endScale - 1) > 1e-9) {
-    const start = nearestEnd(face, path)!, end = pathEnds(path).find((e) => Math.hypot(...sub3(e.point, start.point)) > 1e-6);
-    const len = end ? Math.hypot(...sub3(end.point, start.point)) : 0;
+    const end = ends.find((e) => Math.hypot(...sub3(e.point, from.point)) > 1e-6);
+    const len = end ? Math.hypot(...sub3(end.point, from.point)) : 0;
     const straight = !!end && Math.abs(measureLength(path) - len) <= 1e-6 * Math.max(1, len);
-    if (straight) return twistedSweep(face.clone().outerWire(), face.clone().innerWires(), start.point, end.point, twistDeg, endScale);
+    if (straight) return twistedSweep(face.clone().outerWire(), face.clone().innerWires(), from.point, end.point, twistDeg, endScale);
     if (Math.abs(twistDeg) > 1e-9) throw new Error("Sweep: Twist needs a straight path (a line or guide line)");
     // (End size along a curved path: below)
   }
+  const reversed = Math.hypot(...sub3(path.startPoint.toTuple() as V3, from.point)) > 1e-6;
   // outerWire / innerWires delete the face they are called on.
-  return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round, endScale);
+  return sweepLoops(face.clone().outerWire(), face.clone().innerWires(), path, round, endScale, reversed);
 }
 
 /**
@@ -5177,6 +5317,143 @@ export function boundingSize(shape: Geom): V3 {
   return [x1 - x0, y1 - y0, z1 - z0];
 }
 
+
+/** A spur gear's outline (Macro menu): `teeth` involute teeth of module `module` (mm of pitch diameter per tooth). */
+export interface Gear {
+  teeth: number;
+  module: number;
+  /** Pressure angle, degrees (20 is standard). */
+  pressureAngle: number;
+  /** How much thinner each tooth is at the pitch circle (mm), so two printed gears don't bind. */
+  clearance: number;
+}
+
+/**
+ * A gear's sizes (mm): pitch, outside (teeth that would come to a point: cut off where still 0.02 mm wide), root and base
+ * radius; `phi`: a flank's angle from its tooth's middle at radius r (from the base circle out), `half` that at the pitch circle.
+ */
+export function gearSizes(o: Gear): { rp: number; ra: number; rf: number; rb: number; half: number; phi: (r: number) => number } {
+  const n = Math.round(o.teeth), m = o.module, a = (o.pressureAngle * Math.PI) / 180;
+  const rp = (m * n) / 2, rf = rp - 1.25 * m, rb = rp * Math.cos(a);
+  const half = (Math.PI * m) / 2 / 2 / rp - o.clearance / 2 / rp;
+  const inv = (r: number) => { const t = Math.sqrt(Math.max(0, (r / rb) ** 2 - 1)); return t - Math.atan(t); };
+  const phi = (r: number) => half + Math.tan(a) - a - inv(r);
+  let ra = rp + m;
+  if (phi(ra) < 0.01 / ra) {
+    let lo = Math.max(rb, rf), hi = ra;
+    for (let i = 0; i < 60; i++) { const mid = (lo + hi) / 2; if (phi(mid) < 0.01 / mid) hi = mid; else lo = mid; }
+    ra = lo;
+  }
+  return { rp, ra, rf, rb, half, phi };
+}
+
+/**
+ * The gear's outline as a flat face on the ground (XY), centred at `at`, a tooth along +X — or on the plane of
+ * `axes` (x, y in it), a tooth `turn` radians round from x: each flank one smooth curve through points of the true involute, straight down to the root circle below the base circle (few teeth),
+ * arcs on the root and outside circles. Teeth that would come to a point are cut off flat where they still have
+ * width. Then Push/Pull, holes... by hand.
+ */
+export function gearFace(o: Gear, at: V3 = [0, 0, 0], axes: { x: V3; y: V3; turn: number } = { x: [1, 0, 0], y: [0, 1, 0], turn: 0 }): Face {
+  const n = Math.round(o.teeth), m = o.module, a = (o.pressureAngle * Math.PI) / 180;
+  if (!(n >= 4)) throw new Error("Gear: it needs 4 teeth or more");
+  if (!(m > 0)) throw new Error("Gear: the module (size of a tooth) must be more than 0");
+  if (!(a >= (10 * Math.PI) / 180 && a <= (35 * Math.PI) / 180)) throw new Error("Gear: the pressure angle must be between 10° and 35°");
+  const { ra, rf, rb, half, phi } = gearSizes({ ...o, teeth: n });
+  if (!(half > 0)) throw new Error("Gear: the clearance is as thick as the teeth");
+  const rs = Math.max(rb, rf), phi0 = phi(rs);
+  if (!(phi0 < Math.PI / n - 1e-6)) throw new Error("Gear: the teeth would touch at the root — use more teeth or less clearance");
+  const { x, y, turn } = axes;
+  const pt = (r: number, ang: number): V3 => {
+    const c = r * Math.cos(ang + turn), s = r * Math.sin(ang + turn);
+    return [at[0] + c * x[0] + s * y[0], at[1] + c * x[1] + s * y[1], at[2] + c * x[2] + s * y[2]];
+  };
+  const edges: Edge[] = [];
+  const steps = 10;
+  const flank = (mid: number, side: 1 | -1, up: boolean): void => {
+    const pts: V3[] = [];
+    for (let k = 0; k <= steps; k++) {
+      const t = k / steps, r = rs + (ra - rs) * (1 - (1 - t) * (1 - t)); // (closer near the base, where it bends most)
+      pts.push(pt(r, mid + side * phi(r)));
+    }
+    if (!up) pts.reverse();
+    edges.push(makeBSplineApproximation(pts, { tolerance: 1e-5, degMin: 3, degMax: 3 }));
+  };
+  for (let i = 0; i < n; i++) {
+    const mid = (2 * Math.PI * i) / n, prev = mid - (2 * Math.PI) / n;
+    edges.push(makeThreePointArc(pt(rf, prev + phi0), pt(rf, mid - Math.PI / n), pt(rf, mid - phi0)));
+    if (rs > rf + 1e-9) edges.push(makeLine(pt(rf, mid - phi0), pt(rs, mid - phi0)));
+    flank(mid, -1, true);
+    edges.push(makeThreePointArc(pt(ra, mid - phi(ra)), pt(ra, mid), pt(ra, mid + phi(ra))));
+    flank(mid, 1, false);
+    if (rs > rf + 1e-9) edges.push(makeLine(pt(rs, mid + phi0), pt(rf, mid + phi0)));
+  }
+  let f = makeFace(assembleWire(edges));
+  if (dot3(f.normalAt().toTuple() as V3, cross3(x, y)) < 0) f = f.flipOrientation();
+  if (!isValidShape(f)) throw new Error("Gear: could not make the outline");
+  return f;
+}
+
+/** Where a gear is: its centre and axis (on one face's plane), a unit vector along a tooth, and its even scale since made. */
+export interface GearPlace {
+  center: V3;
+  normal: V3;
+  tooth: V3;
+  scale: number;
+}
+
+/**
+ * A Macro → Gear gear's place read off its shape: its teeth's tip arcs (the biggest circle arcs, one per tooth, on
+ * one axis) — on the lowest of its end faces (a pushed-up gear on the ground: the ground). Null if they aren't
+ * there (changed since, or scaled unevenly).
+ */
+export function gearPlace(shape: Shape, g: Gear): GearPlace | null {
+  const n = Math.round(g.teeth), ra = gearSizes(g).ra;
+  const arcs: { c: V3; n: V3; r: number; mid: V3 }[] = [];
+  for (const e of shape.edges) {
+    if (e.geomType !== "CIRCLE") continue;
+    const c = circleOf(shape, e.hashCode);
+    if (c) arcs.push({ c: c.center, n: norm3(c.normal), r: c.radius, mid: e.pointAt(0.5).toTuple() as V3 });
+  }
+  arcs.sort((x, y) => y.r - x.r);
+  for (const a of arcs) {
+    // (the arcs of this radius on this one plane and axis: one per tooth)
+    const same = arcs.filter((b) => Math.abs(b.r - a.r) < 1e-6 * Math.max(1, a.r) && Math.hypot(...sub3(b.c, a.c)) < 1e-6 * Math.max(1, a.r) && Math.abs(Math.abs(dot3(b.n, a.n)) - 1) < 1e-6);
+    if (same.length !== n) continue;
+    const scale = a.r / ra;
+    const ends = arcs.filter((b) => Math.abs(b.r - a.r) < 1e-6 * Math.max(1, a.r) && Math.abs(Math.abs(dot3(b.n, a.n)) - 1) < 1e-6 && Math.hypot(...cross3(sub3(b.c, a.c), a.n)) < 1e-6 * Math.max(1, a.r));
+    ends.sort((x, y) => x.c[2] - y.c[2] || dot3(x.c, a.n) - dot3(y.c, a.n));
+    const low = ends[0];
+    let normal = a.n;
+    if (normal[2] < -1e-9) normal = neg(normal); // (facing up where it can: a face to push up)
+    const t = sub3(low.mid, low.c);
+    return { center: low.c, normal, tooth: norm3(sub3(t, normal.map((k) => k * dot3(t, normal)) as V3)), scale };
+  }
+  return null;
+}
+
+/**
+ * A gear meshing with one at `place` (Macro → Gear with a gear selected): `teeth` of the same module, pressure angle
+ * and clearance (scaled as it is), a flat face on its plane, its centre the two pitch radii away `aroundDeg` round
+ * from the side the world X points to (along the plane), turned so its teeth sit in the other's gaps.
+ */
+export function gearMate(g: Gear, place: GearPlace, teeth: number, aroundDeg: number): { face: Face; gear: Gear; center: V3; distance: number } {
+  const k = place.scale, n1 = Math.round(g.teeth), n2 = Math.round(teeth);
+  const mate: Gear = { teeth: n2, module: g.module * k, pressureAngle: g.pressureAngle, clearance: g.clearance * k };
+  const z = place.normal;
+  // The plane's own axes: e1 the world X along it (the world Y if the axis runs along X), e2 = z × e1
+  const flat = (v: V3) => sub3(v, z.map((c) => c * dot3(v, z)) as V3);
+  let e1 = flat([1, 0, 0]);
+  if (Math.hypot(...e1) < 1e-6) e1 = flat([0, 1, 0]);
+  e1 = norm3(e1);
+  const e2 = cross3(z, e1);
+  const ang = (v: V3) => Math.atan2(dot3(v, e2), dot3(v, e1));
+  const around = (aroundDeg * Math.PI) / 180, u: V3 = add3(e1.map((c) => c * Math.cos(around)) as V3, e2.map((c) => c * Math.sin(around)) as V3);
+  const distance = ((n1 + n2) * mate.module) / 2, center = add3(place.center, u.map((c) => c * distance) as V3);
+  // Gear 1's tooth β from the line of centres; turned on by β, gear 2 turns back by β·n1/n2 — a gap faces gear 1 at β = 0
+  const beta = ang(place.tooth) - around;
+  const theta = around + Math.PI + Math.PI / n2 - (beta * n1) / n2;
+  return { face: gearFace(mate, center, { x: e1, y: e2, turn: theta }), gear: mate, center, distance };
+}
 
 /** Battery case (Macro menu): a block with a grid of round holes, `columns` × `rows`, the batteries standing in them. */
 export interface BatteryCase {

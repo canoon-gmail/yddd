@@ -93,6 +93,8 @@ body.pro #recent { width: 50px; padding: 4px 2px; }
 body.pro #recent-list .tb-btn { padding: 3px 1px; min-width: 0; }
 body.pro #recent-list .tb-btn svg { display: none; }
 body.pro #recent-list .tb-btn span { font-size: 9.5px; }
+/* Pro: tool panels without their help text (what to click, how a field works) */
+body.pro .op-help, body.pro #measure-panel .tip, body.pro #measure-panel .intro { display: none; }
 .panel { padding: 8px 10px; border-bottom: 1px solid var(--border); overflow: auto; }
 .panel:first-child { flex: 1; min-height: 120px; }
 .panel h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
@@ -106,6 +108,8 @@ body.pro #recent-list .tb-btn span { font-size: 9.5px; }
 .ol-swatch.face { background: transparent; border: 2px solid #6f9bd1; height: 6px; margin: 2px 0; }
 .ol-swatch.path { background: transparent; border-top: 2px solid #ff69b4; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
 .ol-swatch.guide { background: transparent; border-top: 2px dashed #ff6fb5; border-radius: 0; height: 0; margin: 4px 0; transform: rotate(-30deg); }
+.ol-swatch.pic { background: transparent; width: 14px; height: 14px; margin: -2px; color: #6f9bd1; }
+.ol-swatch.pic svg { width: 14px; height: 14px; display: block; }
 .ol-swatch.mesh { background: repeating-linear-gradient(45deg, #9aa5b1 0 2px, #5d6670 2px 4px); }
 .ol-look { cursor: pointer; }
 .ol-look:hover { outline: 1px solid var(--text); outline-offset: 1px; }
@@ -249,6 +253,9 @@ kbd {
 }
 .dim-label.sel { background: #ffd166; }
 .dim-label.preview { pointer-events: none; }
+.dim-label.note { background: #7ee787; color: #0b2e13; font-size: 13px; }
+.dim-label.note.sel { background: #ffd166; }
+.dim-label.editing { border: 1px solid #0b2e13; outline: none; font: inherit; font-size: 13px; cursor: text; }
 
 #measure-panel {
   position: absolute; top: 12px; left: 12px; width: 250px; padding: 10px 12px; z-index: 15;
@@ -296,6 +303,11 @@ kbd {
 }
 #sketch-panel .round-box input:focus { outline: none; border-color: var(--accent); }
 #sketch-panel .round-box .btn { margin-left: auto; padding: 2px 10px; }
+#sketch-panel .scan-box select { padding: 2px 4px; font: inherit; font-size: 12px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+#sketch-panel .scan-box input[type=range] { width: 110px; padding: 0; border: 0; background: none; }
+#sketch-panel .scan-box input[type=checkbox] { width: auto; }
+#sketch-panel .scan-box output { min-width: 58px; font-size: 12px; }
+#sketch-panel .scan-box [data-act=scan-auto] { margin-left: 0; }
 #sketch-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 /* Rarely used tools as small buttons in the viewport's bottom-left corner, above the view name (Revolve, Sweep, Array copy). */
 #corner-tools { position: absolute; left: 10px; bottom: 28px; z-index: 15; display: flex; gap: 4px; }
@@ -416,6 +428,22 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
   padding: 3px 6px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
 }
 #tool-panel textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 44px; }
+#tool-panel .tp-text { display: flex; gap: 4px; align-items: flex-start; }
+#tool-panel .tp-text textarea { flex: 1; min-width: 0; }
+#tool-panel .tp-sym { flex: none; height: 28px; padding: 0 5px; font: inherit; font-size: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
+#tool-panel .tp-sym:hover, #tool-panel .tp-sym.on { border-color: var(--accent); }
+#symbol-pop {
+  position: fixed; z-index: 40; padding: 6px 8px; background: rgba(38, 40, 44, 0.98); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+#symbol-pop .sym-row { display: flex; align-items: center; gap: 8px; }
+#symbol-pop .sym-row > span { width: 48px; flex: none; color: var(--muted); font-size: 11px; }
+#symbol-pop .sym-row > div { display: flex; flex-wrap: wrap; max-width: 336px; }
+#symbol-pop button {
+  width: 28px; height: 28px; padding: 0; border: 1px solid transparent; border-radius: 4px; background: none; color: var(--text);
+  font: 18px/1 "YDDD Symbols 2", "YDDD Symbols", sans-serif; cursor: pointer;
+}
+#symbol-pop button:hover, #symbol-pop button:focus { background: var(--panel-2); border-color: var(--accent); outline: none; }
 #tool-panel .tp-field input, #tool-panel .tp-field select { width: 110px; box-sizing: border-box; }
 #tool-panel textarea:focus, #tool-panel .tp-field input:focus, #tool-panel .tp-field select:focus { outline: none; border-color: var(--accent); }
 #tool-panel .tp-error { color: var(--danger); font-size: 12px; margin-top: 4px; }

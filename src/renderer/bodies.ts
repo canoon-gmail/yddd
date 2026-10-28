@@ -1,4 +1,4 @@
-/** Bodies made from other bodies: what they keep of them (look, text, group, name), and dimensions that follow them. */
+/** Bodies made from other bodies: what they keep of them (look, text, gear, group, name), and dimensions that follow them. */
 import { isMesh, matchCircleEdge, matchStraightEdge, type Geom, type Shape } from "./kernel";
 import { isBrep, type Body, type Dimension, type Look } from "./document";
 
@@ -39,9 +39,11 @@ export function withLookOf<T extends Body>(made: T, from: Body): T {
   return from.look ? { ...made, look: from.look } : made;
 }
 
-/** A copy of a Text tool letter is one too (its text can be edited, see TextRecord); it keeps its look. */
+/** A copy of a Text tool letter is one too (its text can be edited, see TextRecord); of a gear, a gear (see GearRecord); it keeps its look. */
 export function withTextOf<T extends Body>(made: T, from: Body): T {
-  return withLookOf(from.text ? { ...made, text: from.text } : made, from);
+  const gear = from.gear ? { ...made, gear: from.gear } : made;
+  const pic = from.picture ? { ...gear, picture: from.picture } : gear; // (a copy of a picture shows it too)
+  return withLookOf(from.text ? { ...pic, text: from.text } : pic, from);
 }
 
 /** A new body made from `from` (extruded, cut off, split off...) goes in the same group, with the same look. */
@@ -55,5 +57,6 @@ export const AUTO_FACE_NAME = /^(Rectangle|Circle|Polygon|Text|Face|Sketch|Ring)
 /** The solid a flat face object was pushed / pulled into: its group, and the name the user gave it. */
 export function extrudedFrom<T extends Body>(made: T, face: Body): T {
   const named = AUTO_FACE_NAME.test(face.name) ? made : { ...made, name: face.name };
-  return withTextOf(inGroupOf(named, face), face);
+  const { picture: _, ...solid } = withTextOf(inGroupOf(named, face), face); // (a picture stays on its face)
+  return solid as T;
 }

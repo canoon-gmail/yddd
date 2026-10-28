@@ -1,5 +1,6 @@
 /** The undo history saved in a .yddd file. */
-import type { ArrayRecord, Body, Dimension, GroupLooks, Guide, Look, TextRecord } from "./document";
+import type { PictureRecord } from "./picture";
+import type { ArrayRecord, Body, Dimension, GearRecord, GroupLooks, Guide, Look, TextRecord } from "./document";
 
 /** Undo steps a saved file keeps (and redo steps): reopened, Undo goes back that far. */
 export const SAVED_HISTORY = 50;
@@ -21,7 +22,7 @@ export interface SavedHistory {
   ids: number[];
   dims?: Dimension[];
   arrays?: ArrayRecord[];
-  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; locked?: true; s: number }[];
+  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; s: number }[];
   shapes: string[];
   undo: SavedStep[];
   redo: SavedStep[];

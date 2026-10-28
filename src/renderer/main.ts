@@ -87,6 +87,7 @@ import {
   resizeRounds,
   fillRounds,
   holeAt,
+  edgeChain,
   circleOfEdge,
   lineOfEdge,
   fillHoles,
@@ -102,6 +103,7 @@ import {
   revolveRefusal,
   sweepFace,
   profileOnPath,
+  pathEnds,
   lineWire,
   type Axis,
   type V3,
@@ -137,8 +139,8 @@ import {
   movedIds,
   parseStl,
 } from "./kernel";
-import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
-import { Viewport, sameItem, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
+import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
+import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
@@ -149,15 +151,18 @@ import { HOUSE } from "./house";
 import { PLANTER } from "./planter";
 import { PROPELLER } from "./propeller";
 import { MeasureTool } from "./measure";
+import { LABEL_TEXT, LabelTool } from "./label";
 import { SketchTool, type SketchFrame } from "./sketch";
 import { byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, XRAY_OPACITY_KEY } from "./format";
 import { eventKey, isDefault, keyTable, keysPanelOpen, keysText, loadKeys, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
 import type { TutCtx, Tutorial } from "./tutorials";
 import * as macros from "./macros";
-import { $, escapeHtml, fmt, isPro } from "./ui";
+import { $, escapeHtml, fmt, inchFields, isPro } from "./ui";
 import { dragsOf, OpWaiting, parsePercent, type OpDrag, type OpField, type OpInput, type OpOutcome, type OpSpec } from "./ops";
 import { extrudedFrom, inGroupOf, LOOK_PRESETS, notEditable, notMesh, relinkDimensions, swatchStyle, withTextOf } from "./bodies";
 import { HISTORY_BYTES, SAVED_HISTORY, type SavedHistory, type SavedStep } from "./savefile";
+import { closeSymbols, openSymbols } from "./symbols";
+import { addImage, imagesOf, loadImages, PICTURE_TYPES, type PictureRecord } from "./picture";
 import { EDGE_CURSOR, loadRecent, MODE_HINTS, RECENT_ITEMS, RECENT_MAX, RECENT_USE_KEY, RECENT_KEY, SKETCH_COMMANDS, TOOLBAR, TOOLBAR_ITEMS, type ToolbarItem } from "./toolbar";
 
 
@@ -306,6 +311,8 @@ export class App implements ToolHost {
   randomDefaults = { count: 20, smallest: 50, biggest: 150, align: 0, spin: 1, overlap: 0, seed: 1 };
   gridfinityDefaults = { width: 2, depth: 1, height: 6, columns: 1, rows: 1, lip: 1, magnets: 0, wall: 1.2 };
   baseplateDefaults = { width: 3, depth: 3, drawerWidth: 0, drawerDepth: 0, magnets: 0 };
+  gearDefaults = { teeth: 20, module: 2, outside: 0, angle: 20, clearance: 0.1 };
+  gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
@@ -326,6 +333,8 @@ export class App implements ToolHost {
     this.viewport.nav = navGestures(this.keys);
     this.viewport.setOpacity(opacitySetting(SOLID_OPACITY_KEY, 100) / 100, opacitySetting(XRAY_OPACITY_KEY, 80) / 100);
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
+    this.viewport.onLabelDoubleClick = (i) => this.editLabel(i);
+    this.viewport.onViewChange = () => this.positionHud();
     this.doc.relinkDims = (dims, prev, next) => relinkDimensions(dims, prev, next);
     this.doc.linkCopies = (prev, next, arrays, label) => this.linkCopies(prev, next, arrays, label);
     this.buildToolbar();
@@ -362,7 +371,7 @@ export class App implements ToolHost {
     $("status-hint").textContent = isPro() ? text.split(" · ")[0] : text;
   }
 
-  /** Pro layout (Ctrl+Shift+D, remembered — a secret: not listed anywhere): less help text — a one-row sketch panel, a small text-only Recent strip, short hints. */
+  /** Pro layout (Ctrl+Shift+P, remembered — a secret: not listed anywhere): less help text — a one-row sketch panel, a small text-only Recent strip, short hints. */
   private togglePro(): void {
     const on = !isPro();
     document.body.classList.toggle("pro", on);
@@ -526,6 +535,7 @@ export class App implements ToolHost {
         b.style.setProperty("--c", c.color);
         b.addEventListener("pointerdown", (e) => e.stopPropagation()); // (not a click in the view)
         b.addEventListener("click", () => {
+          if (c.pick) return c.pick();
           const input = this.op?.inputs.find((i) => i.dataset.key === c.key);
           if (!input) return;
           input.value = String(c.value);
@@ -539,7 +549,7 @@ export class App implements ToolHost {
     list.forEach((c, i) => {
       const el = this.choicesEl.children[i] as HTMLElement;
       const input = this.op!.inputs.find((inp) => inp.dataset.key === c.key);
-      el.classList.toggle("on", !!input && Number(input.value) === c.value);
+      el.classList.toggle("on", c.pick ? !!c.on : !!input && Number(input.value) === c.value);
       // (kept inside the view — e.g. +Z above an object filling it — still clickable, its line pointing the way)
       const p = this.viewport.toScreen(new THREE.Vector3(...c.at)), m = 18;
       const s = { x: Math.min(Math.max(p.x, r.left + m), r.right - m), y: Math.min(Math.max(p.y, r.top + m), r.bottom - m) };
@@ -621,10 +631,10 @@ export class App implements ToolHost {
   // ================================================================ commands
 
   run(cmd: string, recordRecent = true): void {
-    // While sketching, only the view may change: Ctrl+Z undoes a sketch step, Done / Cancel end it.
+    // While sketching, only the view may change: Ctrl+Z undoes a sketch step, Exit Sketch Mode ends it.
     if (this.tool instanceof SketchTool && !SKETCH_COMMANDS.has(cmd)) {
       if (cmd === "edit.undo") return this.tool.undo();
-      return this.toast("Sketch: click Done (keep the outlines as faces) or Cancel first", "error");
+      return this.toast("Sketch: click Exit Sketch Mode first (keeps the outlines as faces)", "error");
     }
     try {
       this.dispatch(cmd);
@@ -808,6 +818,7 @@ export class App implements ToolHost {
       case "macro.battery": return macros.openBatteryCase(this);
       case "macro.gridfinity": return macros.openGridfinityBin(this);
       case "macro.baseplate": return macros.openGridfinityBaseplate(this);
+      case "macro.gear": return macros.openGear(this);
       case "macro.random": return macros.openRandom(this);
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
@@ -819,6 +830,7 @@ export class App implements ToolHost {
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
       case "tool.measure": return this.startMeasure();
+      case "tool.label": return this.startLabel();
       case "tool.divideFace": return this.startDivideFace();
       case "edit.clearGuides":
         if (!this.doc.guides.length) return this.toast("No guide lines");
@@ -832,7 +844,8 @@ export class App implements ToolHost {
       case "xf.move":
         if (this.selDot >= 0) return this.opPullToPoint();
         if (this.selGuide >= 0 && !this.selection.length) return this.startGuideMove();
-        return this.mode === "edge" && this.selection.some((s) => s.kind === "edge") ? this.startEdgeMove() : this.startTransform("translate");
+        // (a path's lines in Edge mode: the whole path moves — it is only its lines)
+        return this.mode === "edge" && this.selection.some((s) => s.kind === "edge" && this.doc.get(s.body)?.kind !== "path") ? this.startEdgeMove() : this.startTransform("translate");
       case "xf.rotate": return this.startTransform("rotate");
       case "xf.scale": return this.opScale();
       case "xf.moveFrom": return this.startPointMove();
@@ -870,6 +883,7 @@ export class App implements ToolHost {
 
       case "file.new": void this.fileNew(); return;
       case "file.open": void this.fileOpen(); return;
+      case "file.openPicture": void this.fileOpenPicture(); return;
       case "file.save": void this.fileSave(false); return;
       case "file.saveAs": void this.fileSave(true); return;
       case "file.saveAndClose":
@@ -986,7 +1000,7 @@ export class App implements ToolHost {
       const round = this.slideEdgeAt(e);
       if (round) return this.startTransform("translate", true, round.point, round.frame);
     }
-    const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
+    const pick = this.pickInMode(e);
     let item: SelItem | null = pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null;
     // Two solids in the same place (e.g. a copy not moved yet): stay on the selected one instead of flipping to its twin.
     const sel = this.selection.length === 1 && this.selection[0].kind === "body" ? this.selection[0].body : null;
@@ -1016,6 +1030,29 @@ export class App implements ToolHost {
       const exists = this.selection.some((s) => sameItem(s, whole));
       this.setSelection(!(e.shiftKey || e.ctrlKey) ? [whole] : exists ? this.selection.filter((s) => !sameItem(s, whole)) : [...this.selection, whole]);
       return;
+    }
+    // Edge mode, on a line of a path: the whole path, all its lines / arcs (Shift: added / taken off).
+    const pathBody = item.kind === "edge" ? this.doc.get(item.body) : undefined;
+    if (pathBody?.kind === "path") {
+      const all: SelItem[] = pathBody.shape.edges.map((x) => ({ kind: "edge", body: pathBody.id, id: x.hashCode }));
+      const rest = this.selection.filter((s) => s.body !== pathBody.id);
+      const add = e.shiftKey || e.ctrlKey, had = this.selection.some((s) => s.body === pathBody.id);
+      this.setSelection(add ? (had ? rest : [...rest, ...all]) : all);
+      if (!add || !had) this.hint(`Path "${pathBody.name}" (${all.length} ${all.length === 1 ? "line" : "lines / arcs"}) · G move · Del delete · Shift+click another: add it`);
+      return;
+    }
+    // Edge mode, a double click on an edge: it and the edges running on from it smoothly (the short pieces of a long
+    // curve, e.g. where a spout meets a pot), all selected (Shift: added to the selection).
+    const twice = item.kind === "edge" && this.lastEdgeClick?.body === item.body && this.lastEdgeClick.id === item.id && e.timeStamp - this.lastEdgeClick.at < 450;
+    this.lastEdgeClick = item.kind === "edge" && !twice ? { body: item.body, id: item.id, at: e.timeStamp } : null;
+    if (twice && this.mode === "edge") {
+      const chain = this.edgeChainOf(item);
+      if (chain.length > 1) {
+        const add = e.shiftKey || e.ctrlKey;
+        this.setSelection(add ? [...this.selection.filter((s) => !chain.some((c) => sameItem(c, s))), ...chain] : chain);
+        this.hint(`${chain.length} connected edges · F fillet · Shift+F chamfer · double-click another edge: add Shift`);
+        return;
+      }
     }
     // Edge mode, on an edge of a hole's rim: the whole rim (Shift: added); a click on an edge of the
     // selected rim: just that edge (e.g. to fillet one side).
@@ -1055,10 +1092,33 @@ export class App implements ToolHost {
   }
 
   /** The whole solid for a face that is a piece of a smoothly joined surface (see smoothSurfaceFaces), else null. */
+  /** What a click picks in the current mode — in Edge mode, inside a picture (no edge near): the picture. */
+  private pickInMode(e: PointerEvent | MouseEvent): VpPick | null {
+    const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
+    if (pick || this.mode !== "edge") return pick;
+    const w = this.viewport.pick(e.clientX, e.clientY, "body");
+    return w && this.doc.get(w.body)?.picture ? w : null;
+  }
+
   private wholeSolidOf(item: { kind: string; body: number; id: number }): SelItem | null {
-    if (item.kind !== "face") return null;
     const b = this.doc.get(item.body);
+    if (b?.picture) return { kind: "body", body: item.body, id: 0 }; // (a picture: always whole, in any mode)
+    if (item.kind !== "face") return null;
     return b?.kind === "solid" && isBrep(b) && smoothSurfaceFaces(b.shape).has(item.id) ? { kind: "body", body: item.body, id: 0 } : null;
+  }
+
+  /** The last click on an edge (to tell a double click). */
+  private lastEdgeClick: { body: number; id: number; at: number } | null = null;
+
+  /** Edge `item` and the edges running on from it smoothly (see edgeChain); [] if its body has no B-rep. */
+  private edgeChainOf(item: SelItem): SelItem[] {
+    const b = this.doc.get(item.body);
+    if (!b || !isBrep(b)) return [];
+    try {
+      return edgeChain(b.shape, item.id).map((id) => ({ kind: "edge" as const, body: item.body, id }));
+    } catch {
+      return [];
+    }
   }
 
   /** All the edges of the hole's rim that edge `item` is on (any shape of hole), or null if it isn't a hole's rim. */
@@ -1279,10 +1339,12 @@ export class App implements ToolHost {
       const round = this.slideEdgeAt(e);
       this.viewport.showSnapMarker(round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null);
     }
-    const pick = this.viewport.pick(e.clientX, e.clientY, this.mode);
+    const pick = this.pickInMode(e);
     // Face mode: preview the edge a click would switch to.
     const at: SelItem | null = this.selectedEdgeHit(e) ?? (pick ? { kind: pick.kind, body: pick.body, id: pick.id } : null);
-    const item = (at && this.wholeSolidOf(at)) ?? at;
+    // (a line of a path, in Edge mode: the whole path lights up — a click picks it all)
+    const onPath = at?.kind === "edge" && this.doc.get(at.body)?.kind === "path";
+    const item = onPath ? { kind: "body" as const, body: at!.body, id: 0 } : (at && this.wholeSolidOf(at)) ?? at;
     if (!sameItem(item, this.hover) && !(item === null && this.hover === null)) {
       this.hover = item;
       this.viewport.setHighlight(this.selection, this.hover);
@@ -1471,7 +1533,9 @@ export class App implements ToolHost {
   startOp(spec: OpSpec): void {
     this.endInteractions();
     const panel = this.opPanel;
-    panel.innerHTML = `<h4>${spec.title}</h4>${spec.note ? `<div class="op-note">${spec.note}</div>` : ""}`;
+    // (a note that is only help text: hidden whole in the Pro layout)
+    const helpOnly = spec.note && /^<span class="op-help">(?:(?!<span)[^])*<\/span>$/.test(spec.note);
+    panel.innerHTML = `<h4>${spec.title}</h4>${spec.note ? `<div class="op-note${helpOnly ? " op-help" : ""}">${spec.note}</div>` : ""}`;
     const inputs = spec.fields.map((f): OpInput => {
       const label = document.createElement("label");
       label.textContent = f.label;
@@ -1495,7 +1559,7 @@ export class App implements ToolHost {
         input.inputMode = "decimal";
         input.dataset.mm = String(f.mm);
         input.dataset.step = String(f.step ?? 1);
-        input.title = "%, or a size: +10mm / -10mm (that much bigger / smaller), 60mm (that size), +10% / -10%";
+        input.title = "%, or a size: +10mm / -10mm (that much bigger / smaller), 60mm (that size), +10% / -10% — inches too: 2in or 2\"";
         input.value = String(f.value);
         input.addEventListener("change", () => {
           const v = this.opNum(input);
@@ -2450,7 +2514,7 @@ export class App implements ToolHost {
   }
 
   /** The Sweep panel for the profile / path picked so far; clicks in the viewport pick the others. */
-  private openSweep(profile: { bodyId: number; faceId: number } | null, spine: Spine | null): void {
+  private openSweep(profile: { bodyId: number; faceId: number } | null, spine: Spine | null, startEnd?: number, carry: Record<string, number> = {}): void {
     const pb = profile && this.doc.get(profile.bodyId);
     const body = pb && isBrep(pb) ? pb : null;
     const guide = spine && "guide" in spine ? this.doc.guides[spine.guide] : undefined;
@@ -2461,19 +2525,28 @@ export class App implements ToolHost {
     // the side); one already at the path's end stays put unless "Centre" is ticked.
     let onPath = false;
     const straight = !!guide || (!!pathBody && !!this.straightPath(pathBody.id));
+    // The path's two ends: Begin (where the sweep starts — the one nearest the profile unless picked) and End marks, to click.
+    let ends: V3[] = [];
+    let begin = 0;
     if (body && wire) {
       try {
         onPath = profileOnPath(body.shape, profile!.faceId, wire);
+        ends = pathEnds(wire).map((e) => e.point);
       } catch {
         // compute reports what is wrong
       }
-      if (onPath) fields.push({ key: "toPath", label: "Centre profile on the path", value: 0, type: "checkbox" });
+      if (onPath) fields.push({ key: "toPath", label: "Centre profile on the path", value: carry.toPath ?? 0, type: "checkbox" });
+      if (ends.length === 2) {
+        const c = findFace(body.shape, profile!.faceId)?.center.toTuple() as V3 | undefined;
+        const d = (p: V3) => (c ? Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]) : 0);
+        begin = startEnd ?? (d(ends[1]) < d(ends[0]) ? 1 : 0);
+      }
       fields.push({ key: "turn", label: "Turn profile (°)", value: this.defaults.sweepTurn, step: 5 });
       // (the profile's size for this sweep only — e.g. smaller to fit a tight bend; the face itself stays)
-      fields.push({ key: "size", label: "Profile size (%)", value: 100, step: 5 });
+      fields.push({ key: "size", label: "Profile size (%)", value: carry.size ?? 100, step: 5 });
       // (turned evenly on the way — a straight path only, e.g. a propeller blade; sized evenly on any path, e.g. a spout)
-      fields.push({ key: "twist", label: "Twist (°)", value: 0, step: 5, off: () => !straight });
-      fields.push({ key: "endSize", label: "End size (%)", value: 100, step: 5 });
+      fields.push({ key: "twist", label: "Twist (°)", value: carry.twist ?? 0, step: 5, off: () => !straight });
+      fields.push({ key: "endSize", label: "End size (%)", value: carry.endSize ?? 100, step: 5 });
     }
     if (body?.kind === "solid") fields.push({ key: "newBody", label: "New solid", value: this.defaults.joinNew ? 1 : 0, type: "checkbox" });
     const todo = !body ? "click a flat face for the profile (a flat ring makes a tube)" : !wire ? "click a path or guide line to sweep along" : "";
@@ -2499,9 +2572,12 @@ export class App implements ToolHost {
     const take = (t: Target) => {
       if (!t) return;
       if (t === "bad") return this.toast("Sweep: the profile must be a flat face — or click a path or guide line to sweep along", "error");
-      spec.remember!(this.opValues().values); // (the panel opens again with them)
-      if ("spine" in t) this.openSweep(profile, t.spine);
-      else this.openSweep(t.profile, spine);
+      const values = this.opValues().values;
+      spec.remember!(values); // (the panel opens again with them)
+      // (the same path clicked again keeps its Begin; another profile too)
+      const same = "spine" in t && JSON.stringify(t.spine) === JSON.stringify(spine);
+      if ("spine" in t) this.openSweep(profile, t.spine, same && ends.length === 2 ? begin : undefined, values);
+      else this.openSweep(t.profile, spine, ends.length === 2 ? begin : undefined, values);
     };
     const picked: SelItem[] = [];
     if (body) picked.push(body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: profile!.faceId });
@@ -2512,11 +2588,22 @@ export class App implements ToolHost {
       label: "Sweep",
       fields,
       note: `Profile: ${body ? (body.kind === "face" ? body.name : `a face of ${body.name}`) : "—"}<br>Path: ${guide ? "guide line" : pathBody ? pathBody.name : "—"}`,
-      hint: `Sweep: ${todo ? `${todo} · ` : "click another face / path / guide line to change it · Enter apply · "}Esc cancel`,
+      hint: `Sweep: ${todo ? `${todo} · ` : `${ends.length === 2 ? "click the End mark to begin there · " : ""}click another face / path / guide line to change it · Enter apply · `}Esc cancel`,
       compute: ({ round, toPath, turn, size, twist, endSize, newBody }) => {
         if (!body || !wire) throw new OpWaiting(todo);
-        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100, straight ? twist || 0 : 0, (endSize ?? 100) / 100), !!newBody, "Sweep");
+        const from = ends.length === 2 ? ends[begin] : undefined;
+        return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100, straight ? twist || 0 : 0, (endSize ?? 100) / 100, from), !!newBody, "Sweep");
       },
+      choices: ends.length === 2 ? ends.map((at, i) => ({
+        at, key: "", value: i, on: i === begin, label: i === begin ? "Begin" : "End", color: "#f4a259",
+        title: i === begin ? "The sweep begins here" : "Begin the sweep here instead",
+        pick: () => {
+          if (i === begin) return;
+          const values = this.opValues().values;
+          spec.remember!(values);
+          this.openSweep(profile, spine, i, values);
+        },
+      })) : undefined,
       remember: ({ round, turn, newBody }) => {
         this.defaults.sweepRound = round;
         if (turn !== undefined) this.defaults.sweepTurn = turn;
@@ -2588,7 +2675,7 @@ export class App implements ToolHost {
     this.startOp({
       title: "Scale",
       label: "Scale",
-      ...(text ? { note: "Text scales evenly — the letters keep their shape" } : {}),
+      ...(text ? { note: `<span class="op-help">Text scales evenly — the letters keep their shape</span>` } : {}),
       fields: [
         // (a typed size: "+10mm" / "60mm"... — X / Y / Z along that axis, Scale on the longest side)
         { key: "s", label: "Scale (% or ±mm)", value: 100, step: 5, min: 0, mm: Math.max(...size) },
@@ -2667,7 +2754,7 @@ export class App implements ToolHost {
     this.startOp({
       title: `Resize hole (${what})`,
       label: "Resize hole",
-      note: `<div>${what} · every wall moves out (or in) by half the change</div>`,
+      note: `<div>${what}<span class="op-help"> · every wall moves out (or in) by half the change</span></div>`,
       fields: [{ key: "c", label: "Bigger by (mm, − smaller)", value: 0, step: 0.1 }],
       compute: ({ c }) => {
         const resized = () => new Map<number, Geom>([...perBody].map(([id, hs]) => [id, resizeHoles(this.solidOf(id, "Resize hole"), hs, c)]));
@@ -3308,7 +3395,8 @@ export class App implements ToolHost {
   }
 
   /**
-   * Combine `toolIds` into `targetId` (keeps its id; union/intersect results are renamed "Solid N"); one undo step.
+   * Combine `toolIds` into `targetId` (keeps its id; a union is named after the solids joined — "spout+body", many:
+   * "spout + 5 more" —, an intersection "Solid N", a subtraction keeps the target's name); one undo step.
    * A result in separate pieces (e.g. a bar cut through) becomes one body per piece: the largest
    * keeps the target's id. Returns the resulting body ids, or null (with a message, nothing changed)
    * if a union would leave solids that don't touch in one body. Throws on failure.
@@ -3334,7 +3422,9 @@ export class App implements ToolHost {
       return null;
     }
     const removed = new Set(keep ? [] : toolIds);
-    const name = op !== "subtract" && !/^Solid \d+$/.test(target.name) ? this.doc.nextName("Solid") : target.name;
+    const joined = [target, ...tools].map((b) => b.name).join("+");
+    const name = op === "union" ? (joined.length <= 60 ? joined : `${target.name} + ${tools.length} more`)
+      : op === "intersect" && !/^Solid \d+$/.test(target.name) ? this.doc.nextName("Solid") : target.name;
     // One body per piece, largest first (it keeps the target's id and name).
     const parts = pieces.length > 1 ? pieces.map((p) => ({ p, v: solidVolume(p) })).sort((a, b) => b.v - a.v).map(({ p }) => p) : [result];
     const extra = parts.slice(1).map((p) => inGroupOf(this.doc.makeBody(p, name), target));
@@ -3393,6 +3483,44 @@ export class App implements ToolHost {
     });
     const show = (hover: number | null) =>
       this.viewport.setHighlight([{ kind: "body", body: targetId, id: 0 }], hover === null ? null : { kind: "body", body: hover, id: 0 });
+    /** Union: does solid `id` touch the result so far? (by id; forgotten when the result changes — boxes apart: no, without the kernel) */
+    const touching = new Map<number, boolean>();
+    let touchFor: Body | undefined;
+    const touches = (id: number): boolean => {
+      const t = this.doc.get(targetId), b = this.doc.get(id);
+      if (!t || !b || !isBrep(t) || !isBrep(b)) return true; // (not a solid: applyBoolean says why)
+      if (t !== touchFor) touching.clear(), (touchFor = t);
+      let yes = touching.get(id);
+      if (yes === undefined) {
+        const [a0, a1] = t.shape.boundingBox.bounds, [b0, b1] = b.shape.boundingBox.bounds;
+        const tol = 1e-3;
+        yes = [0, 1, 2].every((k) => a0[k] <= b1[k] + tol && b0[k] <= a1[k] + tol);
+        try {
+          if (yes) yes = shapesTouch(t.shape, b.shape);
+        } catch {
+          yes = true; // (can't tell: the join itself checks)
+        }
+        touching.set(id, yes);
+      }
+      return yes;
+    };
+    /** Union: of `ids`, those not joined to the result even through each other (a group touching in a chain is fine). */
+    const apartOf = (ids: number[]): number[] => {
+      if (op !== "union") return [];
+      const joined: number[] = [];
+      let left = ids.filter((id) => !touches(id) || ((joined.push(id), false)));
+      for (let grew = joined.length > 0; grew && left.length; ) {
+        grew = false;
+        left = left.filter((id) => {
+          const b = this.doc.get(id);
+          if (!b || !isBrep(b) || !joined.some((j) => { const o = this.doc.get(j); return !!o && isBrep(o) && shapesTouch(o.shape, b.shape); })) return true;
+          joined.push(id);
+          grew = true;
+          return false;
+        });
+      }
+      return left;
+    };
     const finish = () => {
       this.endTool();
       this.setSelection(this.doc.get(targetId) ? [{ kind: "body", body: targetId, id: 0 }] : []);
@@ -3404,6 +3532,13 @@ export class App implements ToolHost {
       const face = ids.map((id) => this.doc.get(id)).find((b) => b?.kind === "face");
       if (face) {
         this.toast(`Booleans work on solids — "${face.name}" is a flat face. Push/Pull it first.`, "error");
+        return;
+      }
+      // Union: a solid apart from the result is refused before joining (the join can take a while)
+      const apart = apartOf(ids).map((id) => `"${this.doc.get(id)!.name}"`);
+      if (apart.length) {
+        const list = apart.length === 1 ? apart[0] : `${apart.slice(0, -1).join(", ")} and ${apart[apart.length - 1]}`;
+        this.toast(`"${this.doc.get(targetId)?.name ?? target.name}" and ${list} don't touch — nothing to join`, "error");
         return;
       }
       // (always in the background: see boolean)
@@ -3427,7 +3562,13 @@ export class App implements ToolHost {
     };
     const tool: Tool = {
       name: label,
-      move: (e) => show(pickAt(e)),
+      move: (e) => {
+        const id = pickAt(e);
+        const bad = id !== null && op === "union" && !touches(id);
+        show(bad ? null : id);
+        this.viewport.canvas.style.cursor = bad ? "not-allowed" : "pointer";
+        this.hint(bad ? `${label}: "${this.doc.get(id)!.name}" doesn't touch "${this.doc.get(targetId)?.name ?? target.name}" — nothing to join` : msg());
+      },
       down: (e) => {
         const id = pickAt(e);
         if (id === null) return finish();
@@ -3708,6 +3849,31 @@ export class App implements ToolHost {
     this.startTool(new MeasureTool(this, shapeOf, (item) => this.viewport.setHighlight(this.selection, item), () => this.endTool(), dims).start());
   }
 
+  /** Label (+): click where the arrow points, then where the text goes; it reads "Label" (double-click it to type). */
+  private startLabel(): void {
+    const dims = {
+      preview: (d: Dimension | null) => this.showDimensions(d),
+      add: (d: Dimension) => {
+        this.endTool();
+        this.doc.setDimensions([...this.doc.dimensions, d], "Add label");
+        this.selectDimension(this.doc.dimensions.length - 1);
+      },
+    };
+    this.startTool(new LabelTool(this, dims).start());
+  }
+
+  /** Type a label's text in place (double-click on it); an empty one goes back to "Label". */
+  private editLabel(i: number): void {
+    const d = this.doc.dimensions[i];
+    if (d?.kind !== "label") return;
+    this.viewport.editLabel(i, (text) => {
+      const t = text?.trim() || LABEL_TEXT;
+      if (text === null || t === (d.text || LABEL_TEXT) || this.doc.dimensions[i] !== d) return this.showDimensions();
+      this.doc.setDimensions(this.doc.dimensions.map((x, k) => (k === i ? { ...x, text: t } : x)), "Label text");
+    });
+    this.hint("Label: type its text · Enter: done · Esc: keep the old text");
+  }
+
   /** The system's fonts for Text (asked for once). */
   private textFonts: Promise<{ family: string; style: string; file: string }[]> | null = null;
 
@@ -3819,7 +3985,7 @@ export class App implements ToolHost {
       const styleOpts = (family: string) => opts(families.get(family)!.map((x) => [x.file, x.style]), s.font ?? "");
       const align = (["left", "center", "right"] as const).map((a) => `<option value="${a}"${s.align === a ? " selected" : ""}>${a[0].toUpperCase() + a.slice(1)}</option>`).join("");
       panel.set(
-        `<textarea data-k="text" rows="2" spellcheck="false">${escapeHtml(s.text)}</textarea>` +
+        `<div class="tp-text"><textarea data-k="text" rows="2" spellcheck="false">${escapeHtml(s.text)}</textarea><button type="button" class="tp-sym" title="Symbols: ♥ ☺ ★ ✿ ♪ ✓ … — click one to put it in the text">☺▾</button></div>` +
           `<label class="tp-field">Font<select data-k="family">${opts([...families.keys()].map((f) => [f, f]), fam)}</select></label>` +
           `<label class="tp-field">Style<select data-k="font">${styleOpts(fam)}</select></label>` +
           `<label class="tp-field">Height (mm)<input data-k="height" type="number" min="0" step="1" value="${s.height}"></label>` +
@@ -3870,6 +4036,9 @@ export class App implements ToolHost {
         }
       });
       const text = body.querySelector<HTMLTextAreaElement>("textarea")!;
+      const symBtn = body.querySelector<HTMLElement>(".tp-sym")!;
+      symBtn.addEventListener("pointerdown", (e) => e.preventDefault()); // (the text keeps its cursor)
+      symBtn.addEventListener("click", () => openSymbols(symBtn, text, update));
       text.focus();
       text.select();
       update();
@@ -3924,6 +4093,7 @@ export class App implements ToolHost {
     const dispose = tool.dispose.bind(tool);
     tool.dispose = () => {
       dispose();
+      closeSymbols();
       panel?.remove();
       if (edit) {
         this.viewport.clearGhost();
@@ -4157,7 +4327,7 @@ export class App implements ToolHost {
     this.startOp({
       title: `Pull to a point → ${p.circle ? "cone" : "pyramid"}`,
       label: "Pull to a point",
-      note: `Top size: 0 a point · a % or mm (${p.circle ? `its ${circleSize.word}` : "its longest side"}, ${fmt(side)} mm now) a flat top — over 100% it widens${isFace ? "" : " · out of the solid: added to it · into it (a minus height): cut out of it"}`,
+      note: `<span class="op-help">Top size: 0 a point · a % or mm (${p.circle ? `its ${circleSize.word}` : "its longest side"}, ${fmt(side)} mm now) a flat top — over 100% it widens${isFace ? "" : " · out of the solid: added to it · into it (a minus height): cut out of it"}</span>`,
       fields: [
         { key: "h", label: "Height (mm)", value: +Math.max(1, Math.round(size)).toFixed(0), step: 1 },
         { key: "top", label: "Top size (% or mm)", value: 0, step: 10, min: 0, mm: side },
@@ -4194,7 +4364,7 @@ export class App implements ToolHost {
     this.startOp({
       title: "Round tip",
       label: "Round tip",
-      note: `${tip.cone ? "A cone's point: the ball blends into its side" : "A pointed corner: the ball blends into its edges"} · under ${fmt(max)} mm`,
+      note: `<span class="op-help">${tip.cone ? "A cone's point: the ball blends into its side" : "A pointed corner: the ball blends into its edges"} · </span>under ${fmt(max)} mm`,
       fields: [{ key: "r", label: "Radius (mm)", value, step: value < 1 ? 0.1 : 0.5, min: 0 }],
       compute: ({ r }) => {
         const result = roundTip(this.solidOf(body.id, "Round tip"), tip, r);
@@ -4226,7 +4396,7 @@ export class App implements ToolHost {
     this.showGuides();
     this.setSelection([]);
     this.showDimensions();
-    this.hint("Dimension selected · Del removes it · Esc deselects");
+    this.hint(this.doc.dimensions[i]?.kind === "label" ? "Label selected · double-click its text to type · Del removes it · Esc deselects" : "Dimension selected · Del removes it · Esc deselects");
   }
 
   private showGuides(): void {
@@ -5920,7 +6090,9 @@ export class App implements ToolHost {
         row.dataset.id = String(b.id);
         const kind = { solid: "Solid", face: "Flat face", mesh: "Mesh (STL)", path: "Path (open lines from a sketch)" }[b.kind];
         // (a path's lines keep their colour: no look)
-        const swatch = b.kind === "path"
+        const swatch = b.picture
+          ? `<span class="ol-swatch pic" title="Picture">${ICONS.picture}</span>`
+          : b.kind === "path"
           ? `<span class="ol-swatch path" title="${kind}"></span>`
           : `<span class="ol-swatch ol-look${b.kind === "solid" ? "" : " " + b.kind}" title="${kind} · click: colour and opacity" style="${swatchStyle(look)}"></span>`;
         const lock = `<button class="ol-lock${b.locked ? " on" : ""}" title="${b.locked ? "Locked: can't be selected or changed, clicks go through it — click to unlock" : "Lock: can't be selected or changed, clicks go through it (still snapped to)"}">${b.locked ? ICONS.lock : ICONS.unlock}</button>`;
@@ -6280,7 +6452,7 @@ export class App implements ToolHost {
           ? `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("edit.duplicate", "Shift+D", "duplicate")} · File → Export STL (exported with the solids)<br>A mesh can't be edited (no faces or edges)`
           : `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("op.cut", "C", "cut by guide")} · ${job("op.fillet", "F", "fillet all edges")} · ${job("edit.duplicate", "Shift+D", "duplicate")}`;
       } else {
-        hints = `${job("bool.union", "+", "union")} · ${job("bool.subtract", "−", "subtract")} · ${job("bool.intersect", "Shift+I", "intersect")}<br>(first selected = target)`;
+        hints = `${job("bool.union", "Shift+U", "union")} · ${job("bool.subtract", "−", "subtract")} · ${job("bool.intersect", "Shift+I", "intersect")}<br>(first selected = target)`;
         // A whole array group (changed with its icon in the Bodies panel): what it is, or why it can't be changed now.
         const rec = this.arrayToChange(sel.map((s) => s.body));
         if (rec) rows.unshift(typeof rec !== "string" && rec.circular
@@ -6297,8 +6469,16 @@ export class App implements ToolHost {
       }
       hints = `${job("op.pushpull", "P", "push/pull (flat face → new solid)")} · ${job("op.shell", "H", "shell (opens selected faces)")} · ${job("op.offset", "O", "offset")}`;
     } else {
-      rows.push(["Edges", String(sel.length)]);
-      hints = `${job("op.fillet", "F", "fillet")} · ${job("op.chamfer", "Shift+F", "chamfer")} · ${job("op.offset", "O", "offset (strip)")}`;
+      // (a path's lines — picked whole in Edge mode: it's the path)
+      const paths = [...new Set(sel.map((s) => s.body))].map((id) => this.doc.get(id));
+      if (paths.every((b) => b?.kind === "path")) {
+        rows.push([paths.length === 1 ? "Path" : "Paths", paths.length === 1 ? escapeHtml(paths[0]!.name) : String(paths.length)]);
+        rows.push(["Lines / arcs", String(sel.length)]);
+        hints = `${job("xf.move", "G", "move")} · ${job("op.sweep", "S W", "sweep a face along it")} · ${job("edit.delete", "Del", "delete")}`;
+      } else {
+        rows.push(["Edges", String(sel.length)]);
+        hints = `${job("op.fillet", "F", "fillet")} · ${job("op.chamfer", "Shift+F", "chamfer")} · ${job("op.offset", "O", "offset (strip)")}`;
+      }
     }
     el.innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` + tip(hints);
   }
@@ -6443,8 +6623,8 @@ export class App implements ToolHost {
       ["Bodies panel: Shift+click · Ctrl+click", "Select all the rows from the last clicked one to this one (Ctrl+Shift: add them) · add / remove one"],
       ["B B · B C · B S · B O", "Draw solid Box · Cylinder · Sphere · Cone (B O: base, then height — a sharp tip; Tab or height,top size + Enter: a flat top) (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
-      ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai, come from the built-in ones), height (a capital letter, mm), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
-      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Done replaces them, Cancel keeps them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+A spline (a smooth curve through each point clicked; in Select, drag its blue points to reshape it) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Done keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths, Cancel drops the sketch · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
+      ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai or ♥, come from the built-in ones, Noto Sans Symbols / Symbols 2 too), height (a capital letter, mm), symbols (the ☺▾ button by the text: ♥ ☺ ★ ✿ ♪ ✓… — a click puts one in, its Recent row remembers the last 8; typed / pasted ones work in any font), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
+      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch Mode replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+A spline (a smooth curve through each point clicked; in Select, drag its blue points to reshape it) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch Mode keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
@@ -6470,8 +6650,9 @@ export class App implements ToolHost {
       ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; End size % makes the far end smaller / larger, evenly on the way — a spout along a curved path; a straight path: Twist ° turns it evenly on the way — a propeller blade); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Toolbar → Guide line", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
-      ["+ · − · Shift+I  (also Shift+U · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
-      ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
+      ["Shift+U · − · Shift+I  (also Num+ · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
+      ["+ (Shift+=)", "Label: click the point the arrow points at, then where its text goes — it reads \"Label\"; double-click the text to type your own (Enter done, Esc keeps the old) · click its text + Del removes it"],
+            ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line) — or a slanted straight edge: slide along it, the blue arrow in mm steps, Tab: the distance along it"],
       ["S", `Scale selected objects about their bottom centre: drag the ring for Scale % or the red / green / blue boxes for X / Y / Z % (${this.viewport.autoSnap ? "snaps, Ctrl: free" : "Ctrl snaps"}; per-axis works on curved shapes too)`],
       ["S with hole rims selected", "Resize hole / pin: Edge mode, click the rim of a round hole or pin (Shift+click more), S — type the new diameter (holes of different sizes: how much bigger, e.g. 0.2 for a looser fit) or drag the ring on the rim; a hole grows into the solid, a pin out of it · any other hole (rectangle, slot, a sketched shape): click one edge of its rim, S — Bigger by (mm): every wall moves out by half of it, corners stay sharp"],
@@ -6570,7 +6751,7 @@ export class App implements ToolHost {
     // History: body / shape references — negative: the model's own bodies[-r - 1]; else the history's lists.
     const bodyRef = new Map<Body, number>(cur.map((b, i) => [b, -(i + 1)]));
     const shapeRef = new Map<object, number>(cur.map((b, i) => [b.shape, -(i + 1)]));
-    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; locked?: true; s: number }[] = [];
+    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; s: number }[] = [];
     const shapes: string[] = [];
     let size = 0;
     const refBody = (b: Body): number => {
@@ -6584,7 +6765,7 @@ export class App implements ToolHost {
         shapeRef.set(b.shape, sr);
       }
       r = pool.length;
-      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), s: sr });
+      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}), s: sr });
       bodyRef.set(b, r);
       return r;
     };
@@ -6596,6 +6777,7 @@ export class App implements ToolHost {
       return out.reverse();
     };
     const undo = keep(h.undo), redo = keep(h.redo);
+    const pictureIds = new Set([...cur, ...pool].flatMap((b) => (b.picture ? [b.picture.img] : [])));
     return JSON.stringify({
       format: "yddd",
       version: 1,
@@ -6604,8 +6786,10 @@ export class App implements ToolHost {
         ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: this.geomText(b) } : { name: b.name, kind: b.kind, brep: this.geomText(b) }),
         ...(b.group ? { group: b.group } : {}),
         ...(b.text ? { text: b.text } : {}),
-        ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}),
+        ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}),
       })),
+      // Pictures' images (File → Open Picture…), by id: each kept once, for the model and its undo history.
+      ...(pictureIds.size ? { images: imagesOf(pictureIds) } : {}),
       // Group colours / opacities by group name (see GroupLooks).
       ...(Object.keys(this.doc.groupLooks).length ? { looks: this.doc.groupLooks } : {}),
       guides: this.doc.guides,
@@ -6627,8 +6811,9 @@ export class App implements ToolHost {
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
       format: string;
-      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true }[];
+      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord }[];
       looks?: GroupLooks;
+      images?: Record<string, string>;
       guides?: Guide[];
       dimensions?: Dimension[];
       arrays?: ArrayRecord[];
@@ -6642,9 +6827,10 @@ export class App implements ToolHost {
       if (kind === "path") return { kind: "path", shape: shape as unknown as Wire };
       return { kind: kind === "face" || kind === "solid" ? kind : kindOf(shape), shape };
     };
-    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true } => {
+    loadImages(json.images);
+    const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord } => {
       const group = typeof b.group === "string" && b.group ? { group: b.group } : {};
-      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}) };
+      return { name: b.name, ...geom(b.kind, b.kind === "mesh" ? b.mesh! : b.brep!), ...group, ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}) };
     });
     const looks = json.looks ?? {};
     this.endInteractions();
@@ -6663,7 +6849,7 @@ export class App implements ToolHost {
             const p = h.bodies[r];
             let shape = p.s < 0 ? current[-p.s - 1].shape : shapeOf.get(p.s);
             if (!shape) shapeOf.set(p.s, (shape = geom(p.kind, h.shapes[p.s]).shape));
-            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}), ...(p.locked ? { locked: true as const } : {}) } as Body;
+            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}), ...(p.locked ? { locked: true as const } : {}), ...(p.picture ? { picture: p.picture } : {}), ...(p.gear ? { gear: p.gear } : {}) } as Body;
             made.set(r, b);
           }
           return b;
@@ -6823,6 +7009,55 @@ export class App implements ToolHost {
   private async fileImportStl(): Promise<void> {
     const file = await window.yddd.openFile({ title: "Import STL", filters: [{ name: "STL", extensions: ["stl"] }], binary: true });
     if (file) this.importStlData(file.data as Uint8Array, file.path.split(/[\\/]/).pop()!.replace(/\.stl$/i, ""));
+  }
+
+  /** File → Open Picture…: an image as a flat face object (see addPicture). */
+  private async fileOpenPicture(): Promise<void> {
+    const file = await window.yddd.openFile({ title: "Open Picture", filters: [{ name: "Pictures", extensions: Object.keys(PICTURE_TYPES) }], binary: true });
+    if (!file) return;
+    const name = file.path.split(/[\\/]/).pop()!;
+    try {
+      await this.addPicture(file.data as Uint8Array<ArrayBuffer>, name);
+    } catch (e) {
+      this.toast(`Couldn't read the picture "${name}"${e instanceof Error && e.message ? ` (${e.message})` : ""}`, "error");
+    }
+  }
+
+  /**
+   * A picture file's bytes (`file`: its name, the type from its extension) as a new object: a flat face on the
+   * ground under the middle of the view, 100 mm on its long side, the image on it (its top towards +Y), selected.
+   * Returns its id.
+   */
+  async addPicture(data: Uint8Array<ArrayBuffer>, file: string): Promise<number> {
+    const ext = file.split(".").pop()!.toLowerCase();
+    const blob = new Blob([data], { type: PICTURE_TYPES[ext] ?? "image/png" });
+    const url = await new Promise<string>((ok, fail) => {
+      const r = new FileReader();
+      r.onload = () => ok(r.result as string);
+      r.onerror = () => fail(r.error ?? new Error("not readable"));
+      r.readAsDataURL(blob);
+    });
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    if (!img.width || !img.height) throw new Error("no picture in it");
+    const k = 100 / Math.max(img.width, img.height), w = img.width * k, h = img.height * k;
+    const t = this.viewport.cameraState().target;
+    const c: V3 = [t.x, t.y, 0];
+    const ground: Frame = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+    const face = makeRectFace(ground, c, w, h);
+    // Which corner (in the outline's order) is the image's bottom left, and which way round its bottom right is.
+    const corners = pointCenter(face, face.faces[0].hashCode)?.corners ?? [];
+    const near = (p: V3, x: number, y: number) => Math.hypot(p[0] - x, p[1] - y) < 1e-6;
+    const corner = corners.findIndex((p) => near(p, c[0] - w / 2, c[1] - h / 2));
+    if (corners.length !== 4 || corner < 0) throw new Error("its face could not be made");
+    const dir = near(corners[(corner + 1) % 4], c[0] + w / 2, c[1] - h / 2) ? 1 : -1;
+    const body: Body = { ...this.doc.makeBody(face, "Picture", "face"), picture: { img: addImage(url), corner, dir } };
+    this.doc.commit([...this.doc.bodies, body], "Open Picture");
+    this.setMode("body");
+    this.setSelection([{ kind: "body", body: body.id, id: 0 }]);
+    this.toast(`Picture "${file}" added on the ground (${fmt(w)} × ${fmt(h)} mm) — move, turn or scale it like any object (S to size it)`);
+    return body.id;
   }
 
   /** Add an STL file's contents to the model (see fileImportStl). Returns the new bodies' ids. */
@@ -7094,14 +7329,33 @@ export class App implements ToolHost {
     }
   }
 
-  /** The view as a PNG (no axes, paths, guides). */
+  /**
+   * The view as a PNG (no axes, paths, guides). Behind a progress dialog from the key press until the save dialog is up
+   * (the system's file dialog can take a while to open): it goes when the save dialog takes the focus (or it's over).
+   */
   private async fileExportImage(): Promise<void> {
+    if (this.busyNow) return;
+    this.busyNow = true;
+    const el = document.createElement("div");
+    el.id = "busy";
+    el.innerHTML = `<div class="busy-box"><div class="spinner"></div><div class="busy-text">Making the image…</div></div>`;
+    document.body.appendChild(el);
+    const close = () => {
+      el.remove();
+      this.busyNow = false;
+      window.removeEventListener("blur", close);
+    };
     try {
+      await new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0))); // (the dialog painted first)
       const data = await this.viewport.snapshot();
       const base = this.doc.filePath?.split(/[\\/]/).pop()?.replace(/\.yddd$/, "") ?? "view";
+      el.querySelector(".busy-text")!.textContent = "Opening the save dialog…";
+      window.addEventListener("blur", close);
       const path = await window.yddd.saveFile({ title: "Save View as Image", defaultPath: `${base}.png`, filters: [{ name: "PNG image", extensions: ["png"] }], data });
+      close();
       if (path) this.toast(`Saved the view to ${path.split(/[\\/]/).pop()}`);
     } catch (e) {
+      close();
       this.fail(e);
     }
   }
@@ -7113,9 +7367,10 @@ async function boot(): Promise<void> {
   const loading = $("loading");
   try {
     await initKernel();
+    inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

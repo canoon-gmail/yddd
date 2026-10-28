@@ -15,7 +15,8 @@ import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
 import { ICONS } from "./icons";
-import { tessellate, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
+import { tessellate, pointCenter, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
+import { imageUrl } from "./picture";
 
 /** A dimension on screen: a panel's measurement may say more than its length ("2 squares · 83.5"). */
 export type ShownDimension = Dimension & { readonly text?: string };
@@ -149,6 +150,8 @@ export class Viewport {
   private chunks: Chunk[] = [];
   private xfSet = new Set<number>();
   private hl = { sel: [] as SelItem[], hover: null as SelItem | null, painted: new Set<number>() };
+  /** setHighlight's last hover, as given (redrawn by setHidden). */
+  private hlHoverArg: SelItem | null = null;
   /** Object mode: glow round the outline of the hovered body (silver) and selected bodies (blue). */
   private glowBody: number | null = null;
   private glowSel: number[] = [];
@@ -168,8 +171,17 @@ export class Viewport {
   /** Dimension text labels (HTML over the canvas) and the 3D point each one sits at. */
   private dimLabels: { el: HTMLElement; at: THREE.Vector3 }[] = [];
   private dimLabelBox: HTMLElement | null = null;
+  /** Labels' arrowheads (filled cones, the tip at `at`): kept the same size on screen. */
+  private labelArrows: { mesh: THREE.Mesh; at: THREE.Vector3 }[] = [];
   /** Clicking a dimension's text (index into the list given to setDimensions; -1 = the preview). */
   onDimensionClick: ((i: number) => void) | null = null;
+  /** Double-clicking a label's text (index as for onDimensionClick). */
+  onLabelDoubleClick: ((i: number) => void) | null = null;
+  /** The last press on a dimension's text, to tell a double click (the texts are made again on the first one). */
+  private lastDimDown = { i: -1, at: 0 };
+  /** Drawn from a camera that has moved (orbit, Fit, a view button…): the app's marks on the view follow it. */
+  onViewChange: (() => void) | null = null;
+  private viewKey = "";
   /** Guide lines (snap targets); see setGuides. */
   private guides: { a: THREE.Vector3; b: THREE.Vector3 }[] = [];
   private hoverEdges: LineSegments2;
@@ -400,12 +412,24 @@ export class Viewport {
 
   private render(): void {
     this.flushBatches();
+    this.sizeLabelArrows();
     this.renderer.render(this.scene, this.camera);
     this.renderGlow();
     this.renderOverlay();
     this.renderInset();
     this.placeDimLabels();
     this.placeLockIcons();
+    const key = this.camera.matrixWorld.elements.join() + this.camera.projectionMatrix.elements.join() + this.canvas.width + "x" + this.canvas.height;
+    if (key !== this.viewKey) {
+      this.viewKey = key;
+      this.onViewChange?.();
+    }
+  }
+
+  /** Show / hide the world Z axis line (blue) — off while sketching. */
+  setZAxisVisible(on: boolean): void {
+    this.axes[2].visible = on;
+    this.requestRender();
   }
 
   /**
@@ -657,7 +681,9 @@ export class Viewport {
       }
       faceAreas.push(area);
     });
-    const mesh = new THREE.Mesh(geom, this.viewMats(body));
+    const uv = this.pictureUVs(body, faces.vertices);
+    if (uv) geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+    const mesh = new THREE.Mesh(geom, uv && body.picture ? this.pictureMats(body.picture.img) : this.viewMats(body));
 
     const edgePos = Float32Array.from(edges.lines);
     let lines: LineSegments2 | null = null;
@@ -687,6 +713,48 @@ export class Viewport {
       proj: null, projStamp: -1, faceV, vertexCount: P.length / 3, chunk: null, slot: null,
     };
   }
+
+  /**
+   * A picture's (see PictureRecord) texture coordinates: each point's place across its bottom edge (u) and up
+   * its left one (v) — the face may have been turned, scaled or slanted since. Null if it isn't one (or no
+   * longer a 4-cornered face).
+   */
+  private pictureUVs(body: Body, P: ArrayLike<number>): Float32Array | null {
+    const pic = body.picture;
+    if (!pic || body.kind !== "face" || body.shape.faces.length !== 1) return null;
+    const cs = pointCenter(body.shape, body.shape.faces[0].hashCode)?.corners;
+    if (!cs || cs.length !== 4) return null;
+    const o = new THREE.Vector3(...cs[pic.corner]);
+    const a = new THREE.Vector3(...cs[(pic.corner + pic.dir + 4) % 4]).sub(o), b = new THREE.Vector3(...cs[(pic.corner - pic.dir + 4) % 4]).sub(o);
+    // p − o = u a + v b: solved with the dot products (a and b need not be square to each other)
+    const aa = a.dot(a), bb = b.dot(b), ab = a.dot(b), det = aa * bb - ab * ab;
+    if (det <= 1e-12) return null;
+    const out = new Float32Array((P.length / 3) * 2), d = new THREE.Vector3();
+    for (let i = 0, j = 0; i < P.length; i += 3, j += 2) {
+      d.set(P[i] - o.x, P[i + 1] - o.y, P[i + 2] - o.z);
+      const da = d.dot(a), db = d.dot(b);
+      out[j] = (bb * da - ab * db) / det;
+      out[j + 1] = (aa * db - ab * da) / det;
+    }
+    return out;
+  }
+
+  /** A picture's materials (normal, hover, selected: tinted), by image id; the texture drawn once it has loaded. */
+  private picMats = new Map<string, THREE.Material[]>();
+  private pictureMats(img: string): THREE.Material[] {
+    let m = this.picMats.get(img);
+    if (!m) {
+      const url = imageUrl(img);
+      const tex = url ? new THREE.TextureLoader().load(url, () => this.requestRender()) : null;
+      if (tex) tex.colorSpace = THREE.SRGBColorSpace;
+      m = [0xffffff, 0xcfe0ff, 0xffd98a].map((color) => new THREE.MeshBasicMaterial({ map: tex, color, side: THREE.DoubleSide, transparent: true }));
+      this.picMats.set(img, m);
+    }
+    return m;
+  }
+
+  /** A picture body: drawn on its own (its image), not in the batched meshes. */
+  private isPicture = (v: BodyView): boolean => !!v.mesh.geometry.getAttribute("uv");
 
   private disposeView(v: BodyView): void {
     v.group.removeFromParent();
@@ -758,7 +826,7 @@ export class Viewport {
 
   /** Bodies being dragged by the gizmo render on their own (so they can move); all others render batched. */
   private placeView(v: BodyView): void {
-    if (this.xfSet.has(v.body.id)) this.bodyRoot.add(v.group);
+    if (this.xfSet.has(v.body.id) || this.isPicture(v)) this.bodyRoot.add(v.group);
     else v.group.removeFromParent();
   }
 
@@ -795,7 +863,7 @@ export class Viewport {
       const v = this.views.get(id);
       if (!v) continue;
       v.slot = null;
-      if (v.group.visible && !this.xfSet.has(id)) members.push(v);
+      if (v.group.visible && !this.xfSet.has(id) && !this.isPicture(v)) members.push(v);
     }
     const tmp = new THREE.Color();
     // One merged mesh per kind and opacity (see-through bodies share a material of their own).
@@ -980,7 +1048,8 @@ export class Viewport {
       v.group.visible = vis;
     }
     this.stamp++;
-    this.requestRender();
+    // A selected path's lines are drawn again on top (selEdges): taken off when it's hidden
+    this.setHighlight(this.hl.sel, this.hlHoverArg);
   }
 
   /** Whether a selection item still refers to existing geometry. */
@@ -1125,8 +1194,9 @@ export class Viewport {
       const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, only === undefined ? undefined : (b) => b === only);
       return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
     }
-    // Paths have no faces: in front of any face hit, the nearest path line picks the path.
-    const path = this.pathIds.size ? this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, undefined, this.pathIds) : null;
+    // Paths have no faces: in front of any face hit, the nearest path line picks the path (with `only`: that one alone).
+    const paths = only === undefined ? this.pathIds : this.pathIds.has(only) ? new Set([only]) : null;
+    const path = paths?.size ? this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, undefined, paths) : null;
     if (path) return { kind: "body", body: path.view.body.id, id: 0, point: path.point };
     if (!hit) return null;
     // A mesh has no faces to pick: it is always picked whole.
@@ -1434,21 +1504,28 @@ export class Viewport {
       this.canvas.parentElement!.appendChild(this.dimLabelBox);
       this.dimLabelBox.addEventListener("pointerdown", (e) => {
         const el = (e.target as HTMLElement).closest<HTMLElement>(".dim-label");
-        if (!el || !this.onDimensionClick) return;
+        if (!el || el.tagName === "INPUT" || !this.onDimensionClick) return;
         e.stopPropagation();
-        this.onDimensionClick(Number(el.dataset.i));
+        const i = Number(el.dataset.i), again = this.lastDimDown.i === i && e.timeStamp - this.lastDimDown.at < 450;
+        this.lastDimDown = again ? { i: -1, at: 0 } : { i, at: e.timeStamp };
+        this.onDimensionClick(i);
+        if (again && el.classList.contains("note")) {
+          e.preventDefault(); // (the text field gets the focus, not the page)
+          this.onLabelDoubleClick?.(i);
+        }
       });
     }
     this.dimLabelBox.innerHTML = "";
     this.dimLabels = [];
+    this.labelArrows = [];
     const all: [ShownDimension, number][] = list.map((d, i) => [d, i]);
     for (const p of preview ? (Array.isArray(preview) ? preview : [preview as ShownDimension]) : []) all.push([p, -1]);
     for (const [d, i] of all) {
       const a = new THREE.Vector3(...d.a), b = new THREE.Vector3(...d.b), o = new THREE.Vector3(...d.o);
       const len = a.distanceTo(b);
-      if (len < 1e-9) continue;
+      if (len < 1e-9 && d.kind !== "label") continue;
       const u = b.clone().sub(a).normalize();
-      const color = i === selected ? 0xffd166 : i < 0 ? 0x8fd3ff : 0xe6e9ee;
+      const color = i === selected ? 0xffd166 : d.kind === "label" ? 0x7ee787 : i < 0 ? 0x8fd3ff : 0xe6e9ee;
       const draw = (pts: THREE.Vector3[]) => {
         const lines = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
         lines.renderOrder = 16;
@@ -1456,7 +1533,7 @@ export class Viewport {
       };
       const label = (text: string, at: THREE.Vector3) => {
         const el = document.createElement("div");
-        el.className = `dim-label${i === selected ? " sel" : ""}${i < 0 ? " preview" : ""}`;
+        el.className = `dim-label${d.kind === "label" ? " note" : ""}${i === selected ? " sel" : ""}${i < 0 ? " preview" : ""}`;
         el.dataset.i = String(i);
         el.textContent = text;
         this.dimLabelBox!.appendChild(el);
@@ -1468,6 +1545,21 @@ export class Viewport {
           draw(g.pts);
           label(g.text, g.at);
         }
+        continue;
+      }
+      if (d.kind === "label") {
+        // A leader from the text to the point, a filled arrowhead there (a cone: an arrow from any side).
+        if (len > 1e-9) {
+          draw([a, b]);
+          const geo = new THREE.ConeGeometry(0.35, 1, 20).translate(0, -0.5, 0); // (tip at the origin, along −Y)
+          const head = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, depthTest: false, transparent: true }));
+          head.quaternion.setFromUnitVectors(new THREE.Vector3(0, -1, 0), u);
+          head.position.copy(a);
+          head.renderOrder = 16;
+          this.dimRoot.add(head);
+          this.labelArrows.push({ mesh: head, at: a });
+        }
+        label(d.text || "Label", b);
         continue;
       }
       if (d.kind === "radius") {
@@ -1498,6 +1590,45 @@ export class Viewport {
       label(d.text ?? num(len), a2.clone().add(b2).multiplyScalar(0.5));
     }
     this.requestRender();
+  }
+
+  /**
+   * Type a label's text in place of its text on screen (all of it selected); `done` gets the new text (Enter, or
+   * clicking away), or null (Esc). False if that label isn't shown.
+   */
+  editLabel(i: number, done: (text: string | null) => void): boolean {
+    const el = this.dimLabelBox?.querySelector<HTMLElement>(`.dim-label.note[data-i="${i}"]`);
+    if (!el) return false;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = `${el.className} editing`;
+    input.dataset.i = el.dataset.i;
+    input.value = el.textContent ?? "";
+    input.size = Math.max(6, input.value.length + 2);
+    input.style.transform = el.style.transform;
+    el.replaceWith(input);
+    const entry = this.dimLabels.find((x) => x.el === el);
+    if (entry) entry.el = input;
+    let over = false;
+    const finish = (text: string | null) => {
+      if (over) return;
+      over = true;
+      done(text);
+    };
+    input.addEventListener("input", () => (input.size = Math.max(6, input.value.length + 2)));
+    input.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") finish(input.value);
+      else if (e.key === "Escape") finish(null);
+    });
+    input.addEventListener("blur", () => finish(input.value));
+    setTimeout(() => (input.focus(), input.select()));
+    return true;
+  }
+
+  /** Labels' arrowheads ~20 px long whatever the zoom (before every render). */
+  private sizeLabelArrows(): void {
+    for (const { mesh, at } of this.labelArrows) mesh.scale.setScalar(this.worldPerPixel(at) * 20);
   }
 
   /** Keep the dimension texts on their points (after every render: the camera may have moved). */
@@ -1840,6 +1971,7 @@ export class Viewport {
     for (const id of this.hl.painted) this.paintBody(id, null, 0);
     this.hl.painted.clear();
     this.hl.sel = selection;
+    this.hlHoverArg = hover;
     // Object mode: a hovered (unselected) body gets a glow round its outline, nothing on the body.
     // A path has no outline to glow: its lines are drawn in the selection / hover colour instead.
     const isPath = (it: SelItem) => it.kind === "body" && this.views.get(it.body)?.body.kind === "path";
@@ -1852,6 +1984,7 @@ export class Viewport {
     const edgePoints = (items: SelItem[], bodies = false) => {
       const out: number[] = [];
       for (const it of items) {
+        if (this.hidden.has(it.body)) continue;
         if (it.kind !== "edge" && it.kind !== "face") {
           if (!bodies) continue;
           // Whole body: outline all of its edges.

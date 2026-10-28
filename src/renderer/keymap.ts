@@ -22,6 +22,7 @@ export const COMMANDS: Command[] = [
   ...grp("File", [
     ["file.new", "New"],
     ["file.open", "Open…"],
+    ["file.openPicture", "Open Picture…"],
     ["file.save", "Save"],
     ["file.saveAs", "Save As…"],
     ["file.importStep", "Import STEP…"],
@@ -90,7 +91,7 @@ export const COMMANDS: Command[] = [
     ["edit.array", "Array copy"],
     ["edit.circular", "Circular copy"],
   ]),
-  ...grp("Measure", [["tool.measure", "Measure"]]),
+  ...grp("Measure", [["tool.measure", "Measure"], ["tool.label", "Label (arrow + text)"]]),
   ...grp("Mouse: move the view", [
     ["nav.orbit", "Orbit (turn the view round)"],
     ["nav.pan", "Pan (slide the view)"],
@@ -117,6 +118,7 @@ export const COMMANDS: Command[] = [
     ["macro.battery", "Battery case…"],
     ["macro.gridfinity", "Gridfinity bin…"],
     ["macro.baseplate", "Gridfinity baseplate…"],
+    ["macro.gear", "Gear: a flat gear outline…"],
     ["macro.random", "Random: copies scattered on a flat face…"],
   ]),
   ...grp("Help", [
@@ -172,7 +174,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "op.sweep": ["S W"],
   "op.cut": ["C"],
   "op.splitFace": ["Shift+C"],
-  "bool.union": ["Shift+U", "+", "Num+"],
+  "bool.union": ["Shift+U", "Num+"],
   "bool.subtract": ["Shift+S", "-", "Num-"],
   "bool.intersect": ["Shift+I"],
   "xf.move": ["G"],
@@ -182,6 +184,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "xf.repeat": ["Shift+R"],
   "edit.mirror": ["M"],
   "tool.measure": ["="],
+  "tool.label": ["+"], // Shift+=; Union keeps Shift+U and Num+
   "view.fit": ["Home"],
   "view.fitSelection": ["."],
   "view.menu": ["V"],
@@ -190,7 +193,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "view.front": ["Num1"], // top-row "1" stays Solid mode
   "view.right": ["Num3"], // top-row "3" stays Edge mode
   "view.xray": ["Shift+X"],
-  "view.pro": ["Ctrl+Shift+D"], // (hidden: see HIDDEN)
+  "view.pro": ["Ctrl+Shift+P"], // (hidden: see HIDDEN)
   "help.keys": ["/"],
   "help.shortcuts": ["F1", "?"],
   "nav.orbit": ["MiddleDrag", "Alt+LeftDrag"],
