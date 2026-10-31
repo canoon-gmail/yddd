@@ -19,8 +19,12 @@ interface YDDDApi {
   ask(req: { message: string; detail?: string; buttons: string[] }): Promise<number>;
   /** Crash recovery: autosaved unsaved work (see App.autosave). */
   writeRecovery(rec: { savedAt: number; filePath: string | null; data: string }): Promise<void>;
-  readRecovery(): Promise<{ savedAt: number; filePath: string | null; data: string } | null>;
-  clearRecovery(): Promise<void>;
+  /** The newest unsaved work left by a copy of YDDD that isn't running any more (`file`: its recovery file; `more`: others left). */
+  readRecovery(): Promise<{ savedAt: number; filePath: string | null; data: string; file: string; more: number } | null>;
+  /** Recovered: that file becomes this copy's own recovery file. */
+  adoptRecovery(file: string): Promise<void>;
+  /** This copy's recovery file deleted — or `file`, a leftover discarded. */
+  clearRecovery(file?: string): Promise<void>;
   setTitle(title: string): void;
   setDirty(dirty: boolean): void;
   /** The menu's shortcuts as shown (command → Electron accelerator, "" = none); the renderer handles the keys. */

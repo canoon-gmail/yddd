@@ -7232,28 +7232,40 @@ export class App implements ToolHost {
     void window.yddd?.clearRecovery?.();
   }
 
-  /** On start: offer unsaved work autosaved before a crash (or a forced quit). */
+  /**
+   * On start: offer unsaved work autosaved before a crash (or a forced quit) — each copy of YDDD keeps its own recovery
+   * file, so with several left over (two copies crashed) each is offered, newest first: Discard goes on to the next;
+   * Recover takes it in (this window holds one model — the others wait for the next start or another copy).
+   */
   async offerRecovery(): Promise<void> {
-    const rec = await window.yddd?.readRecovery?.();
-    if (!rec) return;
-    const when = new Date(rec.savedAt);
-    const time = when.toDateString() === new Date().toDateString() ? when.toLocaleTimeString() : when.toLocaleString();
-    const name = rec.filePath ? rec.filePath.split(/[\\/]/).pop() : "an unsaved model";
-    const choice = await window.yddd.ask({
-      message: "Recover unsaved work?",
-      detail: `YDDD closed unexpectedly. Changes to ${name}, autosaved at ${time}, can be recovered.`,
-      buttons: ["Recover", "Discard"],
-    });
-    if (choice !== 0) return this.dropRecovery();
-    try {
-      this.loadModel(rec.data, rec.filePath);
-      // Not saved yet: keep it marked unsaved (and keep the recovery file until it is).
-      this.doc.dirty = true;
-      this.autosavedVersion = this.doc.version;
-      this.updateTitle();
-      this.toast(`Recovered work autosaved at ${time} — save it to keep it`);
-    } catch (e) {
-      this.fail(e);
+    for (;;) {
+      const rec = await window.yddd?.readRecovery?.();
+      if (!rec) return;
+      const when = new Date(rec.savedAt);
+      const time = when.toDateString() === new Date().toDateString() ? when.toLocaleTimeString() : when.toLocaleString();
+      const name = rec.filePath ? rec.filePath.split(/[\\/]/).pop() : "an unsaved model";
+      const choice = await window.yddd.ask({
+        message: "Recover unsaved work?",
+        detail: `YDDD closed unexpectedly. Changes to ${name}, autosaved at ${time}, can be recovered.` +
+          (rec.more ? ` (${rec.more} more from other YDDD windows ${rec.more === 1 ? "is" : "are"} offered after this one, or the next time YDDD starts.)` : ""),
+        buttons: ["Recover", "Discard"],
+      });
+      if (choice !== 0) {
+        await window.yddd.clearRecovery(rec.file);
+        continue;
+      }
+      await window.yddd.adoptRecovery(rec.file);
+      try {
+        this.loadModel(rec.data, rec.filePath);
+        // Not saved yet: keep it marked unsaved (and keep the recovery file until it is).
+        this.doc.dirty = true;
+        this.autosavedVersion = this.doc.version;
+        this.updateTitle();
+        this.toast(`Recovered work autosaved at ${time} — save it to keep it` + (rec.more ? ` · ${rec.more} more: start another YDDD window to recover ${rec.more === 1 ? "it" : "them"}` : ""));
+      } catch (e) {
+        this.fail(e);
+      }
+      return;
     }
   }
 

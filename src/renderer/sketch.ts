@@ -619,7 +619,7 @@ export class SketchTool implements Tool {
   private lock = -1;
   /** The sketch points the cursor is lined up with (same X: k = 0, same Y: k = 1), drawn as dashed guides. */
   private aligned: { ref: P; k: 0 | 1 }[] = [];
-  /** The last cursor point was placed free (Auto snap + Ctrl): no arc snapping to a quarter / half turn either. */
+  /** The last cursor point was placed free (Auto snap + Ctrl, or Hold Ctrl without it): no arc snapping to a quarter / half turn either. */
   private free = false;
   private typed = "";
   private undoStack: string[] = [];
@@ -1131,14 +1131,18 @@ export class SketchTool implements Tool {
 
   // ------------------------------------------------------------ pointer
 
-  /** Cursor point in the plane: the sketch's own points, then the model's points, else the plane (grid when snapping). Auto snap + Ctrl: free — no points, grid, level / upright lock or lining up. */
+  /**
+   * Cursor point in the plane: the sketch's own points, then the model's points, else the plane (grid when snapping).
+   * Free as the Snap setting says (Settings → Snap: Auto — with Ctrl; Hold Ctrl — without it): no points, grid, level /
+   * upright lock or lining up — but the outline's start still catches, so it can always be closed.
+   */
   private pointAt(e: PointerEvent): P | null {
     const vp = this.host.viewport;
     this.lock = -1;
     this.aligned = [];
-    const free = (this.free = vp.autoSnap && e.ctrlKey);
+    const free = (this.free = !vp.snapping(e));
     let best: { p: P; kind: "vertex" | "midpoint" | "center"; score: number } | null = null;
-    for (const { p, kind } of free ? [] : this.ownPoints()) {
+    for (const { p, kind } of free ? (this.first ? [{ p: this.first, kind: "vertex" as const }] : []) : this.ownPoints()) {
       const s = vp.toScreen(this.world(p));
       const d = Math.hypot(s.x - e.clientX, s.y - e.clientY);
       const score = d + (kind === "vertex" ? 0 : 4); // ends before middles / centres
@@ -1608,11 +1612,11 @@ export class SketchTool implements Tool {
 
   /**
    * Drag a Spline point to `e`: onto a point of the sketch's other lines (ends first, then middles / centres) or of
-   * the model, else the plane (grid steps when snapping); Ctrl: free. The curve through its points again.
+   * the model, else the plane (grid steps when snapping); free as the Snap setting says (see pointAt). The curve through its points again.
    */
   private ptDragTo(e: PointerEvent): void {
     const dr = this.ptDrag!;
-    const vp = this.host.viewport, free = vp.autoSnap && e.ctrlKey;
+    const vp = this.host.viewport, free = !vp.snapping(e);
     let q: P | null = null;
     if (!free) {
       // (the dragged Spline's own lines left out: its point would stick where it was)

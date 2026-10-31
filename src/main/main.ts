@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, type MenuItemConstructorOptions } from "electron";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -218,7 +218,11 @@ function buildMenu(): void {
     },
     {
       label: "&Help",
-      submenu: [item("Shortcuts: Search & Change…", "help.keys", "/"), item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter"), item("Propeller", "help.propeller")],
+      submenu: [
+        item("Shortcuts: Search & Change…", "help.keys", "/"), item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter"), item("Propeller", "help.propeller"),
+        { type: "separator" },
+        { label: "Clear Old Recovery Files…", click: () => void clearOldRecoveries() },
+      ],
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -325,14 +329,24 @@ function registerIpc(): void {
     await writeFile(file + ".tmp", JSON.stringify(rec)); // never leave a half-written file
     await rename(file + ".tmp", file);
   });
+  // The newest work left by a copy that isn't running any more (or by this window before it restarted), with how many more
   ipcMain.handle("recovery-read", async () => {
-    try {
-      return JSON.parse(await readFile(recoveryFile(), "utf8")) as { savedAt: number; filePath: string | null; data: string };
-    } catch {
-      return null;
+    const files = await leftoverRecoveries();
+    for (const file of files) {
+      try {
+        const rec = JSON.parse(await readFile(file, "utf8")) as { savedAt: number; filePath: string | null; data: string };
+        return { ...rec, file, more: files.length - 1 };
+      } catch {
+        await unlink(file).catch(() => {}); // (unreadable: nothing to offer)
+      }
     }
+    return null;
   });
-  ipcMain.handle("recovery-clear", () => clearRecovery());
+  // Recovered: the file becomes this copy's own (kept until the work is saved)
+  ipcMain.handle("recovery-adopt", async (_e, file: string) => {
+    if (file !== recoveryFile() && (await leftoverRecoveries()).includes(file)) await rename(file, recoveryFile()).catch(() => {});
+  });
+  ipcMain.handle("recovery-clear", (_e, file?: string) => clearRecovery(file));
 
   ipcMain.on("set-title", (_e, title: string) => win?.setTitle(title));
 
@@ -350,13 +364,94 @@ let forceClose = false;
 /** The window's renderer died (crash / killed): its recovery file must survive. */
 let crashed = false;
 
-/** Where unsaved work is autosaved (a test run uses its own, so it never touches the user's). */
-function recoveryFile(): string {
-  return process.env.YDDD_TEST ? path.join(process.env.YDDD_TEST, "recovery.yddd") : path.join(app.getPath("userData"), "recovery.yddd");
+/** The folder recovery files go in (a test run uses its own, so it never touches the user's). */
+function recoveryDir(): string {
+  return process.env.YDDD_TEST ?? app.getPath("userData");
 }
 
-async function clearRecovery(): Promise<void> {
-  await unlink(recoveryFile()).catch(() => {});
+/**
+ * Where this copy of YDDD autosaves its unsaved work: a file of its own (recovery-<process id>.yddd), so two or three
+ * copies running at once don't overwrite each other's — after a crash each one's work is still there.
+ */
+function recoveryFile(): string {
+  return path.join(recoveryDir(), `recovery-${process.pid}.yddd`);
+}
+
+/** Whether the copy of YDDD with this process id is still running (its recovery file is in use, not left over). */
+function running(pid: number): boolean {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // (alive, someone else's)
+  }
+}
+
+/**
+ * Recovery files left by copies that are no longer running (crashed, killed), newest first — and the one-file
+ * recovery.yddd of YDDD before 0.2.2. This copy's own file (its window restarted after a crash) comes first.
+ */
+async function leftoverRecoveries(): Promise<string[]> {
+  const dir = recoveryDir();
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const found: { file: string; at: number }[] = [];
+  for (const n of names) {
+    // (a write cut off by a crash: its half-written .tmp — never offered, just removed)
+    const t = /^recovery(?:-(\d+))?\.yddd\.tmp$/.exec(n);
+    if (t && !(t[1] && running(Number(t[1])))) await unlink(path.join(dir, n)).catch(() => {});
+    const m = /^recovery(?:-(\d+))?\.yddd$/.exec(n);
+    if (!m || (m[1] && Number(m[1]) !== process.pid && running(Number(m[1])))) continue;
+    const file = path.join(dir, n);
+    const at = file === recoveryFile() ? Infinity : (await stat(file).catch(() => null))?.mtimeMs;
+    if (at !== undefined) found.push({ file, at });
+  }
+  return found.sort((a, b) => b.at - a.at).map((f) => f.file);
+}
+
+/**
+ * Help → Clear Old Recovery Files…: the unsaved work left by copies of YDDD that crashed and was never recovered or
+ * discarded — listed (model, when, size) and, if the user agrees, deleted. This window's own file (its unsaved work now)
+ * and other running copies' are never touched.
+ */
+async function clearOldRecoveries(): Promise<void> {
+  const files = (await leftoverRecoveries()).filter((f) => f !== recoveryFile());
+  const parent = win ?? undefined;
+  // (a test run: unattended — the first answer)
+  const show = (o: Electron.MessageBoxOptions) => (process.env.YDDD_TEST ? Promise.resolve({ response: 0, checkboxChecked: false }) : parent ? dialog.showMessageBox(parent, o) : dialog.showMessageBox(o));
+  if (!files.length) {
+    await show({ type: "info", message: "No old recovery files", detail: "Nothing left over from a crash — the windows open now keep their own.", buttons: ["OK"] });
+    return;
+  }
+  const rows: string[] = [];
+  let bytes = 0;
+  for (const f of files) {
+    const size = (await stat(f).catch(() => null))?.size ?? 0;
+    bytes += size;
+    let what = path.basename(f);
+    try {
+      const rec = JSON.parse(await readFile(f, "utf8")) as { savedAt: number; filePath: string | null };
+      what = `${rec.filePath ? path.basename(rec.filePath) : "an unsaved model"} — autosaved ${new Date(rec.savedAt).toLocaleString()}`;
+    } catch {
+      // (unreadable: by its file name)
+    }
+    rows.push(`• ${what} (${(size / 1048576).toFixed(1)} MB)`);
+  }
+  const res = await show({
+    type: "question",
+    message: `Delete ${files.length} old recovery file${files.length === 1 ? "" : "s"} (${(bytes / 1048576).toFixed(1)} MB)?`,
+    detail: `Unsaved work left by YDDD windows that closed unexpectedly:\n${rows.slice(0, 12).join("\n")}${rows.length > 12 ? `\n… and ${rows.length - 12} more` : ""}\n\nThis can't be undone. (The work in the windows open now isn't touched.)`,
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (res.response !== 0) return;
+  for (const f of files) await unlink(f).catch(() => {});
+}
+
+/** Delete this copy's recovery file — or `file`, a leftover the user discarded. */
+async function clearRecovery(file?: string): Promise<void> {
+  await unlink(file && (await leftoverRecoveries()).includes(file) ? file : recoveryFile()).catch(() => {});
 }
 
 /** Ask before closing a window with unsaved changes. */
@@ -449,7 +544,7 @@ async function createWindow(): Promise<void> {
 
 app.whenReady().then(async () => {
   // A test run starts clean (a leftover recovery file would stop it with the Recover question).
-  if (process.env.YDDD_TEST) await clearRecovery();
+  if (process.env.YDDD_TEST) for (const f of await leftoverRecoveries()) await unlink(f).catch(() => {});
   registerAppProtocol();
   registerIpc();
   loadRecent();
