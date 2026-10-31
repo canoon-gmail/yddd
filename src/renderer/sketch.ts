@@ -2707,6 +2707,8 @@ export class SketchTool implements Tool {
     // Rubber band to the cursor.
     const c = this.cursor;
     let hud: string | null = null;
+    /** The label keeps to the far side of the cursor from this (the line / arc being drawn up to it). */
+    let hudAway: P | undefined;
     if (c) {
       const from = this.cur;
       if ((this.mode === "rect" || this.mode === "circle") && this.anchor) {
@@ -2714,10 +2716,12 @@ export class SketchTool implements Tool {
         if (this.mode === "rect") {
           lines([a, [c[0], a[1]], c, [a[0], c[1]]], this.mats.rubber, true);
           hud = `${num(Math.abs(c[0] - a[0]))} × ${num(Math.abs(c[1] - a[1]))} mm`;
+          hudAway = a;
         } else {
           lines(loopPolygon({ kind: "circle", c: a, r: dist(a, c) }), this.mats.rubber, true);
           lines([a, c], this.mats.rubber);
           hud = `${circleSize.tag} ${num(circleSize.shown(dist(a, c)))} mm`;
+          hudAway = a;
         }
       } else if (this.first && this.mode === "spline") {
         // The curve so far, on to the cursor (closing: round to the start)
@@ -2725,16 +2729,21 @@ export class SketchTool implements Tool {
         const g = closing ? throughSpline(q, true) : same(c, q[q.length - 1]) ? null : q.length + 1 >= 2 ? throughSpline([...q, c], false) : null;
         if (g) lines([...splinePoints(g), g.b], this.mats.rubber);
         hud = `Spline · ${q.length + (closing || same(c, q[q.length - 1]) ? 0 : 1)} points`;
+        hudAway = q[q.length - 1];
       } else if (from && this.mode === "line") {
         lines([from, c], this.mats.rubber);
+        hudAway = from;
         const d = sub(c, from);
         hud = `${num(len(d))} mm${this.lock === 0 ? " · horizontal" : this.lock === 1 ? " · vertical" : ` · ${num((Math.atan2(d[1], d[0]) * 180) / Math.PI)}°`}`;
       } else if (from && this.mode === "arc") {
         const g = this.path.length || this.arcEnd ? this.arcAt(from, c) : null;
         const fixed = this.arcR ? ` · R ${num(this.arcR)} (typed)` : "";
         const k = g && arcGeom(g as Extract<Seg, { kind: "arc" }>);
+        hudAway = from;
         if (g && k) {
-          lines([...segPoints(g), g.b], this.mats.rubber);
+          const pts = [...segPoints(g), g.b];
+          lines(pts, this.mats.rubber);
+          hudAway = pts[Math.max(0, pts.length - 4)]; // (the arc's own way into the cursor, not its far start)
           hud = `Arc R ${num(k.r)} mm · ${num((Math.abs(k.sweep) * 180) / Math.PI)}°${this.arcR ? " (R typed)" : ""}`;
         } else if (!this.path.length && !this.arcEnd) {
           lines([from, c], this.mats.rubber);
@@ -2879,7 +2888,8 @@ export class SketchTool implements Tool {
       }
     }
     vp.setOverlay(objs);
-    this.host.hud(this.typed ? `⌨ ${this.typed}_` : hud, sc ? this.world(this.handlePos((sc.handle ?? sc.hover) === "rot" ? "rot" : "xy")) : moveAt ? this.world(moveAt) : gripAt ? this.world(gripAt) : c ? this.world(c) : rh ? this.world(rh.q) : undefined);
+    const atCursor = !sc && !moveAt && !gripAt && !!c;
+    this.host.hud(this.typed ? `⌨ ${this.typed}_` : hud, sc ? this.world(this.handlePos((sc.handle ?? sc.hover) === "rot" ? "rot" : "xy")) : moveAt ? this.world(moveAt) : gripAt ? this.world(gripAt) : c ? this.world(c) : rh ? this.world(rh.q) : undefined, atCursor && hudAway ? this.world(hudAway) : undefined);
     // The 3D corner view frames the model and the sketch — again after each change (moved / scaled: once let go).
     if (this.insetVersion !== this.version && !this.drag?.moved && !this.scaling?.handle && !this.moving?.handle) {
       this.insetVersion = this.version;

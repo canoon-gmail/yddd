@@ -2862,6 +2862,68 @@ export function edgeLoopFace(shape: Shape, edgeIds: number[]): Face {
   return face;
 }
 
+/**
+ * Close (Shift+H): faces that leave openings — a cylinder's side copied off it (a tube), an open box, several face
+ * objects together — sewn, each opening (a loop of edges only one face has) filled with a flat face, made a solid,
+ * outside out. Throws (a message) if an opening isn't flat, the faces don't sew into one piece, or there's no inside.
+ */
+export function closeShapes(shapes: Shape[]): Solid {
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const sew = keep(new oc.BRepBuilderAPI_Sewing(1e-4, true, true, true, false));
+    for (const sh of shapes) for (const f of sh.faces) sew.Add(f.wrapped);
+    sew.Perform(keep(new oc.Message_ProgressRange()));
+    // The openings: the free edges, grouped into loops by their shared ends
+    const free: Edge[] = [];
+    for (let i = 1; i <= sew.NbFreeEdges(); i++) free.push(cast(sew.FreeEdge(i)) as Edge);
+    if (!free.length) throw new Error("Close: it has no openings — it's closed already");
+    const loops: Edge[][] = [];
+    const left = [...free];
+    while (left.length) {
+      const loop = [left.shift()!];
+      const keys = new Set(loop.flatMap((e) => [ptKey(e.startPoint.toTuple() as V3), ptKey(e.endPoint.toTuple() as V3)]));
+      for (let grew = true; grew; ) {
+        grew = false;
+        for (let i = left.length - 1; i >= 0; i--) {
+          const e = left[i], a = ptKey(e.startPoint.toTuple() as V3), b = ptKey(e.endPoint.toTuple() as V3);
+          if (!keys.has(a) && !keys.has(b)) continue;
+          loop.push(e);
+          keys.add(a).add(b);
+          left.splice(i, 1);
+          grew = true;
+        }
+      }
+      loops.push(loop);
+    }
+    const caps = loops.map((loop) => {
+      let face: Face;
+      try {
+        face = makeFace(assembleWire(chainEdges(loop)));
+      } catch {
+        throw new Error("Close: an opening isn't a flat, closed loop — only flat openings can be filled");
+      }
+      if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error("Close: an opening isn't flat — only flat openings can be filled");
+      return face;
+    });
+    const sew2 = keep(new oc.BRepBuilderAPI_Sewing(1e-4, true, true, true, false));
+    sew2.Add(keep(sew.SewedShape()));
+    for (const c of caps) sew2.Add(c.wrapped);
+    sew2.Perform(keep(new oc.Message_ProgressRange()));
+    const shells = [...iterTopo(keep(sew2.SewedShape()), "shell")];
+    if (shells.length !== 1) throw new Error("Close: the faces don't join into one piece — select faces that meet edge to edge");
+    const shell = keep(oc.TopoDS.Shell(shells[0] as never));
+    if (!oc.BRep_Tool.IsClosed(shell)) throw new Error("Close: some openings are left — the faces don't meet edge to edge");
+    const made = keep(new oc.BRepBuilderAPI_MakeSolid(shell)).Solid();
+    oc.BRepLib.OrientClosedSolid(made);
+    const solid = (cast(made) as Solid).simplify() as Solid;
+    if (!isValidShape(solid) || !(solidVolume(solid) > 1e-9)) throw new Error("Close: the result has no inside (a flat face? Push/Pull it instead)");
+    return solid;
+  } finally {
+    for (const o of tmp) o.delete();
+  }
+}
+
 /** True if every face is flat and every edge straight. */
 export function isPolyhedral(shape: Shape): boolean {
   return shape.faces.every((f) => f.geomType === "PLANE") && shape.edges.every((e) => e.geomType === "LINE");

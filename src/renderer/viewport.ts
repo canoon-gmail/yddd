@@ -1123,6 +1123,46 @@ export class Viewport {
   }
 
   /** Screen-space projection of a body's edge polyline points, cached per camera state. */
+  /**
+   * Where a body's box falls on the canvas (px), worked out once per view (its 8 corners): "behind" — all behind the
+   * camera; null — partly behind it (can't tell: never skipped). Lets the snapping / edge picking / drop marks skip
+   * bodies away from the cursor or off screen instead of collecting and projecting all their points (a city: hundreds).
+   */
+  private screenRect(v: BodyView): [number, number, number, number] | "behind" | null {
+    const c = this.rects.get(v), m = v.mesh.matrixWorld.elements;
+    // (the same view, mesh and placement: a body moved or rebuilt without the camera moving is worked out again)
+    if (c && c.stamp === this.stamp && c.geo === v.mesh.geometry && c.m.every((x, i) => x === m[i])) return c.r;
+    const box = new THREE.Box3().setFromObject(v.mesh);
+    let r: [number, number, number, number] | "behind" | null = null;
+    if (!box.isEmpty()) {
+      const p = new THREE.Vector3();
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, behind = 0;
+      for (let k = 0; k < 8; k++) {
+        p.set(k & 1 ? box.max.x : box.min.x, k & 2 ? box.max.y : box.min.y, k & 4 ? box.max.z : box.min.z).project(this.camera);
+        if (p.z > 1) behind++;
+        if (p.z < -1 || p.z > 1) continue;
+        const x = ((p.x + 1) / 2) * this.width, y = ((1 - p.y) / 2) * this.height;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
+      r = behind === 8 ? "behind" : behind ? null : [x0, y0, x1, y1];
+    }
+    this.rects.set(v, { stamp: this.stamp, r, geo: v.mesh.geometry, m: [...m] });
+    return r;
+  }
+  private rects = new WeakMap<BodyView, { stamp: number; r: [number, number, number, number] | "behind" | null; geo: THREE.BufferGeometry; m: number[] }>();
+
+  /** The body's box on screen is more than `pad` px from (px, py) (canvas px) — nothing of it can be under the cursor. */
+  private awayFrom(v: BodyView, px: number, py: number, pad: number): boolean {
+    const r = this.screenRect(v);
+    return r === "behind" || (!!r && (px < r[0] - pad || px > r[2] + pad || py < r[1] - pad || py > r[3] + pad));
+  }
+
+  /** The body's box is wholly off screen. */
+  private offScreen(v: BodyView): boolean {
+    const r = this.screenRect(v);
+    return r === "behind" || (!!r && (r[2] < 0 || r[0] > this.width || r[3] < 0 || r[1] > this.height));
+  }
+
   private projected(v: BodyView): Float32Array {
     if (v.proj && v.projStamp === this.stamp) return v.proj;
     const n = v.edgePos.length / 3;
@@ -1161,6 +1201,7 @@ export class Viewport {
     for (const v of this.views.values()) {
       if (!(underGhost ? this.snappable(v) : v.group.visible) || (bodies && !bodies.has(v.body.id))) continue;
       if (!underGhost && this.locked.has(v.body.id)) continue; // (not picked; snapped to, see snapAt)
+      if (this.awayFrom(v, px, py, tol)) continue;
       const proj = this.projected(v);
       for (let e = 0; e < v.edgeIds.length; e++) {
         if (only && !only(v.body.id, v.edgeIds[e])) continue;
@@ -1416,7 +1457,7 @@ export class Viewport {
     const cands: { score: number; view: BodyView; i: number }[] = [];
     const p = new THREE.Vector3();
     for (const [id, v] of this.views) {
-      if (!this.snappable(v) || exclude?.has(id)) continue;
+      if (!this.snappable(v) || exclude?.has(id) || this.awayFrom(v, px, py, SNAP_PX)) continue;
       const s = this.snapsOf(v);
       if (s.projStamp !== this.stamp || !s.proj) {
         const n = s.kinds.length;
@@ -1823,12 +1864,13 @@ export class Viewport {
   centerTargets(exclude: Set<number>): { point: THREE.Vector3; kind: SnapKind }[] {
     const out: { point: THREE.Vector3; kind: SnapKind }[] = [];
     for (const v of this.views.values()) {
-      if (exclude.has(v.body.id) || !v.group.visible) continue;
+      if (exclude.has(v.body.id) || !v.group.visible || this.offScreen(v)) continue;
       const s = this.snapsOf(v);
       for (let i = 0; i < s.kinds.length; i++) {
         if (SNAP_KINDS[s.kinds[i]] !== "center") continue;
         const p = new THREE.Vector3().fromArray(s.pts, i * 3);
-        if (!this.hiddenFrom(p, exclude)) out.push({ point: p, kind: "center" });
+        // (off screen: left out before the costly hidden test — a ray through every solid's triangles)
+        if (this.inView(p, 0) && !this.hiddenFrom(p, exclude)) out.push({ point: p, kind: "center" });
       }
     }
     return out;

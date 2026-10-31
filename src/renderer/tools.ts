@@ -41,7 +41,8 @@ export interface ToolHost {
   snapStep(e: { ctrlKey: boolean } | null): number;
   hint(text: string): void;
   toast(msg: string, kind?: "info" | "error"): void;
-  hud(text: string | null, at?: THREE.Vector3): void;
+  /** A label by `at` (null: none) — `away`: placed on the far side of `at` from it (not over the line being drawn). */
+  hud(text: string | null, at?: THREE.Vector3, away?: THREE.Vector3): void;
   finish(shape: Shape, baseName: string, kind: BodyKind): void;
   fail(e: unknown): void;
   /** Show a property dialog; onOk receives the edited values in field order. */
@@ -1296,6 +1297,8 @@ export class PointMoveTool implements Tool {
       vp.showSnapMarker(pv ?? (round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null));
       return;
     }
+    // (pressed on the mark and not dragged yet — maybe a click: no target centres yet)
+    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) < 5) return;
     this.refreshPivots();
     // A centre mark of another solid near the cursor wins (exactly centre to centre).
     const mark = vp.snapping(e) ? vp.nearestOnScreen(e.clientX, e.clientY, this.targets) : null;
@@ -1329,8 +1332,11 @@ export class PointMoveTool implements Tool {
       const p = pv.point;
       this.base = p.clone();
       this.press = { x: e.clientX, y: e.clientY };
-      this.camKey = ""; // (shows the target centres now)
-      this.refreshPivots();
+      // (the target centres — every other solid's, each tested for being hidden: seconds in a big model — only once
+      // it's dragged: a click on the mark goes straight to the gizmo)
+      this.targets = [];
+      this.camKey = ""; // (worked out by the first move after this)
+      this.host.viewport.showPivotDots([]);
       this.updateHint();
       return;
     }

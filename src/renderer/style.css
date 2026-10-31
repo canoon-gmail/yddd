@@ -171,8 +171,9 @@ kbd {
 /* ---------------------------------------------------------------- HUD & op panel */
 #hud {
   position: absolute; pointer-events: none; transform: translate(14px, -28px);
-  padding: 3px 7px; border-radius: 4px; background: rgba(20, 21, 24, 0.85);
-  border: 1px solid var(--border); color: var(--accent-2); font-variant-numeric: tabular-nums; white-space: pre; line-height: 1.4;
+  padding: 3px 7px; border-radius: 4px; background: rgba(20, 21, 24, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12); color: var(--accent-2); font-variant-numeric: tabular-nums; white-space: pre; line-height: 1.4;
+  text-shadow: 0 0 3px #000, 0 1px 2px #000; /* (readable on a light face through the lighter box) */
 }
 #op-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .op-handle {
@@ -502,6 +503,7 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 /* ---------------------------------------------------------------- colour / opacity pop-up (Bodies panel swatch) */
 .look-pop { width: 210px; }
 .look-presets { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; padding: 4px 8px 8px; }
+.look-sub { padding: 0 8px; font-size: 11px; color: var(--muted); }
 #look-pop .look-preset { width: 100%; height: 22px; padding: 0; border: 1px solid var(--border); border-radius: 4px; }
 #look-pop .look-preset:hover { outline: 2px solid var(--accent-2); }
 .look-field { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }

@@ -63,6 +63,7 @@ import {
   kindOf,
   faceAxis,
   edgeFaceIds,
+  closeShapes,
   liesOnSolid,
   planarFaceFrame,
   sketchOfShape,
@@ -215,6 +216,17 @@ const SIDEBAR_KEY = "yddd.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
 const AUTO_SNAP_KEY = "yddd.autoSnap";
 /** File → Settings → Orbit around: "selection" — orbit and the view keys turn about the selection; else the view's centre. */
 const ORBIT_KEY = "yddd.orbitAround";
+/** The last custom colours applied (not the presets), newest first — the colour pop-up's Recent row. */
+const RECENT_COLORS_KEY = "yddd.recentColors";
+const RECENT_COLORS_MAX = 10;
+function recentColors(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECENT_COLORS_KEY) ?? "[]");
+    return Array.isArray(v) ? v.filter((c): c is string => typeof c === "string" && /^#[0-9a-f]{6}$/i.test(c)).slice(0, RECENT_COLORS_MAX) : [];
+  } catch {
+    return [];
+  }
+}
 /** More guides than this from one Guide tool run are grouped (Bodies panel). */
 const GUIDE_GROUP_MIN = 4;
 /** The Bodies panel: a list longer than this shows only the rows in view (thousands of rows made every change slow). */
@@ -422,7 +434,7 @@ export class App implements ToolHost {
   }
 
 
-  hud(text: string | null, at?: THREE.Vector3): void {
+  hud(text: string | null, at?: THREE.Vector3, away?: THREE.Vector3): void {
     if (!text || !at) {
       this.hudEl.hidden = true;
       this.hudAnchor = null;
@@ -431,8 +443,11 @@ export class App implements ToolHost {
     this.hudEl.textContent = text;
     this.hudEl.hidden = false;
     this.hudAnchor = at.clone();
+    this.hudAway = away?.clone() ?? null;
     this.positionHud();
   }
+  /** The label keeps clear of this point's side (see hud). */
+  private hudAway: THREE.Vector3 | null = null;
 
   /** World mm per field unit of `drag`, including its `mul` field. */
   private dragUnit(drag: OpDrag): number {
@@ -580,6 +595,10 @@ export class App implements ToolHost {
     const r = $("viewport").getBoundingClientRect();
     this.hudEl.style.left = `${s.x - r.left}px`;
     this.hudEl.style.top = `${s.y - r.top}px`;
+    // In the quarter beyond the cursor, away from the line coming to it (else: up and right, as the stylesheet has it)
+    const a = this.hudAway && this.viewport.toScreen(this.hudAway);
+    const dx = a ? s.x - a.x : 0, dy = a ? s.y - a.y : 0;
+    this.hudEl.style.transform = a && Math.hypot(dx, dy) > 1 ? `translate(${dx >= 0 ? "14px" : "calc(-100% - 14px)"}, ${dy >= 0 ? "14px" : "calc(-100% - 14px)"})` : "";
   }
 
   finish(shape: Shape, baseName: string, kind: BodyKind): void {
@@ -835,6 +854,7 @@ export class App implements ToolHost {
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
+      case "op.close": return this.closeOpenings();
       case "op.offset": return this.opOffset();
       case "op.revolve": return this.opRevolve();
       case "op.sweep": return this.opSweep();
@@ -958,7 +978,11 @@ export class App implements ToolHost {
   }
 
   private setSelection(items: SelItem[]): void {
+    const before = new Set(this.selection.map((s) => s.body));
     this.selection = items.filter((s) => !this.doc.get(s.body)?.locked);
+    // Picked anywhere but the Bodies panel (the view, a tool, Select all…): its row to the panel's top
+    const added = this.selection.find((s) => !before.has(s.body));
+    if (added && !this.olFromPanel) this.olScrollTo = added.body;
     this.located = null;
     if (items.length) this.selDot = -1;
     if (items.length) this.clearGuideGroup();
@@ -2180,6 +2204,28 @@ export class App implements ToolHost {
     });
   }
 
+  /**
+   * Close (Shift+H): the selected face objects (a cylinder's side copied off it, an open box, several meeting edge to
+   * edge) sewn and each flat opening filled — one solid in place of the first, the others used up. One undo step.
+   */
+  private closeOpenings(): void {
+    const bodies = [...new Set(this.selection.map((s) => s.body))].map((id) => this.doc.get(id)!).filter(Boolean);
+    if (!bodies.length || bodies.some((b) => b.kind !== "face" || !isBrep(b)))
+      return this.toast("Close: select face objects that leave openings (e.g. a cylinder's side copied off it with Shift+D) — a solid is closed already", "error");
+    let solid: Solid;
+    try {
+      solid = closeShapes(bodies.map((b) => b.shape as Shape));
+    } catch (e) {
+      return this.toast(errorMessage(e), "error");
+    }
+    const first = bodies[0], used = new Set(bodies.map((b) => b.id));
+    const nb = extrudedFrom(this.doc.makeBody(solid, "Solid"), first);
+    this.doc.commit(this.doc.bodies.flatMap((b) => (b.id === first.id ? [nb] : used.has(b.id) ? [] : [b])), "Close");
+    this.setMode("body");
+    this.setSelection([{ kind: "body", body: nb.id, id: 0 }]);
+    this.toast(`Closed: "${nb.name}", a solid`);
+  }
+
   /** Several faces (on one or more solids) and/or flat face objects, one distance. */
   private opPushPullMany(): void {
     const perSolid = new Map<number, number[]>();
@@ -2874,8 +2920,8 @@ export class App implements ToolHost {
         };
       },
       drag: drags.length ? drags : undefined,
-      then: ["xf.move", "xf.scale", "xf.rotate"],
-      hint: "Scale: drag the ring / boxes or type % or ±mm · Enter apply · G / S / R: apply, then move / scale / rotate · Esc cancel",
+      then: ["xf.move", "xf.moveFrom", "xf.scale", "xf.rotate"],
+      hint: "Scale: drag the ring / boxes or type % or ±mm · Enter apply · G / Shift+G / S / R: apply, then move / move from point / scale / rotate · Esc cancel",
     });
   }
 
@@ -6108,6 +6154,10 @@ export class App implements ToolHost {
   /** The body rows' ids in the panel's order (see renderOutliner); the row height and the spacers of a long list. */
   private olIds: number[] = [];
   private olRowH = 30;
+  /** A body picked outside the Bodies panel: its row scrolled to the panel's top at the next redraw (see setSelection). */
+  private olScrollTo: number | null = null;
+  /** A click in the panel is being handled (its picks don't scroll the panel). */
+  private olFromPanel = false;
   private olSpacers: HTMLElement[] = [];
 
   private renderOutliner(): void {
@@ -6121,6 +6171,11 @@ export class App implements ToolHost {
       };
       const groupOf = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>(".ol-group")?.dataset.group ?? null;
       const members = (g: string) => this.doc.bodies.filter((b) => b.group === g);
+      // (a click in the panel picks what's under the mouse: the list mustn't jump — see olScrollTo)
+      el.addEventListener("click", () => {
+        this.olFromPanel = true;
+        queueMicrotask(() => (this.olFromPanel = false));
+      }, true);
       el.addEventListener("click", (e) => {
         const t = e.target as HTMLElement;
         if (t.closest("input")) return;
@@ -6273,6 +6328,8 @@ export class App implements ToolHost {
     const order: (() => HTMLElement)[] = [];
     /** The body rows' ids in that order (for a Shift+click range: most rows may not be on the page). */
     const ids: number[] = [];
+    /** Each body's place in `order` (in a folded group: its group's row) — for olScrollTo. */
+    const placeOf = new Map<number, number>();
     const live = new Set<number>(), liveGroups = new Set<string>();
     const members = new Map<string, Body[]>();
     for (const b of this.doc.bodies) if (b.group) (members.get(b.group) ?? members.set(b.group, []).get(b.group)!).push(b);
@@ -6308,6 +6365,7 @@ export class App implements ToolHost {
       if (!b.group) {
         live.add(b.id);
         ids.push(b.id);
+        placeOf.set(b.id, order.length);
         order.push(() => bodyRow(b));
         continue;
       }
@@ -6317,9 +6375,11 @@ export class App implements ToolHost {
       const ms = members.get(g)!;
       const open = !this.olCollapsed.has(g);
       for (const m of ms) live.add(m.id); // (folded: kept, just not shown)
+      for (const m of ms) placeOf.set(m.id, order.length); // (folded: its group's row)
       order.push(() => this.groupRow(g, ms, open, selected));
       if (open) for (const m of ms) {
         ids.push(m.id);
+        placeOf.set(m.id, order.length);
         order.push(() => bodyRow(m));
       }
     }
@@ -6328,6 +6388,14 @@ export class App implements ToolHost {
     for (const g of [...this.olGuideGroups.keys()]) if (!guideGroups.has(g)) this.olGuideGroups.delete(g);
     for (const g of [...this.hiddenGuideGroups]) if (!guideGroups.has(g)) this.hiddenGuideGroups.delete(g);
     this.olIds = ids;
+    // Selected outside the panel: that row to the panel's top (or as near as the list's end lets it) — by its place, as
+    // in a long list its row may not be on the page yet (the rows in view are made after this, from the new scroll)
+    const scrollTo = this.olScrollTo !== null ? placeOf.get(this.olScrollTo) : undefined;
+    this.olScrollTo = null;
+    if (scrollTo !== undefined) {
+      const sc = el.parentElement!;
+      sc.scrollTop = el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop + scrollTo * this.olRowH;
+    }
     // A long list: only the rows in view (and a few more each way) on the page, spacers for the rest
     let rows: HTMLElement[], above = 0, below = 0;
     if (order.length <= OL_VIRTUAL_MIN) rows = order.map((make) => make());
@@ -6361,6 +6429,11 @@ export class App implements ToolHost {
       const h = rows[1].offsetTop - rows[0].offsetTop, again = above + below > 0 && Math.abs(h - this.olRowH) > 0.5;
       this.olRowH = h;
       if (again) return this.renderOutliner();
+    }
+    // (exactly to its row, now it's on the page — the place × row height above was near enough to bring it here)
+    if (scrollTo !== undefined) {
+      const row = rows[scrollTo - (order.length > OL_VIRTUAL_MIN ? Math.round(above / this.olRowH) : 0)], sc = el.parentElement!;
+      if (row) sc.scrollTop += row.getBoundingClientRect().top - sc.getBoundingClientRect().top;
     }
     for (const id of [...this.olRows.keys()]) if (!live.has(id)) this.olRows.delete(id);
     for (const g of [...this.olGroups.keys()]) if (!liveGroups.has(g)) this.olGroups.delete(g);
@@ -6491,6 +6564,7 @@ export class App implements ToolHost {
     const op = Math.round((shown.opacity ?? 1) * 100);
     pop.innerHTML = `<h5>${escapeHtml(title)}</h5>` +
       `<div class="look-presets">${LOOK_PRESETS.map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` +
+      (recentColors().length ? `<div class="look-sub">Recent</div><div class="look-presets look-recent">${recentColors().map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` : "") +
       `<label class="look-field">Colour <input type="color" class="look-color" value="${shown.color ?? plain}"></label>` +
       `<label class="look-field">Opacity <input type="range" class="look-op" min="10" max="100" step="5" value="${op}"><span class="look-pct">${op} %</span></label>` +
       `<button class="look-reset">${group ? "No group colour (members: their own / default)" : body!.group ? "Use the group's colour" : "Default colour"}</button>`;
@@ -6573,6 +6647,10 @@ export class App implements ToolHost {
       }
       const { bodies, looks } = result(all);
       this.doc.commit(bodies, group ? `Colour of ${group}` : "Colour", this.doc.guides, this.doc.dimensions, this.doc.arrays, looks);
+      // A custom colour applied (not a preset): first in the Recent row
+      const c = look.color?.toLowerCase();
+      if (c && c !== start.color?.toLowerCase() && !LOOK_PRESETS.includes(c))
+        localStorage.setItem(RECENT_COLORS_KEY, JSON.stringify([c, ...recentColors().filter((x) => x.toLowerCase() !== c)].slice(0, RECENT_COLORS_MAX)));
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" && e.key !== "Enter") return;
@@ -6856,6 +6934,7 @@ export class App implements ToolHost {
       ["Tip dot · F", "Round tip: a selected solid shows a dot on each sharp tip (a cone's point, a pyramid's — not box corners); click the dot, F, the radius (mm): the point becomes a ball — on a cone it blends smoothly into the side, on a pyramid into its edges (a slight crease on the flat sides); the panel says the largest radius the tip takes"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list); edges it can't do at that size are left sharp — the panel says how many (orange), Apply keeps the rest, and a button sets the largest size that does them all"],
       ["H", "Shell / hollow (opens the selected faces)"],
+      ["Shift+H", "Close: a face object that leaves openings (a cylinder's side copied off it, an open box — or several face objects meeting edge to edge) becomes a solid, each flat opening filled"],
       ["Macro → Box Lid → Inside Lip / Over the Box", "A lid for an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits), made closed on it: Inside Lip — a plate on the rim, a lip under it fitting in the opening (Lip depth 0: a flat lid; Lip wall 0: a solid plug); Over the Box — a cap, bigger, its skirt round the box's outside. Clearance: the gap to the box (0: an exact fit)"],
       ["Macro → Dividers", "Walls in an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits): equal compartments, Columns along its long side and Rows across it (1: no walls that way), the walls following the inside (round corners, an oval) from the floor up; Below the rim: their tops that far under it (room for an Inside Lip lid's lip). Fused into the box: one solid to print"],
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
@@ -7604,7 +7683,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, liesOnSolid, edgeFaceIds, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
