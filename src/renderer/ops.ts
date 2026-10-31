@@ -110,6 +110,11 @@ export interface OpSpec {
   note?: string;
   /** Status bar hint instead of the usual one. */
   hint?: string;
+  /**
+   * Commands whose key, pressed while the panel is open (in its fields too), applies it — closes it if nothing was
+   * changed — and then runs them on the result (Scale: G move · S scale · R rotate).
+   */
+  then?: string[];
   /** The panel stays hidden until Tab (a preview's error shows by the cursor / in the status bar): drag the handle, Enter applies, Tab for exact values. */
   panelOnTab?: boolean;
   /** The op picks things in the viewport: a click there goes here (not to selection or Apply). */

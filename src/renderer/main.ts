@@ -1398,6 +1398,15 @@ export class App implements ToolHost {
         this.run(chordCmd);
         return;
       }
+      // An op panel's follow-on keys (Scale: G / S / R) — in its fields too: applied, then that one
+      if (this.op?.spec.then && !this.tool && k) {
+        const next = keyTable(this.keys, isPro()).single.get(k);
+        if (next && this.op.spec.then.includes(next)) {
+          e.preventDefault();
+          void this.applyThen(next);
+          return;
+        }
+      }
       // In a field, keys type — but Ctrl / Alt shortcuts still work (Save, Open… as the menu's did), except the field's own
       // Ctrl+A / C / V / X / Z / Y.
       if (typing && !((e.ctrlKey || e.altKey || e.metaKey) && k && !FIELD_KEYS.has(k))) return;
@@ -1917,6 +1926,19 @@ export class App implements ToolHost {
 
   private applyOp(): void {
     void this.applyOpWhenReady();
+  }
+
+  /** A follow-on key (OpSpec.then): the panel applied — or, nothing changed in it, closed — then `cmd` on the result. */
+  private async applyThen(cmd: string): Promise<void> {
+    const op = this.op;
+    if (!op) return;
+    const { values } = this.opValues();
+    if (op.spec.fields.every((f) => values[f.key] === f.value)) this.cancelOp();
+    else {
+      await this.applyOpWhenReady();
+      if (this.op === op) return; // (not applied: its error is in the panel)
+    }
+    this.run(cmd);
   }
 
   /** Apply: a background op first waits for the preview of the values now in the panel. */
@@ -2852,6 +2874,8 @@ export class App implements ToolHost {
         };
       },
       drag: drags.length ? drags : undefined,
+      then: ["xf.move", "xf.scale", "xf.rotate"],
+      hint: "Scale: drag the ring / boxes or type % or ±mm · Enter apply · G / S / R: apply, then move / scale / rotate · Esc cancel",
     });
   }
 
@@ -4272,7 +4296,7 @@ export class App implements ToolHost {
     const s = this.selection.length === 1 ? this.selection[0] : null;
     const b = s ? this.doc.get(s.body) : undefined;
     const faceId = s?.kind === "face" ? s.id : s?.kind === "body" && b?.kind === "face" ? b.shape.faces[0].hashCode : null;
-    let curved = false;
+    let curved = false, viewRadius = 0;
     if (b && faceId !== null) {
       if (!isBrep(b)) return this.toast("Sketch: select a flat face — or nothing, to sketch on the ground", "error");
       let f = planarFaceFrame(b.shape, faceId), at: V3 | undefined;
@@ -4290,6 +4314,9 @@ export class App implements ToolHost {
       if (Math.abs(frame.z.z) <= 0.9) frame = { ...frame, x: frame.y.clone().negate(), y: frame.x };
       center = v(at ?? faceAxis(b.shape, faceId)?.center ?? f.origin);
       what = b.kind === "face" ? `"${b.name}"` : `a ${curved ? "curved " : ""}face of "${b.name}"`;
+      // (the view shows the face and a little round it — not every body: in a city, the face was a speck far away)
+      const fb = findFace(b.shape, faceId)?.boundingBox.bounds;
+      if (fb) viewRadius = Math.hypot(fb[1][0] - fb[0][0], fb[1][1] - fb[0][1], fb[1][2] - fb[0][2]) / 2 + center.distanceTo(v(fb[0]).add(v(fb[1])).multiplyScalar(0.5));
     }
     this.endInteractions();
     this.setSelection([]); // (the face's selection colour would cover the sketch)
@@ -4306,6 +4333,7 @@ export class App implements ToolHost {
       this.endTool();
       this.toast("Sketch cancelled");
     });
+    tool.viewRadius = viewRadius * 1.25;
     this.startTool(tool.start());
     if (curved) this.toast("Curved face: the sketch is on the flat plane touching it at that point — what you draw stays flat, it doesn't follow the curve");
   }
@@ -4371,6 +4399,7 @@ export class App implements ToolHost {
       this.endTool();
       this.toast(`Sketch cancelled — ${names} unchanged`);
     });
+    tool.viewRadius = box.getBoundingSphere(new THREE.Sphere()).radius * 1.25; // (the outlines and a little round them)
     this.startTool(tool.load(loops, opens).start());
   }
 
@@ -6339,6 +6368,9 @@ export class App implements ToolHost {
   }
 
   /** A group's header row in the Bodies panel (made once, brought up to date). */
+  /** The HTML last put in a group row (see groupRow). */
+  private olHtml = new WeakMap<HTMLElement, string>();
+
   private groupRow(g: string, ms: Body[], open: boolean, selected: Set<number>): HTMLElement {
     {
       const allHidden = ms.every((x) => this.hidden.has(x.id)), allLocked = ms.every((x) => x.locked);
@@ -6360,7 +6392,12 @@ export class App implements ToolHost {
       const editBtn = !ms.some((x) => x.text) ? "" : why ? `<button class="ol-edit off" title="${escapeHtml(why)}">${ICONS.edit}</button>` : `<button class="ol-edit" title="Edit the text">${ICONS.edit}</button>`;
       const gl = this.doc.groupLooks[g] ?? {};
       const html = `<button class="ol-caret" title="${open ? "Fold" : "Unfold"}">${open ? "▾" : "▸"}</button><span class="ol-swatch ol-look" title="The group's colour and opacity (members without their own take it) · click to change" style="${swatchStyle(gl)}"></span><span class="ol-name" title="Click: select the group · double-click: rename">${escapeHtml(g)}</span><span class="ol-count">${ms.length}</span>${editBtn}${arrBtn}<button class="ol-dup" title="Copy the group (Shift+D): its copies as a new group">${ICONS.duplicate}</button>${allLocked ? `<button class="ol-lock on" title="All locked — click to unlock them">${ICONS.lock}</button>` : `<button class="ol-lock" title="Lock the group: its solids can't be selected or changed">${ICONS.unlock}</button>`}<button class="ol-eye" title="Show/hide the group">${allHidden ? ICONS.eyeOff : ICONS.eye}</button>`;
-      if (head.innerHTML !== html && !head.querySelector("input")) head.innerHTML = html;
+      // (against the last one set, not innerHTML — the browser writes that back its own way, so it never matched: the row was
+      // made again on each redraw, the name under the mouse too — a click's redraw lost the double-click, no rename)
+      if (this.olHtml.get(head) !== html && !head.querySelector("input")) {
+        head.innerHTML = html;
+        this.olHtml.set(head, html);
+      }
       head.classList.toggle("selected", ms.every((x) => selected.has(x.id)));
       head.classList.toggle("hidden", allHidden);
       return head;
@@ -6379,7 +6416,10 @@ export class App implements ToolHost {
       }
       const hidden = this.hiddenGuideGroups.has(g);
       const html = `<span class="ol-swatch guide" title="Guide lines"></span><span class="ol-name" title="Click: select its guide lines (Del removes them)">${escapeHtml(g)}</span><span class="ol-count">${n}</span><button class="ol-eye" title="Show/hide these guide lines">${hidden ? ICONS.eyeOff : ICONS.eye}</button>`;
-      if (head.innerHTML !== html) head.innerHTML = html;
+      if (this.olHtml.get(head) !== html) {
+        head.innerHTML = html;
+        this.olHtml.set(head, html);
+      }
       head.classList.toggle("selected", this.selGuideGroup === g);
       head.classList.toggle("hidden", hidden);
       return head;
@@ -6406,7 +6446,11 @@ export class App implements ToolHost {
         const { [group]: look, ...looks } = this.doc.groupLooks;
         this.doc.commit(this.doc.bodies.map((b) => (b.group === group ? { ...b, group: name } : b)), "Rename group", this.doc.guides, this.doc.dimensions, this.doc.arrays, look ? { ...looks, [name]: look } : this.doc.groupLooks);
       } else {
-        this.olGroups.get(group)?.replaceChildren(); // (redrawn below)
+        const head = this.olGroups.get(group);
+        if (head) {
+          head.replaceChildren(); // (redrawn below)
+          this.olHtml.delete(head);
+        }
         this.renderOutliner();
       }
     };

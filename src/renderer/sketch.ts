@@ -1048,10 +1048,13 @@ export class SketchTool implements Tool {
     return this;
   }
 
+  /** How much around the centre the view shows at the start (a face's size, with a margin); 0: every body. */
+  viewRadius = 0;
+
   start(): this {
     const vp = this.host.viewport;
     this.saved = { camera: vp.cameraState(), xray: vp.xray };
-    vp.lookAtPlane(this.center, this.frame.z, this.frame.y);
+    vp.lookAtPlane(this.center, this.frame.z, this.frame.y, this.viewRadius, this.viewRadius > 0);
     vp.viewLocked = true;
     vp.setZAxisVisible(false);
     if (!vp.xray) vp.setXray(true);

@@ -274,6 +274,7 @@ export class Viewport {
         (this.controls.mouseButtons as Record<string, number>)[button] = does;
         // An orbit turns about the app's point (Settings → Orbit around: Selection), else the view's centre
         this.orbitAbout = does === ROTATE && !this.viewLocked ? (this.orbitPivot?.() ?? null) : null;
+        if (this.orbitAbout) this.targetToDepthOf(this.orbitAbout); // (out of Top / Front / Right: perspective sized at it)
         this.orbitTurn = this.camera.quaternion.clone();
       }
       // Sketch: the view stays square to the plane — pan and zoom only.
@@ -508,13 +509,14 @@ export class Viewport {
 
   /**
    * Look straight at a plane (from the `normal` side) with `up` pointing up on screen, centred on
-   * `center`, far enough back to see every body (or `radius` around the centre, if larger).
+   * `center`, far enough back to see every body (or `radius` around the centre, if larger) — `only`: just
+   * `radius` around the centre (a sketch on a face: that face, not a whole city around it far away).
    */
-  lookAtPlane(center: THREE.Vector3, normal: THREE.Vector3, up: THREE.Vector3, radius = 0): void {
+  lookAtPlane(center: THREE.Vector3, normal: THREE.Vector3, up: THREE.Vector3, radius = 0, only = false): void {
     this.setFov(FOV);
     const box = new THREE.Box3();
-    for (const v of this.views.values()) if (v.group.visible) box.expandByObject(v.mesh);
-    let r = Math.max(radius, 30);
+    if (!only) for (const v of this.views.values()) if (v.group.visible) box.expandByObject(v.mesh);
+    let r = Math.max(radius, only ? 5 : 30);
     if (!box.isEmpty()) {
       const sphere = box.getBoundingSphere(new THREE.Sphere());
       r = Math.max(r, sphere.radius + sphere.center.distanceTo(center) * 0.5);
@@ -2561,8 +2563,21 @@ export class Viewport {
     this.camera.updateMatrixWorld();
   }
 
-  /** `about`: turn to it about this point (the selection's middle: it keeps its place on screen), else about the view's centre. */
+  /**
+   * The view's centre moved along the line of sight to the depth of `p` — the picture doesn't change. A change between
+   * perspective (Iso) and the nearly flat Top / Front / Right keeps the size at the centre's depth: at `p`'s then, not
+   * at a centre left near the camera (zoomed in to the cursor, orbited about the selection) — that zoomed far in.
+   */
+  private targetToDepthOf(p: THREE.Vector3): void {
+    const dir = this.camera.getWorldDirection(new THREE.Vector3()), depth = p.clone().sub(this.camera.position).dot(dir);
+    if (!(depth > 1e-6)) return;
+    this.controls.target.copy(this.camera.position).addScaledVector(dir, depth);
+    this.controls.update();
+  }
+
+  /** `about`: turn to it about this point (the selection's middle: it keeps its place on screen and its size), else about the view's centre. */
   setView(name: "top" | "front" | "right" | "iso", about: THREE.Vector3 | null = null): void {
+    if (about) this.targetToDepthOf(about);
     const before = this.camera.quaternion.clone(), was = about?.clone().project(this.camera);
     const dirs: Record<string, V3> = { top: [0, -1e-4, 1], front: [0, -1, 0], right: [1, 0, 0], iso: [1, -1.2, 0.9] };
     const dist = this.camera.position.distanceTo(this.controls.target) / this.depthScale;
@@ -2577,6 +2592,7 @@ export class Viewport {
 
   /** Look from the opposite side (top ↔ bottom, front ↔ back, right ↔ left...); `about`: as setView's. */
   flipView(about: THREE.Vector3 | null = null): void {
+    if (about) this.targetToDepthOf(about);
     const before = this.camera.quaternion.clone();
     const off = this.camera.position.clone().sub(this.controls.target);
     this.camera.position.copy(this.controls.target).sub(off);
