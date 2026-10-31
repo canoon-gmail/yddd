@@ -85,7 +85,7 @@ export const CABLE_STORAGE_BOX: Tutorial = {
     },
     {
       title: "A label on the lid",
-      how: `<kbd>T</kbd> (Text), click the lid's top a little <b>below its middle</b>, type <b>${LABEL}</b>, Font <b>Noto Sans (built in)</b> Style <b>Bold</b>, Height <b>${LABEL_H}</b>, Align <b>Center</b> → Enter. Then <kbd>P</kbd> (Push/Pull) <b>${LABEL_UP}</b> → Enter: raised letters.`,
+      how: `<kbd>T</kbd> (Text), click the lid's top a little <b>below its middle</b>, type <b>${LABEL}</b>, Font <b>Noto Sans (built in)</b> Style <b>Bold</b>, Height <b>${LABEL_H}</b>, Align <b>Center</b> → Enter. Then <kbd>P</kbd> (Push/Pull), <kbd>Tab</kbd>: <b>${LABEL_UP}</b> → Enter: raised letters.`,
       run(doc, ctx, label) {
         const lid = roleBody(doc, ctx, "lid");
         const top = lid.shape.boundingBox.bounds[1][2];

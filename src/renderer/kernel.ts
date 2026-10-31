@@ -1147,6 +1147,20 @@ export function faceAxis(shape: Shape, faceId: number): { center: V3; normal: V3
   return { center: p.toTuple() as V3, normal: face.geomType === "PLANE" ? norm3(face.normalAt().toTuple() as V3) : normalAtUV(face, 0.5, 0.5) };
 }
 
+/** Whether flat face `flat` lies on a flat face of `solid`: in its plane and touching it (e.g. a window drawn on a wall). */
+export function liesOnSolid(flat: Shape, solid: Shape): boolean {
+  const f = flat.faces[0];
+  if (!f || f.geomType !== "PLANE") return false;
+  const c = f.center.toTuple() as V3, n = norm3(f.normalAt().toTuple() as V3);
+  return solid.faces.some((g) => {
+    if (g.geomType !== "PLANE") return false;
+    const m = norm3(g.normalAt().toTuple() as V3), gc = g.center.toTuple() as V3;
+    if (Math.abs(n[0] * m[0] + n[1] * m[1] + n[2] * m[2]) < 1 - 1e-6) return false;
+    if (Math.abs((c[0] - gc[0]) * n[0] + (c[1] - gc[1]) * n[1] + (c[2] - gc[2]) * n[2]) > 1e-4) return false;
+    return measureDistanceBetween(f, g) < 1e-4;
+  });
+}
+
 /** The point of edge `edgeId` of `shape` nearest `p` (exact B-rep curve), or null. */
 /**
  * Where the line through `origin` along world axis k (0 = X, 1 = Y, 2 = Z) meets an edge: the
@@ -1517,6 +1531,15 @@ function stretchPushPull(shape: Solid, moved: Face[], n: V3, distance: number): 
     const lo = [0, 1, 2].map((k) => Math.min(...ends.map((p) => p[k]))), hi = [0, 1, 2].map((k) => Math.max(...ends.map((p) => p[k])));
     const R = 2 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + 10;
     const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    const tol = 1e-6 * Math.max(1, R);
+    const straight = (f: Face) =>
+      f.geomType === "PLANE"
+        ? Math.abs(dot3(norm3(f.normalAt().toTuple() as V3), n)) < 1e-9
+        : [0, 0.5, 1].every((u) => [0, 0.5, 1].every((v) => Math.abs(dot3(normalAtUV(f, u, v), n)) < 1e-7));
+    // Beyond the cut, every other face must be a straight wall (else the outer piece below isn't just the moved faces
+    // and walls): told before the split, which takes a while on free-form faces — e.g. the floor of a letter cut into
+    // a gear's top, the top beside it (~0.4 s saved).
+    if (shape.faces.some((f) => !moved.some((m) => m.isSame(f)) && Math.max(...heights(f)) > top + tol && !straight(f))) return null;
     const planeAt = (k: number) => {
       const o = add3(c, [n[0] * (k - dot3(c, n)), n[1] * (k - dot3(c, n)), n[2] * (k - dot3(c, n))]);
       const pln = keep(new oc.gp_Pln(keep(new oc.gp_Pnt(...o)), keep(new oc.gp_Dir(...n))));
@@ -1537,12 +1560,7 @@ function stretchPushPull(shape: Solid, moved: Face[], n: V3, distance: number): 
     const mid = (p: Solid) => { const hs = p.edges.flatMap((e) => [h(e.startPoint), h(e.endPoint)]); return (Math.min(...hs) + Math.max(...hs)) / 2; };
     const outer = pieces.filter((p) => mid(p) > top), inner = pieces.filter((p) => mid(p) < bottom), slab = pieces.filter((p) => mid(p) > bottom && mid(p) < top);
     if (outer.length !== 1 || !inner.length) return null;
-    const tol = 1e-6 * Math.max(1, R);
     const flatAt = (f: Face, k: number) => f.geomType === "PLANE" && heights(f).every((x) => Math.abs(x - k) < tol);
-    const straight = (f: Face) =>
-      f.geomType === "PLANE"
-        ? Math.abs(dot3(norm3(f.normalAt().toTuple() as V3), n)) < 1e-9
-        : [0, 0.5, 1].every((u) => [0, 0.5, 1].every((v) => Math.abs(dot3(normalAtUV(f, u, v), n)) < 1e-7));
     // A moved face lies wholly beyond the cut, so the split leaves it as it was (the same face).
     const matches = (f: Face) => moved.findIndex((m) => m.isSame(f));
     // The outer piece: the moved faces, walls straight along n, and the cut — nothing else moves.
@@ -2726,6 +2744,24 @@ const norm3 = (p: V3): V3 => {
   return [p[0] / l, p[1] / l, p[2] / l];
 };
 
+const edgeFacesCache = new WeakMap<object, Map<number, number[]>>();
+/** Ids of the faces an edge bounds (usually two) — from a table made once per shape (thousands of faces: not each face asked each time). */
+export function edgeFaceIds(shape: Shape, edgeId: number): number[] {
+  let table = edgeFacesCache.get(shape);
+  if (!table) {
+    table = new Map();
+    for (const f of shape.faces) {
+      const fid = f.hashCode;
+      for (const e of f.edges) {
+        const l = table.get(e.hashCode) ?? table.set(e.hashCode, []).get(e.hashCode)!;
+        if (!l.includes(fid)) l.push(fid);
+      }
+    }
+    edgeFacesCache.set(shape, table);
+  }
+  return table.get(edgeId) ?? [];
+}
+
 /** Straight edges of a planar face (with the face normal), or null if the face is not planar. */
 export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges: RefEdge[] } | null {
   const face = findFace(shape, faceId);
@@ -3723,6 +3759,19 @@ const tipCache = new WeakMap<object, Tip[]>();
 export function solidTips(shape: Shape): Tip[] {
   const cached = tipCache.get(shape);
   if (cached) return cached;
+  // A copy / move of another solid (Duplicate, G): its tips, moved — not looked for again (thousands of faces: seconds)
+  const r = rigid.get(shape);
+  if (r && !isMesh(r.from) && !(r.from instanceof Wire)) {
+    try {
+      const { R, t } = r, k = Math.hypot(R[0], R[3], R[6]);
+      const on = (p: V3): V3 => [0, 1, 2].map((i) => R[i * 3] * p[0] + R[i * 3 + 1] * p[1] + R[i * 3 + 2] * p[2]) as V3;
+      const moved = solidTips(r.from as Shape).map((tip) => ({ ...tip, at: add3(on(tip.at), t), axis: norm3(on(tip.axis)), reach: tip.reach * k }));
+      tipCache.set(shape, moved);
+      return moved;
+    } catch {
+      // (the earlier shape is gone: looked for below)
+    }
+  }
   const tips: Tip[] = [];
   const near = (p: V3, q: V3) => Math.hypot(...sub3(p, q)) < 1e-6;
   const ends = shape.edges.map((e) => ({ e, a: e.startPoint.toTuple() as V3, b: e.endPoint.toTuple() as V3 }));
@@ -3747,22 +3796,62 @@ export function solidTips(shape: Shape): Tip[] {
     const reach = Math.max(...outlinePoints(f).map((p) => dot3(sub3(p, apex), axis))); // (where the cone's side ends)
     if (reach > 1e-6 && !tips.some((t) => near(t.at, apex))) tips.push({ at: apex, axis, half: semi, reach, cone: true });
   }
-  // Pointed corners where flat faces meet
-  const corners: V3[] = [];
-  for (const { a, b } of ends) for (const p of [a, b]) if (!corners.some((c) => near(c, p))) corners.push(p);
-  const faceEdges = shape.faces.map((f) => ({ f, ids: new Set(f.edges.map((e) => e.hashCode)) }));
-  for (const P of corners) {
+  // Pointed corners where flat faces meet. The corners (each with the edges ending there) found through a grid
+  // of 1e-5 mm cells, the faces at an edge from one table: a solid of thousands of faces in milliseconds.
+  const corners: { P: V3; at: number[] }[] = [], grid = new Map<string, number[]>(), cell = 1e-5;
+  const cornerOf = (p: V3): number => {
+    const c = p.map((v) => Math.floor(v / cell));
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++)
+      for (const i of grid.get(`${c[0] + dx},${c[1] + dy},${c[2] + dz}`) ?? []) if (near(corners[i].P, p)) return i;
+    const key = c.join();
+    (grid.get(key) ?? grid.set(key, []).get(key)!).push(corners.length);
+    corners.push({ P: p, at: [] });
+    return corners.length - 1;
+  };
+  ends.forEach(({ a, b }, i) => {
+    for (const p of [a, b]) {
+      const at = corners[cornerOf(p)].at;
+      if (at[at.length - 1] !== i) at.push(i);
+    }
+  });
+  // (asked of the kernel once per edge / face, not once per corner)
+  const lines = new Map<object, boolean>(), hashes = new Map<object, number>(), faceInfo = new Map<Face, { ids: Set<number>; flat: boolean; n: V3 }>();
+  const lineEdge = (x: (typeof ends)[number]) => lines.get(x) ?? lines.set(x, x.e.geomType === "LINE").get(x)!;
+  const edgeId = (x: (typeof ends)[number]) => hashes.get(x) ?? hashes.set(x, x.e.hashCode).get(x)!;
+  const faceOf = (f: Face) => {
+    let info = faceInfo.get(f);
+    if (!info) {
+      const flat = f.geomType === "PLANE";
+      faceInfo.set(f, (info = { ids: new Set(f.edges.map((e) => e.hashCode)), flat, n: flat ? norm3(f.normalAt().toTuple() as V3) : [0, 0, 1] }));
+    }
+    return info;
+  };
+  let edgeFaces: Map<number, Face[]> | null = null; // (edge id → the faces it bounds: made when first needed)
+  const facesAt = (es: typeof ends): Face[] => {
+    if (!edgeFaces) {
+      edgeFaces = new Map();
+      for (const f of shape.faces) for (const e of f.edges) {
+        const h = e.hashCode, l = edgeFaces.get(h) ?? edgeFaces.set(h, []).get(h)!;
+        if (!l.includes(f)) l.push(f);
+      }
+    }
+    const out: Face[] = [];
+    for (const x of es) for (const f of edgeFaces.get(edgeId(x)) ?? []) if (!out.includes(f)) out.push(f);
+    return out;
+  };
+  for (const { P, at: atIds } of corners) {
     if (tips.some((t) => near(t.at, P))) continue;
-    const at = ends.filter(({ a, b }) => near(a, P) || near(b, P));
-    if (at.length < 3 || at.some(({ e }) => e.geomType !== "LINE")) continue;
+    const at = atIds.map((i) => ends[i]);
+    if (at.length < 3 || at.some((x) => !lineEdge(x))) continue;
     const dirs = at.map(({ a, b }) => norm3(near(a, P) ? sub3(b, P) : sub3(a, P)));
-    const faces = faceEdges.filter(({ ids }) => at.some((x) => ids.has(x.e.hashCode)));
-    if (faces.some(({ f }) => f.geomType !== "PLANE")) continue;
+    // (3 edges: each two have a face between them — any two 89°+ apart, e.g. a box's corner, and it's no tip)
+    if (at.length === 3 && [[0, 1], [0, 2], [1, 2]].some(([i, j]) => dot3(dirs[i], dirs[j]) < Math.cos((89 * Math.PI) / 180))) continue;
+    const faces = facesAt(at).map(faceOf);
+    if (faces.some((x) => !x.flat)) continue;
     // Each face's angle at the corner under 90° (not a box corner), and every edge behind every face (pointing out)
     let sharp = true;
-    for (const { f, ids } of faces) {
-      const mine = at.filter((x) => ids.has(x.e.hashCode)).map((x) => dirs[at.indexOf(x)]);
-      const n = norm3(f.normalAt().toTuple() as V3);
+    for (const { ids, n } of faces) {
+      const mine = at.filter((x) => ids.has(edgeId(x))).map((x) => dirs[at.indexOf(x)]);
       if (mine.length !== 2 || dot3(mine[0], mine[1]) < Math.cos((89 * Math.PI) / 180) || dirs.some((d) => dot3(n, d) > 1e-7)) sharp = false;
     }
     if (!sharp) continue;

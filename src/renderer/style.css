@@ -166,7 +166,6 @@ kbd {
 #statusbar .spacer { flex: 1; }
 #status-hint { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #status-mode { color: var(--accent-2); }
-.snap input { margin: 0 3px 0 10px; vertical-align: middle; }
 .snap select { margin-left: 4px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
 
 /* ---------------------------------------------------------------- HUD & op panel */
@@ -422,7 +421,7 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
   padding: 5px 8px; border: 0; border-radius: 4px; background: none; color: var(--text); font: inherit; cursor: pointer; text-align: left;
 }
 #view-menu button:hover, .popup-menu button:hover { background: var(--panel-2); }
-#view-menu kbd { opacity: 0.6; }
+#view-menu kbd, #chord-menu kbd { opacity: 0.6; }
 #tool-panel .tp-field { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 #tool-panel textarea, #tool-panel .tp-field input, #tool-panel .tp-field select {
   padding: 3px 6px; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px;

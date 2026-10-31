@@ -180,6 +180,7 @@ function buildMenu(): void {
         { type: "separator" },
         item("Group", "edit.group", "CmdOrCtrl+G"),
         item("Ungroup", "edit.ungroup", "CmdOrCtrl+Shift+G"),
+        item("Hide", "edit.hide", "CmdOrCtrl+H"),
         { type: "separator" },
         item("Clear All Guides", "edit.clearGuides"),
       ],

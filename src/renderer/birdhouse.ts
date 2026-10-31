@@ -114,12 +114,12 @@ export const BIRD_HOUSE: Tutorial = {
     },
     {
       title: "Left roof board",
-      how: "<kbd>2</kbd>, click the left roof slope, <kbd>O</kbd> (Offset) <b>15</b> → Enter (a bigger face on the slope), then <kbd>P</kbd> (Push/Pull) <b>15</b> → Enter.",
+      how: "<kbd>2</kbd>, click the left roof slope, <kbd>O</kbd> (Offset) <b>15</b> → Enter (a bigger face on the slope), then <kbd>P</kbd> (Push/Pull), <kbd>Tab</kbd>: <b>15</b> → Enter.",
       run: (doc, ctx, label) => roofBoard(doc, ctx, "roofL", label),
     },
     {
       title: "Right roof board",
-      how: "The same on the right slope: <kbd>2</kbd>, click it, <kbd>O</kbd> <b>15</b>, <kbd>P</kbd> <b>15</b>. The boards meet flush at the ridge.",
+      how: "The same on the right slope: <kbd>2</kbd>, click it, <kbd>O</kbd> <b>15</b>, <kbd>P</kbd>, <kbd>Tab</kbd>: <b>15</b>. The boards meet flush at the ridge.",
       run: (doc, ctx, label) => roofBoard(doc, ctx, "roofR", label),
     },
     {

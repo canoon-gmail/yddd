@@ -88,7 +88,9 @@ export interface GizmoFrame {
 
 export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge";
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
-const SNAP_PX = 12;
+const SNAP_PX = 10;
+/** Snapping onto a line (an edge, a world X / Y / Z axis): a little tighter than onto a point, so the points on it win. */
+const SNAP_LINE_PX = 8;
 
 /**
  * Rendering batch: up to CHUNK_SIZE bodies merged into one solid mesh, one
@@ -268,7 +270,11 @@ export class Viewport {
       if (button) {
         const swap = e.ctrlKey || e.metaKey || e.shiftKey;
         const { ROTATE, PAN, DOLLY } = THREE.MOUSE;
-        (this.controls.mouseButtons as Record<string, number>)[button] = act === "zoom" ? DOLLY : act === "orbit" ? (swap ? PAN : ROTATE) : act === "pan" ? (swap ? ROTATE : PAN) : -1;
+        const does = act === "zoom" ? DOLLY : act === "orbit" ? (swap ? PAN : ROTATE) : act === "pan" ? (swap ? ROTATE : PAN) : -1;
+        (this.controls.mouseButtons as Record<string, number>)[button] = does;
+        // An orbit turns about the app's point (Settings → Orbit around: Selection), else the view's centre
+        this.orbitAbout = does === ROTATE && !this.viewLocked ? (this.orbitPivot?.() ?? null) : null;
+        this.orbitTurn = this.camera.quaternion.clone();
       }
       // Sketch: the view stays square to the plane — pan and zoom only.
       this.controls.enableRotate = !this.viewLocked;
@@ -283,6 +289,7 @@ export class Viewport {
     }, { capture: true, passive: true });
 
     window.addEventListener("pointerup", () => {
+      this.orbitAbout = null;
       this.controls.enableRotate = true;
       this.controls.enablePan = true;
       this.tc.enabled = true;
@@ -291,6 +298,8 @@ export class Viewport {
     this.controls.screenSpacePanning = true;
     this.controls.zoomToCursor = true;
     this.controls.addEventListener("change", () => {
+      if (this.orbitAbout) this.turnedAbout(this.orbitAbout, this.orbitTurn);
+      this.orbitTurn.copy(this.camera.quaternion);
       // Orbiting out of a Top / Front / Right view: back to perspective (pan and zoom keep the direction).
       if (this.orthoDir && this.camera.getWorldDirection(new THREE.Vector3()).angleTo(this.orthoDir) > 1e-5) this.setFov(FOV);
       this.updateClipPlanes();
@@ -1463,7 +1472,7 @@ export class Viewport {
     if (!best) {
       // No point nearby: the closer of an axis / guide line and anywhere along a visible edge.
       let ax = this.axisSnap(px, py, cx, cy, faceHit?.distance, opts?.axes ?? true);
-      let ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_PX * 0.75, exclude?.size ? (b) => !exclude.has(b) : undefined, undefined, true);
+      let ed = this.pickEdge(cx, cy, faceHit?.distance ?? null, SNAP_LINE_PX, exclude?.size ? (b) => !exclude.has(b) : undefined, undefined, true);
       // (not one behind a solid the cursor is just off)
       if (ax && this.hiddenFrom(ax.point, exclude)) ax = null;
       if (ed && this.hiddenFrom(ed.point, exclude)) ed = null;
@@ -1739,7 +1748,7 @@ export class Viewport {
       q.copy(p).project(this.camera);
       if (q.z < -1 || q.z > 1) continue;
       const dist = Math.hypot(((q.x + 1) / 2) * this.width - px, ((1 - q.y) / 2) * this.height - py);
-      if (dist <= SNAP_PX * 0.75 && (!best || dist < best.d)) best = { d: dist, p };
+      if (dist <= SNAP_LINE_PX && (!best || dist < best.d)) best = { d: dist, p };
     }
     return best ? { point: best.p, kind: best.p.lengthSq() < 1e-12 ? "vertex" : "axis", d: best.d } : null;
   }
@@ -1777,6 +1786,30 @@ export class Viewport {
       for (let i = 0; i < s.kinds.length; i++) if (!s.curved[i]) out.push({ point: new THREE.Vector3().fromArray(s.pts, i * 3), kind: SNAP_KINDS[s.kinds[i]], inside: !!s.inner[i] });
       const box = new THREE.Box3().setFromBufferAttribute(v.mesh.geometry.attributes.position as THREE.BufferAttribute);
       out.push({ point: box.getCenter(new THREE.Vector3()), kind: "center", inside: true });
+    }
+    return out;
+  }
+
+  /**
+   * The bounding box marks of these bodies together: its 8 corners, its 12 edges' midpoints, the bottom and top centres
+   * and its middle (inside) — Move from point's marks on a solid with too many of its own (a building's windows).
+   */
+  boxMarks(ids: number[]): { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] {
+    const box = new THREE.Box3();
+    for (const id of ids) {
+      const v = this.views.get(id);
+      if (v) box.union(new THREE.Box3().setFromBufferAttribute(v.mesh.geometry.attributes.position as THREE.BufferAttribute));
+    }
+    if (box.isEmpty()) return [];
+    const { min: a, max: b } = box, mid = box.getCenter(new THREE.Vector3());
+    const xs = [a.x, mid.x, b.x], ys = [a.y, mid.y, b.y], zs = [a.z, mid.z, b.z];
+    const out: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] = [];
+    // (each of x / y / z at its low, middle or high: two "middle"s — a face's centre — only for the bottom and top)
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) for (let k = 0; k < 3; k++) {
+      const mids = +(i === 1) + +(j === 1) + +(k === 1);
+      if (mids === 3) out.push({ point: mid.clone(), kind: "center", inside: true });
+      else if (mids === 2 && k !== 1) out.push({ point: new THREE.Vector3(xs[i], ys[j], zs[k]), kind: "center" });
+      else if (mids < 2) out.push({ point: new THREE.Vector3(xs[i], ys[j], zs[k]), kind: mids ? "midpoint" : "vertex" });
     }
     return out;
   }
@@ -2470,6 +2503,22 @@ export class Viewport {
     this.controls.update();
   }
 
+  /** What an orbit turns about, asked as it starts (null: the view's centre, as OrbitControls does). */
+  orbitPivot: (() => THREE.Vector3 | null) | null = null;
+  /** The point this orbit turns about (null: none / not orbiting), and the camera's turn as last seen. */
+  private orbitAbout: THREE.Vector3 | null = null;
+  private orbitTurn = new THREE.Quaternion();
+
+  /** The middle of these bodies' box together (as drawn), or null. */
+  boundsCenter(ids: number[]): THREE.Vector3 | null {
+    const box = new THREE.Box3();
+    for (const id of ids) {
+      const v = this.views.get(id);
+      if (v?.group.visible) box.union(new THREE.Box3().setFromObject(v.mesh));
+    }
+    return box.isEmpty() ? null : box.getCenter(new THREE.Vector3());
+  }
+
   /** The view's mouse gestures: what drags orbit / pan / zoom (see the pointerdown handler). */
   nav: NavGestures = { orbit: [...DEFAULT_KEYS["nav.orbit"]], pan: [...DEFAULT_KEYS["nav.pan"]], zoom: [...DEFAULT_KEYS["nav.zoom"]] };
 
@@ -2500,7 +2549,21 @@ export class Viewport {
   }
 
   /** Top / Front / Right look nearly orthographic (see ORTHO_FOV) until an orbit; Iso is perspective. */
-  setView(name: "top" | "front" | "right" | "iso"): void {
+  /**
+   * The camera has just turned about the target from facing `before`: shifted (camera and target together) as if it
+   * had turned about `about` instead — that point stays where it was on screen. (P − T) − R(P − T), R the turn.
+   */
+  private turnedAbout(about: THREE.Vector3, before: THREE.Quaternion): void {
+    const R = this.camera.quaternion.clone().multiply(before.clone().invert());
+    const pt = about.clone().sub(this.controls.target), shift = pt.clone().sub(pt.clone().applyQuaternion(R));
+    this.camera.position.add(shift);
+    this.controls.target.add(shift);
+    this.camera.updateMatrixWorld();
+  }
+
+  /** `about`: turn to it about this point (the selection's middle: it keeps its place on screen), else about the view's centre. */
+  setView(name: "top" | "front" | "right" | "iso", about: THREE.Vector3 | null = null): void {
+    const before = this.camera.quaternion.clone(), was = about?.clone().project(this.camera);
     const dirs: Record<string, V3> = { top: [0, -1e-4, 1], front: [0, -1, 0], right: [1, 0, 0], iso: [1, -1.2, 0.9] };
     const dist = this.camera.position.distanceTo(this.controls.target) / this.depthScale;
     const dir = new THREE.Vector3(...dirs[name]).normalize();
@@ -2509,14 +2572,38 @@ export class Viewport {
     this.camera.position.copy(this.controls.target).addScaledVector(dir, dist * this.depthScale);
     this.orthoDir = name === "iso" ? null : dir.negate();
     this.controls.update();
+    if (about) this.afterTurn(about, before, was);
   }
 
-  /** Look from the opposite side (top ↔ bottom, front ↔ back, right ↔ left...). */
-  flipView(): void {
+  /** Look from the opposite side (top ↔ bottom, front ↔ back, right ↔ left...); `about`: as setView's. */
+  flipView(about: THREE.Vector3 | null = null): void {
+    const before = this.camera.quaternion.clone();
     const off = this.camera.position.clone().sub(this.controls.target);
     this.camera.position.copy(this.controls.target).sub(off);
     if (this.orthoDir) this.orthoDir.negate();
     this.controls.update();
+    if (about) this.afterTurn(about, before);
+  }
+
+  /**
+   * A view key's turn, moved to be about `about` (the view redrawn). `was`: where it was on screen (-1…1) — after a
+   * change between perspective (Iso) and the nearly flat Top / Front / Right it would be off a little: slid back there.
+   */
+  private afterTurn(about: THREE.Vector3, before: THREE.Quaternion, was?: THREE.Vector3): void {
+    this.turnedAbout(about, before);
+    if (was) {
+      const now = about.clone().project(this.camera), depth = about.clone().applyMatrix4(this.camera.matrixWorldInverse).z;
+      const h = -depth * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)), w = h * this.camera.aspect;
+      const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
+      const shift = right.multiplyScalar((now.x - was.x) * w).add(up.multiplyScalar((now.y - was.y) * h));
+      this.camera.position.add(shift);
+      this.controls.target.add(shift);
+      this.camera.updateMatrixWorld();
+    }
+    this.controls.update();
+    this.updateClipPlanes();
+    this.stamp++;
+    this.requestRender();
   }
 
   /** The view direction of a Top / Front / Right view while it's nearly orthographic (null: perspective). */

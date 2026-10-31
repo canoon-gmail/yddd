@@ -55,6 +55,8 @@ export interface PropField {
   min?: number;
   /** Hidden behind a "More…" link (still sent back, with its value). */
   more?: boolean;
+  /** The field the cursor starts in (else the first), e.g. the one a drag changed. */
+  focus?: boolean;
 }
 
 export interface Tool {
@@ -1200,6 +1202,9 @@ function upright(f: PlaneFrame): PlaneFrame {
  * Off-snap points use a horizontal plane through the base (grid-snapped). Shift locks
  * to the dominant axis; typing "dx,dy,dz" + Enter moves by an exact offset.
  */
+/** Move from point on a solid with more marks of its own than this: only its bounding box's are shown. */
+const MANY_MARKS = 40;
+
 export class PointMoveTool implements Tool {
   readonly name = "Move from point";
   private base: THREE.Vector3 | null = null;
@@ -1211,6 +1216,10 @@ export class PointMoveTool implements Tool {
   private all: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] = [];
   /** Once a base is picked: the other solids' centre marks to drop it on. */
   private targets: { point: THREE.Vector3; kind: SnapKind }[] = [];
+  /** Too many marks (a building's windows): only its box's are shown — these, its own points, snap under the cursor. */
+  private detail: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] | null = null;
+  /** Those points on screen (x, y each; NaN: behind the camera), worked out once per view. */
+  private detailXY: Float64Array | null = null;
   private camKey = "";
 
   constructor(
@@ -1221,12 +1230,17 @@ export class PointMoveTool implements Tool {
     private onPick?: (p: V3, frame?: GizmoFrame) => void,
     /** The point on a round / slanted edge under the cursor and its turned axes (Z along the circle's axis / the edge), if any. */
     private slideEdgeAt?: (e: PointerEvent) => { point: V3; frame: GizmoFrame } | null,
+    /** A click on nothing (no mark, edge or solid under it) before a base is picked: the tool ends (as Esc). */
+    private onMiss?: () => void,
   ) {
     this.exclude = new Set(ids);
   }
 
   start(): this {
-    this.all = this.host.viewport.pivotCandidates(this.ids);
+    const vp = this.host.viewport, all = vp.pivotCandidates(this.ids);
+    // (over MANY_MARKS of its own: the box's marks instead, its own points snapping under the cursor)
+    if (all.filter((p) => !p.inside).length > MANY_MARKS) [this.all, this.detail] = [vp.boxMarks(this.ids), all];
+    else this.all = all;
     this.refreshPivots();
     this.updateHint();
     return this;
@@ -1245,6 +1259,7 @@ export class PointMoveTool implements Tool {
       // (only marks in sight: none behind a solid, the moved one included — but the solid's middle and a sphere's centre, inside it)
       // (marks closer than 14 px on screen: one of them — zoom in for the others)
       this.pivots = vp.spreadOnScreen([...this.all.filter((p) => p.inside), ...vp.visiblePoints(this.all.filter((p) => !p.inside))]);
+      this.detailXY = null; // (projected again when first needed)
       vp.showPivotDots(this.pivots);
     }
   }
@@ -1252,7 +1267,7 @@ export class PointMoveTool implements Tool {
   private updateHint(): void {
     const base = this.base
       ? `Move: drop on a blue centre mark (centre to centre) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
-      : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.slideEdgeAt ? " · click a round or slanted edge: the gizmo turned to it (Z along its axis / the edge)" : ""}`;
+      : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.detail ? " (many points: the outline box's marks — its own corners / midpoints / centres snap under the cursor)" : ""}${this.slideEdgeAt ? " · click a round or slanted edge: the gizmo turned to it (Z along its axis / the edge)" : ""}`;
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
 
@@ -1276,7 +1291,7 @@ export class PointMoveTool implements Tool {
     const vp = this.host.viewport;
     if (!this.base) {
       this.refreshPivots();
-      const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
+      const pv = this.markAt(e);
       const round = pv ? null : this.slideEdgeAt?.(e);
       vp.showSnapMarker(pv ?? (round ? { point: new THREE.Vector3(...round.point), kind: "edge" } : null));
       return;
@@ -1302,11 +1317,12 @@ export class PointMoveTool implements Tool {
 
   down(e: PointerEvent): void {
     if (!this.base) {
-      const pv = this.host.viewport.nearestOnScreen(e.clientX, e.clientY, this.pivots);
+      const pv = this.markAt(e);
       if (!pv) {
         // A round / slanted edge: the gizmo there, turned to it.
         const round = this.onPick ? this.slideEdgeAt?.(e) : null;
         if (round) return this.onPick!(round.point, round.frame);
+        if (this.onMiss && !this.host.viewport.pick(e.clientX, e.clientY, "body")) return this.onMiss();
         this.host.hint("Move: start from a blue mark (corner / edge midpoint / centre) · Esc cancel");
         return;
       }
@@ -1320,6 +1336,31 @@ export class PointMoveTool implements Tool {
     }
     this.move(e);
     if (this.delta) this.finish([this.delta.x, this.delta.y, this.delta.z]);
+  }
+
+  /** The mark under the cursor — or, with only the box's shown, one of the solid's own points (when snapping). */
+  private markAt(e: PointerEvent): { point: THREE.Vector3; kind: SnapKind } | null {
+    const vp = this.host.viewport;
+    const pv = vp.nearestOnScreen(e.clientX, e.clientY, this.pivots);
+    if (pv || !this.detail || !vp.snapping(e)) return pv;
+    // (only the few near the cursor checked for being hidden, nearest first — not thousands each time the view moves)
+    const pts = this.detail;
+    if (!this.detailXY) {
+      const xy = (this.detailXY = new Float64Array(pts.length * 2)), r = vp.canvas.getBoundingClientRect(), q = new THREE.Vector3();
+      pts.forEach((p, i) => {
+        q.copy(p.point).project(vp.camera);
+        const ok = !p.inside && q.z < 1;
+        xy[i * 2] = ok ? r.left + ((q.x + 1) / 2) * r.width : NaN;
+        xy[i * 2 + 1] = ok ? r.top + ((1 - q.y) / 2) * r.height : NaN;
+      });
+    }
+    const near: { i: number; d: number }[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.hypot(this.detailXY[i * 2] - e.clientX, this.detailXY[i * 2 + 1] - e.clientY);
+      if (d < 12) near.push({ i, d });
+    }
+    near.sort((a, b) => a.d - b.d);
+    return near.slice(0, 6).map((x) => pts[x.i]).find((p) => vp.visiblePoints([p]).length) ?? null;
   }
 
   /** Releasing after dragging from the base point drops the selection at the target. */

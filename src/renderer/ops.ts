@@ -49,6 +49,8 @@ export interface OpOutcome {
    * `replaces`: the body itself, moved), see Viewport.showGhostPlaced. Instant; `commit` builds the real ones.
    */
   placed?: { id: number; matrix: THREE.Matrix4; replaces?: boolean }[];
+  /** Instead of `ghost`: `compute` drew an instant preview itself (Push/Pull's shifted meshes); `commit` builds the real result. */
+  drawn?: boolean;
   /** Bodies the result removes: hidden while it is previewed. */
   hide?: number[];
   /** Hide the selected edges' highlight while previewed (they change with it, e.g. a resized hole's rim). */
@@ -108,6 +110,8 @@ export interface OpSpec {
   note?: string;
   /** Status bar hint instead of the usual one. */
   hint?: string;
+  /** The panel stays hidden until Tab (a preview's error shows by the cursor / in the status bar): drag the handle, Enter applies, Tab for exact values. */
+  panelOnTab?: boolean;
   /** The op picks things in the viewport: a click there goes here (not to selection or Apply). */
   pick?(e: PointerEvent): void;
   /** With `pick`: the pointer moved over the viewport (e.g. light up what a click would pick). */

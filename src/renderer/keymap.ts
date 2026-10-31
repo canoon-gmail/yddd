@@ -43,6 +43,7 @@ export const COMMANDS: Command[] = [
     ["edit.selectAll", "Select all"],
     ["edit.group", "Group"],
     ["edit.ungroup", "Ungroup"],
+    ["edit.hide", "Hide the selected objects"],
     ["edit.clearGuides", "Clear all guides"],
   ]),
   ...grp("Select", [
@@ -65,6 +66,7 @@ export const COMMANDS: Command[] = [
   ]),
   ...grp("Modify", [
     ["op.pushpull", "Push/Pull"],
+    ["op.bump", "Bump: a face drawn on a solid out of it / into it"],
     ["op.fillet", "Fillet"],
     ["op.chamfer", "Chamfer"],
     ["op.shell", "Shell"],
@@ -153,6 +155,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "edit.selectAll": ["Ctrl+A"],
   "edit.group": ["Ctrl+G"],
   "edit.ungroup": ["Ctrl+Shift+G"],
+  "edit.hide": ["Ctrl+H"],
   "mode.body": ["1"],
   "mode.face": ["2"],
   "mode.edge": ["3"],
@@ -166,6 +169,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "tool.text": ["T", "A T"],
   "tool.sketch": ["K"],
   "op.pushpull": ["P", "Space"],
+  "op.bump": ["Ctrl+B"],
   "op.fillet": ["F"],
   "op.chamfer": ["Shift+F"],
   "op.shell": ["H"],

@@ -62,6 +62,8 @@ import {
   smoothSurfaceFaces,
   kindOf,
   faceAxis,
+  edgeFaceIds,
+  liesOnSolid,
   planarFaceFrame,
   sketchOfShape,
   type SketchLoop,
@@ -154,7 +156,7 @@ import { MeasureTool } from "./measure";
 import { LABEL_TEXT, LabelTool } from "./label";
 import { SketchTool, type SketchFrame } from "./sketch";
 import { byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, XRAY_OPACITY_KEY } from "./format";
-import { eventKey, isDefault, keyTable, keysPanelOpen, keysText, loadKeys, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
+import { COMMANDS, eventKey, isDefault, keyTable, keysPanelOpen, keysText, loadKeys, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
 import type { TutCtx, Tutorial } from "./tutorials";
 import * as macros from "./macros";
 import { $, escapeHtml, fmt, inchFields, isPro } from "./ui";
@@ -199,6 +201,8 @@ const BUSY_DRAW_MS = 300;
 
 /** Op previews slower than this (ms) are not redone on every drag frame. */
 const SLOW_PREVIEW_MS = 60;
+/** A Push/Pull's exact preview slower than this (a letter cut into a gear: ~1.2 s): typed values get the instant drag preview, the exact result on Apply. */
+const SLOW_PUSHPULL_MS = 250;
 
 
 
@@ -209,6 +213,8 @@ const PRO_KEY = "yddd.pro";
 const SIDEBAR_KEY = "yddd.sidebarWidth", SIDEBAR_MIN = 180, SIDEBAR_MAX = 600;
 /** localStorage: Auto snap off ("0"); on by default. */
 const AUTO_SNAP_KEY = "yddd.autoSnap";
+/** File → Settings → Orbit around: "selection" — orbit and the view keys turn about the selection; else the view's centre. */
+const ORBIT_KEY = "yddd.orbitAround";
 /** More guides than this from one Guide tool run are grouped (Bodies panel). */
 const GUIDE_GROUP_MIN = 4;
 /** The Bodies panel: a list longer than this shows only the rows in view (thousands of rows made every change slow). */
@@ -243,8 +249,11 @@ export class App implements ToolHost {
   private tool: Tool | null = null;
   /** Every command's keys (keymap.ts: the defaults, or the user's own — "/" changes them). */
   private keys: Keys = loadKeys();
-  /** Pending two-key chord (e.g. B C): its second-key map and when the first key was pressed. */
-  private chord: { keys: Record<string, string>; at: number } | null = null;
+  /**
+   * Pending two-key chord (e.g. B C): its second-key map, when the first key was pressed and the tool it started (B: Box) —
+   * while that tool is still open and not clicked in, the second key counts however long after (B, a pause, S: Sphere).
+   */
+  private chord: { keys: Record<string, string>; at: number; tool: Tool | null } | null = null;
   /** Toasts already shown when a chord's first key ran (its own, newer error toasts go if the chord goes on). */
   private chordToasts = new Set<Element>();
   /** An op's hover (see OpSpec.hover): one per frame, with the latest pointer position. */
@@ -314,7 +323,7 @@ export class App implements ToolHost {
   gearDefaults = { teeth: 20, module: 2, outside: 0, angle: 20, clearance: 0.1 };
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -331,6 +340,7 @@ export class App implements ToolHost {
     const container = $("viewport");
     this.viewport = new Viewport(container);
     this.viewport.nav = navGestures(this.keys);
+    this.viewport.orbitPivot = () => this.turnPivot();
     this.viewport.setOpacity(opacitySetting(SOLID_OPACITY_KEY, 100) / 100, opacitySetting(XRAY_OPACITY_KEY, 80) / 100);
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.viewport.onLabelDoubleClick = (i) => this.editLabel(i);
@@ -624,8 +634,10 @@ export class App implements ToolHost {
       if (e.key === "Escape") close();
     });
     $("viewport").appendChild(dlg);
-    inputs[0]?.focus();
-    inputs[0]?.select();
+    const at = Math.max(0, fields.findIndex((f) => f.focus));
+    if (fields[at]?.more) dlg.querySelector<HTMLElement>("[data-act=more]")?.click(); // (it's behind More…: shown)
+    inputs[at]?.focus();
+    inputs[at]?.select();
   }
 
   // ================================================================ commands
@@ -837,6 +849,7 @@ export class App implements ToolHost {
         this.selGuide = -1;
         return this.doc.setGuides([], "Clear guides");
 
+      case "op.bump": return this.opBump();
       case "bool.union": return this.boolean("union");
       case "bool.subtract": return this.boolean("subtract");
       case "bool.intersect": return this.boolean("intersect");
@@ -863,6 +876,7 @@ export class App implements ToolHost {
       case "edit.arrayChange": return this.arrayCopy(true);
       case "edit.group": return this.groupSelected();
       case "edit.ungroup": return this.ungroupSelected();
+      case "edit.hide": return this.hideSelected();
       case "body.unlock": return this.located !== null ? this.lockBodies([this.located], false) : undefined;
       case "edit.selectAll":
         this.setMode("body");
@@ -870,11 +884,12 @@ export class App implements ToolHost {
 
       case "view.fit": return this.viewport.fit();
       case "view.fitSelection": return this.viewport.fit(this.selectedBodyIds());
-      case "view.top": return this.viewport.setView("top");
-      case "view.front": return this.viewport.setView("front");
-      case "view.right": return this.viewport.setView("right");
-      case "view.iso": return this.viewport.setView("iso");
-      case "view.flip": return this.viewport.flipView();
+      // (Settings → Orbit around: Selection — about it, as an orbit is: it keeps its place on screen)
+      case "view.top": return this.viewport.setView("top", this.turnPivot());
+      case "view.front": return this.viewport.setView("front", this.turnPivot());
+      case "view.right": return this.viewport.setView("right", this.turnPivot());
+      case "view.iso": return this.viewport.setView("iso", this.turnPivot());
+      case "view.flip": return this.viewport.flipView(this.turnPivot());
       case "view.xray":
         this.viewport.setXray(!this.viewport.xray);
         this.toast(this.viewport.xray ? "X-ray on (semi-transparent solids)" : "X-ray off (opaque solids)");
@@ -1242,6 +1257,7 @@ export class App implements ToolHost {
       this.hoverQueued = e;
     });
     c.addEventListener("pointerdown", (e) => {
+      if (e.button === 0 && !e.altKey) this.chord = null; // (a click in the viewport: drawing with the first key's tool)
       if (e.button === 2) {
         const toolTakes = !!this.tool?.rightClick;
         this.rightDownAt = (this.tool && !toolTakes) || this.op || this.viewport.gizmoHot ? null : { x: e.clientX, y: e.clientY };
@@ -1371,7 +1387,8 @@ export class App implements ToolHost {
       const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
       const k = eventKey(e);
       // A chord's second key also counts in the op panel its first key opened (S → Scale's field has focus).
-      const chordCmd = this.chord && k && (!typing || !!target.closest("#op-panel")) && performance.now() - this.chord.at < CHORD_MS ? this.chord.keys[k] : undefined;
+      const chordLive = this.chord && (performance.now() - this.chord.at < CHORD_MS || (!!this.chord.tool && this.chord.tool === this.tool));
+      const chordCmd = chordLive && k && (!typing || !!target.closest("#op-panel")) ? this.chord!.keys[k] : undefined;
       if (k) this.chord = null;
       if (chordCmd) {
         e.preventDefault();
@@ -1404,6 +1421,11 @@ export class App implements ToolHost {
         this.toast(done);
         return;
       }
+      if (e.key === "Tab" && this.op && !this.tool) {
+        e.preventDefault();
+        this.focusOpPanel(); // (Push/Pull's waits for Tab)
+        return;
+      }
       if (e.key === "Tab" && this.xf && !this.tool) {
         e.preventDefault();
         this.transformDialog();
@@ -1434,7 +1456,11 @@ export class App implements ToolHost {
         if (cmd) this.run(cmd);
         // (not while sketching, where the first key was turned down: its second key would end the sketch)
         const blocked = this.tool instanceof SketchTool && !(cmd && SKETCH_COMMANDS.has(cmd));
-        if (chord && !blocked) this.chord = { keys: chord, at: performance.now() };
+        if (chord && !blocked) {
+          this.chord = { keys: chord, at: performance.now(), tool: cmd ? this.tool : null };
+          // (B / A — the first key started a tool: what its second key gives, by the cursor; not in Pro)
+          if (this.chord.tool && !isPro()) this.showChordMenu(chord);
+        }
       }
     });
     // A mouse side button (4 / 5) with a shortcut: runs its command.
@@ -1449,6 +1475,46 @@ export class App implements ToolHost {
   // ================================================================ view menu
 
   private pointer = { x: innerWidth / 2, y: innerHeight / 2 };
+
+  /**
+   * B / A: a pop-up by the cursor listing what the second key gives (Box B · Cylinder C · Sphere S · Cone O), from
+   * the keymap. The first key's tool is already on: a click in the viewport closes it and draws; any key closes it
+   * (its second key switches, as ever); an item clicked switches too.
+   */
+  private showChordMenu(chord: Record<string, string>): void {
+    document.getElementById("chord-menu")?.remove();
+    const keysOf = new Map<string, string[]>();
+    for (const [k, cmd] of Object.entries(chord)) (keysOf.get(cmd) ?? keysOf.set(cmd, []).get(cmd)!).push(k);
+    const items = COMMANDS.filter((c) => keysOf.has(c.cmd));
+    if (!items.length) return;
+    const menu = document.createElement("div");
+    menu.id = "chord-menu";
+    menu.className = "popup-menu";
+    menu.innerHTML = `<h5>${escapeHtml(items[0].group)}</h5>` +
+      items.map((c) => `<button data-cmd="${c.cmd}"><span>${escapeHtml(c.label)}</span><kbd>${keysOf.get(c.cmd)!.map(escapeHtml).join(" / ")}</kbd></button>`).join("");
+    document.body.appendChild(menu);
+    // (beside the cursor, not under it: a click there draws)
+    const r = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(4, Math.min(this.pointer.x + 18, innerWidth - r.width - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(this.pointer.y + 18, innerHeight - r.height - 4))}px`;
+    const close = () => {
+      menu.remove();
+      window.removeEventListener("keydown", close, true);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+    const onDown = (e: PointerEvent) => {
+      const b = (e.target as HTMLElement).closest?.("#chord-menu button") as HTMLElement | null;
+      close();
+      if (!b) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.chord = null;
+      this.endInteractions(); // (the first key's tool goes, as with its second key)
+      this.run(b.dataset.cmd!);
+    };
+    window.addEventListener("keydown", close, true);
+    window.addEventListener("pointerdown", onDown, true);
+  }
 
   /** Pop-up at the cursor to pick a standard view (click, or press its number key). */
   private showViewMenu(): void {
@@ -1585,7 +1651,7 @@ export class App implements ToolHost {
     buttons.className = "op-buttons";
     buttons.innerHTML = `<button class="btn" data-a="cancel">Cancel</button><button class="btn primary" data-a="apply">${spec.applyLabel ?? "Apply ⏎"}</button>`;
     panel.appendChild(buttons);
-    panel.hidden = false;
+    panel.hidden = !!spec.panelOnTab;
 
     this.op = { spec, inputs, timer: 0, result: null, key: "" };
     buttons.addEventListener("click", (e) => {
@@ -1630,12 +1696,20 @@ export class App implements ToolHost {
     if (spec.pick) this.viewport.canvas.style.cursor = "crosshair";
     const drags = dragsOf(spec);
     this.hint(spec.hint ?? (drags.length
-      ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (${this.viewport.snapTip("grid / points")}) · click or Enter apply · Esc cancel`
+      ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (${this.viewport.snapTip("grid / points")})${spec.panelOnTab ? " · Tab: exact values" : ""} · click or Enter apply · Esc cancel`
       : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`));
     this.renderToolbarState();
     if (spec.slow) this.previewAfterPaint();
     else this.previewOp();
     this.positionHandle();
+    if (!panel.hidden) this.focusOpPanel();
+  }
+
+  /** The op panel shown (if it waited for Tab), its first number field focused and selected. */
+  private focusOpPanel(): void {
+    if (!this.op) return;
+    this.opPanel.hidden = false;
+    const inputs = this.op.inputs;
     const first = inputs.find((i) => !i.disabled && (i.type === "number" || i.dataset.mm)) ?? inputs[0];
     first?.focus();
     if (first instanceof HTMLInputElement && (first.type === "number" || first.dataset.mm)) first.select();
@@ -1811,7 +1885,9 @@ export class App implements ToolHost {
         err.append(" ", b);
       }
     }
-    if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
+    if (result.drawn) {
+      // (on screen already)
+    } else if (result.xform) this.viewport.showGhostTransformed(result.xform.ids, result.xform.matrix);
     else if (result.placed) this.viewport.showGhostPlaced(result.placed, result.hide);
     else this.viewport.showGhost(result.ghost, result.hide, result.hideSelection);
     if (result.dims || this.opDimsShown) this.showDimensions();
@@ -1827,6 +1903,13 @@ export class App implements ToolHost {
     err.textContent = errorMessage(e);
     err.classList.remove("warn");
     err.classList.toggle("waiting", e instanceof OpWaiting);
+    // A panel waiting for Tab stays hidden: the error by the cursor (dragging) or in the status bar
+    if (this.opPanel.hidden && !(e instanceof OpWaiting)) {
+      const msg = errorMessage(e);
+      if (this.hudAnchor) {
+        if (!this.hudEl.textContent?.endsWith(msg)) this.hud(`${this.hudEl.textContent} — ${msg}`, this.hudAnchor);
+      } else this.hint(`${op.spec.title}: ${msg} · Tab: exact values · Esc cancel`);
+    }
     this.viewport.clearGhost();
     if (this.opDimsShown) this.showDimensions();
     this.opDimsShown = false;
@@ -1959,6 +2042,7 @@ export class App implements ToolHost {
       // Flat face → extrude into a brand-new solid that replaces the face.
       this.startOp({
         title: "Push / Pull → new solid",
+        panelOnTab: true,
         label: "Extrude face",
         fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
         compute: ({ d }) => {
@@ -1980,8 +2064,10 @@ export class App implements ToolHost {
     }
 
     // Face of a solid → modify that solid, or (checkbox) create a separate new solid.
+    let exactMs = 0; // (the last exact preview's time: slow → typed values get the instant one too)
     this.startOp({
       title: "Push / Pull",
+      panelOnTab: true,
       label: "Push/Pull",
       fields: [
         { key: "d", label: "Distance (mm)", value: 1, step: 1 },
@@ -2001,16 +2087,74 @@ export class App implements ToolHost {
         }
         // Fast preview; the exact result is computed on Apply (see asPreview).
         const solid = this.solidOf(bodyId, "Push/Pull");
-        return {
-          ghost: new Map([[bodyId, asPreview(() => pushPull(solid, faceId, d))]]),
-          commit: () => this.replaceOutcome(new Map([[bodyId, pushPull(solid, faceId, d)]]), "Push/Pull").commit(),
-        };
+        const commit = () => this.replaceOutcome(new Map([[bodyId, pushPull(solid, faceId, d)]]), "Push/Pull").commit();
+        if (exactMs > SLOW_PUSHPULL_MS && this.dragPushPull(new Map([[bodyId, [faceId]]]), d)) return { ghost: new Map(), drawn: true, commit };
+        const t0 = performance.now();
+        const ghost = new Map([[bodyId, asPreview(() => pushPull(solid, faceId, d))]]);
+        exactMs = performance.now() - t0;
+        return { ghost, commit };
       },
       remember: ({ d, newBody }) => {
         this.defaults.pushpullNew = !!newBody;
       },
       fastDrag: ({ d, newBody }) => !newBody && this.dragPushPull(new Map([[bodyId, [faceId]]]), d),
       drag,
+    });
+  }
+
+  /**
+   * Ctrl+B with a flat face drawn on a solid's flat face (a window on a house's wall): Out — pushed out of it and
+   * joined to it; In — pushed into it and cut out of it. The face object is used up.
+   */
+  private opBump(): void {
+    // (the face object picked whole or by its face: a second click on it picks the face)
+    const flat = this.selection.length === 1 && this.selection[0].kind !== "edge" ? this.doc.get(this.selection[0].body) : undefined;
+    if (flat?.kind !== "face") return this.toast("Bump: select one flat face drawn on a solid's flat face (e.g. a window on a wall)", "error");
+    const host = this.doc.bodies.find((b): b is ShapeBody => b.kind === "solid" && !this.hidden.has(b.id) && !b.locked && liesOnSolid(flat.shape, b.shape));
+    if (!host) return this.toast(`Bump: "${flat.name}" isn't on a solid's flat face — draw it on one`, "error");
+    const faceId = flat.shape.faces[0].hashCode;
+    this.startOp({
+      title: "Bump",
+      label: "Bump",
+      note: `<span class="op-help">Out: pushed out and joined to "${escapeHtml(host.name)}" · In: pushed in and cut out of it</span>`,
+      fields: [
+        { key: "d", label: "Length (mm)", value: this.defaults.bumpLength, step: 1, min: 0 },
+        { key: "dir", label: "Bump", value: this.defaults.bumpIn ? 1 : 0, type: "select", options: ["Out", "In"] },
+      ],
+      compute: ({ d, dir }) => {
+        if (!(d > 0)) throw new Error("Bump: the length must be more than 0");
+        const piece = extrudeFace(flat.shape, faceId, dir ? -d : d);
+        const result = booleanOp(dir ? "subtract" : "union", this.solidOf(host.id, "Bump"), [piece]);
+        return {
+          ghost: new Map([[host.id, result]]),
+          hide: [flat.id],
+          commit: () => {
+            this.doc.commit(this.doc.bodies.filter((b) => b.id !== flat.id).map((b) => (b.id === host.id ? withShape(b, result) : b)), "Bump");
+            return { select: [host.id], solidMode: true };
+          },
+        };
+      },
+      remember: ({ d, dir }) => {
+        this.defaults.bumpLength = d;
+        this.defaults.bumpIn = !!dir;
+      },
+      hint: "Bump: Enter apply · click another face drawn on a solid: apply this one and bump that one the same way · Esc cancel",
+      // Another face object clicked: this one applied, then the same on that one (a row of windows)
+      pick: (e) => {
+        const p = this.viewport.pick(e.clientX, e.clientY, "body");
+        const next = p && this.doc.get(p.body);
+        if (next?.kind !== "face" || next.id === flat.id) return;
+        void this.applyOpWhenReady().then(() => {
+          if (this.op || this.doc.get(flat.id) || !this.doc.get(next.id)) return; // (not applied: an error shown)
+          this.setSelection([{ kind: "body", body: next.id, id: 0 }]);
+          this.opBump();
+        });
+      },
+      hover: (e) => {
+        const p = this.viewport.pick(e.clientX, e.clientY, "body");
+        const b = p && this.doc.get(p.body);
+        this.viewport.canvas.style.cursor = b?.kind === "face" && b.id !== flat.id ? "pointer" : "";
+      },
     });
   }
 
@@ -2042,17 +2186,23 @@ export class App implements ToolHost {
       const a = faceAxis(b.shape, b.shape.faces[0].hashCode);
       if (a) flatDirs.set(b.id, a.normal);
     }
+    let exactMs = 0; // (as in opPushPull)
     this.startOp({
       title: `Push / Pull (${n} faces)`,
+      panelOnTab: true,
       label: "Push/Pull",
       fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
       compute: ({ d }) => {
         // Fast preview; the exact solids are computed on Apply (see asPreview).
         const pushed = () => new Map<number, Shape>([...perSolid].map(([id, faces]) => [id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d)]));
-        const preview = asPreview(pushed);
+        const instant = exactMs > SLOW_PUSHPULL_MS && flatDirs.size === flats.length && this.dragPushPull(perSolid, d, flatDirs);
+        const t0 = performance.now();
+        const preview = instant ? new Map<number, Shape>() : asPreview(pushed);
+        if (!instant) exactMs = performance.now() - t0;
         const extruded = new Map<number, Shape>(flats.map((b) => [b.id, extrudeFace(b.shape, b.shape.faces[0].hashCode, d)]));
         return {
           ghost: new Map([...preview, ...extruded]),
+          drawn: instant,
           commit: () => {
             const solids = pushed();
             const made = new Map(flats.map((b) => [b.id, extrudedFrom(this.doc.makeBody(extruded.get(b.id)!, "Solid"), b)]));
@@ -3818,9 +3968,10 @@ export class App implements ToolHost {
   private edgeSides(bodyId: number, edgeId: number): EdgeSides | null {
     const b = this.doc.get(bodyId);
     if (!b || !isBrep(b)) return null;
-    const faces = b.shape.faces.flatMap((f) => {
-      const ref = faceRefEdges(b.shape, f.hashCode)?.edges.find((e) => e.id === edgeId);
-      return ref ? [{ faceId: f.hashCode, ref }] : [];
+    // (only the faces the edge bounds: a solid of thousands of faces took seconds per edge hovered)
+    const faces = edgeFaceIds(b.shape, edgeId).flatMap((faceId) => {
+      const ref = faceRefEdges(b.shape, faceId)?.edges.find((e) => e.id === edgeId);
+      return ref ? [{ faceId, ref }] : [];
     });
     return faces.length ? { bodyId, faces } : null;
   }
@@ -4440,7 +4591,9 @@ export class App implements ToolHost {
           this.startTransform("translate", false, [...p] as V3, frame);
           if (!frame) this.hint(`Move: drag the gizmo from the picked mark (${this.viewport.snapTip("grid / points")}) · Tab: exact values · Enter/Esc: done`);
         },
-        (e) => this.slideEdgeAt(e)).start(),
+        (e) => this.slideEdgeAt(e),
+        () => this.endTool(),
+      ).start(),
     );
   }
 
@@ -4592,7 +4745,9 @@ export class App implements ToolHost {
   private transformDialog(): void {
     if (!this.xf) return;
     const r3 = (n: number) => +n.toFixed(3);
-    const fields = (v: V3) => [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }];
+    // (after a drag: the cursor in the field it changed — the biggest, if a plane square moved two)
+    const moved = (v: number[]) => v.reduce((m, x, k) => (Math.abs(x) > Math.abs(v[m]) ? k : m), 0);
+    const fields = (v: V3) => [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }].map((f, k) => ({ ...f, focus: k === moved(v) }));
     const same = (a: V3, b: number[]) => a.every((x, k) => Math.abs(x - b[k]) < 1e-9);
     if (this.xf.guide !== undefined) {
       // Just moved (dragged)? Prefilled with that move; OK replaces it (one undo step).
@@ -4659,8 +4814,8 @@ export class App implements ToolHost {
     const frame = this.xf.frame;
     const world = (n: number[]): V3 => (frame ? [0, 1, 2].map((k) => frame.x[k] * n[0] + frame.y[k] * n[1] + frame.z[k] * n[2]) : [n[0], n[1], n[2]]) as V3;
     const moveFields = (v: V3) => frame
-      ? [{ label: "Along the axis (mm)", value: r3(v[2]) }, { label: frame.toAxis ? "Off the axis: X (to centre)" : "Off the axis: X", value: r3(v[0]), more: true }, { label: "Off the axis: Y (across)", value: r3(v[1]), more: true }]
-      : [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }];
+      ? [{ label: "Along the axis (mm)", value: r3(v[2]) }, { label: frame.toAxis ? "Off the axis: X (to centre)" : "Off the axis: X", value: r3(v[0]), more: true }, { label: "Off the axis: Y (across)", value: r3(v[1]), more: true }].map((f, k) => ({ ...f, focus: k === moved([v[2], v[0], v[1]]) }))
+      : fields(v);
     // (the dialog's order back to X, Y, Z)
     const typed = (n: number[]): number[] => (frame ? [n[1], n[2], n[0]] : n);
     if (last?.type === "translate" && mode === "translate") {
@@ -5867,6 +6022,18 @@ export class App implements ToolHost {
     this.toast(`${name}: ${ids.size} objects — double-click its name in the Bodies panel to rename`);
   }
 
+  /** Ctrl+H: the selected objects are hidden (as the Bodies panel's eye; not an undo step). */
+  private hideSelected(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) return this.toast("Hide: select the objects to hide — the Bodies panel's eye shows them again", "error");
+    this.endInteractions();
+    for (const id of ids) this.hidden.add(id);
+    this.viewport.setHidden(this.hidden);
+    this.setSelection([]);
+    this.renderOutliner();
+    this.toast(ids.length > 1 ? `${ids.length} objects hidden — the eye in the Bodies panel shows them again` : `${this.doc.get(ids[0])?.name ?? "Object"} hidden — its eye in the Bodies panel shows it again`);
+  }
+
   /** Ctrl+Shift+G: the groups of the selected objects are taken apart (the objects stay). */
   private ungroupSelected(): void {
     const groups = new Set(this.selectedBodyIds().map((id) => this.doc.get(id)?.group).filter((g): g is string => !!g));
@@ -6483,10 +6650,19 @@ export class App implements ToolHost {
     el.innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` + tip(hints);
   }
 
-  /** Auto snap on / off (the status bar's Auto box); `remember`: keep it for next time. */
+  /**
+   * What the view turns about (orbit, Top / Front / Right / Iso / opposite side): with Settings → Orbit around: Selection,
+   * the selection's middle — none (the view's centre) with nothing selected, a tool / panel open, or View centre set.
+   */
+  private turnPivot(): THREE.Vector3 | null {
+    if (localStorage.getItem(ORBIT_KEY) !== "selection" || this.tool || this.op || this.xf) return null;
+    const ids = [...new Set(this.selection.map((s) => s.body))];
+    return ids.length ? this.viewport.boundsCenter(ids) : null;
+  }
+
+  /** Auto snap on / off (File → Settings → Snap); `remember`: keep it for next time. */
   setAutoSnap(on: boolean, remember = true): void {
     this.viewport.autoSnap = on;
-    $<HTMLInputElement>("auto-snap").checked = on;
     if (remember) localStorage.setItem(AUTO_SNAP_KEY, on ? "1" : "0");
     // Rewrite the current hint / gizmo snapping for the new setting.
     if (this.xf?.guide !== undefined) this.startGuideMove(true);
@@ -6495,13 +6671,7 @@ export class App implements ToolHost {
   }
 
   private bindStatusBar(): void {
-    const auto = $<HTMLInputElement>("auto-snap");
     this.setAutoSnap(localStorage.getItem(AUTO_SNAP_KEY) !== "0", false);
-    auto.addEventListener("change", () => {
-      auto.blur();
-      this.setAutoSnap(auto.checked);
-      this.toast(auto.checked ? "Auto snap on — hold Ctrl to place freely" : "Auto snap off — hold Ctrl to snap");
-    });
     const select = $<HTMLSelectElement>("snap-select");
     // (the step from last time, if it is still one of the choices)
     const saved = localStorage.getItem(SNAP_STEP_KEY);
@@ -6634,8 +6804,9 @@ export class App implements ToolHost {
       ["G with edges selected", "Move edge: drag the edge, reshaping its flat-faced solid (bent faces split into triangles)"],
       ["Shift+wheel · [ · ] (Polygon tool)", "Fewer / more sides (3–64)"],
       this.viewport.autoSnap
-        ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). The Auto box by Snap in the status bar turns it off: then hold Ctrl to snap"]
-        : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (tick Auto by Snap in the status bar to snap without Ctrl)"],
+        ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). File → Settings → Snap: Hold Ctrl turns it off: then hold Ctrl to snap"]
+        : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (File → Settings → Snap: Auto to snap without Ctrl)"],
+      ["Ctrl+B", "Bump: select a flat face drawn on a solid's flat face (a window on a wall) — Length and Out (pushed out, joined to the solid) or In (pushed in, cut out of it); the face is used up · with the dialog open, click the next face: this one applied, the same on that one"],
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["Dot · G", "Pull to a point: select a flat circle, rectangle or polygon face (or its face object) — a dot shows in its middle; click the dot, G, drag or type the height: a cone / pyramid (out of a solid: added to it; a minus height into it: cut out of it) · Top size %: a flat top instead of a point"],
       ["Tip dot · F", "Round tip: a selected solid shows a dot on each sharp tip (a cone's point, a pyramid's — not box corners); click the dot, F, the radius (mm): the point becomes a ball — on a cone it blends smoothly into the side, on a pyramid into its edges (a slight crease on the flat sides); the panel says the largest radius the tip takes"],
@@ -6664,6 +6835,7 @@ export class App implements ToolHost {
       ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like the Guide line tool)"],
       ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],
+      ["Ctrl+H", "Hide the selected objects (the Bodies panel's eye shows them again)"],
       ["Ctrl+Z · Ctrl+R (or Ctrl+Shift+Z)", "Undo · Redo"],
       ["Home · .", "Fit all · Fit selection"],
       ["5 · 7 · Num 1 · Num 3", "Iso · Top · Front · Right view"],
@@ -7095,7 +7267,7 @@ export class App implements ToolHost {
     }
   }
 
-  /** File → Settings: a Radius | Diameter switch for circles, cylinders and spheres; solids' opacity (normal / x-ray). Saved at once (localStorage). */
+  /** File → Settings: a Radius | Diameter switch for circles, cylinders and spheres; Snap: Auto (Ctrl: free) | Hold Ctrl; Orbit around: View centre | Selection; solids' opacity (normal / x-ray). Saved at once (localStorage). */
   private settingsDialog(): void {
     document.getElementById("props-dlg")?.remove();
     const dlg = document.createElement("form");
@@ -7103,6 +7275,8 @@ export class App implements ToolHost {
     dlg.innerHTML =
       `<h4>Settings</h4>` +
       `<div class="seg-row"><span>Circles, cylinders, spheres</span><span class="seg"><button type="button" class="btn" data-v="r">Radius</button><button type="button" class="btn" data-v="d">Diameter</button></span></div>` +
+      `<div class="seg-row" title="Auto: tools snap without a key, Ctrl places freely. Hold Ctrl: no snapping unless Ctrl is held"><span>Snap</span><span class="seg snap-seg"><button type="button" class="btn" data-v="auto">Auto (Ctrl: free)</button><button type="button" class="btn" data-v="ctrl">Hold Ctrl</button></span></div>` +
+      `<div class="seg-row" title="Selection: orbiting — and Top / Front / Right / Iso — turn about the selected objects, which stay put on screen (nothing selected: the view's centre)"><span>Orbit around</span><span class="seg orbit-seg"><button type="button" class="btn" data-v="view">View centre</button><button type="button" class="btn" data-v="selection">Selection</button></span></div>` +
       `<label class="range-row" title="How solid the solids look normally — 100%: opaque"><span>Solid opacity</span><input type="range" data-k="solid" min="5" max="100" step="5"><output></output></label>` +
       `<label class="range-row" title="How solid the solids look in X-ray (Shift+X), where hidden faces and edges show through"><span>X-ray opacity</span><input type="range" data-k="xray" min="5" max="100" step="5"><output></output></label>` +
       `<div class="op-buttons"><button type="submit" class="btn primary">Done</button></div>`;
@@ -7118,8 +7292,24 @@ export class App implements ToolHost {
         vp.setOpacity(solid ? v : vp.solidOpacity, solid ? vp.xrayOpacity : v);
       });
     }
-    const seg = [...dlg.querySelectorAll<HTMLButtonElement>(".seg button")];
-    const show = () => seg.forEach((b) => b.classList.toggle("primary", (b.dataset.v === "d") === byDiameter()));
+    const seg = [...dlg.querySelectorAll<HTMLButtonElement>(".seg:not(.snap-seg):not(.orbit-seg) button")];
+    const snapSeg = [...dlg.querySelectorAll<HTMLButtonElement>(".snap-seg button")];
+    const orbitSeg = [...dlg.querySelectorAll<HTMLButtonElement>(".orbit-seg button")];
+    const show = () => {
+      seg.forEach((b) => b.classList.toggle("primary", (b.dataset.v === "d") === byDiameter()));
+      snapSeg.forEach((b) => b.classList.toggle("primary", (b.dataset.v === "auto") === vp.autoSnap));
+      orbitSeg.forEach((b) => b.classList.toggle("primary", (b.dataset.v === "selection") === (localStorage.getItem(ORBIT_KEY) === "selection")));
+    };
+    for (const b of orbitSeg)
+      b.addEventListener("click", () => {
+        localStorage.setItem(ORBIT_KEY, b.dataset.v!);
+        show();
+      });
+    for (const b of snapSeg)
+      b.addEventListener("click", () => {
+        this.setAutoSnap(b.dataset.v === "auto");
+        show();
+      });
     for (const b of seg)
       b.addEventListener("click", () => {
         localStorage.setItem(CIRCLE_SIZE_KEY, b.dataset.v!);
@@ -7370,7 +7560,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, liesOnSolid, edgeFaceIds, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
