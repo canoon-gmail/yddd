@@ -2,7 +2,7 @@
   "name": "yddd",
   "productName": "YDDD",
   "desktopName": "yddd.desktop",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "YDDD - a direct NURBS/B-rep CAD modeler (Electron + Three.js + OpenCascade)",
   "main": "dist/main/main.js",
   "type": "commonjs",
