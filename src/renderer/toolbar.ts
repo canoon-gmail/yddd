@@ -45,6 +45,7 @@ export const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[
       { cmd: "op.fillet", icon: "fillet", label: "Fillet" },
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer" },
       { cmd: "op.shell", icon: "shell", label: "Shell" },
+      { cmd: "op.curveFace", icon: "curveFace", label: "Curve face" },
       { cmd: "op.offset", icon: "offset", label: "Offset" },
       { cmd: "op.revolve", icon: "revolve", label: "Revolve" },
       { cmd: "edit.circular", icon: "circular", label: "Circular copy" },

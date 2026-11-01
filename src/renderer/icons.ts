@@ -35,6 +35,7 @@ export const ICONS: Record<string, string> = {
   fillet: svg(`<path d="M4 20v-7a9 9 0 0 1 9-9h7"/><path d="M4 13A9 9 0 0 1 13 4L4 4z" ${FILL} stroke="none"/><path d="M4 11V4h7" ${SOFT} ${DASH}/><circle cx="4" cy="4" r="1.4" ${DOT}/>`),
   chamfer: svg(`<path d="M4 20v-8l8-8h8"/><path d="M4 12l8-8H4z" ${FILL} stroke="none"/><path d="M4 10V4h6" ${SOFT} ${DASH}/><circle cx="4" cy="4" r="1.4" ${DOT}/>`),
   shell: svg(`<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 6.2l5 2.8L12 11.8 7 9z" ${FILL}/><path d="M12 11.8V15M12 21v-5" ${SOFT}/>`),
+  curveFace: svg(`<path d="M4 6v13M20 6v13" ${SOFT}/><path d="M4 6c0 1.4 3.6 2.5 8 2.5s8-1.1 8-2.5" ${SOFT}/><path d="M7.5 12.2c2.9.9 6.1.9 9 0v3.6c-2.9.9-6.1.9-9 0z" ${FILL}/>`),
   offset: svg(`<rect x="3.5" y="5" width="17" height="14" rx="1.5" ${DASH} ${SOFT}/><rect x="7.5" y="8.5" width="9" height="7" rx="0.8" ${FILL}/><path d="M16.5 12h4M19 10.3l1.7 1.7-1.7 1.7"/>`),
   revolve: svg(`<path d="M6 2.5v19" ${DASH} ${SOFT}/><rect x="10.5" y="5" width="6.5" height="8.5" rx="0.8" ${FILL}/><path d="M19.5 15c0 2.2-4 3.8-9 3.8-2.2 0-4.2-.3-5.6-.8"/><path d="M6.8 16l-2.2 1.8 1.8 2.2"/>`),
   sweep: svg(`<path d="M4 19c0-7.5 5.5-12 14-12" ${DASH}/><path d="M1.5 19C1.5 9.5 8 4 18 4M6.5 19c0-5.5 4.2-9 11.5-9" ${SOFT}/><ellipse cx="4" cy="19" rx="2.8" ry="1.6" ${FILL}/><ellipse cx="18" cy="7" rx="1.6" ry="3" ${FILL}/>`),

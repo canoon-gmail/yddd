@@ -39,6 +39,8 @@ import {
   pushPull,
   pushPullMany,
   shellSolid,
+  curveFacesOnto,
+  flatFaceBoolean,
   booleanOp,
   tessellate,
   translateShape,
@@ -335,7 +337,7 @@ export class App implements ToolHost {
   gearDefaults = { teeth: 20, module: 2, outside: 0, angle: 20, clearance: 0.1 };
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -854,6 +856,7 @@ export class App implements ToolHost {
       case "op.fillet": return this.selDot >= 0 ? this.opRoundTip() : this.opEdges("fillet");
       case "op.chamfer": return this.opEdges("chamfer");
       case "op.shell": return this.opShell();
+      case "op.curveFace": return this.opCurveFace();
       case "op.close": return this.closeOpenings();
       case "op.offset": return this.opOffset();
       case "op.revolve": return this.opRevolve();
@@ -2472,6 +2475,81 @@ export class App implements ToolHost {
     });
   }
 
+
+  /**
+   * Curve face: the selected flat face objects (a scanned logo) put onto a face clicked on a solid — round a cup's side
+   * (wrapped: curveFacesOnto) or flat on a flat face — and pushed out of it by Length. Apply: the face objects become
+   * those solids, in a group of their own ("Curved N"), not joined to the cup (Union them by hand). One undo step.
+   */
+  private opCurveFace(): void {
+    // (the face objects selected — a solid selected with them, e.g. the cup in a box selection, is left out)
+    const logo = [...new Set(this.selection.map((s) => s.body))].map((id) => this.doc.get(id)).filter((b): b is Body => b?.kind === "face" && isBrep(b));
+    if (!logo.length) {
+      this.toast("Curve face: select the flat face(s) to put on — e.g. a scanned logo's faces (Sketch → Scan), not pushed yet", "error");
+      return;
+    }
+    const logoIds = new Set(logo.map((b) => b.id));
+    const faces = logo.flatMap((b) => (b.shape as Shape).faces);
+    let target: { bodyId: number; faceId: number; at: V3 } | null = null;
+    const todo = "Click the face to put it on — a cup's side (it wraps round it) or a flat face";
+    const targetAt = (e: PointerEvent): { bodyId: number; faceId: number; at: V3 } | "bad" | null => {
+      const hit = this.viewport.pick(e.clientX, e.clientY, "face");
+      const b = hit && this.doc.get(hit.body);
+      if (!hit || !b) return null;
+      const t = hit.kind === "face" && b.kind === "solid" && isBrep(b) && !logoIds.has(b.id) ? findFace(b.shape, hit.id)?.geomType : undefined;
+      return t === "PLANE" || t === "CYLINDRE" ? { bodyId: b.id, faceId: hit.id, at: hit.point.toArray() as V3 } : "bad";
+    };
+    const note = (text: string) => {
+      const el = this.opPanel.querySelector(".op-note");
+      if (el) el.textContent = text;
+    };
+    this.startOp({
+      title: "Curve face",
+      label: "Curve face",
+      note: "On: —",
+      hint: `Curve face: ${todo.toLowerCase()} · click again to move it · Enter apply · Esc cancel`,
+      fields: [{ key: "length", label: "Length (mm)", value: this.defaults.curveFaceLength, step: 0.5, min: 0 }],
+      compute: ({ length }) => {
+        if (!target) throw new OpWaiting(todo);
+        const t = target, host = this.doc.get(t.bodyId);
+        if (!host || !isBrep(host)) throw new OpWaiting(todo);
+        const pieces = curveFacesOnto(faces, host.shape as Shape, t.faceId, t.at, length);
+        return {
+          ghost: new Map(pieces.map((p, i) => [-(i + 1), p as Shape])),
+          hide: [...logoIds],
+          commit: () => {
+            // One solid per face, in a group of their own (one alone: no group), where the face objects were
+            const group = pieces.length > 1 ? this.newGroupName("Curved") : undefined;
+            const made = pieces.map((p) => ({ ...this.doc.makeBody(p, "Curved"), ...(group ? { group } : {}) }));
+            const at = this.doc.bodies.findIndex((b) => logoIds.has(b.id));
+            const rest = this.doc.bodies.filter((b) => !logoIds.has(b.id));
+            this.doc.commit([...rest.slice(0, at), ...made, ...rest.slice(at)], "Curve face");
+            if (group) this.olCollapsed.delete(group);
+            const said = `Curve face: ${made.length} curved solid${made.length > 1 ? `s in "${group}"` : ""} on "${host.name}" — not joined (Union them with it if wanted)`;
+            return { select: made.map((b) => b.id), solidMode: true, then: () => this.toast(said) };
+          },
+        };
+      },
+      remember: ({ length }) => (this.defaults.curveFaceLength = length),
+      pick: (e) => {
+        const t = targetAt(e);
+        if (!t) return;
+        if (t === "bad") return this.toast("Curve face: click a solid's flat face or a cylinder's side (a cup, a bottle)", "error");
+        target = t;
+        const host = this.doc.get(t.bodyId)!, kind = findFace(host.shape as Shape, t.faceId)?.geomType === "CYLINDRE" ? "round" : "flat on";
+        note(`On: "${host.name}" — ${kind === "round" ? "wrapped round its side" : "flat on its face"} · click again to move it`);
+        if (this.op) this.op.key = "";
+        this.previewOp();
+      },
+      hover: (e) => {
+        const t = targetAt(e);
+        this.viewport.setHighlight([], t && t !== "bad" ? { kind: "face", body: t.bodyId, id: t.faceId } : null);
+        this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t ? "pointer" : "crosshair";
+      },
+    });
+    this.viewport.setHighlight([], null);
+  }
+
   /** The right side of the solids there (for a new ready-made object beside them), -Infinity if none. */
   rightOfBodies(): number {
     let right = -Infinity;
@@ -3544,14 +3622,14 @@ export class App implements ToolHost {
       return;
     }
     const flat = this.faceBodiesIn(ids);
-    if (flat.length) {
-      this.toast(`Booleans work on solids — "${flat[0].name}" is a flat face. Push/Pull it first.`, "error");
+    if (flat.length && flat.length < ids.length) {
+      this.toast(`Booleans: all solids or all flat faces — "${flat[0].name}" is a flat face (Push/Pull it first to combine it with a solid)`, "error");
       return;
     }
     const [targetId, ...toolIds] = ids;
     // Always in the background behind the busy dialog: how long one takes can't be told from the solids
     // (a swept spout joined to a sphere, 11 faces: ~9 s); the dialog fades in late, so a quick one doesn't show it.
-    this.runBusy(true, `${label} of ${ids.length} solids…`, async () => {
+    this.runBusy(true, `${label} of ${ids.length} ${flat.length ? "faces" : "solids"}…`, async () => {
       let made: number[] | null;
       try {
         made = await this.applyBoolean(op, targetId, toolIds, label, false, true);
@@ -3586,22 +3664,12 @@ export class App implements ToolHost {
   private runBusy(heavy: boolean, text: string, work: (say: ((text: string) => Promise<void>) | null) => void | Promise<void>): void {
     if (!heavy) return void work(null);
     if (this.busyNow) return;
-    this.busyNow = true;
-    const el = document.createElement("div");
-    el.id = "busy";
     // (the background kernel's jobs can be stopped: Stop ends whatever it's doing — nothing changes)
-    const stoppable = this.bgKernel.ready;
-    el.innerHTML = `<div class="busy-box"><div class="spinner"></div><div class="busy-text">${escapeHtml(text)}</div>` +
-      (stoppable ? `<div class="busy-tip">Stop ends it — nothing changes</div><button type="button" class="btn busy-stop">Stop</button>` : `<div class="busy-tip">It can't be stopped part-way — Ctrl+Z undoes it afterwards</div>`) +
-      `</div>`;
-    // Stop / Esc: the job ends now — or, not started yet (the dialog is painted first), doesn't start
     let stopped = false;
-    this.busyStop = stoppable ? () => ((stopped = true), this.bgKernel.cancel()) : null;
-    el.querySelector(".busy-stop")?.addEventListener("click", () => this.busyStop?.());
-    document.body.appendChild(el);
+    const busy = this.showBusy(text, this.bgKernel.ready ? () => ((stopped = true), this.bgKernel.cancel()) : null);
     const painted = () => new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)));
     const say = (t: string) => {
-      el.querySelector(".busy-text")!.textContent = t;
+      busy.say(t);
       return painted();
     };
     // (after the next paint: the dialog is on screen before the kernel takes over)
@@ -3610,11 +3678,33 @@ export class App implements ToolHost {
         if (stopped) return this.toast("Stopped — nothing changed");
         await work(say);
       } finally {
+        busy.close();
+      }
+    });
+  }
+
+  /**
+   * The busy dialog (spinner, fading in after a moment) until `close`; with `stop`, its Stop button and Esc call it —
+   * else it says it can't be stopped part-way. Keys and clicks wait meanwhile (busyNow).
+   */
+  private showBusy(text: string, stop: (() => void) | null): { say: (text: string) => void; close: () => void } {
+    this.busyNow = true;
+    const el = document.createElement("div");
+    el.id = "busy";
+    el.innerHTML = `<div class="busy-box"><div class="spinner"></div><div class="busy-text">${escapeHtml(text)}</div>` +
+      (stop ? `<div class="busy-tip">Stop ends it — nothing changes</div><button type="button" class="btn busy-stop">Stop</button>` : `<div class="busy-tip">It can't be stopped part-way — Ctrl+Z undoes it afterwards</div>`) +
+      `</div>`;
+    this.busyStop = stop;
+    el.querySelector(".busy-stop")?.addEventListener("click", () => this.busyStop?.());
+    document.body.appendChild(el);
+    return {
+      say: (t) => (el.querySelector(".busy-text")!.textContent = t),
+      close: () => {
         el.remove();
         this.busyNow = false;
         this.busyStop = null;
-      }
-    });
+      },
+    };
   }
 
   /** Solids likely to take a while to combine or draw (the busy dialog): 6 or more at once, or 400+ faces. */
@@ -3636,6 +3726,7 @@ export class App implements ToolHost {
   private async applyBoolean(op: BooleanOp, targetId: number, toolIds: number[], label: string, keep = false, background = false): Promise<number[] | null> {
     const target = this.doc.get(targetId)!;
     const tools = toolIds.map((id) => this.doc.get(id)!);
+    if (target.kind === "face" || tools.some((b) => b.kind === "face")) return this.applyFaceBoolean(op, target, tools, label, keep);
     // A heavy one (`background`) in the background kernel: the app stays live, the busy dialog's Stop ends it
     const result = background && this.bgKernel.ready
       ? solidFrom(await this.bgKernel.run({ op: "boolean", kind: op, target: serializeShape(this.solidOf(targetId, label)), tools: toolIds.map((id) => serializeShape(this.solidOf(id, label))) }))
@@ -3665,6 +3756,32 @@ export class App implements ToolHost {
     this.doc.commit(next, label);
     this.toast(extra.length ? `${label}: "${name}" split into ${parts.length} solids` : `${label}: ${name}`);
     return [targetId, ...extra.map((b) => b.id)];
+  }
+
+  /**
+   * Union / Subtract / Intersect of flat face objects on one plane (2D, quick: right here, not in the background):
+   * the target keeps its id (the largest piece if it comes apart), the tools are used up (unless `keep`); one undo step.
+   */
+  private applyFaceBoolean(op: BooleanOp, target: Body, tools: Body[], label: string, keep: boolean): number[] | null {
+    const mixed = [target, ...tools].find((b) => b.kind !== "face");
+    if (mixed) throw new Error(`Booleans: all solids or all flat faces — "${mixed.name}" isn't a flat face`);
+    const faces = flatFaceBoolean(op, this.brep(target.id), tools.map((b) => this.brep(b.id)));
+    if (op === "union" && faces.length > 1) {
+      this.toast(`"${target.name}" and ${tools.length === 1 ? `"${tools[0].name}"` : "the others"} don't touch — nothing to join`, "error");
+      return null;
+    }
+    const joined = [target, ...tools].map((b) => b.name).join("+");
+    const name = op === "union" ? (joined.length <= 60 ? joined : `${target.name} + ${tools.length} more`) : target.name;
+    // One body per face, largest first (it keeps the target's id and name)
+    const parts = faces.map((f) => ({ f, a: faceInfo(f, f.hashCode)?.area ?? 0 })).sort((a, b) => b.a - a.a).map(({ f }) => f);
+    const extra = parts.slice(1).map((f) => inGroupOf(this.doc.makeBody(f, name, "face"), target));
+    const removed = new Set(keep ? [] : tools.map((b) => b.id));
+    this.doc.commit(
+      this.doc.bodies.filter((b) => !removed.has(b.id)).flatMap((b) => (b.id === target.id ? [{ ...withShape(b, parts[0]), name }, ...extra] : [b])),
+      label,
+    );
+    this.toast(extra.length ? `${label}: "${name}" split into ${parts.length} faces` : `${label}: ${name}`);
+    return [target.id, ...extra.map((b) => b.id)];
   }
 
   /** A + key + B (+ C ...): each click on another solid applies the operation to A right away. */
@@ -3760,9 +3877,10 @@ export class App implements ToolHost {
     const apply = (ids: number[]) => {
       ids = ids.filter((id) => id !== targetId);
       if (!ids.length) return;
-      const face = ids.map((id) => this.doc.get(id)).find((b) => b?.kind === "face");
-      if (face) {
-        this.toast(`Booleans work on solids — "${face.name}" is a flat face. Push/Pull it first.`, "error");
+      const faceTarget = this.doc.get(targetId)?.kind === "face";
+      const odd = ids.map((id) => this.doc.get(id)).find((b) => (b?.kind === "face") !== faceTarget);
+      if (odd) {
+        this.toast(`Booleans: all solids or all flat faces — "${faceTarget ? (this.doc.get(targetId)?.name ?? target.name) : odd.name}" is a flat face (Push/Pull it first to combine it with a solid)`, "error");
         return;
       }
       // Union: a solid apart from the result is refused before joining (the join can take a while)
@@ -7706,7 +7824,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

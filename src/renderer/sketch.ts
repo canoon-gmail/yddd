@@ -349,13 +349,13 @@ function throughSpline(q: P[], closed: boolean): Extract<Seg, { kind: "spline" }
  * line turns more than 55°, each piece between corners one smooth curve through its points (two points: a straight
  * line); no corners at all, closed: one smooth closed curve.
  */
-function smoothRun(q: P[], closed: boolean): Seg[] {
+function smoothRun(q: P[], closed: boolean, cornerDeg = 55): Seg[] {
   const n = q.length, turn = (i: number) => {
     const a = sub(q[i], q[(i - 1 + n) % n]), b = sub(q[(i + 1) % n], q[i]);
     return Math.abs(Math.atan2(cross(a, b), a[0] * b[0] + a[1] * b[1]));
   };
   const corners: number[] = [];
-  for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) if (turn(i) > (55 * Math.PI) / 180) corners.push(i);
+  for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) if (turn(i) > (cornerDeg * Math.PI) / 180) corners.push(i);
   if (closed && !corners.length) return n >= 3 ? [throughSpline(q, true)] : [];
   const piece = (run: P[]): Seg[] => (run.length >= 3 ? [throughSpline(run, false)] : [{ kind: "line", a: run[0], b: run[1] }]);
   if (!closed) {
@@ -373,6 +373,42 @@ function smoothRun(q: P[], closed: boolean): Seg[] {
     out.push(...piece(run));
   }
   return out;
+}
+
+/** Does a closed outline (its points in order) cross itself? (Segments swept left to right: only those side by side are compared.) */
+function crossesItself(pts: P[]): boolean {
+  const n = pts.length;
+  if (n < 4) return false;
+  const o = (p: P, q: P, r: P) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const segs = Array.from({ length: n }, (_, i) => {
+    const a = pts[i], b = pts[(i + 1) % n];
+    return { i, a, b, x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]) };
+  }).sort((s, t) => s.x0 - t.x0);
+  const open: typeof segs = [];
+  for (const s of segs) {
+    for (let k = open.length - 1; k >= 0; k--) if (open[k].x1 < s.x0) open.splice(k, 1);
+    for (const t of open) {
+      const d = Math.abs(s.i - t.i);
+      if (d <= 1 || d === n - 1) continue; // (neighbours share an end)
+      const d1 = o(t.a, t.b, s.a), d2 = o(t.a, t.b, s.b), d3 = o(s.a, s.b, t.a), d4 = o(s.a, s.b, t.b);
+      if (d1 * d2 < 0 && d3 * d4 < 0) return true;
+    }
+    open.push(s);
+  }
+  return false;
+}
+
+/**
+ * Scan's Smooth for an outline: smooth curves that don't cross themselves — at a tight turn (between letters) a curve
+ * can swing out across the outline's other side (the face then can't be made: "an outline crosses itself"). Tried
+ * again with more corners (shorter curves swing out less), else straight lines through its points.
+ */
+function smoothLoop(q: P[]): Seg[] {
+  for (const deg of [55, 35, 20]) {
+    const segs = smoothRun(q, true, deg);
+    if (!crossesItself(segs.flatMap(segPoints))) return segs;
+  }
+  return q.map((a, i) => ({ kind: "line", a, b: q[(i + 1) % q.length] }) as Seg);
 }
 
 /** A freeform curve that is a Spline (back from a saved face / path: its points found again), else it as it is. */
@@ -973,7 +1009,7 @@ export class SketchTool implements Tool {
     }
     const r = scanGrid(grey, w, h, o, o.smooth ? 1.2 : 0.8);
     const toP = ([gx, gy]: GP): P => [x0 + gx * cw, y0 + gy * ch];
-    const loopOf = (q: P[]): Loop => ({ kind: "path", segs: o.smooth ? smoothRun(q, true) : q.map((a, i) => ({ kind: "line", a, b: q[(i + 1) % q.length] }) as Seg) });
+    const loopOf = (q: P[]): Loop => ({ kind: "path", segs: o.smooth ? smoothLoop(q) : q.map((a, i) => ({ kind: "line", a, b: q[(i + 1) % q.length] }) as Seg) });
     const openOf = (q: P[]): Seg[] => (o.smooth ? smoothRun(q, false) : q.slice(1).map((b, i) => ({ kind: "line", a: q[i], b }) as Seg));
     this.scanFound = { loops: r.loops.map((l) => loopOf(l.map(toP))), opens: r.paths.map((l) => openOf(l.map(toP))), level: r.level };
     this.update();
