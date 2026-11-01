@@ -1577,17 +1577,25 @@ function stretchPushPull(shape: Solid, moved: Face[], n: V3, distance: number): 
     const shift: V3 = [n[0] * distance, n[1] * distance, n[2] * distance];
     const parts: Shape3D[] = [...inner.slice(1), translateShape(outer[0], shift)];
     if (distance > 0) for (const f of outer[0].faces.filter((g) => flatAt(g, top))) parts.push(basicFaceExtrusion(f, new Vector(shift)));
-    let joined: Shape3D | null = null;
-    try {
-      // Glue edits its arguments in place, and the split pieces share faces with `shape`: copies.
-      joined = booleanOnce("fuse", deepCopy(inner[0]), parts.map(deepCopy), "shift");
-      if (!isValidShape(joined as Shape)) joined = null;
-    } catch {
-      joined = null;
+    const good = (s: Shape3D) => isValidShape(s) && [...iterTopo(s.wrapped, "solid")].length === 1;
+    // Walls cut at the stretch and not made whole again by simplify (free-form ones): merged — only the faces
+    // meeting at the cut lines are compared (all neighbours: 142 pairs, 1.4 s on a 90-face lettered plate; ~0.1 s)
+    const seams = [top, top + distance];
+    const atSeam = (e: Edge) => [0, 0.5, 1].every((t) => { const k = h(e.pointAt(t)); return seams.some((s) => Math.abs(k - s) < tol); });
+    const done = (s: Solid) => (s.faces.length > shape.faces.length ? mergeCoincidentFaces(s, atSeam) : s);
+    // The pieces only touch on their cut faces, which lie exactly on each other: full glue first (pulling a lettered
+    // plate's top: 0.26 s, against 2.1 s with shift glue); checked once, after simplify.
+    for (const glue of ["full", "shift"] as const) {
+      try {
+        // Glue edits its arguments in place, and the split pieces share faces with `shape`: copies.
+        const out = booleanOnce("fuse", deepCopy(inner[0]), parts.map(deepCopy), glue).simplify();
+        if (good(out)) return done(out as Solid);
+      } catch {
+        // the next glue / without glue below
+      }
     }
-    if (!joined) joined = booleanOnce("fuse", inner[0], parts, "off");
-    const out = joined.simplify();
-    return isValidShape(out) && [...iterTopo(out.wrapped, "solid")].length === 1 ? out : null;
+    const out = booleanOnce("fuse", inner[0], parts, "off").simplify();
+    return good(out) ? done(out as Solid) : null;
   } catch {
     return null;
   } finally {
@@ -2528,7 +2536,7 @@ function pushPullFaces(shape: Solid, picked: { face: Face; n: V3 }[], distance: 
   // boolean slow): try it as a stretch first.
   if (shape.faces.some((f) => !ANALYTIC.has(f.geomType)) && faces.every(({ face, n }) => face.geomType === "PLANE" && dot3(n, faces[0].n) > 1 - 1e-9)) {
     const r = stretchPushPull(shape, withChains.map(({ face }) => face), faces[0].n, distance);
-    if (r) return mergeCoincidentFaces(r);
+    if (r) return r; // (its cut walls merged already)
   }
   if (withChains.length > faces.length) {
     try {
@@ -2550,7 +2558,7 @@ const ANALYTIC = new Set(["PLANE", "CYLINDRE", "CONE", "SPHERE", "TORUS"]);
  * simplify(), leaving a seam. Rebuild each such group on one surface object so they merge.
  * Returns `shape` unchanged if nothing matches or the merge does not give a valid solid.
  */
-function mergeCoincidentFaces(shape: Solid): Solid {
+function mergeCoincidentFaces(shape: Solid, seam?: (e: Edge) => boolean): Solid {
   if (previewing) return shape; // seams don't matter in a drag preview: keep it fast
   const faces = shape.faces.filter((f) => !ANALYTIC.has(f.geomType));
   if (faces.length < 2) return shape;
@@ -2558,31 +2566,49 @@ function mergeCoincidentFaces(shape: Solid): Solid {
   const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
   try {
     // Does face `b` lie on the surface of face `a`? (A grid of points over b's (u, v) bounds.)
-    // Points are projected onto B-splines only: OpenCascade's projection onto a linear extrusion
-    // can crash, so an extrusion is projected onto its exact B-spline, long enough to reach b.
+    // Points are found on B-splines only: OpenCascade's projection onto a linear extrusion can crash,
+    // so an extrusion is replaced by its exact B-spline, long enough to reach b.
     const known = new Map<string, boolean>();
     const liesOn = (b: Face, a: Face): boolean => {
       const k = `${faces.indexOf(b)}:${faces.indexOf(a)}`;
       if (!known.has(k)) known.set(k, liesOnUncached(b, a));
       return known.get(k)!;
     };
-    const liesOnUncached = (b: Face, a: Face): boolean => {
-      let s: unknown;
+    const ends = shape.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
+    const reach = Math.hypot(...[0, 1, 2].map((k) => Math.max(...ends.map((p) => p[k])) - Math.min(...ends.map((p) => p[k]))));
+    // Each face's surface made once (per pair: ~8 ms a check) with its point finder (ShapeAnalysis_Surface: its search grid made once — a
+    // GeomAPI_ProjectPointOnSurf per point grew OpenCascade's memory ~100 MB a face on a lettered plate's walls, ~1.9 GB a
+    // push / pull, and the third one ran out of it and crashed). An extrusion's B-spline reaches across the whole solid.
+    const finders = new Map<Face, { distance(p: unknown): number } | null>();
+    const finderOf = (a: Face) => {
+      if (finders.has(a)) return finders.get(a)!;
+      let s: unknown = null;
       if (a.geomType === "BSPLINE_SURFACE") s = keep(oc.BRep_Tool.Surface(a.wrapped));
       else if (a.geomType === "EXTRUSION_SURFACE") {
         const fa = keep(new oc.BRepAdaptor_Surface(a.wrapped, true));
-        const [[x0, y0, z0], [x1, y1, z1]] = a.boundingBox.bounds, [[X0, Y0, Z0], [X1, Y1, Z1]] = b.boundingBox.bounds;
-        const reach = Math.hypot(Math.max(x1, X1) - Math.min(x0, X0), Math.max(y1, Y1) - Math.min(y0, Y0), Math.max(z1, Z1) - Math.min(z0, Z0));
         s = extrudedSurface(a, keep, [fa.FirstVParameter() - reach, fa.LastVParameter() + reach]);
       }
-      if (!s) return false;
+      const sas = s ? keep(new oc.ShapeAnalysis_Surface(s as never)) : null;
+      const finder = sas && {
+        distance: (p: unknown) => {
+          sas.ValueOfUV(p as never, 1e-7).delete();
+          return sas.Gap();
+        },
+      };
+      finders.set(a, finder);
+      return finder;
+    };
+    const liesOnUncached = (b: Face, a: Face): boolean => {
+      const finder = finderOf(a);
+      if (!finder) return false;
       const ad = keep(new oc.BRepAdaptor_Surface(b.wrapped, true));
       const u0 = ad.FirstUParameter(), u1 = ad.LastUParameter(), v0 = ad.FirstVParameter(), v1 = ad.LastVParameter();
       for (let i = 0; i <= 4; i++) {
         for (let j = 0; j <= 4; j++) {
-          const p = keep(ad.Value(u0 + ((u1 - u0) * i) / 4, v0 + ((v1 - v0) * j) / 4));
-          const pr = keep(new oc.GeomAPI_ProjectPointOnSurf(p, s));
-          if (!pr.IsDone() || pr.NbPoints() < 1 || pr.LowerDistance() > 1e-6) return false;
+          const p = ad.Value(u0 + ((u1 - u0) * i) / 4, v0 + ((v1 - v0) * j) / 4);
+          const off = finder.distance(p);
+          p.delete();
+          if (!(off <= 1e-6)) return false;
         }
       }
       return true;
@@ -2592,7 +2618,7 @@ function mergeCoincidentFaces(shape: Solid): Solid {
     const root = (i: number): number => (parent[i] === i ? i : (parent[i] = root(parent[i])));
     for (let i = 0; i < faces.length; i++) {
       for (let j = i + 1; j < faces.length; j++) {
-        if (!faces[i].edges.some((e) => faces[j].edges.some((x) => x.isSame(e)))) continue;
+        if (!faces[i].edges.some((e) => (!seam || seam(e)) && faces[j].edges.some((x) => x.isSame(e)))) continue;
         try {
           if (liesOn(faces[j], faces[i]) || liesOn(faces[i], faces[j])) parent[root(j)] = root(i);
         } catch {

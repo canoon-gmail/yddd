@@ -2288,12 +2288,58 @@ export class Viewport {
       const P = g0.attributes.position.array as Float32Array;
       // Offset per vertex position (first moved face wins where two meet).
       const shift = new Map<string, V3>();
+      const planes: { n: V3; c: number; tol: number; d: V3 }[] = [];
       for (const [faceId, d] of faces) {
         const gi = v.faceIndex.get(faceId);
         if (gi === undefined) continue;
-        for (let k = v.faceV[gi * 2]; k < v.faceV[gi * 2 + 1]; k++) {
+        const k0 = v.faceV[gi * 2], k1 = v.faceV[gi * 2 + 1];
+        for (let k = k0; k < k1; k++) {
           const kk = key(P, k * 3);
           if (!shift.has(kk)) shift.set(kk, d);
+        }
+        // A flat face moved along its normal: its plane, for the walls round it (below)
+        const l = Math.hypot(...d);
+        if (!l) continue;
+        const n: V3 = [d[0] / l, d[1] / l, d[2] / l];
+        let lo = Infinity, hi = -Infinity, span = 0;
+        for (let k = k0; k < k1; k++) {
+          const h = n[0] * P[k * 3] + n[1] * P[k * 3 + 1] + n[2] * P[k * 3 + 2];
+          lo = Math.min(lo, h);
+          hi = Math.max(hi, h);
+          span = Math.max(span, Math.abs(P[k * 3]), Math.abs(P[k * 3 + 1]), Math.abs(P[k * 3 + 2]));
+        }
+        const tol = 1e-5 * Math.max(1, span);
+        if (hi - lo < tol) planes.push({ n, c: (lo + hi) / 2, tol, d });
+      }
+      // Walls round a flat moved face (straight along its normal: pockets, a figure's sides) are stretched: each
+      // point by its share of the wall's height, the far end staying — moving only the points on the face's plane
+      // left a free-form wall's inner points behind, folded into spikes (dark streaks) as soon as the face passed them.
+      const stretch = new Map<number, V3>(); // (point index → its move)
+      const wallOf = (pts: ArrayLike<number>, k0: number, k1: number) => {
+        let touches = false;
+        for (let k = k0; k < k1 && !touches; k++) touches = shift.has(key(pts, k * 3));
+        if (!touches) return null;
+        const at = (k: number, pl: (typeof planes)[number]) => pl.n[0] * pts[k * 3] + pl.n[1] * pts[k * 3 + 1] + pl.n[2] * pts[k * 3 + 2];
+        for (const pl of planes) {
+          let lo = Infinity, hi = -Infinity;
+          for (let k = k0; k < k1; k++) {
+            const h = at(k, pl);
+            lo = Math.min(lo, h);
+            hi = Math.max(hi, h);
+          }
+          // on one side of the plane, reaching it
+          const far = Math.abs(hi - pl.c) < pl.tol ? lo : Math.abs(lo - pl.c) < pl.tol ? hi : NaN;
+          if (Number.isNaN(far)) continue;
+          return { pl, share: (k: number) => (Math.abs(pl.c - far) < pl.tol ? 1 : (at(k, pl) - far) / (pl.c - far)) };
+        }
+        return null;
+      };
+      if (planes.length) {
+        for (let gi = 0; gi < v.faceV.length / 2; gi++) {
+          const k0 = v.faceV[gi * 2], k1 = v.faceV[gi * 2 + 1];
+          if (faces.has(v.faceIds[gi])) continue;
+          const w = wallOf(P, k0, k1);
+          if (w) for (let k = k0; k < k1; k++) if (!shift.has(key(P, k * 3))) { const t = w.share(k); stretch.set(k, [w.pl.d[0] * t, w.pl.d[1] * t, w.pl.d[2] * t]); }
         }
       }
       const moved = (src: ArrayLike<number>) => {
@@ -2309,7 +2355,9 @@ export class Viewport {
         return out;
       };
       const geom = new THREE.BufferGeometry();
-      geom.setAttribute("position", new THREE.BufferAttribute(moved(P), 3));
+      const MP = moved(P);
+      for (const [k, m] of stretch) for (let j = 0; j < 3; j++) MP[k * 3 + j] += m[j];
+      geom.setAttribute("position", new THREE.BufferAttribute(MP, 3));
       geom.setAttribute("normal", new THREE.BufferAttribute(Float32Array.from(g0.attributes.normal.array as Float32Array), 3));
       geom.setIndex(new THREE.BufferAttribute(Uint32Array.from(g0.index!.array as Uint32Array), 1));
       for (const g of g0.groups) geom.addGroup(g.start, g.count, g.materialIndex); // per-face materials
@@ -2317,7 +2365,16 @@ export class Viewport {
       group.add(new THREE.Mesh(geom, v.mesh.material));
       if (v.edges) {
         const eg = new LineSegmentsGeometry();
-        eg.setPositions(moved(v.edgePos));
+        const E = moved(v.edgePos);
+        // (the walls' edges stretched the same way)
+        if (planes.length) {
+          for (let i = 0; i < v.edgeStarts.length; i++) {
+            const k0 = v.edgeStarts[i], k1 = k0 + v.edgeCounts[i];
+            const w = wallOf(v.edgePos, k0, k1);
+            if (w) for (let k = k0; k < k1; k++) if (!shift.has(key(v.edgePos, k * 3))) for (let j = 0; j < 3; j++) E[k * 3 + j] += w.pl.d[j] * w.share(k);
+          }
+        }
+        eg.setPositions(E);
         const lines = new LineSegments2(eg, this.mats.edge);
         lines.raycast = () => {};
         group.add(lines);

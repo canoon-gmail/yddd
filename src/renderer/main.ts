@@ -2111,7 +2111,8 @@ export class App implements ToolHost {
 
     // Face of a solid → modify that solid, or (checkbox) create a separate new solid.
     let exactMs = 0; // (the last exact preview's time: slow → typed values get the instant one too)
-    this.startOp({
+    let opened = false;
+    const spec: OpSpec = {
       title: "Push / Pull",
       panelOnTab: true,
       label: "Push/Pull",
@@ -2135,6 +2136,15 @@ export class App implements ToolHost {
         const solid = this.solidOf(bodyId, "Push/Pull");
         const commit = () => this.replaceOutcome(new Map([[bodyId, pushPull(solid, faceId, d)]]), "Push/Pull").commit();
         if (exactMs > SLOW_PUSHPULL_MS && this.dragPushPull(new Map([[bodyId, [faceId]]]), d)) return { ghost: new Map(), drawn: true, commit };
+        // Opening: the gizmo and the instant preview first (a free-form solid's exact one can take ~0.5 s), the exact one once painted
+        if (!opened && (opened = true) && this.dragPushPull(new Map([[bodyId, [faceId]]]), d)) {
+          requestAnimationFrame(() => setTimeout(() => {
+            if (this.op?.spec !== spec || exactMs || this.op.job) return;
+            this.op.key = "";
+            this.previewOp();
+          }, 0));
+          return { ghost: new Map(), drawn: true, commit };
+        }
         const t0 = performance.now();
         const ghost = new Map([[bodyId, asPreview(() => pushPull(solid, faceId, d))]]);
         exactMs = performance.now() - t0;
@@ -2145,7 +2155,8 @@ export class App implements ToolHost {
       },
       fastDrag: ({ d, newBody }) => !newBody && this.dragPushPull(new Map([[bodyId, [faceId]]]), d),
       drag,
-    });
+    };
+    this.startOp(spec);
   }
 
   /**
