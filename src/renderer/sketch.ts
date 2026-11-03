@@ -33,13 +33,13 @@ type P = [number, number];
  * spline: a freeform curve (what an arc / circle becomes when stretched unevenly) — rational quadratic
  * pieces end to end: `pts` = 2n+1 control points (pts[0] = a, the last = b, every 2nd one on the curve),
  * `w` their weights. Exact for circles / arcs, and stays exact when scaled (only the points move).
- * A Spline (Shift+A) keeps the points it was drawn through (`thru`; `closed`: round back to the first) — drag
- * them in Select to reshape it (see throughSpline).
+ * A Curve (Shift+C) keeps its control points (`ctrl`; `closed`: round past all of them, see controlCurve) — drag
+ * them in Select to reshape it.
  */
-type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P } | { kind: "spline"; a: P; b: P; pts: P[]; w: number[]; thru?: P[]; closed?: boolean };
+type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P } | { kind: "spline"; a: P; b: P; pts: P[]; w: number[]; ctrl?: P[]; closed?: boolean };
 /** A closed outline; `g`: its join group (outlines joined with J become one face at Done). */
 type Loop = ({ kind: "path"; segs: Seg[] } | { kind: "circle"; c: P; r: number }) & { g?: number };
-type Mode = "select" | "line" | "arc" | "spline" | "rect" | "circle" | "round" | "picture" | "scan";
+type Mode = "select" | "line" | "arc" | "curve" | "rect" | "circle" | "round" | "picture" | "scan";
 /** A selectable part of the sketch: a closed outline or an open path (by index). */
 type Item = { kind: "loop" | "open"; i: number };
 const sameItem = (a: Item | null, b: Item | null) => !!a && !!b && a.kind === b.kind && a.i === b.i;
@@ -54,13 +54,13 @@ const mapSeg = (g: Seg, f: (p: P) => P): Seg => {
   if (g.kind === "line") return { kind: "line", a: f(g.a), b: f(g.b) };
   if (g.kind === "arc") return { kind: "arc", a: f(g.a), m: f(g.m), b: f(g.b) };
   const pts = g.pts.map(f);
-  return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w, ...(g.thru ? { thru: g.thru.map(f), closed: g.closed } : {}) };
+  return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w, ...(g.ctrl ? { ctrl: g.ctrl.map(f), closed: g.closed } : {}) };
 };
 const moveSeg = (g: Seg, d: P): Seg => mapSeg(g, (p) => moveP(p, d));
 /** The same segment run the other way. */
 const revSeg = (g: Seg): Seg =>
   g.kind === "line" ? { kind: "line", a: g.b, b: g.a } : g.kind === "arc" ? { kind: "arc", a: g.b, m: g.m, b: g.a }
-  : g.thru ? throughSpline([...g.thru].reverse(), !!g.closed) : { kind: "spline", a: g.b, b: g.a, pts: [...g.pts].reverse(), w: [...g.w].reverse() };
+  : g.ctrl ? controlCurve([...g.ctrl].reverse(), !!g.closed) : { kind: "spline", a: g.b, b: g.a, pts: [...g.pts].reverse(), w: [...g.w].reverse() };
 /** Scaling about c by kx along X, ky along Y — unevenly, arcs / circles become freeform curves (they'd be ellipses). */
 const scaleP = (p: P, c: P, kx: number, ky: number): P => [c[0] + (p[0] - c[0]) * kx, c[1] + (p[1] - c[1]) * ky];
 const scaleSeg = (g: Seg, c: P, kx: number, ky: number): Seg => {
@@ -327,21 +327,18 @@ function circleSpline(c: P, r: number): Seg {
 }
 
 /**
- * Spline (Shift+A): a smooth curve through the points `q` (closed: round back to q[0], not repeated) — each gap a
- * cubic whose ends lean along the line through the points either side (Catmull-Rom), drawn as two quadratic pieces
- * that meet smoothly. The sketch's freeform curve (weights 1), so Done / scale / join / save take it as any other.
+ * Scan's Smooth: a smooth curve through the points `q` (closed: round back to q[0], not repeated) — each gap a cubic
+ * whose ends lean along the line through the points either side (Catmull-Rom), as two quadratic pieces: a Curve whose
+ * control points sit a quarter of the way along those lines either side of each point.
  */
-function throughSpline(q: P[], closed: boolean): Extract<Seg, { kind: "spline" }> {
-  const n = q.length, nodes = closed ? [...q, q[0]] : q;
+function smoothThrough(q: P[], closed: boolean): Extract<Seg, { kind: "spline" }> {
+  const n = q.length;
   const tan = (i: number): P =>
     closed ? mul(sub(q[(i + 1) % n], q[(i - 1 + n) % n]), 0.5) : i === 0 ? sub(q[1], q[0]) : i === n - 1 ? sub(q[n - 1], q[n - 2]) : mul(sub(q[i + 1], q[i - 1]), 0.5);
-  const pts: P[] = [nodes[0]];
-  for (let i = 0; i + 1 < nodes.length; i++) {
-    const a = nodes[i], b = nodes[i + 1];
-    const A = add(a, mul(tan(i % n), 0.25)), B = sub(b, mul(tan((i + 1) % n), 0.25));
-    pts.push(A, mul(add(A, B), 0.5), B, b);
-  }
-  return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: pts.map(() => 1), thru: [...q], closed };
+  const c: P[] = closed ? [] : [q[0]];
+  for (let i = 0; i < (closed ? n : n - 1); i++) c.push(add(q[i], mul(tan(i), 0.25)), sub(q[(i + 1) % n], mul(tan((i + 1) % n), 0.25)));
+  if (!closed) c.push(q[n - 1]);
+  return controlCurve(c, closed);
 }
 
 /**
@@ -356,8 +353,8 @@ function smoothRun(q: P[], closed: boolean, cornerDeg = 55): Seg[] {
   };
   const corners: number[] = [];
   for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) if (turn(i) > (cornerDeg * Math.PI) / 180) corners.push(i);
-  if (closed && !corners.length) return n >= 3 ? [throughSpline(q, true)] : [];
-  const piece = (run: P[]): Seg[] => (run.length >= 3 ? [throughSpline(run, false)] : [{ kind: "line", a: run[0], b: run[1] }]);
+  if (closed && !corners.length) return n >= 3 ? [smoothThrough(q, true)] : [];
+  const piece = (run: P[]): Seg[] => (run.length >= 3 ? [smoothThrough(run, false)] : [{ kind: "line", a: run[0], b: run[1] }]);
   if (!closed) {
     const cuts = [0, ...corners, n - 1], out: Seg[] = [];
     for (let k = 0; k + 1 < cuts.length; k++) out.push(...piece(q.slice(cuts[k], cuts[k + 1] + 1)));
@@ -411,13 +408,33 @@ function smoothLoop(q: P[]): Seg[] {
   return q.map((a, i) => ({ kind: "line", a, b: q[(i + 1) % q.length] }) as Seg);
 }
 
-/** A freeform curve that is a Spline (back from a saved face / path: its points found again), else it as it is. */
-function withThru(g: Extract<Seg, { kind: "spline" }>): Extract<Seg, { kind: "spline" }> {
-  if (g.thru || (g.pts.length - 1) % 4 || g.w.some((w) => Math.abs(w - 1) > 1e-9)) return g;
-  const nodes = g.pts.filter((_, i) => i % 4 === 0), closed = same(g.a, g.b);
-  const q = closed ? nodes.slice(0, -1) : nodes;
-  if (q.length < (closed ? 3 : 2)) return g;
-  const t = throughSpline(q, closed);
+/**
+ * Curve (Shift+C): a smooth curve pulled towards its control points `c` — it starts on c[0] and ends on the last (closed:
+ * round past all of them, touching none), each piece a quadratic from halfway between two control points to halfway
+ * between the next two (a quadratic B-spline): the sketch's freeform curve (weights 1), exact, as any other.
+ */
+function controlCurve(c: P[], closed: boolean): Extract<Seg, { kind: "spline" }> {
+  const n = c.length, mid = (i: number) => mul(add(c[i % n], c[(i + 1) % n]), 0.5);
+  const pts: P[] = [];
+  if (closed) {
+    for (let i = 0; i < n; i++) pts.push(mid(i), c[(i + 1) % n]);
+    pts.push(pts[0]);
+  } else {
+    pts.push(c[0]);
+    for (let i = 1; i < n - 1; i++) pts.push(c[i], i < n - 2 ? mid(i) : c[n - 1]);
+  }
+  return { kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: pts.map(() => 1), ctrl: [...c], closed };
+}
+
+/**
+ * A freeform curve that is a Curve (back from a saved face / path: its control points found again), else it as it is —
+ * a Spline of older versions (a smooth curve through its points) is one too: it comes back as a Curve.
+ */
+function withCtrl(g: Extract<Seg, { kind: "spline" }>): Extract<Seg, { kind: "spline" }> {
+  if (g.ctrl || g.pts.length < 3 || g.w.some((w) => Math.abs(w - 1) > 1e-9)) return g;
+  const odd = g.pts.filter((_, i) => i % 2), closed = same(g.a, g.b) && g.pts.length >= 7;
+  const c = closed ? [odd[odd.length - 1], ...odd.slice(0, -1)] : [g.a, ...odd, g.b];
+  const t = controlCurve(c, closed);
   return t.pts.length === g.pts.length && t.pts.every((p, i) => dist(p, g.pts[i]) < 1e-6) ? t : g;
 }
 
@@ -665,9 +682,9 @@ export class SketchTool implements Tool {
   /** The outline being drawn (lines / arcs) and its first point. */
   private path: Seg[] = [];
   private first: P | null = null;
-  /** Spline being drawn: the points clicked after `first`. */
+  /** Curve being drawn: the control points clicked after `first`. */
   private thru: P[] = [];
-  /** Select: a Spline point being dragged (see splineHandles), from the state before; the one under the cursor ("item:seg:k"). */
+  /** Select: a Curve's control point being dragged (see splineHandles), from the state before; the one under the cursor ("item:seg:k"). */
   private ptDrag: { item: Item; seg: number; k: number; snap: string; moved: boolean } | null = null;
   private ptHover: string | null = null;
   /** First arc with nothing to be tangent to: its end point, waiting for a point it passes through. */
@@ -738,6 +755,8 @@ export class SketchTool implements Tool {
     selPath: new THREE.LineBasicMaterial({ color: 0xffe08a, depthTest: false, transparent: true }),
     hoverPath: new THREE.LineBasicMaterial({ color: 0xe2e5e8, depthTest: false, transparent: true }),
     rubber: new THREE.LineBasicMaterial({ color: 0x8fd3ff, depthTest: false, transparent: true }),
+    /** A Curve's control lines (point to point): faint, under the curve. */
+    ctrl: new THREE.LineBasicMaterial({ color: 0x4f9dff, depthTest: false, transparent: true, opacity: 0.5 }),
     fill: new THREE.MeshBasicMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
     guide: new THREE.LineDashedMaterial({ color: 0xff6fb5, dashSize: 1, gapSize: 1, depthTest: false, transparent: true }),
   };
@@ -1107,7 +1126,7 @@ export class SketchTool implements Tool {
       if (g.kind === "line") return { kind: "line", a: p2(g.a), b: p2(g.b) };
       if (g.kind === "arc") return { kind: "arc", a: p2(g.a), m: p2(g.m), b: p2(g.b) };
       const pts = g.pts.map(p2);
-      return withThru({ kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w });
+      return withCtrl({ kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w });
     };
     for (const l of loops) this.loops.push(l.kind === "circle" ? { kind: "circle", c: p2(l.c), r: l.r } : { kind: "path", segs: l.segs.map(seg) });
     for (const segs of opens) this.opens.push(segs.map(seg));
@@ -1648,15 +1667,16 @@ export class SketchTool implements Tool {
     this.update();
   }
 
-  /** Select: the points of the selected Splines, to drag (not an end where it joins on to other lines). */
+  /** Select: the control points of the selected Curves, to drag (not an end where it joins on to other lines). */
   private splineHandles(): { item: Item; seg: number; k: number; p: P }[] {
     const out: { item: Item; seg: number; k: number; p: P }[] = [];
     for (const it of this.selected) {
       const l = it.kind === "loop" ? this.loops[it.i] : null, segs = l ? (l.kind === "path" ? l.segs : []) : this.opens[it.i] ?? [];
       segs.forEach((g, si) => {
-        if (g.kind !== "spline" || !g.thru) return;
-        const last = g.thru.length - 1;
-        g.thru.forEach((p, k) => {
+        const q = g.kind === "spline" ? g.ctrl : null;
+        if (!q || g.kind !== "spline") return;
+        const last = q.length - 1;
+        q.forEach((p, k) => {
           const joinedAt = !g.closed && ((k === 0 && (l || si > 0)) || (k === last && (l || si < segs.length - 1)));
           if (!joinedAt) out.push({ item: it, seg: si, k, p });
         });
@@ -1665,7 +1685,7 @@ export class SketchTool implements Tool {
     return out;
   }
 
-  /** The Spline point under the cursor (see splineHandles), or null. */
+  /** The Curve's control point under the cursor (see splineHandles), or null. */
   private splineHandleAt(e: PointerEvent): { item: Item; seg: number; k: number } | null {
     if (this.moving || this.scaling) return null;
     const vp = this.host.viewport;
@@ -1678,15 +1698,15 @@ export class SketchTool implements Tool {
   }
 
   /**
-   * Drag a Spline point to `e`: onto a point of the sketch's other lines (ends first, then middles / centres) or of
-   * the model, else the plane (grid steps when snapping); free as the Snap setting says (see pointAt). The curve through its points again.
+   * Drag a Curve's control point to `e`: onto a point of the sketch's other lines (ends first, then middles / centres) or of
+   * the model, else the plane (grid steps when snapping); free as the Snap setting says (see pointAt). The curve made again.
    */
   private ptDragTo(e: PointerEvent): void {
     const dr = this.ptDrag!;
     const vp = this.host.viewport, free = !vp.snapping(e);
     let q: P | null = null;
     if (!free) {
-      // (the dragged Spline's own lines left out: its point would stick where it was)
+      // (the dragged Curve's own lines left out: its point would stick where it was)
       const pts: { p: P; kind: "vertex" | "midpoint" | "center" }[] = [];
       const seg = (g: Seg) => pts.push({ p: g.a, kind: "vertex" }, { p: g.b, kind: "vertex" }, { p: segMid(g), kind: "midpoint" });
       this.loops.forEach((l, i) => (dr.item.kind === "loop" && dr.item.i === i ? undefined : l.kind === "circle" ? pts.push({ p: l.c, kind: "center" }) : l.segs.forEach(seg)));
@@ -1709,13 +1729,13 @@ export class SketchTool implements Tool {
     }
     const segs = dr.item.kind === "loop" ? (this.loops[dr.item.i] as Extract<Loop, { kind: "path" }>).segs : this.opens[dr.item.i];
     const g = segs[dr.seg] as Extract<Seg, { kind: "spline" }>;
-    const thru = g.thru!.map((p, k) => (k === dr.k ? q! : p));
-    const next = segs.map((x, i) => (i === dr.seg ? throughSpline(thru, !!g.closed) : x));
+    const moved = g.ctrl!.map((p, k) => (k === dr.k ? q! : p));
+    const next = segs.map((x, i) => (i === dr.seg ? controlCurve(moved, !!g.closed) : x));
     if (dr.item.kind === "loop") this.loops = this.loops.map((l, i) => (i === dr.item.i ? ({ ...l, segs: next } as Loop) : l));
     else this.opens = this.opens.map((o, i) => (i === dr.item.i ? next : o));
     dr.moved = true;
     this.version++;
-    this.host.hud(`Spline point ${num(q[0])}, ${num(q[1])}`, this.world(q));
+    this.host.hud(`Control point ${num(q[0])}, ${num(q[1])}`, this.world(q));
     this.update();
   }
 
@@ -1983,7 +2003,7 @@ export class SketchTool implements Tool {
       return this.roundPick();
     }
     const prev = this.lastDown, now = performance.now();
-    const lines = this.mode === "line" || this.mode === "arc" || this.mode === "spline";
+    const lines = this.mode === "line" || this.mode === "arc" || this.mode === "curve";
     const double = lines && !!prev && now - prev.t < 400 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 5;
     this.lastDown = double ? null : { t: now, x: e.clientX, y: e.clientY };
     // The 2nd click of a double-click only ends the lines (on an arc it would start another one) —
@@ -2001,11 +2021,11 @@ export class SketchTool implements Tool {
     if (this.mode === "rect" || this.mode === "circle" || !this.first) return;
     this.undoStack.push(JSON.stringify(this.state()));
     this.version++;
-    if (this.mode === "spline") {
+    if (this.mode === "curve") {
       // (two points: a straight line)
       const q = [this.first, ...this.thru];
       if (q.length === 2) this.opens.push([{ kind: "line", a: q[0], b: q[1] }]);
-      else if (q.length > 2) this.opens.push([throughSpline(q, false)]);
+      else if (q.length > 2) this.opens.push([controlCurve(q, false)]);
       this.thru = [];
     } else if (this.path.length) {
       const closing: Seg = { kind: "line", a: this.cur!, b: this.first };
@@ -2064,9 +2084,9 @@ export class SketchTool implements Tool {
         this.anchor = null;
       }
     } else if (!this.first) {
-      if (this.mode === "spline" || !this.resume(p)) this.first = p;
-    } else if (this.mode === "spline") {
-      changed = this.addSplinePoint(p);
+      if (this.mode === "curve" || !this.resume(p)) this.first = p;
+    } else if (this.mode === "curve") {
+      changed = this.addCurvePoint(p);
     } else {
       changed = this.addSegment(p);
     }
@@ -2093,13 +2113,13 @@ export class SketchTool implements Tool {
     return false;
   }
 
-  /** Spline: the next point it passes through — on the start point (after 2 more), it closes into an outline. */
-  private addSplinePoint(p: P): boolean {
+  /** Curve: its next control point — on the start point (after 2 more), it closes into an outline. */
+  private addCurvePoint(p: P): boolean {
     const first = this.first!;
     if (same(p, this.cur!)) return false;
     if (same(p, first)) {
       if (this.thru.length < 2) return false;
-      this.loops.push({ kind: "path", segs: [throughSpline([first, ...this.thru], true)] });
+      this.loops.push({ kind: "path", segs: [controlCurve([first, ...this.thru], true)] });
       this.thru = [];
       this.first = null;
       return true;
@@ -2279,7 +2299,7 @@ export class SketchTool implements Tool {
       else if (this.scaling) this.endScale(true);
       else if (this.moving) this.endMove(true);
       else if (this.mode === "round") this.roundDone();
-      else if ((this.mode === "arc" || this.mode === "line" || this.mode === "spline") && this.first) {
+      else if ((this.mode === "arc" || this.mode === "line" || this.mode === "curve") && this.first) {
         // Nothing typed: done drawing — an arc shown (e.g. after typing its radius) is placed first.
         if (this.mode === "arc" && this.cursor && this.cur && (this.path.length || this.arcEnd) && this.arcAt(this.cur, this.cursor)) this.click(this.cursor);
         this.endLines();
@@ -2290,8 +2310,9 @@ export class SketchTool implements Tool {
       this.dialog();
       return true;
     }
-    if ((k === "A" || k === "a") && e.shiftKey) {
-      this.setMode("spline");
+    // (Shift+A: the Spline's key, before the Curve took its place)
+    if ((k === "C" || k === "c" || k === "A" || k === "a") && e.shiftKey) {
+      this.setMode("curve");
       return true;
     }
     const mode = ({ l: "line", a: "arc", r: "rect", c: "circle", f: "round" } as Record<string, Mode>)[k.toLowerCase()];
@@ -2306,7 +2327,7 @@ export class SketchTool implements Tool {
     if (this.scaling) this.endScale(false);
     if (this.moving) this.endMove(true); // (moved with the gizmo: kept)
     // (a line being drawn ends here, as with Enter — while still in its tool, so undo goes back to it)
-    if (this.first && (mode === "select" || mode === "round" || mode === "scan" || (mode === "spline") !== (this.mode === "spline"))) this.endLines();
+    if (this.first && (mode === "select" || mode === "round" || mode === "scan" || (mode === "curve") !== (this.mode === "curve"))) this.endLines();
     if (mode === "picture" && this.mode !== "picture") this.prevMode = this.mode;
     // (corners picked to round: rounded on the way out, as lines being drawn end)
     if (this.mode === "round" && mode !== "round" && this.roundPicks.length) this.roundDone();
@@ -2524,7 +2545,7 @@ export class SketchTool implements Tool {
     };
     if (this.mode === "line" || (!this.path.length && !this.arcEnd)) {
       const d = c && !same(c, from) ? sub(c, from) : ([10, 0] as P);
-      return ask(this.mode === "line" ? "Line" : this.mode === "spline" ? "Spline: the next point" : "Arc: its end", [{ label: "Length (mm)", value: len(d), min: 0 }, { label: "Angle (°)", value: deg(d) }], ([l, a]) => (l > 0 ? this.click(end(l, a)) : undefined));
+      return ask(this.mode === "line" ? "Line" : this.mode === "curve" ? "Curve: the next control point" : "Arc: its end", [{ label: "Length (mm)", value: len(d), min: 0 }, { label: "Angle (°)", value: deg(d) }], ([l, a]) => (l > 0 ? this.click(end(l, a)) : undefined));
     }
     if (this.arcEnd) {
       const g = c && this.arcAt(from, c), k = g && arcGeom(g as Extract<Seg, { kind: "arc" }>);
@@ -2774,8 +2795,12 @@ export class SketchTool implements Tool {
     for (const p of [this.first, this.arcEnd, this.anchor, ...this.thru]) if (p) dot(p);
     for (const it of this.selected) itemLines(it, this.mats.sel, this.mats.selPath);
     if (hoverOnly) itemLines(hoverOnly, this.mats.hover, this.mats.hoverPath);
-    // Select: the selected Splines' points, to drag (the one under the cursor / dragged bigger).
+    // Select: the selected Curves' control points, to drag (the one under the cursor / dragged bigger); a Curve's control lines.
     if (this.mode === "select") {
+      for (const it of this.selected) {
+        const l = it.kind === "loop" ? this.loops[it.i] : null;
+        for (const g of l ? (l.kind === "path" ? l.segs : []) : this.opens[it.i] ?? []) if (g.kind === "spline" && g.ctrl) lines(g.ctrl, this.mats.ctrl, !!g.closed);
+      }
       for (const h of this.splineHandles()) {
         const key = `${h.item.kind}${h.item.i}:${h.seg}:${h.k}`, live = key === this.ptHover || (this.ptDrag && `${this.ptDrag.item.kind}${this.ptDrag.item.i}:${this.ptDrag.seg}:${this.ptDrag.k}` === key);
         const sz = vp.worldPerPixel(this.world(h.p)) * (live ? 6 : 4);
@@ -2805,12 +2830,13 @@ export class SketchTool implements Tool {
           hud = `${circleSize.tag} ${num(circleSize.shown(dist(a, c)))} mm`;
           hudAway = a;
         }
-      } else if (this.first && this.mode === "spline") {
-        // The curve so far, on to the cursor (closing: round to the start)
-        const q = [this.first, ...this.thru], closing = q.length >= 3 && same(c, this.first);
-        const g = closing ? throughSpline(q, true) : same(c, q[q.length - 1]) ? null : q.length + 1 >= 2 ? throughSpline([...q, c], false) : null;
+      } else if (this.first && this.mode === "curve") {
+        // The curve so far, on to the cursor (closing: round past the start), and its control lines
+        const q = [this.first, ...this.thru], closing = q.length >= 3 && same(c, this.first), qc = closing || same(c, q[q.length - 1]) ? q : [...q, c];
+        const g = closing ? controlCurve(q, true) : qc.length >= 3 ? controlCurve(qc, false) : null;
         if (g) lines([...splinePoints(g), g.b], this.mats.rubber);
-        hud = `Spline · ${q.length + (closing || same(c, q[q.length - 1]) ? 0 : 1)} points`;
+        lines(qc, this.mats.ctrl, closing);
+        hud = `Curve · ${qc.length} control points`;
         hudAway = q[q.length - 1];
       } else if (from && this.mode === "line") {
         lines([from, c], this.mats.rubber);
@@ -3007,14 +3033,14 @@ export class SketchTool implements Tool {
     const tips: Record<Mode, string> = {
       select: this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
         : this.scaling ? `Scale / rotate: drag the red square (X), green (Y), the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} or the blue ring (rotate) — ${this.host.viewport.stepTip("round steps, 15°")} · Tab: exact %, ° · Enter / click elsewhere: apply · Esc / right click: cancel`
-        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Spline's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
+        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
       line: this.first ? "Click the next point · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
         : this.path.length ? "Click the arc's end (it bends on from the last segment) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it · L: back to lines" : this.arcEnd ? "Click a point the arc passes through (near a half circle it snaps to one) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it" : "Click the arc's end point · type a radius + Enter to fix it",
-      spline: this.first
-        ? `Click the next point — a smooth curve runs through them all · click the start point to close (after 2 more) · Enter / double-click: done (left open: a path) · Esc: drop it`
-        : "Click where the curve starts · then click each point it passes through (later: Select it and drag its points)",
+      curve: this.first
+        ? `Click the next control point — the curve is pulled towards each, starting and ending on the first and last · click the start point to close (after 2 more) · Enter / double-click: done (left open: a path) · Esc: drop it`
+        : "Click where the curve starts · then click control points that pull it (later: Select it and drag its points)",
       round: "Click the corners to round (where two straight lines meet; an outline / inside it: all its corners; again: unpick) · drag the yellow handle, or type the radius · Done (in the box, or Enter) rounds them — then pick more · Esc: unpick all",
       scan: !this.pic ? "Scan: no picture — click the picture icon (bottom left) to load one"
         : this.scanFirst ? "Scan: click the area's other corner"
@@ -3048,14 +3074,14 @@ export class SketchTool implements Tool {
       <span class="muted" data-scan-out="found"></span>
       <button type="button" class="btn primary" data-act="scan-add" title="Put what was found (blue) into the sketch — Enter">Add</button></div>` : "";
     const html = `<h4>Sketch on ${this.what}</h4>
-      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("spline", "Spline", "Shift+A")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round corner", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}</div>
+      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("curve", "Curve", "Shift+C")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round corner", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}</div>
       ${roundBox}${scanBox}
       <div class="tip">${tips[this.mode]}</div>
-      <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · Tab: exact values · ${this.mode === "select" ? "L A Shift+A R C: draw · F: round corners" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>
+      <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · Tab: exact values · ${this.mode === "select" ? "L A Shift+C R C: draw · F: round corners" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>
       <div class="op-buttons"><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>`;
     // Pro layout: one row of modes, Exit Sketch Mode — no tips. (Cancel: hidden, for the smoke test)
     const pro = document.body.classList.contains("pro");
-    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("spline", "Spline", "⇧A")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>${roundBox}${scanBox}`;
+    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("curve", "Curve", "⇧C")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>${roundBox}${scanBox}`;
     const out = pro ? proHtml : html;
     this.panel.classList.toggle("compact", pro);
     if (out !== this.panelHtml) this.panel.innerHTML = this.panelHtml = out;
@@ -3065,7 +3091,7 @@ export class SketchTool implements Tool {
     this.corner.querySelector(".pic-wrap")?.classList.toggle("on", this.mode === "picture"); // (lit, its menu open)
     this.syncPicMenu();
     if (pro && this.mode === "picture") return this.host.hint(`Sketch — picture: ${tips.picture}`);
-    if (pro) return this.host.hint(this.mode === "select" ? `Sketch — select${nSel ? `: ${nSel}, Del deletes` : ""} — L A R C: draw` : "Sketch — L line, A arc, Shift+A spline, R rect, C circle, F round corner — Enter: done");
-    this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · Shift+A spline · R rectangle · C circle · F round corner · Exit Sketch Mode in the panel`);
+    if (pro) return this.host.hint(this.mode === "select" ? `Sketch — select${nSel ? `: ${nSel}, Del deletes` : ""} — L A R C: draw` : "Sketch — L line, A arc, Shift+C curve, R rect, C circle, F round corner — Enter: done");
+    this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · Shift+C curve · R rectangle · C circle · F round corner · Exit Sketch Mode in the panel`);
   }
 }

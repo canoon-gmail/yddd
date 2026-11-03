@@ -4810,6 +4810,12 @@ export function flatFaceBoolean(op: BooleanOp, target: Shape, tools: Shape[]): F
 export type BooleanOp = "union" | "subtract" | "intersect";
 
 export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
+  // A union: each solid's separate pieces joined too (a bolt of an older version: head, shank and thread only touching
+  // — one argument's pieces aren't fused with each other, so the thread stayed apart and the union was refused)
+  if (op === "union") {
+    const all = [target, ...tools].flatMap((x) => solidPieces(x));
+    if (all.length > tools.length + 1) [target, tools] = [all[0], all.slice(1)];
+  }
   // (a failed try changes the solids it was given — even non-destructive —, so a retry needs copies made before it)
   const spheres = [target, ...tools].some((x) => sphereCenter(x)) ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
   let first: Solid | null = null, failed: unknown = null;
@@ -6130,15 +6136,19 @@ function revolvedOutline(rz: [number, number][], at: V3): Solid {
 }
 
 /**
- * Pieces that only touch (on shared flat faces, none crossing) joined / cut with OpenCascade's full glue — ~20× faster
- * than a normal boolean on the thread's twisted faces (a bolt: ~2.5 s → ~0.1 s); a normal boolean if that fails.
+ * Pieces that only touch (on flat faces lying on each other, none crossing) joined / cut with OpenCascade's glue —
+ * faster than a normal boolean on the thread's twisted faces. Full glue first (~0.1 s), kept only if it comes out as
+ * one solid: on faces that lie on each other but aren't the same (a shank's end on a thread's cross-section) it leaves
+ * the pieces apart — a bolt was 3 solids, a union with it refused as "don't touch"; then shift glue, then none.
  */
 function joinTouching(kind: "fuse" | "cut", a: Solid, tools: Solid[]): Solid {
-  try {
-    const r = booleanOnce(kind, a, tools, "full");
-    if (isValidShape(r as Shape)) return r;
-  } catch {
-    // (glue not applicable: below)
+  for (const glue of ["full", "shift"] as const) {
+    try {
+      const r = booleanOnce(kind, a, tools, glue);
+      if ((kind === "cut" || solidPieces(r).length === 1) && isValidShape(r as Shape)) return r;
+    } catch {
+      // (glue not applicable: the next)
+    }
   }
   return boolean(kind, a, tools);
 }

@@ -21,7 +21,7 @@ F1 = shortcuts, / = search commands.
 
 ## Stuff it does
 
-- box, cylinder, sphere, cone, rectangle, circle, polygon, sketch (lines, arcs, splines)
+- box, cylinder, sphere, cone, rectangle, circle, polygon, sketch (lines, arcs, curves)
 - push/pull, fillet, chamfer, shell, offset, revolve, sweep, cut
 - union / subtract / intersect
 - move, rotate, scale, mirror, circular copy
