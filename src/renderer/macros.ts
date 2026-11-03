@@ -1,5 +1,5 @@
 /**
- * The Macro menu: ready-made parts and box tools (Box from Face, Box Lid, Dividers, Battery case,
+ * The Macro menu: ready-made parts and box tools (Box from Face, Box Lid, Dividers, Battery case, Nut and bolt,
  * Random, Gridfinity bin / baseplate, Gear), each an op panel on the App.
  */
 import * as THREE from "three";
@@ -15,6 +15,13 @@ import {
   batteryCase,
   gridfinityBin,
   gridfinitySizes,
+  METRIC_SIZES,
+  nutBoltParts,
+  nutBoltPreview,
+  loadTextFont,
+  textFontReady,
+  errorMessage,
+  type NutBolt,
   gridfinityBaseplate,
   gridfinityBaseplateSizes,
   gearFace,
@@ -31,11 +38,12 @@ import {
   boundsOf,
   type Geom,
   type Solid,
+  type Shape,
 } from "./kernel";
 import { scatter } from "./scatter";
 import { isBrep, withShape, type Body } from "./document";
 import { type SelItem, type ShownDimension } from "./viewport";
-import { solidFrom } from "./kernelWorker";
+import { JobCancelled, solidFrom } from "./kernelWorker";
 import { escapeHtml, fmt, isPro } from "./ui";
 import { OpWaiting, type OpField, type OpOutcome, type OpSpec } from "./ops";
 import { inGroupOf } from "./bodies";
@@ -294,6 +302,69 @@ export function openBatteryCase(app: App): void {
       };
     },
     remember: (v) => (app.batteryDefaults = { ...d, ...v }),
+  });
+}
+
+/**
+ * Macro → Nut and bolt: an ISO metric coarse size (M5 to M24) as four solids side by side, in a group of their own —
+ * the bolt (standing on its head; Thread length of its length threaded, the rest a plain shank), the nut, a thread
+ * cutter (Subtract it from a part: a threaded hole a printed bolt screws into) and a nut trap (Subtract it: a hex
+ * pocket a metal nut presses into, and the bolt's hole). Clearance makes the nut's thread, the cutter and the trap
+ * that much bigger all round. The parts not wanted are deleted by hand. Made in the background kernel.
+ */
+export function openNutBolt(app: App): void {
+  const d = app.nutBoltDefaults;
+  const right = app.rightOfBodies();
+  const params = (v: Record<string, number>): NutBolt => ({ size: METRIC_SIZES[Math.round(v.size)] ?? METRIC_SIZES[2], length: v.length, thread: v.thread, clearance: v.clearance });
+  // Left to right, 5 mm apart (a big size: half its diameter), from beside what's there
+  const places = (o: NutBolt): V3[] => {
+    const corner = (2 * o.size.hex) / Math.sqrt(3) + 2 * o.clearance, gap = Math.max(5, o.size.d / 2);
+    const widths = [corner, corner, o.size.d + 2 * o.clearance, corner];
+    let x = right > -Infinity ? right + 10 : 0;
+    return widths.map((w) => {
+      const at: V3 = [x + w / 2, 0, 0];
+      x += w + gap;
+      return at;
+    });
+  };
+  // The panel previews quick stand-ins (no thread: nutBoltPreview); Apply makes the real ones in the background
+  // kernel (~1.5 s) behind the busy dialog — Stop: nothing added
+  const outcome = (o: NutBolt, solids: Shape[]): OpOutcome => ({
+    ghost: new Map(solids.map((s, i) => [-1 - i, s])),
+    commit: () => ({ select: [], then: () => make(o) }),
+  });
+  const make = (o: NutBolt) =>
+    app.runBusy(true, `Making the ${o.size.name} nut and bolt…`, async () => {
+      let solids: Solid[];
+      try {
+        if (!app.bgKernel.ready && !textFontReady()) await loadTextFont(); // (the thread cutter's size label)
+        solids = app.bgKernel.ready ? (await app.bgKernel.run({ op: "nutbolt", o, at: places(o) })).solids.map(solidFrom) : nutBoltParts(o, places(o));
+      } catch (err) {
+        return app.toast(err instanceof JobCancelled ? "Nut and bolt stopped — nothing added" : errorMessage(err), err instanceof JobCancelled ? undefined : "error");
+      }
+      const { name } = o.size, group = app.uniqueGroupName(`Nut and bolt ${name}`);
+      const names = [`Bolt ${name}×${fmt(o.length)}`, `Nut ${name}`, `Thread cutter ${name}`, `Nut trap ${name}`];
+      const made = solids.map((s, i) => ({ ...app.doc.makeBody(s, names[i]), group }) as Body);
+      app.doc.commit([...app.doc.bodies, ...made], `Nut and bolt ${name}`);
+      app.setMode("body");
+      app.setSelection(made.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      app.toast(`"${group}" in the Bodies panel: bolt, nut, thread cutter, nut trap — delete the ones you don't need`);
+    });
+  app.startOp({
+    title: "Nut and bolt",
+    label: "Nut and bolt",
+    note: `<span class="op-help">Bolt, nut, thread cutter and nut trap — delete the ones you don't need. Subtract the thread cutter from a part for a threaded hole, the nut trap for a pocket a metal nut presses into. The preview draws the thread as a line — Apply makes it, the size on the thread cutter's top</span>`,
+    fields: [
+      { key: "size", label: "Size (ISO metric coarse)", type: "select", options: METRIC_SIZES.map((m) => `${m.name} (pitch ${fmt(m.pitch)})`), value: Math.min(d.size, METRIC_SIZES.length - 1) },
+      { key: "length", label: "Bolt length (mm, under the head)", value: d.length, step: 1, min: 1 },
+      { key: "thread", label: "Thread length (mm, 0: none)", value: d.thread, step: 1, min: 0 },
+      { key: "clearance", label: "Clearance (mm, nut / cutter / trap bigger all round)", value: d.clearance, step: 0.05, min: 0 },
+    ],
+    compute: (v) => {
+      const o = params(v);
+      return outcome(o, nutBoltPreview(o, places(o)));
+    },
+    remember: (v) => (app.nutBoltDefaults = { ...d, ...v }),
   });
 }
 

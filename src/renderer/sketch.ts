@@ -443,9 +443,17 @@ function segMid(g: Seg): P {
   return n % 2 ? splineAt(g, (n - 1) / 2, 0.5) : g.pts[n];
 }
 
+/** Outlines' polygons, worked out once each (an outline isn't changed in place: an edit makes a new one). */
+const polygons = new WeakMap<Loop, P[]>();
+
+/** Points round an outline (don't change the array: it's shared). */
 function loopPolygon(l: Loop): P[] {
-  if (l.kind === "circle") return Array.from({ length: 72 }, (_, i) => [l.c[0] + l.r * Math.cos((i / 72) * TAU), l.c[1] + l.r * Math.sin((i / 72) * TAU)] as P);
-  return l.segs.flatMap(segPoints);
+  let pts = polygons.get(l);
+  if (!pts) {
+    pts = l.kind === "circle" ? Array.from({ length: 72 }, (_, i) => [l.c[0] + l.r * Math.cos((i / 72) * TAU), l.c[1] + l.r * Math.sin((i / 72) * TAU)] as P) : l.segs.flatMap(segPoints);
+    polygons.set(l, pts);
+  }
+  return pts;
 }
 
 /** A sketch line, or a circle / arc (sweep: signed, ±2π for a full circle). */
@@ -563,6 +571,9 @@ function edgeDist(p: P, poly: P[]): number {
   return d;
 }
 
+/** Whether one outline lies inside another (see nest), by the two outlines (each a new object when edited). */
+const insideOf = new WeakMap<Loop, WeakMap<Loop, boolean>>();
+
 /**
  * Outer outlines with their holes: an outline inside an odd number of others is a hole of the
  * smallest one around it. Inside = all of it inside or on the other's outline (one that only touches
@@ -571,9 +582,29 @@ function edgeDist(p: P, poly: P[]): number {
  */
 function nest(loops: Loop[]): { outer: number; holes: number[] }[] {
   const polys = loops.map(loopPolygon), areas = polys.map(polyArea);
+  const boxes = polys.map((q) => {
+    const b = [Infinity, Infinity, -Infinity, -Infinity];
+    for (const [x, y] of q) {
+      b[0] = Math.min(b[0], x);
+      b[1] = Math.min(b[1], y);
+      b[2] = Math.max(b[2], x);
+      b[3] = Math.max(b[3], y);
+    }
+    return b;
+  });
   const within = (i: number, j: number) => {
+    // (remembered for the two outlines: drawing one more outline checks only its own pairs — a lettered logo's 18
+    // outlines, ~0.4 s from scratch)
+    let row = insideOf.get(loops[i]);
+    const known = row?.get(loops[j]);
+    if (known !== undefined) return known;
     const tol = 1e-6 * Math.max(1, Math.sqrt(areas[j]));
-    return polys[i].every((p) => inside(p, polys[j]) || edgeDist(p, polys[j]) < tol);
+    // (not inside its box: not inside it — no point-by-point check)
+    const a = boxes[i], b = boxes[j];
+    const r = !(a[0] < b[0] - tol || a[1] < b[1] - tol || a[2] > b[2] + tol || a[3] > b[3] + tol) && polys[i].every((p) => inside(p, polys[j]) || edgeDist(p, polys[j]) < tol);
+    if (!row) insideOf.set(loops[i], (row = new WeakMap()));
+    row.set(loops[j], r);
+    return r;
   };
   const joined = (i: number, j: number) => loops[i].g !== undefined && loops[i].g === loops[j].g;
   const parents = loops.map((_, i) => loops.map((_, j) => j).filter((j) => j !== i && !joined(i, j) && areas[j] > areas[i] && within(i, j)));
@@ -2573,7 +2604,18 @@ export class SketchTool implements Tool {
   }
 
   /** The face(s) of the outlines joined in group g (with their holes): merged into one where they touch / overlap. */
-  private groupFaces(g: number, groups = nest(this.loops)): Shape[] {
+  /**
+   * nest(this.loops), worked out again only when the outlines change — it's asked on every redraw (the list is changed
+   * in place too: kept by its outlines, each a new object when edited).
+   */
+  private nested(): { outer: number; holes: number[] }[] {
+    const c = this.nestCache, L = this.loops;
+    if (!c || c.loops.length !== L.length || c.loops.some((l, i) => l !== L[i])) this.nestCache = { loops: [...L], groups: nest(L) };
+    return this.nestCache!.groups;
+  }
+  private nestCache: { loops: Loop[]; groups: { outer: number; holes: number[] }[] } | null = null;
+
+  private groupFaces(g: number, groups = this.nested()): Shape[] {
     const n = this.frame.z.toArray() as V3;
     const faces = groups.filter((x) => this.loops[x.outer].g === g).flatMap((x) => sketchFaces(this.kernelLoop(this.loops[x.outer]), x.holes.map((h) => this.kernelLoop(this.loops[h])), n));
     return joinFlatFaces(faces as Parameters<typeof joinFlatFaces>[0], n);
@@ -2608,7 +2650,7 @@ export class SketchTool implements Tool {
 
   private finish(): void {
     if (this.roundPicks.length) this.roundDone();
-    const groups = nest(this.loops);
+    const groups = this.nested();
     try {
       const n = this.frame.z.toArray() as V3;
       // Faces of each outline (with its holes); outlines joined with J are merged into one face.
@@ -2680,7 +2722,7 @@ export class SketchTool implements Tool {
     for (const g of new Set(this.loops.map((l) => l.g).filter((x): x is number => x !== undefined))) if (groupObj(g, this.mats.fill, this.mats.line)) merged.add(g);
     const shown = (l: Loop) => l.g === undefined || !merged.has(l.g);
     // Closed outlines: filled (holes left open) and outlined.
-    const nested = nest(this.loops);
+    const nested = this.nested();
     for (const { outer, holes } of nested) {
       if (!shown(this.loops[outer])) continue;
       const shape = new THREE.Shape(loopPolygon(this.loops[outer]).map(([u, v]) => new THREE.Vector2(u, v)));

@@ -62,6 +62,10 @@ import {
   makeSphereAt,
   seamEdgeIds,
   smoothSurfaceFaces,
+  standInTessellation,
+  needsBackgroundMesh,
+  takeMesh,
+  type Tessellation,
   kindOf,
   faceAxis,
   edgeFaceIds,
@@ -80,6 +84,15 @@ import {
   boxDividers,
   gridfinityBin,
   gridfinityBaseplate,
+  boltSolid,
+  nutSolid,
+  threadCutter,
+  labelledCutter,
+  nutTrap,
+  roughBounds,
+  optimalBounds,
+ 
+  METRIC_SIZES,
   wrappedTextFaces,
   offsetRing,
   scaleShape,
@@ -159,7 +172,7 @@ import { MeasureTool } from "./measure";
 import { LABEL_TEXT, LabelTool } from "./label";
 import { SketchTool, type SketchFrame } from "./sketch";
 import { byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, XRAY_OPACITY_KEY } from "./format";
-import { COMMANDS, eventKey, isDefault, keyTable, keysPanelOpen, keysText, loadKeys, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
+import { COMMANDS, dragGesture, eventKey, isDefault, navAction, keyTable, keysPanelOpen, keysText, loadKeys, toolbarKeysText, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
 import type { TutCtx, Tutorial } from "./tutorials";
 import * as macros from "./macros";
 import { $, escapeHtml, fmt, inchFields, isPro } from "./ui";
@@ -201,6 +214,8 @@ const CUT_GROUP_OVER = 4;
 
 /** Undo / Redo that will take longer than this (ms) to draw shows the busy dialog. */
 const BUSY_DRAW_MS = 300;
+/** Pasting objects from another window with more B-rep text than this (bytes): meshed in the background first, behind the busy dialog. */
+const PASTE_BUSY_BYTES = 300_000;
 
 /** Op previews slower than this (ms) are not redone on every drag frame. */
 const SLOW_PREVIEW_MS = 60;
@@ -251,6 +266,12 @@ const STL_SOLID_MAX = 20000;
 /** Last STL export quality (localStorage). */
 const STL_QUALITY_KEY = "yddd.stlQuality";
 
+
+/** A body as saved in a .yddd file (see App.savedBody). */
+type SavedBody = { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord };
+
+/** What Ctrl+C leaves for every YDDD window (see App.copySelection). */
+type CopiedObjects = { format: "yddd-copy"; version: number; from: string; bodies: SavedBody[]; looks?: GroupLooks; images?: Record<string, string> };
 
 export class App implements ToolHost {
   readonly doc = new Doc();
@@ -336,6 +357,7 @@ export class App implements ToolHost {
   baseplateDefaults = { width: 3, depth: 3, drawerWidth: 0, drawerDepth: 0, magnets: 0 };
   gearDefaults = { teeth: 20, module: 2, outside: 0, angle: 20, clearance: 0.1 };
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
+  nutBoltDefaults = { size: 2, length: 30, thread: 20, clearance: 0.3 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
   private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
 
@@ -355,6 +377,7 @@ export class App implements ToolHost {
     this.viewport = new Viewport(container);
     this.viewport.nav = navGestures(this.keys);
     this.viewport.orbitPivot = () => this.turnPivot();
+    this.viewport.meshLater = (shape) => this.meshInBackground(shape);
     this.viewport.setOpacity(opacitySetting(SOLID_OPACITY_KEY, 100) / 100, opacitySetting(XRAY_OPACITY_KEY, 80) / 100);
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.viewport.onLabelDoubleClick = (i) => this.editLabel(i);
@@ -849,6 +872,7 @@ export class App implements ToolHost {
       case "macro.lidOver": return macros.openBoxLid(this, true, macros.selectedLidBox(this));
       case "macro.dividers": return macros.openDividers(this, macros.selectedLidBox(this));
       case "macro.battery": return macros.openBatteryCase(this);
+      case "macro.nutBolt": return macros.openNutBolt(this);
       case "macro.gridfinity": return macros.openGridfinityBin(this);
       case "macro.baseplate": return macros.openGridfinityBaseplate(this);
       case "macro.gear": return macros.openGear(this);
@@ -892,7 +916,7 @@ export class App implements ToolHost {
       case "edit.delete": return this.deleteSelected();
       case "edit.duplicate": return this.duplicate();
       case "edit.copy": return this.copySelection();
-      case "edit.paste": return this.paste();
+      case "edit.paste": return void this.paste();
       case "edit.array": return this.arrayCopy();
       case "edit.circular": return this.circularCopy();
       case "edit.mirror": return this.mirrorCopy();
@@ -964,7 +988,7 @@ export class App implements ToolHost {
     return this.mode === "edge" ? EDGE_CURSOR : "default";
   }
 
-  private setMode(mode: SelMode): void {
+  setMode(mode: SelMode): void {
     if (mode !== this.mode) {
       if (this.xf?.edges) this.stopTransform();
       if (mode === "body") {
@@ -980,7 +1004,7 @@ export class App implements ToolHost {
     this.refreshSelection();
   }
 
-  private setSelection(items: SelItem[]): void {
+  setSelection(items: SelItem[]): void {
     const before = new Set(this.selection.map((s) => s.body));
     this.selection = items.filter((s) => !this.doc.get(s.body)?.locked);
     // Picked anywhere but the Bodies panel (the view, a tool, Select all…): its row to the panel's top
@@ -1267,6 +1291,7 @@ export class App implements ToolHost {
         return;
       }
       this.updateCoords(e);
+      if (this.boxFrom && e.buttons & 1) return this.dragBox(e);
       if (this.op) {
         const op = this.op;
         if (op.spec.hover && !this.opHoverQueued) {
@@ -1305,6 +1330,13 @@ export class App implements ToolHost {
       }
       if (this.viewport.gizmoHot || this.op) return;
       this.downAt = { x: e.clientX, y: e.clientY };
+      // (a drag from here: a selection box — in Solid mode, not a view-moving drag such as Shift + drag)
+      const g = dragGesture(e);
+      this.boxFrom = this.mode === "body" && !(g && navAction(this.viewport.nav, g)) ? { x: e.clientX, y: e.clientY, add: e.ctrlKey || e.metaKey, el: null } : null;
+    });
+    // (let go anywhere — off the view too: the box selects)
+    window.addEventListener("pointerup", (e) => {
+      if (e.button === 0 && this.boxFrom) this.endBox(e);
     });
     c.addEventListener("pointerup", (e) => {
       if (e.button === 2) {
@@ -1550,6 +1582,45 @@ export class App implements ToolHost {
     };
     window.addEventListener("keydown", close, true);
     window.addEventListener("pointerdown", onDown, true);
+  }
+
+  /** A left drag in Solid mode from empty space or an object (no tool / panel): the selection box being dragged. */
+  private boxFrom: { x: number; y: number; add: boolean; el: HTMLElement | null } | null = null;
+
+  /**
+   * Box selection: left to right — a window (blue, solid): what's wholly inside; right to left — a crossing (green,
+   * dashed): what it touches. Shown once the drag is 5 px long (shorter: a click).
+   */
+  private dragBox(e: PointerEvent): void {
+    const b = this.boxFrom!;
+    if (!b.el && Math.hypot(e.clientX - b.x, e.clientY - b.y) < 5) return;
+    if (!b.el) {
+      b.el = document.createElement("div");
+      b.el.id = "box-select";
+      $("viewport").appendChild(b.el);
+      this.viewport.setHighlight(this.selection, null);
+    }
+    const r = $("viewport").getBoundingClientRect();
+    const crossing = e.clientX < b.x;
+    b.el.classList.toggle("crossing", crossing);
+    Object.assign(b.el.style, {
+      left: `${Math.min(b.x, e.clientX) - r.left}px`, top: `${Math.min(b.y, e.clientY) - r.top}px`,
+      width: `${Math.abs(e.clientX - b.x)}px`, height: `${Math.abs(e.clientY - b.y)}px`,
+    });
+    this.hint(crossing ? "Box select (right to left): what it touches · Ctrl: add to the selection" : "Box select (left to right): what's wholly inside · Ctrl: add to the selection");
+  }
+
+  private endBox(e: PointerEvent): void {
+    const b = this.boxFrom!;
+    this.boxFrom = null;
+    if (!b.el) return; // (a click: see click)
+    b.el.remove();
+    this.downAt = null;
+    const r = this.viewport.canvas.getBoundingClientRect();
+    const ids = this.viewport.bodiesInRect(Math.min(b.x, e.clientX) - r.left, Math.min(b.y, e.clientY) - r.top, Math.max(b.x, e.clientX) - r.left, Math.max(b.y, e.clientY) - r.top, e.clientX < b.x);
+    const items: SelItem[] = ids.map((id) => ({ kind: "body", body: id, id: 0 }));
+    this.setSelection(b.add ? [...this.selection, ...items.filter((it) => !this.selection.some((s) => s.body === it.body && s.kind === "body"))] : items);
+    this.hint(this.modeHint());
   }
 
   /** Pop-up at the cursor to pick a standard view (click, or press its number key). */
@@ -2163,7 +2234,7 @@ export class App implements ToolHost {
   }
 
   /**
-   * Ctrl+B with a flat face drawn on a solid's flat face (a window on a house's wall): Out — pushed out of it and
+   * Shift+B with a flat face drawn on a solid's flat face (a window on a house's wall): Out — pushed out of it and
    * joined to it; In — pushed into it and cut out of it. The face object is used up.
    */
   private opBump(): void {
@@ -3414,8 +3485,14 @@ export class App implements ToolHost {
       return { point: [0, 0, 0], normal: guidePlaneNormal([], [0, 0, 0], u, this.viewDir()), along: u };
     }
     const { a, b, n } = this.doc.guides[line];
-    // Only solids the guide passes through (their drawn boxes): it can't lie on a face of the others,
-    // and looking through all their faces is slow (17 sweeps: ~0.7 s each hover).
+    return { point: a, normal: guidePlaneNormal(this.shapesAlong(a, b, ids), a, b, this.viewDir(), n), along: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] };
+  }
+
+  /**
+   * Of the solids `ids`, those the line a–b passes through (their drawn boxes): it can't lie on a face of the others,
+   * and looking through all their faces is slow (17 sweeps: ~0.7 s each hover; a thread's twisted faces: ~2 s a solid).
+   */
+  private shapesAlong(a: V3, b: V3, ids: number[]): Shape[] {
     const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b), len = A.distanceTo(B);
     const ray = new THREE.Ray(A, B.clone().sub(A).normalize()), hit = new THREE.Vector3();
     const near = (id: number) => {
@@ -3425,8 +3502,7 @@ export class App implements ToolHost {
       // (starting inside it — e.g. a face's corner-to-corner diagonal — intersectBox gives the way out)
       return box.containsPoint(A) || (!!ray.intersectBox(box, hit) && hit.distanceTo(A) <= len + 1e-6);
     };
-    const shapes = ids.filter(near).map((id) => this.doc.get(id)!.shape).filter(notMesh);
-    return { point: a, normal: guidePlaneNormal(shapes, a, b, this.viewDir(), n), along: [b[0] - a[0], b[1] - a[1], b[2] - a[2]] };
+    return ids.filter(near).map((id) => this.doc.get(id)!.shape).filter(notMesh);
   }
 
   /**
@@ -3661,7 +3737,7 @@ export class App implements ToolHost {
    * for the dialog (e.g. "Cutting 3 of 17…"), painted before the returned promise resolves — work
    * done in steps awaits it between them.
    */
-  private runBusy(heavy: boolean, text: string, work: (say: ((text: string) => Promise<void>) | null) => void | Promise<void>): void {
+  runBusy(heavy: boolean, text: string, work: (say: ((text: string) => Promise<void>) | null) => void | Promise<void>): void {
     if (!heavy) return void work(null);
     if (this.busyNow) return;
     // (the background kernel's jobs can be stopped: Stop ends whatever it's doing — nothing changes)
@@ -3733,6 +3809,8 @@ export class App implements ToolHost {
       : booleanOp(op, this.solidOf(targetId, label), toolIds.map((id) => this.solidOf(id, label)));
     if (!this.doc.get(targetId) || toolIds.some((id) => !this.doc.get(id))) return null; // (gone meanwhile)
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
+    // (broken even at 10× size — see booleanOp: not kept, e.g. a union that silently lost the second solid)
+    if (!isValidShape(result)) throw new Error(`OpenCascade couldn't ${label.toLowerCase()} these solids exactly (the result came out broken) — nothing changed`);
     const pieces = solidPieces(result);
     if (op === "union" && pieces.length > 1) {
       // One body must be one solid: solids that don't touch stay separate objects.
@@ -4588,14 +4666,14 @@ export class App implements ToolHost {
       this.endTool();
       // Fix each guide's cut direction now: the face it lies on, or the view it was drawn in.
       const view = this.viewDir();
-      const shapes = this.doc.bodies.map((b) => b.shape).filter(notMesh);
+      const ids = this.doc.bodies.map((b) => b.id);
       // More than 4 at once: one group, listed in the Bodies panel (select / hide / delete them together).
       let group: string | undefined;
       if (lines.length > GUIDE_GROUP_MIN) {
         const taken = new Set(this.doc.guides.map((g) => g.group));
         for (let k = 1; !group; k++) if (!taken.has(`Guides ${k}`)) group = `Guides ${k}`;
       }
-      const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(shapes, l.a, l.b, view), ...(group ? { group } : {}) }));
+      const made = lines.map((l) => ({ ...l, n: guidePlaneNormal(this.shapesAlong(l.a, l.b, ids), l.a, l.b, view), ...(group ? { group } : {}) }));
       this.doc.setGuides([...this.doc.guides, ...made], lines.length > 1 ? `Add ${lines.length} guides` : "Add guide");
       this.toast(`Added ${lines.length} guide line(s)${group ? ` as "${group}" in the Bodies panel` : ""} — ${this.viewport.autoSnap ? "tools snap to them" : "hold Ctrl to snap to them"}`);
     }, (st) => (st ? showPanel(st) : panel.remove()));
@@ -5177,20 +5255,113 @@ export class App implements ToolHost {
   /** Ctrl+C: what Ctrl+V copies (the selection then). */
   private clipboard: SelItem[] = [];
 
+  /** This window, told apart from other YDDD windows in what Ctrl+C leaves for them (see copySelection). */
+  private readonly windowTag = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+  /**
+   * Ctrl+C: the selection noted for Ctrl+V here; whole objects also written for every YDDD window (a file of YDDD's
+   * own, not the system clipboard: other apps never see it) — their shapes, groups, colours, text records, pictures.
+   * Faces / edges: only here (the file then says so, for the other windows).
+   */
   private copySelection(): void {
     if (!this.selection.length) return this.toast("Copy: select something first", "error");
     this.clipboard = [...this.selection];
-    this.toast("Copied — Ctrl+V to paste a copy");
+    const whole = this.selection.every((x) => x.kind === "body");
+    const bodies = whole ? this.selectedBodyIds().flatMap((id) => this.doc.get(id) ?? []) : [];
+    const groups = new Set(bodies.flatMap((b) => (b.group ? [b.group] : [])));
+    const looks = Object.fromEntries(Object.entries(this.doc.groupLooks).filter(([g]) => groups.has(g)));
+    const pictures = new Set(bodies.flatMap((b) => (b.picture ? [b.picture.img] : [])));
+    const copy: CopiedObjects = {
+      format: "yddd-copy",
+      version: 1,
+      from: this.windowTag,
+      bodies: bodies.map((b) => this.savedBody(b)),
+      ...(Object.keys(looks).length ? { looks } : {}),
+      ...(pictures.size ? { images: imagesOf(pictures) } : {}),
+    };
+    void window.yddd.clipWrite(JSON.stringify(copy)).catch(() => {});
+    this.toast(whole ? "Copied — Ctrl+V to paste a copy (here or in another YDDD window)" : "Copied — Ctrl+V to paste a copy (faces / edges: in this window)");
   }
 
-  /** Ctrl+V: Duplicate what Ctrl+C copied (still there), or the selection if nothing was copied. */
-  private paste(): void {
+  /**
+   * Ctrl+V: what Ctrl+C copied in another YDDD window, if that's the latest copy (see copySelection); else Duplicate
+   * what was copied here (still there), or the selection if nothing was.
+   */
+  private async paste(): Promise<void> {
+    let copy: CopiedObjects | null = null;
+    try {
+      const t = await window.yddd.clipRead();
+      copy = t ? (JSON.parse(t) as CopiedObjects) : null;
+    } catch {
+      copy = null;
+    }
+    if (copy?.format === "yddd-copy" && copy.from !== this.windowTag && Array.isArray(copy.bodies)) {
+      if (!copy.bodies.length) return this.toast("Paste: faces / edges copied in another YDDD window paste only there — copy whole objects (Solid mode, key 1) to paste them here", "error");
+      return await this.pasteCopied(copy);
+    }
     const items = this.clipboard.filter((x) => this.doc.get(x.body));
     if (items.length) {
       this.setMode(items[0].kind);
       this.setSelection(items);
     }
     this.duplicate();
+  }
+
+  /**
+   * Objects copied in another YDDD window, added here (one undo step): their names numbered on here, a group whose
+   * name is taken here renamed ("Bracket" → "Bracket 2"), its colour going with it; selected and moved like Duplicate.
+   */
+  private async pasteCopied(copy: CopiedObjects): Promise<void> {
+    this.endInteractions();
+    let made: Body[];
+    const renamed = new Map<string, string>();
+    try {
+      loadImages(copy.images);
+      const used = new Set(this.doc.bodies.map((b) => b.group));
+      for (const g of new Set(copy.bodies.flatMap((r) => (r.group ? [r.group] : [])))) renamed.set(g, used.has(g) ? this.uniqueGroupName(g) : g);
+      made = copy.bodies.map((r) => {
+        const { kind, shape } = this.geomOf(r.kind, (r.kind === "mesh" ? r.mesh : r.brep) ?? "");
+        const b = this.doc.makeBody(shape, r.name.replace(/\s+\d+$/, "") || "Object", kind);
+        return { ...b, ...(r.group ? { group: renamed.get(r.group)! } : {}), ...(r.text ? { text: r.text } : {}), ...(r.look ? { look: r.look } : {}), ...(r.picture ? { picture: r.picture } : {}), ...(r.gear ? { gear: r.gear } : {}) } as Body;
+      });
+    } catch (e) {
+      return this.toast(`Paste: the copied objects couldn't be read (${errorMessage(e)})`, "error");
+    }
+    // Many / big objects (a city's 112: ~4 s to mesh here, the window stuck): meshed in the background kernel first,
+    // behind the busy dialog ("drawing 12 of 112", Stop: nothing pasted) — then added at once
+    const breps = copy.bodies.map((r, i) => (r.brep && (made[i].kind === "solid" || made[i].kind === "face") ? r.brep : null));
+    if (this.bgKernel.ready && breps.reduce((n, b) => n + (b?.length ?? 0), 0) > PASTE_BUSY_BYTES) {
+      const n = made.length, what = `${n} object${n > 1 ? "s" : ""}`;
+      let stopped = false;
+      const busy = this.showBusy(`Pasting ${what}…`, () => ((stopped = true), this.bgKernel.cancel()));
+      try {
+        // (all asked at once: the kernel goes from one to the next without waiting)
+        const jobs = breps.map((b) => (b ? this.bgKernel.run({ op: "mesh", brep: b }) : null));
+        for (const j of jobs) void j?.catch(() => {});
+        for (let i = 0; i < n && !stopped; i++) {
+          busy.say(`Pasting ${what} — drawing ${i + 1} of ${n}…`);
+          try {
+            const r = jobs[i] && (await jobs[i]);
+            if (r) takeMesh(made[i].shape as Shape, r.mesh);
+          } catch (e) {
+            if (e instanceof JobCancelled) break;
+            // (meshed here then)
+          }
+        }
+      } finally {
+        busy.close();
+      }
+      if (stopped) return this.toast("Paste stopped — nothing added");
+    }
+    const looks = { ...this.doc.groupLooks };
+    for (const [g, look] of Object.entries(copy.looks ?? {})) if (renamed.has(g)) looks[renamed.get(g)!] = look;
+    this.doc.commit([...this.doc.bodies, ...made], made.length > 1 ? `Paste ${made.length} objects` : `Paste ${made[0].name}`, this.doc.guides, this.doc.dimensions, this.doc.arrays, looks);
+    this.toast(`Pasted ${made.length > 1 ? `${made.length} objects` : `"${made[0].name}"`} from another YDDD window — move into place`);
+    this.setMode("body");
+    this.setSelection(made.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+    this.startTransform("translate");
+    this.placing = this.xf ? { ids: this.xf.ids.join(), version: this.doc.version } : null;
+    this.repeatCopyIds = made.map((b) => b.id).join();
   }
 
   private duplicate(): void {
@@ -6030,11 +6201,17 @@ export class App implements ToolHost {
     }
   }
 
+  /** The shapes of the history of the model just opened (linked as copies once it's shown: see onDocChange). */
+  private loadedHistoryShapes: BodyGeom["shape"][] = [];
+
   private onDocChange(): void {
     if (this.justLoaded) {
       this.justLoaded = false;
       this.linkArrayCopies();
-      linkSimilarCopies(this.doc.bodies.map((b) => b.shape)); // (other copies — moved, turned, scaled: drawn from one mesh)
+      // (other copies — moved, turned, scaled: drawn from one mesh; the history's too, after the model's own: a step
+      // undone / redone that only moved a solid draws it from the one on screen)
+      linkSimilarCopies([...this.doc.bodies.map((b) => b.shape), ...this.loadedHistoryShapes]);
+      this.loadedHistoryShapes = [];
     }
     // Hidden ids of bodies gone (an undone add, New / Open) dropped here and in the viewport too, before it builds
     // anything: a body back by Redo (same id) would otherwise come back hidden while its eye says shown.
@@ -6067,12 +6244,12 @@ export class App implements ToolHost {
   private modeHint(): string {
     if (this.mode !== "body" || (["orbit", "pan", "zoom"] as const).every((a) => isDefault(this.keys, `nav.${a}`))) return MODE_HINTS[this.mode];
     const nav = (a: string, what: string) => (keysText(this.keys, `nav.${a}`) ? `${keysText(this.keys, `nav.${a}`)} ${what}` : "");
-    return `Solid mode: click to select solids (click again → face / edge), Shift+click to add.  ${[nav("orbit", "orbit"), nav("pan", "pan"), nav("zoom", "zoom")].filter(Boolean).join(" · ")}`;
+    return `Solid mode: click to select solids (click again → face / edge), Shift+click to add, drag a box to select several (left → right: wholly inside · right → left: touching · Ctrl: add).  ${[nav("orbit", "orbit"), nav("pan", "pan"), nav("zoom", "zoom")].filter(Boolean).join(" · ")}`;
   }
 
   /** A toolbar button's tooltip: its label and keys. */
   private toolTitle(it: ToolbarItem): string {
-    const k = keysText(this.keys, it.cmd);
+    const k = toolbarKeysText(this.keys, it.cmd);
     return k ? `${it.label} (${k})` : it.label;
   }
 
@@ -6089,7 +6266,7 @@ export class App implements ToolHost {
       if (!it) continue;
       b.title = this.toolTitle(it);
       const kbd = b.querySelector("kbd");
-      if (kbd) kbd.textContent = keysText(keys, it.cmd);
+      if (kbd) kbd.textContent = toolbarKeysText(keys, it.cmd);
     }
     this.renderRecent();
   }
@@ -6136,7 +6313,7 @@ export class App implements ToolHost {
         const list = document.createElement("div");
         list.className = "tb-flyout";
         for (const it of group.items) {
-          const b = mkBtn(it, "tb-btn tb-item", `${ICONS[it.icon]}<span>${it.label}</span><kbd>${keysText(this.keys, it.cmd)}</kbd>`);
+          const b = mkBtn(it, "tb-btn tb-item", `${ICONS[it.icon]}<span>${it.label}</span><kbd>${toolbarKeysText(this.keys, it.cmd)}</kbd>`);
           b.addEventListener("click", () => {
             b.blur();
             setMain(it);
@@ -6201,7 +6378,7 @@ export class App implements ToolHost {
 
   /** "Group 1", "Group 2"... — the first not in use. */
   /** `name` if no object uses it as a group yet, else "name 2", "name 3"... */
-  private uniqueGroupName(name: string): string {
+  uniqueGroupName(name: string): string {
     const used = new Set(this.doc.bodies.map((b) => b.group));
     let n = 2;
     if (!used.has(name)) return name;
@@ -6922,7 +7099,8 @@ export class App implements ToolHost {
   }
 
   private bindStatusBar(): void {
-    this.setAutoSnap(localStorage.getItem(AUTO_SNAP_KEY) !== "0", false);
+    // (a fresh install: Hold Ctrl — snapping only while Ctrl is held; Auto once chosen in File → Settings)
+    this.setAutoSnap(localStorage.getItem(AUTO_SNAP_KEY) === "1", false);
     const select = $<HTMLSelectElement>("snap-select");
     // (the step from last time, if it is still one of the choices)
     const saved = localStorage.getItem(SNAP_STEP_KEY);
@@ -7057,7 +7235,7 @@ export class App implements ToolHost {
       this.viewport.autoSnap
         ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). File → Settings → Snap: Hold Ctrl turns it off: then hold Ctrl to snap"]
         : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (File → Settings → Snap: Auto to snap without Ctrl)"],
-      ["Ctrl+B", "Bump: select a flat face drawn on a solid's flat face (a window on a wall) — Length and Out (pushed out, joined to the solid) or In (pushed in, cut out of it); the face is used up · with the dialog open, click the next face: this one applied, the same on that one"],
+      ["Shift+B", "Bump: select a flat face drawn on a solid's flat face (a window on a wall) — Length and Out (pushed out, joined to the solid) or In (pushed in, cut out of it); the face is used up · with the dialog open, click the next face: this one applied, the same on that one"],
       ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["Dot · G", "Pull to a point: select a flat circle, rectangle or polygon face (or its face object) — a dot shows in its middle; click the dot, G, drag or type the height: a cone / pyramid (out of a solid: added to it; a minus height into it: cut out of it) · Top size %: a flat top instead of a point"],
       ["Tip dot · F", "Round tip: a selected solid shows a dot on each sharp tip (a cone's point, a pyramid's — not box corners); click the dot, F, the radius (mm): the point becomes a ball — on a cone it blends smoothly into the side, on a pyramid into its edges (a slight crease on the flat sides); the panel says the largest radius the tip takes"],
@@ -7082,7 +7260,7 @@ export class App implements ToolHost {
       ["Click a selected solid again", "Drill down: selects the edge (near one) or face under the cursor and switches to Edge / Face mode"],
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
-      ["Shift+G", "Move from point: show marks — click one → move gizmo there; or drag a mark to the target (the other solids' circle / face centres show as marks: centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
+      ["Shift+G", "Move from point: show marks — click one → move gizmo there; or drag a mark to the target (snapping: the solid under the cursor shows its corners / midpoints / circle and face centres — centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
       ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like the Guide line tool)"],
       ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
@@ -7123,7 +7301,7 @@ export class App implements ToolHost {
     const file = await window.yddd.openFile({ title: "Open model", filters: [{ name: "YDDD model", extensions: ["yddd", "y3d"] }], binary: false });
     if (!file) return;
     try {
-      this.loadModel(file.data as string, file.path);
+      if (!(await this.openModel(file.data as string, file.path))) return;
       this.toast(`Opened ${file.path.split(/[\\/]/).pop()}`);
       this.dropRecovery();
       void window.yddd.addRecent(file.path);
@@ -7142,7 +7320,7 @@ export class App implements ToolHost {
       return this.toast(`${name} is no longer there (moved or deleted) — taken off the recent list`, "error");
     }
     try {
-      this.loadModel(text, filePath);
+      if (!(await this.openModel(text, filePath))) return;
       this.toast(`Opened ${name}`);
       this.dropRecovery();
       void window.yddd.addRecent(filePath);
@@ -7161,6 +7339,24 @@ export class App implements ToolHost {
       this.shapeTexts.set(b.shape, t);
     }
     return t;
+  }
+
+  /** A body as it's saved in a .yddd file (and copied with Ctrl+C): its B-rep / mesh text and what goes with it. */
+  private savedBody(b: Body): SavedBody {
+    return {
+      ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: this.geomText(b) } : { name: b.name, kind: b.kind, brep: this.geomText(b) }),
+      ...(b.group ? { group: b.group } : {}),
+      ...(b.text ? { text: b.text } : {}),
+      ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}),
+    };
+  }
+
+  /** A saved body's shape (see savedBody): read back from its B-rep / mesh text. */
+  private geomOf(kind: string | undefined, text: string): BodyGeom {
+    if (kind === "mesh") return { kind: "mesh", shape: TriMesh.fromBase64(text) };
+    const shape = deserialize(text);
+    if (kind === "path") return { kind: "path", shape: shape as unknown as Wire };
+    return { kind: kind === "face" || kind === "solid" ? kind : kindOf(shape), shape };
   }
 
   /**
@@ -7206,12 +7402,7 @@ export class App implements ToolHost {
       format: "yddd",
       version: 1,
       units: "mm",
-      bodies: cur.map((b) => ({
-        ...(b.kind === "mesh" ? { name: b.name, kind: b.kind, mesh: this.geomText(b) } : { name: b.name, kind: b.kind, brep: this.geomText(b) }),
-        ...(b.group ? { group: b.group } : {}),
-        ...(b.text ? { text: b.text } : {}),
-        ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}),
-      })),
+      bodies: cur.map((b) => this.savedBody(b)),
       // Pictures' images (File → Open Picture…), by id: each kept once, for the model and its undo history.
       ...(pictureIds.size ? { images: imagesOf(pictureIds) } : {}),
       // Group colours / opacities by group name (see GroupLooks).
@@ -7231,6 +7422,35 @@ export class App implements ToolHost {
     });
   }
 
+  /**
+   * Open a .yddd file's contents (throws if it isn't one). Its solids heavy to mesh (a thread: ~5 s) are drawn from a
+   * stand-in at once, their real meshes made in the background (see Viewport.meshLater). True: opened.
+   */
+  private async openModel(text: string, filePath: string | null): Promise<boolean> {
+    this.loadModel(text, filePath);
+    return true;
+  }
+
+  /**
+   * A shape's display mesh made in the background kernel (waiting for it to start; again if a Stop elsewhere cancelled
+   * it), given to the shape — null if it can't be (meshed here then).
+   */
+  private async meshInBackground(shape: Shape): Promise<Tessellation | null> {
+    for (let k = 0; k < 600 && !this.bgKernel.ready; k++) await new Promise((r) => setTimeout(r, 50));
+    if (!this.bgKernel.ready) return null;
+    const brep = serializeShape(shape);
+    for (let tries = 0; tries < 3; tries++) {
+      try {
+        const { mesh } = await this.bgKernel.run({ op: "mesh", brep });
+        takeMesh(shape, mesh);
+        return tessellate(shape); // (the mesh by id, as takeMesh keeps it)
+      } catch (e) {
+        if (!(e instanceof JobCancelled)) return null;
+      }
+    }
+    return null;
+  }
+
   /** Replace the document with a .yddd file's contents (throws if it isn't one). */
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
@@ -7245,12 +7465,7 @@ export class App implements ToolHost {
     };
     if (json.format !== "yddd" && json.format !== "y3d") throw new Error("not a YDDD file");
     this.justLoaded = true; // (cleared by the change it makes — see onDocChange)
-    const geom = (kind: string | undefined, text: string): BodyGeom => {
-      if (kind === "mesh") return { kind: "mesh", shape: TriMesh.fromBase64(text) };
-      const shape = deserialize(text);
-      if (kind === "path") return { kind: "path", shape: shape as unknown as Wire };
-      return { kind: kind === "face" || kind === "solid" ? kind : kindOf(shape), shape };
-    };
+    const geom = (kind: string | undefined, text: string): BodyGeom => this.geomOf(kind, text);
     loadImages(json.images);
     const bodies = json.bodies.map((b): BodyGeom & { name: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord } => {
       const group = typeof b.group === "string" && b.group ? { group: b.group } : {};
@@ -7279,9 +7494,11 @@ export class App implements ToolHost {
           return b;
         };
         const entry = (e: SavedStep): HistoryEntry => ({ label: e.label, bodies: e.bodies.map(body), guides: e.guides ?? [], dims: e.dims ?? [], arrays: e.arrays ?? [], looks: e.looks ?? {} });
+        const undo = h.undo.map(entry), redo = h.redo.map(entry);
+        this.loadedHistoryShapes = [...shapeOf.values()];
         this.doc.restore(
           { label: "", bodies: current, guides: json.guides ?? [], dims: h.dims ?? [], arrays: h.arrays ?? [], looks },
-          { undo: h.undo.map(entry), redo: h.redo.map(entry), counters: h.counters ?? [], nextId: h.nextId ?? 1 },
+          { undo, redo, counters: h.counters ?? [], nextId: h.nextId ?? 1 },
           filePath,
         );
         this.viewport.fit();
@@ -7385,7 +7602,7 @@ export class App implements ToolHost {
       }
       await window.yddd.adoptRecovery(rec.file);
       try {
-        this.loadModel(rec.data, rec.filePath);
+        if (!(await this.openModel(rec.data, rec.filePath))) return; // (stopped: its file kept, offered again next time)
         // Not saved yet: keep it marked unsaved (and keep the recovery file until it is).
         this.doc.dirty = true;
         this.autosavedVersion = this.doc.version;
@@ -7824,7 +8041,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

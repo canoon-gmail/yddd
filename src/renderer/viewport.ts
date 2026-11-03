@@ -15,7 +15,7 @@ import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
 import { ICONS } from "./icons";
-import { tessellate, pointCenter, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
+import { tessellate, pointCenter, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, needsBackgroundMesh, standInTessellation, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 import { imageUrl } from "./picture";
 
 /** A dimension on screen: a panel's measurement may say more than its length ("2 squares · 83.5"). */
@@ -49,6 +49,8 @@ const ORTHO_FOV = 2;
 
 interface BodyView {
   body: Body;
+  /** Drawn from a quick stand-in (standInTessellation) while its real mesh is made in the background. */
+  standIn?: boolean;
   group: THREE.Group;
   mesh: THREE.Mesh;
   edges: LineSegments2 | null;
@@ -61,6 +63,8 @@ interface BodyView {
   edgeStarts: number[];
   edgeCounts: number[];
   edgeIndex: Map<number, number>;
+  /** Edges that coil (a thread's helixes, see coiled): not picked in Edge mode — nothing works on them yet. */
+  coils: Set<number>;
   edgePos: Float32Array;
   proj: Float32Array | null;
   projStamp: number;
@@ -74,6 +78,8 @@ interface BodyView {
   /** `inner`: points inside the body (sphere centres) — snappable through the body's own surface. */
   /** `curved`: 1 for the midpoint of a curved edge (not a Move from point mark). */
   snaps?: { pts: Float64Array; kinds: Uint8Array; inner: Uint8Array; curved: Uint8Array; proj: Float32Array | null; projStamp: number };
+  /** Its straight edges' ends (exact B-rep, 6 numbers an edge): where a guide crosses one snaps (see guideCrossings). */
+  lines?: Float64Array;
 }
 
 /** Object snap kinds, in priority order. */
@@ -89,6 +95,8 @@ export interface GizmoFrame {
 export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge";
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
 const SNAP_PX = 10;
+/** While a move is dragged with snapping: the marks of the solid under the cursor shown within this many px of it. */
+const HOVER_PX = 150;
 /** Snapping onto a line (an edge, a world X / Y / Z axis): a little tighter than onto a point, so the points on it win. */
 const SNAP_LINE_PX = 8;
 
@@ -105,6 +113,8 @@ interface Chunk {
 }
 
 const CHUNK_SIZE = 256;
+/** The most triangles kept from views no longer on screen (see Viewport.kept): ~3 million, ~70 MB. */
+const KEEP_TRIANGLES = 3_000_000;
 const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xc0c4c8, selected: 0xf0d78c };
 
 /**
@@ -328,6 +338,7 @@ export class Viewport {
       this.controls.enabled = !dragging;
       if (!dragging) {
         this.showSnapMarker(null);
+        if (this.hoverKey) this.showPivotDots(null);
         this.finishTransformDrag();
       }
     });
@@ -644,14 +655,18 @@ export class Viewport {
   private meshMs = new WeakMap<Geom, number>();
 
   /**
-   * About how long (ms) drawing `shapes` would take: those on screen (or moved copies of them) cost
+   * About how long (ms) drawing `shapes` would take: those on screen or kept (or moved copies of them) cost
    * nothing; ones meshed before, what they took; others a guess from their faces.
    */
   drawCost(shapes: readonly Geom[]): number {
-    const shown = new Set<Geom>([...this.views.values()].map((v) => v.body.shape));
+    const shown = new Set<Geom>([...this.views.values()].map((v) => v.body.shape).concat([...this.kept.keys()]));
     let ms = 0;
     for (const s of shapes) {
       if (shown.has(s) || rigidSource(s, (x) => shown.has(x))) continue;
+      if (this.meshLater && needsBackgroundMesh(s)) {
+        ms += 200; // (a stand-in now: see sync)
+        continue;
+      }
       ms += this.meshMs.get(s) ?? (isMesh(s) ? s.triangleCount / 2e4 : s.faces.length * 2);
     }
     return ms;
@@ -708,11 +723,13 @@ export class Viewport {
     const edgeStarts: number[] = [];
     const edgeCounts: number[] = [];
     const edgeIndex = new Map<number, number>();
+    const coils = new Set<number>();
     edges.edgeGroups.forEach((g, i) => {
       edgeIds.push(g.edgeId);
       edgeStarts.push(g.start);
       edgeCounts.push(g.count);
       edgeIndex.set(g.edgeId, i);
+      if (body.kind === "solid" && coiled(edgePos, g.start, g.count)) coils.add(g.edgeId);
     });
 
     const group = new THREE.Group();
@@ -720,7 +737,7 @@ export class Viewport {
     if (lines) group.add(lines);
     group.visible = !this.hidden.has(body.id);
     return {
-      body, group, mesh, edges: lines, faceIds, faceStarts, faceIndex, faceAreas, edgeIds, edgeStarts, edgeCounts, edgeIndex, edgePos,
+      body, group, mesh, edges: lines, faceIds, faceStarts, faceIndex, faceAreas, edgeIds, edgeStarts, edgeCounts, edgeIndex, coils, edgePos,
       proj: null, projStamp: -1, faceV, vertexCount: P.length / 3, chunk: null, slot: null,
     };
   }
@@ -767,6 +784,32 @@ export class Viewport {
   /** A picture body: drawn on its own (its image), not in the batched meshes. */
   private isPicture = (v: BodyView): boolean => !!v.mesh.geometry.getAttribute("uv");
 
+  /**
+   * Views replaced or removed lately, by shape (oldest first), kept for their triangles — Undo / Redo bring a shape
+   * back, or one moved from it: drawn from these (as from one on screen) instead of meshed again (a thread cutter:
+   * ~5 s a step). At most KEEP_TRIANGLES in all, the oldest dropped first.
+   */
+  private kept = new Map<Geom, { view: BodyView; tris: number }>();
+  private keptTris = 0;
+
+  private keep(v: BodyView): void {
+    if ((v.body.kind !== "solid" && v.body.kind !== "face") || v.standIn) return;
+    const tris = (v.mesh.geometry.index?.count ?? 0) / 3;
+    if (!tris || tris > KEEP_TRIANGLES) return;
+    const old = this.kept.get(v.body.shape);
+    if (old) {
+      this.kept.delete(v.body.shape);
+      this.keptTris -= old.tris;
+    }
+    this.kept.set(v.body.shape, { view: v, tris });
+    this.keptTris += tris;
+    for (const [shape, k] of this.kept) {
+      if (this.keptTris <= KEEP_TRIANGLES) break;
+      this.kept.delete(shape);
+      this.keptTris -= k.tris;
+    }
+  }
+
   private disposeView(v: BodyView): void {
     v.group.removeFromParent();
     v.mesh.geometry.dispose();
@@ -775,6 +818,47 @@ export class Viewport {
       v.chunk.ids.delete(v.body.id);
       v.chunk.dirty = true;
     }
+  }
+
+  /**
+   * Makes `shape`'s display mesh in the background kernel (and gives it to the shape: tessellate then has it); null if
+   * it can't. Set by the app; without it heavy shapes are meshed here as they come.
+   */
+  meshLater: ((shape: Shape) => Promise<Tessellation | null>) | null = null;
+
+  /** Shapes whose mesh is being made in the background (see meshLater): asked once each. */
+  private meshing = new Map<Geom, Promise<Tessellation | null>>();
+
+  /** The real mesh of body `id`'s `shape` made in the background, then drawn instead of its stand-in (if it's still that shape). */
+  private meshInBackground(id: number, shape: Shape): void {
+    let job = this.meshing.get(shape);
+    if (!job) {
+      job = this.meshLater!(shape).catch(() => null);
+      this.meshing.set(shape, job);
+      void job.finally(() => this.meshing.delete(shape));
+    }
+    void job.then((made) => {
+      const v = this.views.get(id);
+      if (!v || !v.standIn || v.body.shape !== shape) return;
+      const body = v.body, chunk = v.chunk;
+      this.disposeView(v);
+      // (no mesh: meshed here after all)
+      const view = this.buildView(body, false, made ?? undefined);
+      this.views.set(id, view);
+      if (chunk) {
+        view.chunk = chunk;
+        chunk.ids.add(id);
+        chunk.dirty = true;
+      }
+      this.placeView(view);
+      this.stamp++;
+      this.requestRender();
+    });
+  }
+
+  /** Bodies still drawn from a stand-in (their real mesh being made). */
+  get standIns(): number[] {
+    return [...this.views.values()].filter((v) => v.standIn).map((v) => v.body.id);
   }
 
   /** Path bodies (picked by their lines: they have no faces). */
@@ -786,7 +870,8 @@ export class Viewport {
     this.pathIds = new Set(bodies.filter((b) => b.kind === "path").map((b) => b.id));
     /** What's on screen, by shape: a body moved / copied from one of them reuses its triangles. */
     const shown = new Map<Geom, BodyView>();
-    for (const v of this.views.values()) shown.set(v.body.shape, v);
+    for (const [shape, k] of this.kept) shown.set(shape, k.view);
+    for (const v of this.views.values()) if (!v.standIn) shown.set(v.body.shape, v);
     // Copies of a shape also (re)built here (e.g. linked copies following a filleted one) wait for it,
     // then reuse its triangles instead of meshing again.
     const pending: Body[] = [];
@@ -803,18 +888,27 @@ export class Viewport {
       const existing = this.views.get(body.id);
       const chunk = existing?.chunk ?? this.chunkWithRoom();
       const moved = this.movedTessellation(body, shown);
-      if (existing) this.disposeView(existing);
-      const view = this.buildView(body, false, moved);
+      // Heavy to mesh (a thread: ~5 s): a quick stand-in now, the real mesh made in the background, swapped in after
+      const later = !moved && !!this.meshLater && needsBackgroundMesh(body.shape);
+      if (existing) {
+        this.disposeView(existing);
+        this.keep(existing);
+      }
+      const view = this.buildView(body, false, moved ?? (later ? standInTessellation(body.shape as Shape) : undefined));
       this.views.set(body.id, view);
       view.chunk = chunk;
       chunk.ids.add(body.id);
       chunk.dirty = true;
       this.placeView(view);
-      shown.set(body.shape, view);
+      if (later) {
+        view.standIn = true;
+        this.meshInBackground(body.id, body.shape as Shape);
+      } else shown.set(body.shape, view);
     }
     for (const [id, v] of this.views) {
       if (!live.has(id)) {
         this.disposeView(v);
+        this.keep(v);
         this.views.delete(id);
         this.hl.painted.delete(id);
       }
@@ -1125,7 +1219,7 @@ export class Viewport {
   /** Screen-space projection of a body's edge polyline points, cached per camera state. */
   /**
    * Where a body's box falls on the canvas (px), worked out once per view (its 8 corners): "behind" — all behind the
-   * camera; null — partly behind it (can't tell: never skipped). Lets the snapping / edge picking / drop marks skip
+   * camera; null — partly behind it (can't tell: never skipped). Lets the snapping / edge picking skip
    * bodies away from the cursor or off screen instead of collecting and projecting all their points (a city: hundreds).
    */
   private screenRect(v: BodyView): [number, number, number, number] | "behind" | null {
@@ -1157,10 +1251,21 @@ export class Viewport {
     return r === "behind" || (!!r && (px < r[0] - pad || px > r[2] + pad || py < r[1] - pad || py > r[3] + pad));
   }
 
-  /** The body's box is wholly off screen. */
-  private offScreen(v: BodyView): boolean {
-    const r = this.screenRect(v);
-    return r === "behind" || (!!r && (r[2] < 0 || r[0] > this.width || r[3] < 0 || r[1] > this.height));
+  /**
+   * Box selection: the shown, unlocked bodies whose box on screen is wholly inside the rectangle (canvas px) — or, with
+   * `crossing`, touches it. (Their boxes: instant with thousands; a body partly behind the camera is left out.)
+   */
+  bodiesInRect(x0: number, y0: number, x1: number, y1: number, crossing: boolean): number[] {
+    const out: number[] = [];
+    for (const v of this.views.values()) {
+      if (!v.group.visible || this.locked.has(v.body.id)) continue;
+      const r = this.screenRect(v);
+      if (!r || r === "behind") continue;
+      const inside = r[0] >= x0 && r[2] <= x1 && r[1] >= y0 && r[3] <= y1;
+      const touches = r[2] >= x0 && r[0] <= x1 && r[3] >= y0 && r[1] <= y1;
+      if (crossing ? touches : inside) out.push(v.body.id);
+    }
+    return out;
   }
 
   private projected(v: BodyView): Float32Array {
@@ -1235,15 +1340,20 @@ export class Viewport {
   /** Nearest visible edge accepted by `only`, within `tol` pixels. */
   pickEdgeAmong(cx: number, cy: number, tol: number, only: (body: number, edgeId: number) => boolean): Pick | null {
     const hit = this.raycastFaces(cx, cy, undefined, this.locked);
-    const e = this.pickEdge(cx, cy, hit ? hit.distance : null, tol, only);
+    const e = this.pickEdge(cx, cy, hit ? hit.distance : null, tol, (b, id) => !this.isCoil(b, id) && only(b, id));
     return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
+  }
+
+  /** A thread's helix (see coiled): not hovered or picked in Edge mode. */
+  private isCoil(body: number, edgeId: number): boolean {
+    return !!this.views.get(body)?.coils.has(edgeId);
   }
 
   /** What is under the cursor in `mode`; with `only`, on that body alone (others are ignored, not in the way). */
   pick(cx: number, cy: number, mode: SelMode, only?: number): Pick | null {
     const hit = this.raycastFaces(cx, cy, only, this.locked); // (locked bodies: clicked through)
     if (mode === "edge") {
-      const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, only === undefined ? undefined : (b) => b === only);
+      const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, (b, id) => (only === undefined || b === only) && !this.isCoil(b, id));
       return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
     }
     // Paths have no faces: in front of any face hit, the nearest path line picks the path (with `only`: that one alone).
@@ -1347,6 +1457,17 @@ export class Viewport {
         acc += len;
       }
     }
+    // A cone's tip: a circle of radius 0 (not drawn, so not among the edges above) — a corner.
+    const drawn = new Set(v.edgeIds);
+    for (const ed of v.body.shape.edges) {
+      if (drawn.has(ed.hashCode)) continue;
+      try {
+        const a = ed.pointAt(0).toTuple(), b = ed.pointAt(0.5).toTuple();
+        if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 1e-7) add(a[0], a[1], a[2], 0);
+      } catch {
+        // (a broken edge: left out)
+      }
+    }
     // Planar face centres (area-weighted centroid; skipped for curved faces).
     const g = v.mesh.geometry;
     const P = g.attributes.position.array as Float32Array, N = g.attributes.normal.array as Float32Array, T = g.index!.array;
@@ -1392,14 +1513,42 @@ export class Viewport {
     return v.snaps;
   }
 
-  /** Where guide lines cross each other or a world X / Y / Z axis line (snap points, like corners). */
-  private guideCrossings(): THREE.Vector3[] {
+  /** A body's straight edges, start and end (exact B-rep), worked out once (see BodyView.lines). */
+  private linesOf(v: BodyView): Float64Array {
+    if (v.lines) return v.lines;
+    const out: number[] = [];
+    if (v.body.kind !== "mesh")
+      for (const ed of v.body.shape.edges) {
+        if (ed.geomType !== "LINE") continue;
+        try {
+          out.push(...ed.startPoint.toTuple(), ...ed.endPoint.toTuple());
+        } catch {
+          // (a broken edge: left out)
+        }
+      }
+    return (v.lines = Float64Array.from(out));
+  }
+
+  /**
+   * Where guide lines cross each other, a world X / Y / Z axis line or one of `views`' straight edges (snap points,
+   * like corners — e.g. to divide a face exactly where a guide meets its edge).
+   */
+  private guideCrossings(views: BodyView[] = []): THREE.Vector3[] {
     const lines = this.guides
       .filter((_, i) => i !== this.snapSkipGuide && !this.hiddenGuides.has(i))
       .map((g) => ({ o: g.a, dir: g.b.clone().sub(g.a).normalize(), len: g.a.distanceTo(g.b) }));
     const axes = [0, 1, 2].map((k) => ({ o: new THREE.Vector3(), dir: new THREE.Vector3().setComponent(k, 1), len: Infinity, axis: true }));
+    const edges: { o: THREE.Vector3; dir: THREE.Vector3; len: number }[] = [];
+    if (lines.length)
+      for (const v of views) {
+        const L = this.linesOf(v);
+        for (let k = 0; k < L.length; k += 6) {
+          const a = new THREE.Vector3(L[k], L[k + 1], L[k + 2]), b = new THREE.Vector3(L[k + 3], L[k + 4], L[k + 5]), len = a.distanceTo(b);
+          if (len > 1e-9) edges.push({ o: a, dir: b.sub(a).divideScalar(len), len });
+        }
+      }
     const out: THREE.Vector3[] = [];
-    const all = [...lines, ...axes];
+    const all = [...lines, ...axes, ...edges];
     for (let i = 0; i < lines.length; i++) {
       for (let j = i + 1; j < all.length; j++) {
         const A = all[i], B = all[j];
@@ -1493,7 +1642,9 @@ export class Viewport {
     }) ?? null;
     // Where guides cross (each other or an axis): like a corner.
     let cross: { d: number; p: THREE.Vector3 } | null = null;
-    for (const c of this.guideCrossings()) {
+    const near: BodyView[] = [];
+    for (const [id, v] of this.views) if (this.snappable(v) && !exclude?.has(id) && !this.awayFrom(v, px, py, SNAP_PX)) near.push(v);
+    for (const c of this.guideCrossings(near)) {
       p.copy(c).project(this.camera);
       if (p.z < -1 || p.z > 1) continue;
       const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
@@ -1818,19 +1969,98 @@ export class Viewport {
 
   /**
    * Pivot candidates of bodies: their snap points (not curved edges' midpoints) plus each body's bounding-box centre;
-   * `inside`: a point inside the solid (its box centre, a sphere's centre), so never in sight.
+   * `inside`: a point inside the solid (its box centre, a sphere's centre), so never in sight. `box: false` — without the
+   * box centre (only the points that snap).
    */
-  pivotCandidates(ids: number[]): { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] {
+  pivotCandidates(ids: number[], box = true): { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] {
     const out: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] = [];
     for (const id of ids) {
       const v = this.views.get(id);
       if (!v) continue;
       const s = this.snapsOf(v);
       for (let i = 0; i < s.kinds.length; i++) if (!s.curved[i]) out.push({ point: new THREE.Vector3().fromArray(s.pts, i * 3), kind: SNAP_KINDS[s.kinds[i]], inside: !!s.inner[i] });
-      const box = new THREE.Box3().setFromBufferAttribute(v.mesh.geometry.attributes.position as THREE.BufferAttribute);
-      out.push({ point: box.getCenter(new THREE.Vector3()), kind: "center", inside: true });
+      if (!box) continue;
+      const bb = new THREE.Box3().setFromBufferAttribute(v.mesh.geometry.attributes.position as THREE.BufferAttribute);
+      out.push({ point: bb.getCenter(new THREE.Vector3()), kind: "center", inside: true });
     }
     return out;
+  }
+
+  /**
+   * The shown body under the cursor (client px), else the one whose box on screen is nearest within `pad` px —
+   * leaving out `exclude` (the ones being moved): whose marks to show while dragging onto it.
+   */
+  bodyNear(cx: number, cy: number, exclude: Set<number>, pad = 24): number | null {
+    const hit = this.raycastFaces(cx, cy, undefined, exclude, true);
+    if (hit) return hit.view.body.id;
+    const r = this.canvas.getBoundingClientRect(), px = cx - r.left, py = cy - r.top;
+    let best: { id: number; d: number } | null = null;
+    for (const v of this.views.values()) {
+      if (!this.snappable(v) || exclude.has(v.body.id)) continue;
+      const b = this.screenRect(v);
+      if (!b || b === "behind") continue;
+      const d = Math.hypot(Math.max(b[0] - px, 0, px - b[2]), Math.max(b[1] - py, 0, py - b[3]));
+      if (d <= pad && (!best || d < best.d)) best = { id: v.body.id, d };
+    }
+    return best?.id ?? null;
+  }
+
+  /** showHoverMarks drew marks (cleared with them). */
+  private hoverKey = "";
+  /** The view hoverCache is for: each solid's marks, where they fall on the canvas, and which were tested hidden. */
+  private hoverView = "";
+  private hoverCache = new Map<number, { all: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[]; xy: Float32Array; seen: Int8Array }>();
+  private hoverRaf = 0;
+
+  /**
+   * While a move is dragged with snapping on (`on`): the corners / edge midpoints / centres in sight of the solid under or
+   * near the cursor (client px), within HOVER_PX of it. Only those near it are tested for being hidden (a ray through
+   * every solid each: a 3800-mark library took 1 s for all), nearest first, a few ms a time — the rest on the next
+   * frames; each remembered for that solid and view. Off, or over nothing: none.
+   */
+  showHoverMarks(cx: number, cy: number, exclude: Set<number>, on: boolean): void {
+    cancelAnimationFrame(this.hoverRaf);
+    const id = on ? this.bodyNear(cx, cy, exclude) : null;
+    if (id === null) {
+      if (this.hoverKey) this.showPivotDots(null);
+      return;
+    }
+    const c = this.camera, view = c.matrixWorld.elements.concat(c.projectionMatrix.elements).map((n) => n.toFixed(5)).join();
+    if (view !== this.hoverView) {
+      this.hoverView = view;
+      this.hoverCache.clear();
+    }
+    let h = this.hoverCache.get(id);
+    if (!h) {
+      const all = this.pivotCandidates([id], false), xy = new Float32Array(all.length * 2), q = new THREE.Vector3();
+      all.forEach((p, i) => {
+        q.copy(p.point).project(c);
+        const ok = q.z >= -1 && q.z <= 1;
+        xy[i * 2] = ok ? ((q.x + 1) / 2) * this.width : NaN;
+        xy[i * 2 + 1] = ok ? ((1 - q.y) / 2) * this.height : NaN;
+      });
+      this.hoverCache.set(id, (h = { all, xy, seen: new Int8Array(all.length) })); // (seen: 0 not yet, 1 in sight, 2 hidden)
+    }
+    const r = this.canvas.getBoundingClientRect(), px = cx - r.left, py = cy - r.top;
+    const near: { i: number; d: number }[] = [];
+    for (let i = 0; i < h.all.length; i++) {
+      const d = Math.hypot(h.xy[i * 2] - px, h.xy[i * 2 + 1] - py);
+      if (d <= HOVER_PX) near.push({ i, d });
+    }
+    near.sort((x, y) => x.d - y.d);
+    const t0 = performance.now();
+    let more = false;
+    for (const { i } of near) {
+      if (h.seen[i]) continue;
+      if (performance.now() - t0 > 6) {
+        more = true;
+        break;
+      }
+      h.seen[i] = h.all[i].inside || !this.hiddenFrom(h.all[i].point, exclude) ? 1 : 2;
+    }
+    this.showPivotDots(this.spreadOnScreen(near.filter((n) => h.seen[n.i] === 1).map((n) => h.all[n.i])));
+    this.hoverKey = "on";
+    if (more) this.hoverRaf = requestAnimationFrame(() => this.showHoverMarks(cx, cy, exclude, on));
   }
 
   /**
@@ -1853,25 +2083,6 @@ export class Viewport {
       if (mids === 3) out.push({ point: mid.clone(), kind: "center", inside: true });
       else if (mids === 2 && k !== 1) out.push({ point: new THREE.Vector3(xs[i], ys[j], zs[k]), kind: "center" });
       else if (mids < 2) out.push({ point: new THREE.Vector3(xs[i], ys[j], zs[k]), kind: mids ? "midpoint" : "vertex" });
-    }
-    return out;
-  }
-
-  /**
-   * Centre marks of the shown bodies other than `exclude`: centres of their circles and flat faces,
-   * not hidden behind a solid (the excluded ones don't hide them: they are the ones being moved).
-   */
-  centerTargets(exclude: Set<number>): { point: THREE.Vector3; kind: SnapKind }[] {
-    const out: { point: THREE.Vector3; kind: SnapKind }[] = [];
-    for (const v of this.views.values()) {
-      if (exclude.has(v.body.id) || !v.group.visible || this.offScreen(v)) continue;
-      const s = this.snapsOf(v);
-      for (let i = 0; i < s.kinds.length; i++) {
-        if (SNAP_KINDS[s.kinds[i]] !== "center") continue;
-        const p = new THREE.Vector3().fromArray(s.pts, i * 3);
-        // (off screen: left out before the costly hidden test — a ray through every solid's triangles)
-        if (this.inView(p, 0) && !this.hiddenFrom(p, exclude)) out.push({ point: p, kind: "center" });
-      }
     }
     return out;
   }
@@ -1919,6 +2130,9 @@ export class Viewport {
 
   /** Show fixed-size marks at `pts` (drawn on top): centres as small rings, other points as squares; null hides them. */
   showPivotDots(pts: { point: THREE.Vector3; kind: SnapKind }[] | null): void {
+    this.hoverKey = "";
+    cancelAnimationFrame(this.hoverRaf);
+    if (!pts) this.hoverView = ""; // (a drag ended: the solids may change — worked out again next time)
     for (const d of this.pivotDots) {
       this.scene.remove(d);
       d.geometry.dispose();
@@ -2919,6 +3133,7 @@ export class Viewport {
     const ptr = this.xfPointer;
     const axis = this.tc.axis ?? "";
     const sp = ptr.ctrl !== this.autoSnap ? this.snapPoint(ptr.x, ptr.y, this.xfSet) : null;
+    this.showHoverMarks(ptr.x, ptr.y, this.xfSet, ptr.ctrl !== this.autoSnap);
     if (sp) {
       // Along the dragged axes only (the turned ones, if any): the snap point's offset from the start in them.
       const inv = this.xfFrame?.clone().invert();
@@ -3100,4 +3315,52 @@ function meshTessellation(m: TriMesh): ReturnType<typeof tessellate> {
     faces: { vertices: P, normals: N, triangles: T, faceGroups: [{ start: 0, count: n, faceId: 0 }] },
     edges: { lines: [], edgeGroups: [] },
   } as unknown as ReturnType<typeof tessellate>;
+}
+
+/**
+ * Whether an edge's display line (segment pairs from `start`, `count` points) coils: open, winding about nine tenths
+ * of a turn or more round one axis while rising along it — a thread's helix, a Twist sweep's edges. Not a circle
+ * (flat), a closed outline, or a letter's outline wrapped round a cup (it doesn't wind round its own middle).
+ */
+function coiled(pos: ArrayLike<number>, start: number, count: number): boolean {
+  if (count < 16) return false;
+  const pts: THREE.Vector3[] = [];
+  for (let k = start; k < start + count; k += 2) pts.push(new THREE.Vector3(pos[k * 3], pos[k * 3 + 1], pos[k * 3 + 2]));
+  pts.push(new THREE.Vector3(pos[(start + count - 1) * 3], pos[(start + count - 1) * 3 + 1], pos[(start + count - 1) * 3 + 2]));
+  const box = new THREE.Box3().setFromPoints(pts), size = box.getSize(new THREE.Vector3()).length();
+  if (!(size > 0) || pts[0].distanceTo(pts[pts.length - 1]) < 1e-3 * size) return false; // (closed)
+  const mid = box.getCenter(new THREE.Vector3());
+  // The axis: Newell's normal of the line taken as a loop (a helix: along its axis)
+  const axis = new THREE.Vector3();
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i].clone().sub(mid), b = pts[(i + 1) % pts.length].clone().sub(mid);
+    axis.add(a.cross(b));
+  }
+  if (axis.lengthSq() < 1e-18) return false;
+  axis.normalize();
+  // Rising along it: not flat
+  let lo = Infinity, hi = -Infinity;
+  for (const p of pts) {
+    const h = p.clone().sub(mid).dot(axis);
+    lo = Math.min(lo, h);
+    hi = Math.max(hi, h);
+  }
+  if (hi - lo < 0.02 * size) return false;
+  // Winding round it: the angle swept round the middle, seen along the axis
+  const u = new THREE.Vector3(1, 0, 0);
+  if (Math.abs(u.dot(axis)) > 0.9) u.set(0, 1, 0);
+  u.sub(axis.clone().multiplyScalar(u.dot(axis))).normalize();
+  const w = axis.clone().cross(u);
+  let turned = 0, prev: number | null = null;
+  for (const p of pts) {
+    const d = p.clone().sub(mid), ang = Math.atan2(d.dot(w), d.dot(u));
+    if (prev !== null) {
+      let step = ang - prev;
+      if (step > Math.PI) step -= 2 * Math.PI;
+      if (step < -Math.PI) step += 2 * Math.PI;
+      turned += step;
+    }
+    prev = ang;
+  }
+  return Math.abs(turned) >= 0.9 * 2 * Math.PI;
 }

@@ -120,6 +120,7 @@ export const COMMANDS: Command[] = [
     ["macro.lidOver", "Box Lid: Over the Box…"],
     ["macro.dividers", "Dividers…"],
     ["macro.battery", "Battery case…"],
+    ["macro.nutBolt", "Nut and bolt: M5 to M24, thread cutter, nut trap…"],
     ["macro.gridfinity", "Gridfinity bin…"],
     ["macro.baseplate", "Gridfinity baseplate…"],
     ["macro.gear", "Gear: a flat gear outline…"],
@@ -171,7 +172,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "tool.text": ["T", "A T"],
   "tool.sketch": ["K"],
   "op.pushpull": ["P", "Space"],
-  "op.bump": ["Ctrl+B"],
+  "op.bump": ["Shift+B"],
   "op.fillet": ["F"],
   "op.chamfer": ["Shift+F"],
   "op.shell": ["H"],
@@ -347,6 +348,13 @@ export function keyText(k: string): string {
 
 /** A command's keys for a tooltip / label ("" if none). */
 export const keysText = (keys: Keys, cmd: string): string => (keys[cmd] ?? []).map(keyText).join(" · ");
+
+/** The one key the toolbar shows for a command that has several (the others still work; Help → Shortcuts lists all). */
+const TOOLBAR_KEY: Record<string, string> = { "tool.rectangle": "A R" };
+
+/** A toolbar button's / menu item's keys: just its TOOLBAR_KEY while it still has it, else all of them. */
+export const toolbarKeysText = (keys: Keys, cmd: string): string =>
+  TOOLBAR_KEY[cmd] && keys[cmd]?.includes(TOOLBAR_KEY[cmd]) ? keyText(TOOLBAR_KEY[cmd]) : keysText(keys, cmd);
 
 /** The menu's accelerator for a shortcut (shown only — YDDD handles the key itself), or null if the menu can't show it. */
 export function accelerator(k: string): string | null {

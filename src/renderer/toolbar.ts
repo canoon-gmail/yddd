@@ -136,7 +136,7 @@ export function loadRecent(): string[] {
 }
 
 export const MODE_HINTS: Record<SelMode, string> = {
-  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add.  Middle-drag or Alt+drag orbit · Shift+drag pan · Wheel / two-finger slide zoom",
+  body: "Solid mode: click to select solids (click again → face / edge), Shift+click to add, drag a box to select several (left → right: wholly inside · right → left: touching · Ctrl: add).  Middle-drag or Alt+drag orbit · Shift+drag pan · Wheel / two-finger slide zoom",
   face: "Face mode: click faces (P push/pull, H shell; a flat face's centre dot, then G: a cone / pyramid), click a selected face's edge → Edge mode.  Shift+click to add · Right-click a solid → Solid mode",
   edge: "Edge mode: click edges (F fillet, Shift+F chamfer, Shift+D guide line from edge — a closed loop of edges: a face copy).  Shift+click to add · Right-click a solid → Solid mode",
 };

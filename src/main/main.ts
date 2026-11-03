@@ -209,6 +209,7 @@ function buildMenu(): void {
         item("Dividers…", "macro.dividers"),
         { type: "separator" },
         item("Battery Case…", "macro.battery"),
+        item("Nut and Bolt…", "macro.nutBolt"),
         item("Gridfinity Bin…", "macro.gridfinity"),
         item("Gridfinity Baseplate…", "macro.baseplate"),
         item("Gear…", "macro.gear"),
@@ -276,6 +277,20 @@ function registerIpc(): void {
     return { path: filePath, data: req.binary ? new Uint8Array(buf) : buf.toString("utf8") };
   });
 
+  // Objects copied with Ctrl+C, for Ctrl+V in any YDDD window: a file of YDDD's own, not the system clipboard (other
+  // apps never see the model data; a thread cutter is ~1 MB of it)
+  ipcMain.handle("clip-write", async (_e, data: string) => {
+    const file = clipFile(), tmp = `${file}.${process.pid}.tmp`;
+    await writeFile(tmp, data); // never leave a half-written file
+    await rename(tmp, file);
+  });
+  ipcMain.handle("clip-read", async () => {
+    try {
+      return await readFile(clipFile(), "utf8");
+    } catch {
+      return null;
+    }
+  });
   ipcMain.handle("read-file", async (_e, filePath: string) => {
     try {
       return await readFile(filePath, "utf8");
@@ -365,6 +380,11 @@ let forceClose = false;
 let crashed = false;
 
 /** The folder recovery files go in (a test run uses its own, so it never touches the user's). */
+/** The objects copied with Ctrl+C (see "clip-write"), shared by every YDDD window of this user. */
+function clipFile(): string {
+  return path.join(recoveryDir(), "clipboard.yddd");
+}
+
 function recoveryDir(): string {
   return process.env.YDDD_TEST ?? app.getPath("userData");
 }

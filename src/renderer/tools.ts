@@ -1215,8 +1215,6 @@ export class PointMoveTool implements Tool {
   private pivots: { point: THREE.Vector3; kind: SnapKind }[] = [];
   private press: { x: number; y: number } | null = null;
   private all: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] = [];
-  /** Once a base is picked: the other solids' centre marks to drop it on. */
-  private targets: { point: THREE.Vector3; kind: SnapKind }[] = [];
   /** Too many marks (a building's windows): only its box's are shown — these, its own points, snap under the cursor. */
   private detail: { point: THREE.Vector3; kind: SnapKind; inside?: boolean }[] | null = null;
   /** Those points on screen (x, y each; NaN: behind the camera), worked out once per view. */
@@ -1247,27 +1245,26 @@ export class PointMoveTool implements Tool {
     return this;
   }
 
-  /** Recompute which marks are visible (not behind a body) when the camera moves: the base marks, or once a base is picked, the target centres. */
+  /** Recompute which base marks are visible (not behind a body) when the camera moves. */
+  private viewKey(): string {
+    const c = this.host.viewport.camera;
+    return c.position.toArray().concat(c.quaternion.toArray() as number[]).map((n) => n.toFixed(4)).join();
+  }
+
   private refreshPivots(): void {
-    const vp = this.host.viewport, c = vp.camera;
-    const key = c.position.toArray().concat(c.quaternion.toArray() as number[]).map((n) => n.toFixed(4)).join();
+    const vp = this.host.viewport, key = this.viewKey();
     if (key === this.camKey) return;
     this.camKey = key;
-    if (this.base) {
-      this.targets = vp.spreadOnScreen(vp.centerTargets(this.exclude));
-      vp.showPivotDots(this.targets);
-    } else {
-      // (only marks in sight: none behind a solid, the moved one included — but the solid's middle and a sphere's centre, inside it)
-      // (marks closer than 14 px on screen: one of them — zoom in for the others)
-      this.pivots = vp.spreadOnScreen([...this.all.filter((p) => p.inside), ...vp.visiblePoints(this.all.filter((p) => !p.inside))]);
-      this.detailXY = null; // (projected again when first needed)
-      vp.showPivotDots(this.pivots);
-    }
+    // (only marks in sight: none behind a solid, the moved one included — but the solid's middle and a sphere's centre, inside it)
+    // (marks closer than 14 px on screen: one of them — zoom in for the others)
+    this.pivots = vp.spreadOnScreen([...this.all.filter((p) => p.inside), ...vp.visiblePoints(this.all.filter((p) => !p.inside))]);
+    this.detailXY = null; // (projected again when first needed)
+    vp.showPivotDots(this.pivots);
   }
 
   private updateHint(): void {
     const base = this.base
-      ? `Move: drop on a blue centre mark (centre to centre) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
+      ? `Move: drop on a corner / midpoint / centre (snapping: the solid under the cursor shows its marks) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
       : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.detail ? " (many points: the outline box's marks — its own corners / midpoints / centres snap under the cursor)" : ""}${this.slideEdgeAt ? " · click a round or slanted edge: the gizmo turned to it (Z along its axis / the edge)" : ""}`;
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
@@ -1299,11 +1296,10 @@ export class PointMoveTool implements Tool {
     }
     // (pressed on the mark and not dragged yet — maybe a click: no target centres yet)
     if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) < 5) return;
-    this.refreshPivots();
-    // A centre mark of another solid near the cursor wins (exactly centre to centre).
-    const mark = vp.snapping(e) ? vp.nearestOnScreen(e.clientX, e.clientY, this.targets) : null;
-    if (mark) vp.showSnapMarker(mark);
-    const t = mark ? mark.point.clone() : this.pointAt(e, this.base.z, this.exclude);
+    // Snapping: the marks of the one solid under / near the cursor shown (not every solid's: every face centre
+    // worked out and tested for being hidden took seconds in a big model)
+    vp.showHoverMarks(e.clientX, e.clientY, this.exclude, vp.snapping(e));
+    const t = this.pointAt(e, this.base.z, this.exclude);
     if (!t) return;
     const d = t.sub(this.base);
     if (e.shiftKey) {
@@ -1332,10 +1328,6 @@ export class PointMoveTool implements Tool {
       const p = pv.point;
       this.base = p.clone();
       this.press = { x: e.clientX, y: e.clientY };
-      // (the target centres — every other solid's, each tested for being hidden: seconds in a big model — only once
-      // it's dragged: a click on the mark goes straight to the gizmo)
-      this.targets = [];
-      this.camKey = ""; // (worked out by the first move after this)
       this.host.viewport.showPivotDots([]);
       this.updateHint();
       return;

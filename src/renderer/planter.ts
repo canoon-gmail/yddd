@@ -44,7 +44,7 @@ export const PLANTER: Tutorial = {
     },
     {
       title: "Drainage hole",
-      how: `<kbd>V</kbd> <kbd>V</kbd> (bottom view), <kbd>B</kbd> <kbd>C</kbd> (Cylinder): click the <b>centre</b> of the bottom face (it snaps), radius <b>${HOLE_R}</b> Enter, height <b>-${WALL + 10}</b> Enter (up through the floor). <kbd>1</kbd>, click the planter, <kbd>Shift</kbd>-click the cylinder, <kbd>−</kbd> (Subtract). <kbd>5</kbd> back to iso. Done — <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.`,
+      how: `<kbd>V</kbd> <kbd>V</kbd> (bottom view), <kbd>B</kbd> <kbd>C</kbd> (Cylinder): click the <b>centre</b> of the bottom face (hold <kbd>Ctrl</kbd> so it snaps), radius <b>${HOLE_R}</b> Enter, height <b>-${WALL + 10}</b> Enter (up through the floor). <kbd>1</kbd>, click the planter, <kbd>Shift</kbd>-click the cylinder, <kbd>−</kbd> (Subtract). <kbd>5</kbd> back to iso. Done — <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.`,
       run(doc, ctx, label) {
         const p = body(doc, ctx, "planter");
         const drill = makeCylinder(BOTTOM, [0, 0, 0], HOLE_R, -(WALL + 10));

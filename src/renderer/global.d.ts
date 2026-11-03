@@ -7,6 +7,9 @@ interface YDDDApi {
   openFile(req: { title: string; filters: FileFilter[]; binary: boolean }): Promise<{ path: string; data: string | Uint8Array } | null>;
   /** A text file's contents; null if it can't be read (moved, deleted...). */
   readFile(filePath: string): Promise<string | null>;
+  /** Objects copied with Ctrl+C, for any YDDD window (a file of YDDD's own, not the system clipboard). */
+  clipWrite(data: string): Promise<void>;
+  clipRead(): Promise<string | null>;
   /** The system's TrueType / OpenType fonts (for Text), and one's file contents (null: not listed / unreadable). */
   listFonts(): Promise<{ family: string; style: string; file: string }[]>;
   readFont(file: string): Promise<Uint8Array | null>;

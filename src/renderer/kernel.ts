@@ -47,6 +47,7 @@ import {
   revolution,
   genericSweep,
   makeHelix,
+  BoundingBox,
   deserializeShape,
   exportSTEP,
   importSTEP,
@@ -171,6 +172,141 @@ export async function initKernel(): Promise<void> {
   oc = await opencascade({ locateFile: () => wasmUrl });
   setOC(oc);
   fastSubShapes();
+  quickExactBoxes();
+}
+
+/**
+ * replicad's `shape.boundingBox` (OpenCascade's exact box, BRepBndLib::AddOptimal) searches each free-form face whole:
+ * on a long twisted face — a bolt's thread — its time grows with the square of its turns (1 turn 37 ms, 16 turns
+ * 2.5 s; Scale / Move / Fit waited that long before opening). Same box, worked out quickly: such a face (a B-spline
+ * of many spans) sampled across each span, the best point on each side polished with Newton steps on the surface;
+ * every other face, and the edges, as before.
+ */
+function quickExactBoxes(): void {
+  const optimal = (s: unknown, box: unknown) => oc.BRepBndLib.AddOptimal(s as never, box as never, false, false);
+  Object.defineProperty(OcShape.prototype, "boundingBox", {
+    configurable: true,
+    get(this: OcShape<never>) {
+      const box = new oc.Bnd_Box();
+      try {
+        const faces = [...iterTopo(this.wrapped, "face")];
+        const slow = faces.map((f) => manySpans(f));
+        if (!slow.some(Boolean)) optimal(this.wrapped, box);
+        else {
+          faces.forEach((f, i) => {
+            const b = slow[i] ? splineFaceBox(f, slow[i]!) : null;
+            if (b) box.Update(b[0][0], b[0][1], b[0][2], b[1][0], b[1][1], b[1][2]);
+            else optimal(f, box);
+          });
+          for (const e of iterTopo(this.wrapped, "edge")) optimal(e, box);
+        }
+        if (box.IsVoid()) return new BoundingBox();
+        const lo = box.CornerMin(), hi = box.CornerMax();
+        const out = BoundingBox.fromBounds([lo.X(), lo.Y(), lo.Z()], [hi.X(), hi.Y(), hi.Z()]);
+        lo.delete();
+        hi.delete();
+        return out;
+      } finally {
+        box.delete();
+      }
+    },
+  });
+}
+
+/** OpenCascade's own exact box (as replicad's boundingBox was): to check quickExactBoxes against. */
+export function optimalBounds(shape: Shape): [V3, V3] {
+  const box = new oc.Bnd_Box();
+  try {
+    oc.BRepBndLib.AddOptimal(shape.wrapped, box, false, false);
+    const lo = box.CornerMin(), hi = box.CornerMax();
+    const r: [V3, V3] = [[lo.X(), lo.Y(), lo.Z()], [hi.X(), hi.Y(), hi.Z()]];
+    lo.delete();
+    hi.delete();
+    return r;
+  } finally {
+    box.delete();
+  }
+}
+
+/** A face's surface if it's a B-spline of many spans (see quickExactBoxes), else null. */
+function manySpans(face: unknown): { ad: any; nu: number; nv: number } | null {
+  const ad = new oc.BRepAdaptor_Surface(oc.TopoDS.Face(face as never), true);
+  if (ad.GetType() !== oc.GeomAbs_SurfaceType.GeomAbs_BSplineSurface) {
+    ad.delete();
+    return null;
+  }
+  const nu = ad.NbUKnots() - 1, nv = ad.NbVKnots() - 1;
+  if (nu * nv < 8) {
+    ad.delete();
+    return null;
+  }
+  return { ad, nu, nv };
+}
+
+/**
+ * The exact box of a B-spline face: its surface over the face's parameter range sampled (6 points a span each way, at
+ * least 13, at most ~40,000 in all), then on each of the 6 sides the best sample polished — Newton steps along u and v in
+ * turn (backing off when one doesn't help), kept in range — to the surface's true extreme there.
+ */
+function splineFaceBox(_face: unknown, { ad, nu, nv }: { ad: any; nu: number; nv: number }): [V3, V3] | null {
+  const P = new oc.gp_Pnt(), Du = new oc.gp_Vec(), Dv = new oc.gp_Vec(), Duu = new oc.gp_Vec(), Dvv = new oc.gp_Vec(), Duv = new oc.gp_Vec();
+  try {
+    const u0 = ad.FirstUParameter(), u1 = ad.LastUParameter(), v0 = ad.FirstVParameter(), v1 = ad.LastVParameter();
+    let su = Math.max(13, 6 * nu + 1), sv = Math.max(13, 6 * nv + 1);
+    while (su * sv > 40000) (su > sv ? (su = Math.ceil(su / 2)) : (sv = Math.ceil(sv / 2)));
+    const coord = (k: number) => (k === 0 ? P.X() : k === 1 ? P.Y() : P.Z());
+    // best[side]: side 2k → the most along axis k, 2k + 1 → the least
+    const best = [0, 1, 2, 3, 4, 5].map(() => ({ f: -Infinity, u: u0, v: v0 }));
+    for (let i = 0; i < su; i++) {
+      const u = u0 + ((u1 - u0) * i) / (su - 1);
+      for (let j = 0; j < sv; j++) {
+        const v = v0 + ((v1 - v0) * j) / (sv - 1);
+        ad.D0(u, v, P);
+        for (let k = 0; k < 3; k++) {
+          const c = coord(k);
+          if (c > best[2 * k].f) best[2 * k] = { f: c, u, v };
+          if (-c > best[2 * k + 1].f) best[2 * k + 1] = { f: -c, u, v };
+        }
+      }
+    }
+    const value = (side: number, u: number, v: number) => {
+      ad.D0(u, v, P);
+      return (side % 2 ? -1 : 1) * coord(side >> 1);
+    };
+    const hu = (u1 - u0) / (su - 1), hv = (v1 - v0) / (sv - 1);
+    for (let side = 0; side < 6; side++) {
+      const k = side >> 1, sign = side % 2 ? -1 : 1, b = best[side];
+      const comp = (w: any) => sign * (k === 0 ? w.X() : k === 1 ? w.Y() : w.Z());
+      for (let iter = 0; iter < 30; iter++) {
+        let moved = 0;
+        for (const along of ["u", "v"] as const) {
+          ad.D2(b.u, b.v, P, Du, Dv, Duu, Dvv, Duv);
+          const g = comp(along === "u" ? Du : Dv), h = comp(along === "u" ? Duu : Dvv), span = along === "u" ? hu : hv;
+          if (Math.abs(g) < 1e-14) continue;
+          // Newton where the side curves away (h < 0); else a step of a sample's width the way it rises
+          let step = h < 0 ? -g / h : Math.sign(g) * span;
+          step = Math.max(-span, Math.min(span, step));
+          for (let tries = 0; tries < 8; tries++, step /= 2) {
+            const lo = along === "u" ? u0 : v0, hi = along === "u" ? u1 : v1;
+            const t = Math.max(lo, Math.min(hi, (along === "u" ? b.u : b.v) + step));
+            const nu2 = along === "u" ? t : b.u, nv2 = along === "u" ? b.v : t;
+            const f = value(side, nu2, nv2);
+            if (f > b.f) {
+              moved = Math.max(moved, Math.abs(t - (along === "u" ? b.u : b.v)) / span);
+              b.f = f;
+              b.u = nu2;
+              b.v = nv2;
+              break;
+            }
+          }
+        }
+        if (moved < 1e-9) break;
+      }
+    }
+    return [[-best[1].f, -best[3].f, -best[5].f], [best[0].f, best[2].f, best[4].f]];
+  } finally {
+    for (const o of [P, Du, Dv, Duu, Dvv, Duv, ad]) o.delete();
+  }
 }
 
 /**
@@ -331,6 +467,17 @@ export const BUSY_FACES = 30;
 export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   const given = meshedElsewhere.get(shape);
   if (given) return given;
+  const opts = displayOpts(shape, preview);
+  if (shape instanceof Wire) return { faces: shape.mesh(opts), edges: shape.meshEdges(opts) }; // a path: lines only
+  const { mesh, whole } = meshFaces(shape, opts);
+  // Edge lines come from the shape's triangulation; meshed in parts it has none as a whole
+  // (OpenCascade would mesh it all again, stand-ins' faces too): from the edges alone then.
+  const edgeLines = whole ? shape.meshEdges(opts) : (makeCompound(shape.edges) as unknown as Shape).meshEdges(opts);
+  return { faces: mesh, edges: withoutSeams(edgeLines, seamEdgeIds(shape)) };
+}
+
+/** The display mesh's settings for `shape` (see tessellate). */
+function displayOpts(shape: Shape | Wire, preview: boolean): { tolerance: number; angularTolerance: number } {
   // Size from points along the edges (a bounding box of B-spline faces is slow to compute — tens
   // of ms); midpoints too, for a whole circle whose one edge starts and ends at the same point.
   const ends = shape.edges.flatMap((e) => [0, 0.5, 1].map((t) => e.pointAt(t).toTuple() as V3));
@@ -345,13 +492,95 @@ export function tessellate(shape: Shape | Wire, preview = false): Tessellation {
   // under ~10 mm) get about a third fewer segments; larger curves are set by `tolerance` anyway.
   // (~2.5× faster to mesh)
   const angle = !(shape instanceof Wire) && shape.faces.length > BUSY_FACES ? 0.3 : 0.15;
-  const opts = preview ? { tolerance: tolerance * 4, angularTolerance: 0.3 } : { tolerance, angularTolerance: angle };
-  if (shape instanceof Wire) return { faces: shape.mesh(opts), edges: shape.meshEdges(opts) }; // a path: lines only
-  const { mesh, whole } = meshFaces(shape, opts);
-  // Edge lines come from the shape's triangulation; meshed in parts it has none as a whole
-  // (OpenCascade would mesh it all again, stand-ins' faces too): from the edges alone then.
-  const edgeLines = whole ? shape.meshEdges(opts) : (makeCompound(shape.edges) as unknown as Shape).meshEdges(opts);
-  return { faces: mesh, edges: withoutSeams(edgeLines, seamEdgeIds(shape)) };
+  return preview ? { tolerance: tolerance * 4, angularTolerance: 0.3 } : { tolerance, angularTolerance: angle };
+}
+
+const heavyShapes = new WeakMap<object, boolean>();
+
+/**
+ * Whether drawing `shape` is best left to the background kernel: it has B-spline faces heavy to mesh (a thread's: ~5 s)
+ * and no display mesh yet (see standInTessellation) — remembered.
+ */
+export function needsBackgroundMesh(shape: Geom): boolean {
+  if (isMesh(shape) || shape instanceof Wire || meshedElsewhere.has(shape)) return false;
+  let known = heavyShapes.get(shape);
+  if (known === undefined) {
+    try {
+      known = (shape as Shape).faces.some(heavySpline);
+    } catch {
+      known = false;
+    }
+    heavyShapes.set(shape, known);
+  }
+  return known;
+}
+
+/**
+ * A quick stand-in for a shape's display mesh while the real one is made in the background (needsBackgroundMesh):
+ * its other faces meshed as usual, each heavy B-spline face as a grid of points on its surface (across its whole
+ * parameter range: trims not followed) — tens of ms where meshing a thread takes seconds. Its edges as usual.
+ */
+export function standInTessellation(shape: Shape): Tessellation {
+  const opts = displayOpts(shape, false), faces = shape.faces;
+  const heavy = faces.map(heavySpline), light = faces.filter((_, i) => !heavy[i]);
+  const out: ShapeMesh = { vertices: [], normals: [], triangles: [], faceGroups: [] };
+  const append = (m: ShapeMesh, id?: number) => {
+    const v0 = out.vertices.length / 3, t0 = out.triangles.length;
+    for (const x of m.vertices) out.vertices.push(x);
+    for (const x of m.normals) out.normals.push(x);
+    for (const x of m.triangles) out.triangles.push(x + v0);
+    for (const g of m.faceGroups) out.faceGroups.push({ start: g.start + t0, count: g.count, faceId: id ?? g.faceId });
+  };
+  if (light.length) append(extractMesh((makeCompound(light) as unknown as Shape).wrapped, opts));
+  faces.forEach((f, i) => heavy[i] && append(gridMesh(f), f.hashCode));
+  const edgeLines = (makeCompound(shape.edges) as unknown as Shape).meshEdges(opts);
+  return { faces: out, edges: withoutSeams(edgeLines, seamEdgeIds(shape)) };
+}
+
+/** A B-spline face as a grid of points on its surface (about two a control point each way), facing its way out. */
+function gridMesh(face: Face): ShapeMesh {
+  const ad = new oc.BRepAdaptor_Surface(face.wrapped, true);
+  try {
+    const bs = ad.BSpline();
+    const nu = Math.min(64, Math.max(4, bs.NbUPoles() * 2)), nv = Math.min(4000, Math.max(4, bs.NbVPoles() * 2));
+    bs.delete();
+    const u0 = ad.FirstUParameter(), u1 = ad.LastUParameter(), v0 = ad.FirstVParameter(), v1 = ad.LastVParameter();
+    const P: number[] = [];
+    for (let j = 0; j <= nv; j++) {
+      for (let i = 0; i <= nu; i++) {
+        const p = ad.Value(u0 + ((u1 - u0) * i) / nu, v0 + ((v1 - v0) * j) / nv);
+        P.push(p.X(), p.Y(), p.Z());
+        p.delete();
+      }
+    }
+    const flip = face.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED;
+    const at = (i: number, j: number) => j * (nu + 1) + i;
+    const T: number[] = [];
+    for (let j = 0; j < nv; j++) {
+      for (let i = 0; i < nu; i++) {
+        const a = at(i, j), b = at(i + 1, j), c = at(i + 1, j + 1), d = at(i, j + 1);
+        if (flip) T.push(a, c, b, a, d, c);
+        else T.push(a, b, c, a, c, d);
+      }
+    }
+    // Normals from the triangles round each point
+    const N = new Array<number>(P.length).fill(0);
+    for (let k = 0; k < T.length; k += 3) {
+      const [a, b, c] = [T[k] * 3, T[k + 1] * 3, T[k + 2] * 3];
+      const e1 = [P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]], e2 = [P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]];
+      const n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      for (const q of [a, b, c]) for (let r = 0; r < 3; r++) N[q + r] += n[r];
+    }
+    for (let q = 0; q < N.length; q += 3) {
+      const l = Math.hypot(N[q], N[q + 1], N[q + 2]) || 1;
+      N[q] /= l;
+      N[q + 1] /= l;
+      N[q + 2] /= l;
+    }
+    return { vertices: P, normals: N, triangles: T, faceGroups: [{ start: 0, count: T.length, faceId: 0 }] };
+  } finally {
+    ad.delete();
+  }
 }
 
 /** Display meshes made in the background kernel for shapes read back here (see takeMesh): tessellate uses them. */
@@ -4337,7 +4566,8 @@ export function guidePlaneNormal(shapes: Shape[], a: V3, b: V3, view?: V3, store
   // Flat faces the guide lies on, nearest first.
   const onFaces: { n: V3; d: number }[] = [];
   for (const shape of shapes) {
-    const [lo, hi] = shape.boundingBox.bounds;
+    // (its size for the tolerance: the quick box round its control points — the exact one takes ~2 s on a thread)
+    const [lo, hi] = roughBounds(shape);
     const tol = 1e-6 * Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
     for (const f of shape.faces) {
       if (f.geomType !== "PLANE") continue;
@@ -4580,6 +4810,46 @@ export function flatFaceBoolean(op: BooleanOp, target: Shape, tools: Shape[]): F
 export type BooleanOp = "union" | "subtract" | "intersect";
 
 export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
+  // (a failed try changes the solids it was given — even non-destructive —, so a retry needs copies made before it)
+  const spheres = [target, ...tools].some((x) => sphereCenter(x)) ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
+  let first: Solid | null = null, failed: unknown = null;
+  try {
+    first = booleanOpOnce(op, target, tools);
+    if (isValidShape(first)) return first;
+  } catch (e) {
+    failed = e;
+  }
+  // Broken (or failed) with a whole sphere: again with the spheres among the tools (else the target) turned about their
+  // centres — the same solids, their seam and poles elsewhere. OpenCascade misses where two spheres cross with their
+  // poles on parallel axes (r 0.66 and 0.33: the union came back as the first one alone, broken); turned, it's right.
+  if (spheres) {
+    try {
+      const turn = (x: Solid) => {
+        const c = sphereCenter(x);
+        return c ? rotateShape(x, 41, c, [0.3, 0.7, 0.2]) : x;
+      };
+      const inTools = spheres.tools.some((x) => sphereCenter(x));
+      const r = booleanOpOnce(op, inTools ? spheres.target : turn(spheres.target), inTools ? spheres.tools.map(turn) : spheres.tools);
+      if (isValidShape(r)) return r;
+    } catch {
+      // (the first try's result / error below)
+    }
+  }
+  if (first) return first;
+  throw failed;
+}
+
+/** A whole sphere (one spherical face): its centre, else null. */
+function sphereCenter(x: Solid): V3 | null {
+  const f = x.faces;
+  return f.length === 1 && f[0].geomType === "SPHERE" ? curvedFaceCenter(f[0]) : null;
+}
+
+function booleanOpOnce(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
+  if (op === "union") {
+    const sliced = slicedUnion(target, tools);
+    if (sliced) return sliced.simplify() as Solid;
+  }
   // Cut / fuse with all the tools at once: one pass instead of one per tool on an ever more complex
   // result (36 array copies: ~5× faster). Common with several tools would mean "∩ their union", so it
   // stays one at a time, as does anything the single pass fails on.
@@ -4601,16 +4871,87 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   return result.simplify();
 }
 
+/** Whether a face is a B-spline with more than HEAVY_POLES control points (a thread's: ~16 turns in one face). */
+function heavySpline(f: Face): boolean {
+  if (f.geomType !== "BSPLINE_SURFACE") return false;
+  const ad = new oc.BRepAdaptor_Surface(f.wrapped, true);
+  try {
+    const bs = ad.BSpline();
+    const poles = bs.NbUPoles() * bs.NbVPoles();
+    bs.delete();
+    return poles > HEAVY_POLES;
+  } catch {
+    return false;
+  } finally {
+    ad.delete();
+  }
+}
+
+/**
+ * Solids standing on a flat face of a target with heavy B-spline faces (letters on a thread cutter's top), all on the
+ * outer side of that face: the target cut by a plane just inside that face, the tools joined to the thin slice only,
+ * the rest glued back on (their cut faces lie exactly on each other) — OpenCascade doesn't intersect the tools with the
+ * whole thread then (5 letters on an M5 × 20 thread: 154 s → ~2 s). The same solid: the tools can't reach the rest.
+ * Null (the usual boolean then) if it doesn't apply, or the result isn't valid or its volume isn't the sum.
+ */
+function slicedUnion(first: Solid, rest: Solid[]): Shape3D | null {
+  if (!rest.length) return null;
+  try {
+    // (a union is the same whichever is first: the one with the heavy faces is cut — letters picked first too)
+    const all = [first, ...rest], i = all.findIndex((x) => x.faces.some(heavySpline));
+    if (i < 0) return null;
+    const target = all[i], tools = all.filter((_, k) => k !== i);
+    const boxes = tools.map((t) => t.boundingBox.bounds);
+    const [lo, hi] = target.boundingBox.bounds;
+    for (const f of target.faces) {
+      if (f.geomType !== "PLANE") continue;
+      const n = f.normalAt().toTuple() as V3, c = f.center.toTuple() as V3, at = dot3(n, c);
+      // Every tool beyond the face's plane (its box's nearest corner along n no further in than the plane)
+      const out = boxes.every(([a, b]) => {
+        let m = 0;
+        for (let k = 0; k < 3; k++) m += n[k] * (n[k] >= 0 ? a[k] : b[k]);
+        return m >= at - 1e-6;
+      });
+      if (!out) continue;
+      // Do they touch this face at all (else another face, or none: the usual boolean)
+      if (!boxes.some(([a, b]) => [0, 1, 2].every((k) => a[k] <= Math.max(lo[k], hi[k]) + 1e-6 && b[k] >= Math.min(lo[k], hi[k]) - 1e-6))) continue;
+      // The target's depth along -n, a slice a quarter of it (at most 1 mm) thick
+      let depth = 0;
+      for (let k = 0; k < 3; k++) depth += Math.abs(n[k]) * (hi[k] - lo[k]);
+      // (thin: the less of the thread in the slice, the quicker its boolean — 1 mm: 11 s, 0.5 mm: 1.3 s)
+      const d = Math.min(0.5, depth / 4);
+      if (!(d > 1e-3)) return null;
+      const cut: V3 = [c[0] - n[0] * d, c[1] - n[1] * d, c[2] - n[2] * d];
+      const { above, below } = splitByPlane(target, cut, n);
+      if (!above || !below) return null;
+      const top = boolean("fuse", above, tools);
+      const r = booleanOnce("fuse", deepCopy(below), [deepCopy(top as Solid)], "full");
+      if (!isValidShape(r as Shape)) return null;
+      // The pieces' volumes add up (the tools may overlap each other, so not the tools' own sum). The volume of a
+      // piece of a heavy B-spline is only so exact: the thread's two halves add up to its own within ~3e-5.
+      const want = solidVolume(below) + solidVolume(top as Solid), got = solidVolume(r as Solid);
+      if (Math.abs(got - want) > 1e-4 * Math.max(1, want)) return null;
+      return r;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 /**
  * Two solids joined on a face they share whole (e.g. a face pushed out into a new solid, joined back), touching
  * nowhere else: OpenCascade's full glue — it skips intersecting their faces, ~100× faster (a swept spout and its
- * pushed-out mouth: 8.7 s → 0.1 s, the same result). Null (the usual boolean then) if they share no face, the
- * result isn't valid or a point of either lies inside the other (they cross somewhere: glue would be wrong).
+ * pushed-out mouth: 8.7 s → 0.1 s, the same result). Null (the usual boolean then) if they share no face (the same
+ * area, centre and corners), the result isn't valid, its volume isn't the two added or a point of either lies inside
+ * the other (they cross somewhere: glue would be wrong).
  */
 function gluedUnion(a: Solid, b: Solid): Shape3D | null {
   const fa = a.faces, fb = b.faces;
   if (fa.length + fb.length > 60) return null;
-  const facts = (f: Face) => ({ type: f.geomType, area: measureArea(f), c: f.center.toTuple() as V3 });
+  // (its corners too: the same area and centre isn't the same face — a prism and a copy turned about its middle)
+  const facts = (f: Face) => ({ type: f.geomType, area: measureArea(f), c: f.center.toTuple() as V3, vs: f.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]) });
+  const sameCorners = (p: V3[], q: V3[], tol: number) => p.every((u) => q.some((w) => Math.hypot(...sub3(u, w)) <= tol)) && q.every((u) => p.some((w) => Math.hypot(...sub3(u, w)) <= tol));
   const ia = new Map<number, ReturnType<typeof facts>>(), ib = new Map<number, ReturnType<typeof facts>>();
   const ofA = (i: number) => ia.get(i) ?? (ia.set(i, facts(fa[i])), ia.get(i)!);
   const ofB = (j: number) => ib.get(j) ?? (ib.set(j, facts(fb[j])), ib.get(j)!);
@@ -4621,7 +4962,8 @@ function gluedUnion(a: Solid, b: Solid): Shape3D | null {
         if (fa[i].geomType !== fb[j].geomType) continue;
         const x = ofA(i), y = ofB(j);
         const tol = 1e-6 * Math.max(1, x.area);
-        if (Math.abs(x.area - y.area) <= tol && Math.hypot(...sub3(x.c, y.c)) <= 1e-5 * Math.max(1, Math.sqrt(x.area))) {
+        const near = 1e-5 * Math.max(1, Math.sqrt(x.area));
+        if (Math.abs(x.area - y.area) <= tol && Math.hypot(...sub3(x.c, y.c)) <= near && sameCorners(x.vs, y.vs, near)) {
           sharedA.add(fa[i].hashCode);
           sharedB.add(fb[j].hashCode);
         }
@@ -4634,6 +4976,9 @@ function gluedUnion(a: Solid, b: Solid): Shape3D | null {
   try {
     const r = booleanOnce("fuse", a, [b], "full");
     if (!isValidShape(r as Shape)) return null;
+    // (touching only on the shared faces: the volumes add up — else they overlap somewhere glue can't see)
+    const want = solidVolume(a) + solidVolume(b);
+    if (Math.abs(solidVolume(r as Solid) - want) > 1e-4 * Math.max(1, want)) return null;
     return pointsOutside(a, sharedA, b) && pointsOutside(b, sharedB, a) ? r : null;
   } catch {
     return null;
@@ -4734,6 +5079,26 @@ export function noteMoved(copy: Geom, from: Geom, R: number[], t: V3): void {
 }
 
 const boxCache = new WeakMap<object, [V3, V3]>();
+
+/**
+ * A box round the shape that may be a little too big (round its surfaces' control points, not their exact extent):
+ * quick where the exact one is slow (a bolt's twisted thread faces: ~2.3 s exact) — for sizes that needn't be exact.
+ */
+export function roughBounds(shape: Shape): [V3, V3] {
+  const known = boxCache.get(shape);
+  if (known) return known;
+  const box = new oc.Bnd_Box();
+  try {
+    oc.BRepBndLib.Add(shape.wrapped, box, false);
+    const lo = box.CornerMin(), hi = box.CornerMax();
+    const r: [V3, V3] = [[lo.X(), lo.Y(), lo.Z()], [hi.X(), hi.Y(), hi.Z()]];
+    lo.delete();
+    hi.delete();
+    return r;
+  } finally {
+    box.delete();
+  }
+}
 
 /**
  * A shape's bounding box, remembered — a moved copy's from the one it was moved from (`boundingBox` on a curved
@@ -5696,6 +6061,215 @@ export function batteryCase(o: BatteryCase, at: V3 = [0, 0, 0]): Solid {
   if (!isValidShape(out)) throw new Error("Battery case: the result is not a valid solid");
   return out;
 }
+
+/**
+ * Macro → Nut and bolt: ISO metric coarse threads (mm) — pitch, hex across flats (ISO 4032 / 4017), nut height, bolt
+ * head height and the clearance hole a bolt goes through (ISO 273, medium).
+ */
+export const METRIC_SIZES = [
+  { name: "M5", d: 5, pitch: 0.8, hex: 8, nut: 4.7, head: 3.5, hole: 5.5 },
+  { name: "M6", d: 6, pitch: 1, hex: 10, nut: 5.2, head: 4, hole: 6.6 },
+  { name: "M8", d: 8, pitch: 1.25, hex: 13, nut: 6.8, head: 5.3, hole: 9 },
+  { name: "M10", d: 10, pitch: 1.5, hex: 16, nut: 8.4, head: 6.4, hole: 11 },
+  { name: "M12", d: 12, pitch: 1.75, hex: 18, nut: 10.8, head: 7.5, hole: 13.5 },
+  { name: "M14", d: 14, pitch: 2, hex: 21, nut: 12.8, head: 8.8, hole: 15.5 },
+  { name: "M16", d: 16, pitch: 2, hex: 24, nut: 14.8, head: 10, hole: 17.5 },
+  { name: "M18", d: 18, pitch: 2.5, hex: 27, nut: 15.8, head: 11.5, hole: 20 },
+  { name: "M20", d: 20, pitch: 2.5, hex: 30, nut: 18, head: 12.5, hole: 22 },
+  { name: "M22", d: 22, pitch: 2.5, hex: 34, nut: 19.4, head: 14, hole: 24 },
+  { name: "M24", d: 24, pitch: 3, hex: 36, nut: 21.5, head: 15, hole: 26 },
+] as const;
+
+export type MetricSize = (typeof METRIC_SIZES)[number];
+
+/** A nut and bolt (Macro menu): bolt length under the head, how much of it is threaded, the printing clearance (mm). */
+export interface NutBolt {
+  size: MetricSize;
+  length: number;
+  thread: number;
+  /** The nut's thread, the cutter's and the nut trap made this much bigger all round, so printed parts fit. */
+  clearance: number;
+}
+
+/** The thread's depth (mm): the ISO profile's 5/8 of the sharp-V height. */
+const threadDepth = (pitch: number) => ((5 / 8) * Math.sqrt(3) * pitch) / 2;
+
+/**
+ * A right-hand threaded rod standing on `at` (its axis up Z), outside radius `r`, `len` long: the ISO profile (60°,
+ * flat crest P/8, flat root P/4) — its cut across the axis (crest and root arcs, the flanks spirals between them)
+ * twisted a full turn per pitch as it goes up: one exact sweep, the core included (no thread fused onto a cylinder).
+ */
+function threadedRod(r: number, pitch: number, len: number, at: V3, turnDeg = 0): Solid {
+  const root = r - threadDepth(pitch), turn = (turnDeg * Math.PI) / 180;
+  const pt = (rad: number, ang: number): V3 => [at[0] + rad * Math.cos(ang + turn), at[1] + rad * Math.sin(ang + turn), at[2]];
+  // Round the axis, the angle is the axial place in the profile (a full turn: one pitch): crest ±π/8, root 3π/4…5π/4
+  const flank = (a0: number, a1: number, r0: number, r1: number) => {
+    const pts: V3[] = [];
+    for (let k = 0; k <= 8; k++) pts.push(pt(r0 + ((r1 - r0) * k) / 8, a0 + ((a1 - a0) * k) / 8));
+    return makeBSplineApproximation(pts, { tolerance: 1e-5, degMin: 3, degMax: 3 });
+  };
+  const P = Math.PI;
+  const edges = [
+    makeThreePointArc(pt(r, -P / 8), pt(r, 0), pt(r, P / 8)),
+    flank(P / 8, (3 * P) / 4, r, root),
+    makeThreePointArc(pt(root, (3 * P) / 4), pt(root, P), pt(root, (5 * P) / 4)),
+    flank((5 * P) / 4, (15 * P) / 8, root, r),
+  ];
+  const outline = makeFace(assembleWire(edges)).outerWire();
+  return twistedSweep(outline, [], at, [at[0], at[1], at[2] + len], (360 * len) / pitch, 1);
+}
+
+/** A hex prism standing on `at`, `across` its flats, `h` tall (two flats facing ±X). */
+function hexPrism(across: number, h: number, at: V3): Solid {
+  return drawPolysides(across / Math.sqrt(3), 6).sketchOnPlane(new Plane(at, [1, 0, 0], [0, 0, 1])).extrude(h) as Solid;
+}
+
+/** A solid of revolution about the vertical line through `at`: its (radius, height) outline, from the axis out and back. */
+function revolvedOutline(rz: [number, number][], at: V3): Solid {
+  return revolution(makePolygon(rz.map(([rad, z]) => [at[0] + rad, at[1], at[2] + z] as V3)), at, [0, 0, 1], 360) as Solid;
+}
+
+/**
+ * Pieces that only touch (on shared flat faces, none crossing) joined / cut with OpenCascade's full glue — ~20× faster
+ * than a normal boolean on the thread's twisted faces (a bolt: ~2.5 s → ~0.1 s); a normal boolean if that fails.
+ */
+function joinTouching(kind: "fuse" | "cut", a: Solid, tools: Solid[]): Solid {
+  try {
+    const r = booleanOnce(kind, a, tools, "full");
+    if (isValidShape(r as Shape)) return r;
+  } catch {
+    // (glue not applicable: below)
+  }
+  return boolean(kind, a, tools);
+}
+
+/** A hex `across` its flats, `h` tall, standing on `at`, its corners chamfered 30° at the bottom (and the top too, `both`). */
+function chamferedHex(across: number, h: number, at: V3, both: boolean): Solid {
+  const corner = across / Math.sqrt(3) + 0.1, from = 0.95 * (across / 2), rise = (corner - from) * Math.tan(Math.PI / 6);
+  const outline: [number, number][] = both ? [[0, 0], [from, 0], [corner, rise], [corner, h - rise], [from, h], [0, h]] : [[0, 0], [from, 0], [corner, rise], [corner, h], [0, h]];
+  return booleanOp("intersect", hexPrism(across, h, at), [revolvedOutline(outline, at)]);
+}
+
+/**
+ * The bolt, standing on its head (as it prints) centred on `at`: a hex head (its corners chamfered 30° underneath),
+ * a plain shank, then `thread` mm of thread up to the end — its last turn made on its own and chamfered 45° down to
+ * the root (a chamfer on the whole thread's twisted faces is slow), all pieces only touching, joined with glue.
+ */
+export function boltSolid(o: NutBolt, at: V3 = [0, 0, 0]): Solid {
+  checkNutBolt(o);
+  const { d, pitch, hex, head } = o.size, r = d / 2, top = head + o.length, z = (h: number): V3 => [at[0], at[1], at[2] + h];
+  const tools: Solid[] = [];
+  if (o.length - o.thread > 1e-6) tools.push(occCylinder(r, o.length - o.thread, z(head), [0, 0, 1]) as Solid);
+  if (o.thread > 1e-6) {
+    const tipLen = Math.min(pitch, o.thread), body = o.thread - tipLen, ch = threadDepth(pitch);
+    if (body > 1e-6) tools.push(threadedRod(r, pitch, body, z(top - o.thread)));
+    const tip = threadedRod(r, pitch, tipLen, z(top - tipLen), (360 * body) / pitch);
+    const z0 = top - tipLen;
+    tools.push(booleanOp("intersect", tip, [revolvedOutline([[0, z0 - 0.1], [r + 0.1, z0 - 0.1], [r + 0.1, top - ch - 0.1], [r - ch, top], [0, top]], at)]));
+  }
+  const out = joinTouching("fuse", chamferedHex(hex, head, at, false), tools);
+  if (!isValidShape(out)) throw new Error("Nut and bolt: the bolt is not a valid solid");
+  return out;
+}
+
+/** The nut, lying flat centred on `at`: a hex, its corners chamfered 30° both sides, the thread (+ clearance) cut through it. */
+export function nutSolid(o: NutBolt, at: V3 = [0, 0, 0]): Solid {
+  checkNutBolt(o);
+  const { d, pitch, hex, nut } = o.size;
+  // (a normal cut, not glue: glue left the top / bottom faces' inner outline unrespected by the display mesh — a
+  // triangle or two across the hole, the nut drawn without one; ~0.5–0.9 s)
+  const out = boolean("cut", chamferedHex(hex, nut, at, true), [threadedRod(d / 2 + o.clearance, pitch, nut, at)]);
+  if (!isValidShape(out)) throw new Error("Nut and bolt: the nut is not a valid solid");
+  return out;
+}
+
+/**
+ * The cutter for a threaded hole (Subtract it from a part): the bolt's thread made `clearance` bigger all round,
+ * the thread's length (no thread: the bolt's), standing on `at` — the hole a printed bolt screws into.
+ */
+export function threadCutter(o: NutBolt, at: V3 = [0, 0, 0]): Solid {
+  checkNutBolt(o);
+  const { d, pitch } = o.size;
+  return threadedRod(d / 2 + o.clearance, pitch, o.thread > 1e-6 ? o.thread : o.length, at);
+}
+
+/**
+ * The nut trap (Subtract it from a part, press a metal nut in): a hex pocket (nut + clearance all round, the nut's
+ * height + clearance deep) at the bottom, the bolt's clearance hole up through the bolt's length.
+ */
+export function nutTrap(o: NutBolt, at: V3 = [0, 0, 0]): Solid {
+  checkNutBolt(o);
+  const { hex, nut, hole } = o.size, c = o.clearance;
+  const pocket = hexPrism(hex + 2 * c, nut + c, at);
+  const out = booleanOp("union", pocket, [occCylinder(hole / 2, o.length, [at[0], at[1], at[2] + nut + c - 0.01], [0, 0, 1]) as Solid]);
+  if (!isValidShape(out)) throw new Error("Nut and bolt: the nut trap is not a valid solid");
+  return out;
+}
+
+/**
+ * The thread cutter with its size ("M5") standing 0.4 mm on its top face, read along X, as big as fits inside the
+ * thread's root (a printed tap shows what it cuts) — joined to it (letters on a thread's top: see slicedUnion).
+ * The text font must be loaded (loadTextFont).
+ */
+export function labelledCutter(o: NutBolt, at: V3 = [0, 0, 0]): Solid {
+  const cutter = threadCutter(o, at);
+  const { d, pitch, name } = o.size;
+  const top = at[2] + (o.thread > 1e-6 ? o.thread : o.length), inside = 2 * (d / 2 + o.clearance - threadDepth(pitch));
+  const frame: Frame = { origin: [at[0], at[1], top], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+  // Capital height a third of the diameter, smaller if the text is wider than ~70% of the root circle
+  const letters = (h: number) => makeTextFaces(frame, [at[0], at[1] - h / 2, top], name, { height: h, align: "center", lineSpacing: 1, font: "builtin:NotoSans-Bold" });
+  let h = d / 3, faces = letters(h);
+  const width = (fs: Face[]) => {
+    let lo = Infinity, hi = -Infinity;
+    for (const f of fs) for (const e of f.edges) for (const t of [0, 0.25, 0.5, 0.75, 1]) { const x = e.pointAt(t).x; lo = Math.min(lo, x); hi = Math.max(hi, x); }
+    return hi - lo;
+  };
+  const w = width(faces), fit = 0.7 * inside * 0.95;
+  if (w > fit) faces = letters((h *= fit / w));
+  const solids = faces.map((f) => extrudeFace(f, f.faces[0].hashCode, 0.4));
+  const out = booleanOp("union", cutter, solids);
+  if (!isValidShape(out)) throw new Error("Nut and bolt: the labelled thread cutter is not a valid solid");
+  return out;
+}
+
+/** All four, in this order: bolt, nut, thread cutter (labelled with its size: the font loaded), nut trap — each standing on its place in `at`. */
+export function nutBoltParts(o: NutBolt, at: V3[]): Solid[] {
+  return [boltSolid(o, at[0]), nutSolid(o, at[1]), labelledCutter(o, at[2]), nutTrap(o, at[3])];
+}
+
+/**
+ * The four as quick stand-ins for the panel's preview (~tens of ms, against ~1.5 s): no thread — the bolt's a plain
+ * rod, the nut's hole and the cutter plain at the thread's outside (+ clearance); the nut trap as made. Each threaded
+ * part with a helix line where its thread goes (one turn a pitch), so the preview shows the coil.
+ */
+export function nutBoltPreview(o: NutBolt, at: V3[]): Shape[] {
+  checkNutBolt(o);
+  const { d, pitch, hex, head, nut } = o.size, r = d / 2, c = o.clearance;
+  const up = (p: V3, h: number): V3 => [p[0], p[1], p[2] + h];
+  const coil = (s: Solid, rad: number, from: V3, h: number): Shape => (h > 1e-6 ? (makeCompound([s, makeHelix(pitch, h, rad, from, [0, 0, 1])]) as unknown as Shape) : s);
+  const bolt = joinTouching("fuse", chamferedHex(hex, head, at[0], false), [occCylinder(r, o.length, up(at[0], head), [0, 0, 1]) as Solid]);
+  const hole = occCylinder(r + c, nut + 2, up(at[1], -1), [0, 0, 1]) as Solid;
+  const nutS = booleanOp("subtract", chamferedHex(hex, nut, at[1], true), [hole]);
+  const cutLen = o.thread > 1e-6 ? o.thread : o.length;
+  const cutter = occCylinder(r + c, cutLen, at[2], [0, 0, 1]) as Solid;
+  return [
+    coil(bolt, r, up(at[0], head + o.length - o.thread), o.thread),
+    coil(nutS, r + c, at[1], nut),
+    coil(cutter, r + c, at[2], cutLen),
+    nutTrap(o, at[3]),
+  ];
+}
+
+function checkNutBolt(o: NutBolt): void {
+  if (!(o.length > 0)) throw new Error("Nut and bolt: the bolt length must be more than 0 mm");
+  if (!(o.thread >= 0)) throw new Error("Nut and bolt: the thread length can't be below 0 mm");
+  if (o.thread > o.length + 1e-9) throw new Error("Nut and bolt: the thread can't be longer than the bolt");
+  if (o.thread > 1e-6 && o.thread < o.size.pitch) throw new Error(`Nut and bolt: the thread must be at least one turn (${fmtMm(o.size.pitch)} mm) long, or 0`);
+  if (!(o.clearance >= 0 && o.clearance <= 1)) throw new Error("Nut and bolt: the clearance must be 0 to 1 mm");
+  if (o.length > 300) throw new Error("Nut and bolt: at most 300 mm long");
+}
+
+const fmtMm = (v: number) => String(Math.round(v * 100) / 100);
 
 /** Gridfinity (Macro menu): the standard's fixed sizes (mm) — a grid square, a height unit, the gap round a bin. */
 export const GRIDFINITY = { grid: 42, unit: 7, gap: 0.5, radius: 3.75, foot: 4.75, lip: 4.4, magnet: { d: 6.5, depth: 2.4, from: 13 } } as const;

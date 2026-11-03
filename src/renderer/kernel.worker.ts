@@ -5,12 +5,16 @@
  * A result comes with its display mesh, made here too. See kernelWorker.ts for the other end.
  */
 import {
+  loadTextFont,
+  textFontReady,
   booleanOp,
   deserialize,
   errorMessage,
   exportStep,
   gridfinityBaseplate,
   gridfinityBin,
+  nutBoltParts,
+  type NutBolt,
   type GridfinityBaseplate,
   type GridfinityBin,
   type V3,
@@ -41,18 +45,23 @@ export type KernelJob =
   | { op: "exportStl"; items: JobShape[]; quality: StlQuality }
   | { op: "export3mf"; items: (JobShape & { name: string })[]; quality: StlQuality }
   | { op: "importStep"; data: Uint8Array }
-  | { op: "gridfinity"; bin?: GridfinityBin; baseplate?: GridfinityBaseplate; at: V3 };
+  | { op: "gridfinity"; bin?: GridfinityBin; baseplate?: GridfinityBaseplate; at: V3 }
+  | { op: "nutbolt"; o: NutBolt; at: V3[] }
+  /** A shape's display mesh (faces / edges by place: see meshByPlace) — a heavy one read from a file, meshed here so the window stays live. */
+  | { op: "mesh"; brep: string };
 
 /** A shape made here: BREP text and its display mesh (faces / edges by place: see meshByPlace) — the app needn't mesh it again. */
 export type JobSolid = { brep: string; mesh: Tessellation };
 
 export type KernelJobResult =
+  | { op: "mesh"; mesh: Tessellation }
   | ({ op: "round"; skipped: number[]; asked: number; largest: number | null } & JobSolid)
   | ({ op: "shell" } & JobSolid)
   | ({ op: "boolean" } & JobSolid)
   | { op: "file"; data: Uint8Array }
   | { op: "importStep"; solids: JobSolid[] }
-  | ({ op: "gridfinity" } & JobSolid);
+  | ({ op: "gridfinity" } & JobSolid)
+  | { op: "nutbolt"; solids: JobSolid[] };
 
 const ready = initKernel();
 ready.then(
@@ -98,6 +107,11 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
       return { op: "importStep", solids: (await importStep(job.data)).map(made) };
     case "gridfinity":
       return { op: "gridfinity", ...made(job.bin ? gridfinityBin(job.bin, job.at) : gridfinityBaseplate(job.baseplate!, job.at)) };
+    case "mesh":
+      return { op: "mesh", mesh: meshByPlace(deserialize(job.brep)) };
+    case "nutbolt":
+      if (!textFontReady()) await loadTextFont(); // (the thread cutter's size label)
+      return { op: "nutbolt", solids: nutBoltParts(job.o, job.at).map(made) };
   }
 }
 

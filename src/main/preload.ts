@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld("yddd", {
   openFile: (req: { title: string; filters: FileFilter[]; binary: boolean }) =>
     ipcRenderer.invoke("open-file", req) as Promise<{ path: string; data: string | Uint8Array } | null>,
   readFile: (filePath: string) => ipcRenderer.invoke("read-file", filePath) as Promise<string | null>,
+  clipWrite: (data: string) => ipcRenderer.invoke("clip-write", data) as Promise<void>,
+  clipRead: () => ipcRenderer.invoke("clip-read") as Promise<string | null>,
   listFonts: () => ipcRenderer.invoke("fonts-list") as Promise<{ family: string; style: string; file: string }[]>,
   readFont: (file: string) => ipcRenderer.invoke("font-read", file) as Promise<Uint8Array | null>,
   addRecent: (filePath: string) => ipcRenderer.invoke("recent-add", filePath) as Promise<void>,

@@ -169,6 +169,8 @@ kbd {
 .snap select { margin-left: 4px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; }
 
 /* ---------------------------------------------------------------- HUD & op panel */
+#box-select { position: absolute; pointer-events: none; z-index: 5; border: 1px solid #4f9dff; background: rgba(79, 157, 255, 0.12); }
+#box-select.crossing { border: 1px dashed #3fbf7f; background: rgba(63, 191, 127, 0.12); }
 #hud {
   position: absolute; pointer-events: none; transform: translate(14px, -28px);
   padding: 3px 7px; border-radius: 4px; background: rgba(20, 21, 24, 0.55);

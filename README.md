@@ -27,7 +27,7 @@ F1 = shortcuts, / = search commands.
 - move, rotate, scale, mirror, circular copy
 - text (flat or wrapped round a curved face, Thai works)
 - resize holes for print fit
-- macros: box from face, lids, dividers, battery case, gridfinity bin + baseplate, random scatter
+- macros: box from face, lids, dividers, battery case, nut and bolt (M5–M24, thread cutter, nut trap), gridfinity bin + baseplate, random scatter
 - STEP / STL / 3MF export, STEP + STL import
 
 ## Mouse
@@ -35,7 +35,7 @@ F1 = shortcuts, / = search commands.
 - middle drag / alt+drag: orbit
 - shift+drag: pan
 - wheel: zoom
-- ctrl: no snap
+- ctrl: snap to points / grid while drawing or dragging (File → Settings → Snap → Auto: snaps without it, Ctrl then places freely)
 
 ## Notes
 

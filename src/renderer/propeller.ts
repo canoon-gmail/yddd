@@ -90,7 +90,7 @@ export const PROPELLER: Tutorial = {
     },
     {
       title: "Shaft hole",
-      how: `<kbd>B</kbd> <kbd>C</kbd>: click the <b>centre</b> of the hub's top (it snaps), radius <b>${SHAFT_R}</b> Enter, height <b>${-(HUB_H + 2)}</b> Enter (down through the hub). <kbd>1</kbd>, click the propeller, <kbd>Shift</kbd>-click the cylinder, <kbd>−</kbd> (Subtract): a ${2 * SHAFT_R} mm hole for the motor shaft. Done — <kbd>Ctrl</kbd>+<kbd>S</kbd> to save, File → Export 3MF to print (supports under the blades).`,
+      how: `<kbd>B</kbd> <kbd>C</kbd>: click the <b>centre</b> of the hub's top (hold <kbd>Ctrl</kbd> so it snaps), radius <b>${SHAFT_R}</b> Enter, height <b>${-(HUB_H + 2)}</b> Enter (down through the hub). <kbd>1</kbd>, click the propeller, <kbd>Shift</kbd>-click the cylinder, <kbd>−</kbd> (Subtract): a ${2 * SHAFT_R} mm hole for the motor shaft. Done — <kbd>Ctrl</kbd>+<kbd>S</kbd> to save, File → Export 3MF to print (supports under the blades).`,
       run(doc, ctx, label) {
         const p = body(doc, ctx, "hub");
         const drill = makeCylinder(GROUND, [0, 0, -HUB_H / 2 - 1], SHAFT_R, HUB_H + 2);
