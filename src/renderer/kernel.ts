@@ -168,9 +168,36 @@ export interface Frame {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let oc: any;
 
+/** OpenCascade's own threads (the threaded build, a cross-origin isolated page): booleans split across them. */
+let parallel = false;
+/** How many threads this kernel works with (1: just its own). */
+let threadCount = 1;
+export const kernelThreads = (): number => threadCount;
+/**
+ * The threaded build's workers, made when it loads (one can't be started while the kernel is busy): the background
+ * kernel (kernel.worker.ts, the slow jobs) BG_THREADS (YDDD_THREADS=N at start: N, e.g. 16), the window's own none — each holds
+ * its own copy of the compiled code (both kernels with 16: ~510 MB more). OpenCascade's pool as many (the caller only
+ * waits: one less, 2 threads did nearly nothing — a 20-tool cut 3.5 s, with 2 in the pool 2.1 s).
+ */
+// (0 for now, while the kernel's speed work goes on: YDDD_THREADS=16 at start for full speed)
+const BG_THREADS = 0;
+
 export async function initKernel(): Promise<void> {
+  const inWorker = typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== "undefined";
+  // (YDDD_THREADS=N at start: the worker's name says how many — see kernelWorker.ts)
+  const asked = Number(/threads=(\d+)/.exec((globalThis as { name?: string }).name ?? "")?.[1] ?? NaN);
+  const want = Number.isFinite(asked) ? Math.min(asked, 64) : BG_THREADS;
+  const threads = inWorker && globalThis.crossOriginIsolated ? Math.min(want, navigator.hardwareConcurrency || 1) : 0;
+  (globalThis as { y3dOccThreads?: number }).y3dOccThreads = threads; // (read by the build as it loads)
   oc = await opencascade({ locateFile: () => wasmUrl });
   setOC(oc);
+  if (oc.OSD_ThreadPool) {
+    // (made first with this many threads, not one per logical processor — without workers just 1: the mesher asks for the
+    // default pool and meshes in parallel if it has more, and a thread it can't start would hang the window)
+    oc.OSD_ThreadPool.DefaultPool(threads >= 2 ? threads : 1);
+    parallel = threads >= 2;
+    threadCount = parallel ? threads : 1;
+  }
   fastSubShapes();
   quickExactBoxes();
 }
@@ -415,6 +442,7 @@ function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], 
     // Oriented bounding boxes to rule out face pairs that can't touch: axis-aligned ones of solids
     // turned off X / Y / Z (e.g. a circular copy's sweeps round a cylinder) all overlap — 7 s → 1 s.
     builder.SetUseOBB(true);
+    builder.SetRunParallel(parallel);
     if (glue !== "off") builder.SetGlue(glue === "full" ? oc.BOPAlgo_GlueEnum.BOPAlgo_GlueFull : oc.BOPAlgo_GlueEnum.BOPAlgo_GlueShift);
     builder.Build();
     if (builder.HasErrors()) throw new Error(`boolean ${kind} failed`);

@@ -30,6 +30,9 @@ const MIME: Record<string, string> = {
   ".json": "application/json",
 };
 
+/** Headers that make the page cross-origin isolated (SharedArrayBuffer: OpenCascade's threads). */
+const ISOLATED = { "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" };
+
 function registerAppProtocol(): void {
   protocol.handle("app", async (req) => {
     const { pathname } = new URL(req.url);
@@ -39,7 +42,8 @@ function registerAppProtocol(): void {
     try {
       const data = await readFile(file);
       const type = MIME[path.extname(file).toLowerCase()] ?? "application/octet-stream";
-      return new Response(data, { headers: { "content-type": type } });
+      // (cross-origin isolated: SharedArrayBuffer, which the threaded OpenCascade build needs)
+      return new Response(data, { headers: { "content-type": type, ...ISOLATED } });
     } catch {
       return new Response("Not found", { status: 404 });
     }
@@ -547,7 +551,11 @@ async function createWindow(): Promise<void> {
       .then(restart);
   });
   // YDDD_STRESS=N: renderer populates the scene with N test solids on startup.
-  const q = process.env.YDDD_STRESS ? `?stress=${encodeURIComponent(process.env.YDDD_STRESS)}` : "";
+  // YDDD_THREADS=N: the background kernel's OpenCascade threads (default 0: none — 16: full speed; at most one per core)
+  const params = new URLSearchParams();
+  if (process.env.YDDD_STRESS) params.set("stress", process.env.YDDD_STRESS);
+  if (process.env.YDDD_THREADS) params.set("threads", process.env.YDDD_THREADS);
+  const q = params.size ? `?${params}` : "";
   if (DEV_URL) await win.loadURL(DEV_URL + q);
   // The page stays at app://y3d (the app's old name): its origin keys the saved settings (localStorage).
   else await win.loadURL("app://y3d/index.html" + q);

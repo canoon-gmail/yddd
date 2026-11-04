@@ -17,5 +17,6 @@ export default defineConfig({
   worker: { format: "es" },
   // The Emscripten OpenCascade build must not be pre-bundled by esbuild.
   optimizeDeps: { exclude: ["replicad-opencascadejs"] },
-  server: { port: 5733, strictPort: true },
+  // (cross-origin isolated, as the app:// protocol serves it: SharedArrayBuffer for OpenCascade's threads)
+  server: { port: 5733, strictPort: true, headers: { "Cross-Origin-Opener-Policy": "same-origin", "Cross-Origin-Embedder-Policy": "require-corp" } },
 });

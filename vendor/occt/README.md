@@ -13,3 +13,11 @@ Added: `Y3DFaceOffset` (per-face offset, wrappers/y3d-face-offset.cpp), `BRepFea
 parameters (interior deflection / angle, MinSize, flags for ControlSurfaceDeflection,
 InternalVerticesMode, ...) — yddd's display meshes turn surface control off (see `meshFaces` in
 kernel.ts). The original wasm is kept in `~/occt-build/backup-2026-10-20/`.
+
+**Threaded build (branch dev-native-occt):** built from `~/occt-build/y3d-config-mt` with the image
+`ghcr.io/taucad/opencascade.js:canary-ebd263f1-multi-threaded` — `y3d_occt.yml` there adds `-pthread` and
+`-sPTHREAD_POOL_SIZE=globalThis["y3dOccThreads"]||0` (the page sets how many workers before loading it: kernel.ts
+`initKernel` — the background kernel BG_THREADS, 0 by default, `YDDD_THREADS=16 npm start` for full speed; the window's own none) and leaves out `-sEVAL_CTORS` (not with pthreads).
+Needs a cross-origin isolated page (main.ts `ISOLATED` headers, vite.config.mts `server.headers`). Booleans run with
+`SetRunParallel`; OpenCascade's default thread pool is made first in every kernel (the mesher asks for it: without
+workers it must be 1, or a thread it can't start hangs the window).

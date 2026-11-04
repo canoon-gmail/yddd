@@ -30,6 +30,8 @@ export class KernelWorker {
   private pending = new Map<number, { resolve: (r: KernelJobResult) => void; reject: (e: Error) => void }>();
   /** Loaded and working (false while loading, or if it failed to start: the caller then works on the main thread). */
   ready = false;
+  /** OpenCascade threads it works with (1: just its own — see kernel.ts initKernel). */
+  threads = 1;
 
   constructor() {
     this.spawn();
@@ -37,13 +39,18 @@ export class KernelWorker {
 
   private spawn(): void {
     this.ready = false;
-    const w = new Worker(new URL("./kernel.worker.ts", import.meta.url), { type: "module" });
+    // (the page's ?threads=N — YDDD_THREADS — handed on in the worker's name: it starts its threads as it loads)
+    const threads = new URLSearchParams(location.search).get("threads");
+    // (a plain options object: Vite reads its "type" when building)
+    const name = threads ? `threads=${threads}` : "kernel";
+    const w = new Worker(new URL("./kernel.worker.ts", import.meta.url), { type: "module", name });
     this.worker = w;
-    w.onmessage = (e: MessageEvent<{ ready?: boolean; error?: string; id?: number; result?: KernelJobResult }>) => {
+    w.onmessage = (e: MessageEvent<{ ready?: boolean; threads?: number; error?: string; id?: number; result?: KernelJobResult }>) => {
       if (w !== this.worker) return;
       const m = e.data;
       if (m.ready !== undefined) {
         this.ready = m.ready;
+        this.threads = m.threads ?? 1;
         if (!m.ready) console.warn("background kernel failed to start:", m.error);
         return;
       }

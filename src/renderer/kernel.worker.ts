@@ -21,6 +21,7 @@ import {
   exportStl,
   importStep,
   initKernel,
+  kernelThreads,
   meshByPlace,
   meshForExport,
   roundSome,
@@ -65,7 +66,7 @@ export type KernelJobResult =
 
 const ready = initKernel();
 ready.then(
-  () => postMessage({ ready: true }),
+  () => postMessage({ ready: true, threads: kernelThreads() }),
   (e) => postMessage({ ready: false, error: errorMessage(e) }),
 );
 
