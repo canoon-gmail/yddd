@@ -2715,6 +2715,15 @@ export class App implements ToolHost {
       faces.push(f);
     }
     const first = this.doc.get(items[0].bodyId)!, axis = isBrep(first) ? offsetDragAxis(first.shape, items[0].faceId) : null;
+    let breps: string[] | undefined;
+    const outcome = (out: Shape[], ring: boolean): OpOutcome => ({
+      ghost: new Map(out.map((f, i) => [-1 - i, f] as [number, Shape])),
+      commit: () => {
+        const made = out.map((f) => this.doc.makeBody(f, ring ? "Ring" : "Outline", "face"));
+        this.doc.commit([...this.doc.bodies, ...made], ring ? "Offset ring" : "Offset faces");
+        return { select: made.map((b) => b.id), solidMode: true };
+      },
+    });
     this.startOp({
       title: `Offset ${faces.length} faces`,
       label: "Offset",
@@ -2724,16 +2733,12 @@ export class App implements ToolHost {
         { key: "fill", label: "Fill holes (outer outlines only)", value: this.defaults.offsetFill ? 1 : 0, type: "checkbox" },
         { key: "ring", label: "Make ring", value: this.defaults.offsetRing ? 1 : 0, type: "checkbox" },
       ],
-      compute: ({ d, round, fill, ring }) => {
-        const out = offsetFaces(faces, d, !!round, !!fill, !!ring);
-        return {
-          ghost: new Map(out.map((f, i) => [-1 - i, f] as [number, Shape])),
-          commit: () => {
-            const made = out.map((f) => this.doc.makeBody(f, ring ? "Ring" : "Outline", "face"));
-            this.doc.commit([...this.doc.bodies, ...made], ring ? "Offset ring" : "Offset faces");
-            return { select: made.map((b) => b.id), solidMode: true };
-          },
-        };
+      compute: ({ d, round, fill, ring }) => outcome(offsetFaces(faces, d, !!round, !!fill, !!ring), !!ring),
+      // The same in the background kernel (a long script name's outline: ~1–2 s — the window stays live)
+      computeAsync: async ({ d, round, fill, ring }) => {
+        breps ??= faces.map((f) => serializeShape(f as unknown as Shape));
+        const res = await this.bgKernel.run({ op: "offsetFaces", faces: breps, distance: d, round: !!round, fill: !!fill, ring: !!ring });
+        return outcome(res.faces.map((m) => solidFrom(m) as unknown as Shape), !!ring);
       },
       remember: ({ d, round, fill, ring }) => {
         this.defaults.offset = d;

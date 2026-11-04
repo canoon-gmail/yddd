@@ -25,6 +25,7 @@ import {
   meshByPlace,
   meshForExport,
   roundSome,
+  offsetFaces,
   serializeShape,
   shellSolid,
   TriMesh,
@@ -41,6 +42,8 @@ export type JobShape = { brep: string } | { mesh: Float32Array };
 export type KernelJob =
   | { op: "round"; kind: "fillet" | "chamfer"; brep: string; /** by place in `shape.edges` (null: every real edge) */ edges: number[] | null; size: number }
   | { op: "shell"; brep: string; /** open faces, by place in `shape.faces` */ faces: number[]; thickness: number }
+  /** Offset of several flat faces on one plane (see offsetFaces): the faces as BREP text. */
+  | { op: "offsetFaces"; faces: string[]; distance: number; round: boolean; fill: boolean; ring: boolean }
   | { op: "boolean"; kind: BooleanOp; target: string; tools: string[] }
   | { op: "exportStep"; items: { brep: string; name: string }[] }
   | { op: "exportStl"; items: JobShape[]; quality: StlQuality }
@@ -58,6 +61,7 @@ export type KernelJobResult =
   | { op: "mesh"; mesh: Tessellation }
   | ({ op: "round"; skipped: number[]; asked: number; largest: number | null } & JobSolid)
   | ({ op: "shell" } & JobSolid)
+  | { op: "offsetFaces"; faces: JobSolid[] }
   | ({ op: "boolean" } & JobSolid)
   | { op: "file"; data: Uint8Array }
   | { op: "importStep"; solids: JobSolid[] }
@@ -95,6 +99,10 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
     case "shell": {
       const shape = solidOf(job.brep), all = shape.faces.map((f) => f.hashCode);
       return { op: "shell", ...made(shellSolid(shape, new Set(job.faces.map((i) => all[i])), job.thickness)) };
+    }
+    case "offsetFaces": {
+      const faces = job.faces.map((b) => deserialize(b) as unknown as Parameters<typeof offsetFaces>[0][number]);
+      return { op: "offsetFaces", faces: offsetFaces(faces, job.distance, job.round, job.fill, job.ring).map((f) => made(f as unknown as Solid)) };
     }
     case "boolean":
       return { op: "boolean", ...made(booleanOp(job.kind, solidOf(job.target), job.tools.map(solidOf))) };

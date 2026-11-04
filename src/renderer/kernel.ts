@@ -764,7 +764,8 @@ function extractMesh(shape: unknown, opts: { tolerance: number; angularTolerance
  * smoothly (e.g. the rings between the arc pieces of a tube swept along a Spline, or two
  * half cylinders). None is a visible crease, so they are not drawn, not pickable and
  * skipped by "fillet all edges". (A flat face meeting a curved one smoothly — a fillet's
- * edge — stays: it shows where the rounding starts.)
+ * edge — stays: it shows where the rounding starts; but not on a side wall, both faces between
+ * the same two flat caps: a pushed-up outline's straight runs and curves.)
  * Flat face bodies have no seams (their single-face edges are the real outline).
  */
 export function seamEdgeIds(shape: Shape): Set<number> {
@@ -780,9 +781,36 @@ export function seamEdgeIds(shape: Shape): Set<number> {
   }
   const seams = new Set<number>();
   let edges: Map<number, Edge> | null = null;
+  // (each face's flat neighbours — for the side walls below)
+  let flatNext: Map<number, Set<number>> | null = null;
+  const flatNeighbours = () => {
+    if (flatNext) return flatNext;
+    flatNext = new Map();
+    for (const two of facesOf.values()) {
+      if (two.length !== 2) continue;
+      for (const [a, b] of [[two[0], two[1]], [two[1], two[0]]]) {
+        if (b.geomType !== "PLANE") continue;
+        const set = flatNext.get(a.hashCode) ?? new Set<number>();
+        set.add(b.hashCode);
+        flatNext.set(a.hashCode, set);
+      }
+    }
+    return flatNext;
+  };
   for (const [id, faces] of facesOf) {
     if (faces.length === 1) seams.add(id);
-    else if (faces.length === 2 && faces.every((f) => f.geomType !== "PLANE")) {
+    else if (faces.length === 2) {
+      const flat = faces.filter((f) => f.geomType === "PLANE").length;
+      // A flat face meeting a curved one smoothly: a fillet's edge (it shows where the rounding starts) — kept, but on a
+      // side wall: both faces running between the same two flat caps (the side of a pushed-up outline — a letter's or a
+      // keychain plate's straight runs and curves, ~100 of them, each join drawn: a striped side)
+      if (flat === 2) continue;
+      if (flat === 1) {
+        const nb = flatNeighbours(), a = nb.get(faces[0].hashCode), b = nb.get(faces[1].hashCode);
+        let shared = 0;
+        if (a && b) for (const f of a) if (b.has(f)) shared++;
+        if (shared < 2) continue;
+      }
       edges ??= new Map(shape.edges.map((e) => [e.hashCode, e]));
       const e = edges.get(id);
       if (e && smoothJoin(e, faces[0], faces[1])) seams.add(id);
