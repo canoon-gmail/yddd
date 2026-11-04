@@ -6478,9 +6478,11 @@ export class App implements ToolHost {
       const groupOf = (e: Event) => (e.target as HTMLElement).closest<HTMLElement>(".ol-group")?.dataset.group ?? null;
       const members = (g: string) => this.doc.bodies.filter((b) => b.group === g);
       // (a click in the panel picks what's under the mouse: the list mustn't jump — see olScrollTo)
+      // (cleared once the whole click is handled — not in a microtask: with a real mouse click the browser runs those
+      // between one listener and the next, so it was cleared before the click below picked the row: the list jumped)
       el.addEventListener("click", () => {
         this.olFromPanel = true;
-        queueMicrotask(() => (this.olFromPanel = false));
+        setTimeout(() => (this.olFromPanel = false));
       }, true);
       el.addEventListener("click", (e) => {
         const t = e.target as HTMLElement;
