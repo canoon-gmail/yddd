@@ -551,7 +551,7 @@ async function createWindow(): Promise<void> {
       .then(restart);
   });
   // YDDD_STRESS=N: renderer populates the scene with N test solids on startup.
-  // YDDD_THREADS=N: the background kernel's OpenCascade threads (default 0: none — 16: full speed; at most one per core)
+  // (the background kernel's thread count, for development — see kernel.ts initKernel)
   const params = new URLSearchParams();
   if (process.env.YDDD_STRESS) params.set("stress", process.env.YDDD_STRESS);
   if (process.env.YDDD_THREADS) params.set("threads", process.env.YDDD_THREADS);

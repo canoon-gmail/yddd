@@ -175,16 +175,16 @@ let threadCount = 1;
 export const kernelThreads = (): number => threadCount;
 /**
  * The threaded build's workers, made when it loads (one can't be started while the kernel is busy): the background
- * kernel (kernel.worker.ts, the slow jobs) BG_THREADS (YDDD_THREADS=N at start: N, e.g. 16), the window's own none — each holds
+ * kernel (kernel.worker.ts, the slow jobs) BG_THREADS, the window's own none — each holds
  * its own copy of the compiled code (both kernels with 16: ~510 MB more). OpenCascade's pool as many (the caller only
  * waits: one less, 2 threads did nearly nothing — a 20-tool cut 3.5 s, with 2 in the pool 2.1 s).
  */
-// (0 for now, while the kernel's speed work goes on: YDDD_THREADS=16 at start for full speed)
+// (0 for now, while the kernel's speed work goes on)
 const BG_THREADS = 0;
 
 export async function initKernel(): Promise<void> {
   const inWorker = typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== "undefined";
-  // (YDDD_THREADS=N at start: the worker's name says how many — see kernelWorker.ts)
+  // (a count set at start: in the worker's name — see kernelWorker.ts)
   const asked = Number(/threads=(\d+)/.exec((globalThis as { name?: string }).name ?? "")?.[1] ?? NaN);
   const want = Number.isFinite(asked) ? Math.min(asked, 64) : BG_THREADS;
   const threads = inWorker && globalThis.crossOriginIsolated ? Math.min(want, navigator.hardwareConcurrency || 1) : 0;

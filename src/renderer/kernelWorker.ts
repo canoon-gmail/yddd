@@ -39,7 +39,7 @@ export class KernelWorker {
 
   private spawn(): void {
     this.ready = false;
-    // (the page's ?threads=N — YDDD_THREADS — handed on in the worker's name: it starts its threads as it loads)
+    // (the page's thread count handed on in the worker's name: it starts its threads as it loads)
     const threads = new URLSearchParams(location.search).get("threads");
     // (a plain options object: Vite reads its "type" when building)
     const name = threads ? `threads=${threads}` : "kernel";
