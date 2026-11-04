@@ -20,6 +20,9 @@ import notoThai from "../../vendor/fonts/NotoSansThai-Regular.ttf?url";
 import notoThaiBold from "../../vendor/fonts/NotoSansThai-Bold.ttf?url";
 import notoSymbols from "../../vendor/fonts/NotoSansSymbols-Regular.ttf?url";
 import notoSymbols2 from "../../vendor/fonts/NotoSansSymbols2-Regular.ttf?url";
+import pacifico from "../../vendor/fonts/Pacifico-Regular.ttf?url";
+import lobster from "../../vendor/fonts/Lobster-Regular.ttf?url";
+import ClipperLib from "clipper-lib";
 import {
   setOC,
   Plane,
@@ -1133,6 +1136,9 @@ export const BUILT_IN_FONTS: { family: string; style: string; key: string; url: 
   { family: "Noto Sans Thai", style: "Bold", key: "builtin:NotoSansThai-Bold", url: notoThaiBold },
   { family: "Noto Sans Symbols", style: "Regular", key: "builtin:NotoSansSymbols-Regular", url: notoSymbols },
   { family: "Noto Sans Symbols 2", style: "Regular", key: "builtin:NotoSansSymbols2-Regular", url: notoSymbols2 },
+  // (script fonts whose letters join up — a name keychain in one piece)
+  { family: "Pacifico", style: "Regular", key: "builtin:Pacifico-Regular", url: pacifico },
+  { family: "Lobster", style: "Regular", key: "builtin:Lobster-Regular", url: lobster },
 ];
 
 /**
@@ -3889,6 +3895,71 @@ export function offsetFaces(faces: Face[], distance: number, round = false, fill
   return out.map((f) => (dot3(f.normalAt().toTuple() as V3, n) < 0 ? f.flipOrientation() : f));
 }
 
+/**
+ * A face (no holes) grown round by `d` the sure way, where OpenCascade's offset fails — at the distance where an outline's
+ * parts grow into each other and close off a gap (Pacifico's curly "M" from ~2.6 mm on a 20 mm name), whatever its curves
+ * are made of. Its outline as points (every ~0.4 mm: within ~0.04 mm at a letter's tightest curls), grown by Clipper (round joins, arcs within 0.01 mm), each loop a
+ * smooth curve through its points again (cubic, within 0.01 mm; straight pieces if those don't make a valid face).
+ */
+function clipperGrown(f: Face, d: number): Face {
+  const w = [...f.wires][0], n = norm3(f.normalAt().toTuple() as V3);
+  const cc = new oc.BRepAdaptor_CompCurve(w.wrapped, true), pts: V3[] = [];
+  try {
+    const u0 = cc.FirstParameter(), u1 = cc.LastParameter(), count = Math.min(3000, Math.max(200, Math.ceil(measureLength(w) / 0.4)));
+    for (let i = 0; i < count; i++) {
+      const p = cc.Value(u0 + ((u1 - u0) * i) / count);
+      pts.push([p.X(), p.Y(), p.Z()]);
+      p.delete();
+    }
+  } finally {
+    cc.delete();
+  }
+  // (the face's plane: x / y along it, in Clipper's whole numbers — 1e-5 mm)
+  const o = pts[0], ax = norm3(Math.abs(n[0]) < 0.9 ? cross3(n, [1, 0, 0]) : cross3(n, [0, 1, 0])), ay = cross3(n, ax), S = 1e5;
+  let path = pts.map((p) => ({ X: Math.round(dot3(sub3(p, o), ax) * S), Y: Math.round(dot3(sub3(p, o), ay) * S) }));
+  if (!ClipperLib.Clipper.Orientation(path)) path = path.reverse();
+  const co = new ClipperLib.ClipperOffset(2, 0.01 * S), sol: { X: number; Y: number }[][] = [];
+  co.AddPath(path, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+  co.Execute(sol, d * S);
+  const to3 = (q: { X: number; Y: number }): V3 => [0, 1, 2].map((k) => o[k] + (q.X / S) * ax[k] + (q.Y / S) * ay[k]) as V3;
+  const loopWire = (loop: { X: number; Y: number }[], smooth: boolean): Wire => {
+    const p3 = loop.map(to3);
+    if (!smooth) return [...makePolygon(p3).wires][0];
+    const arr = new oc.NCollection_Array1_gp_Pnt(1, p3.length + 1), made: { delete(): void }[] = [arr];
+    try {
+      [...p3, p3[0]].forEach((p, i) => {
+        const g = new oc.gp_Pnt(p[0], p[1], p[2]);
+        made.push(g);
+        arr.SetValue(i + 1, g);
+      });
+      const fit = new oc.GeomAPI_PointsToBSpline(arr, 3, 3, oc.GeomAbs_Shape.GeomAbs_C2, 0.01);
+      made.push(fit);
+      if (fit.IsDone()) {
+        const mk = new oc.BRepBuilderAPI_MakeEdge(fit.Curve() as never);
+        made.push(mk);
+        const wire = assembleWire([cast(mk.Edge()) as Edge]);
+        if (wire.isClosed) return wire;
+      }
+    } catch {
+      // (the straight pieces below)
+    } finally {
+      made.forEach((m) => m.delete());
+    }
+    return [...makePolygon(p3).wires][0];
+  };
+  const outers = sol.filter((l) => ClipperLib.Clipper.Orientation(l)), holes = sol.filter((l) => !ClipperLib.Clipper.Orientation(l));
+  if (!outers.length) throw new Error("Offset: the face vanishes at this distance");
+  // (smooth curves through the loops — or, if those don't make a valid face, the straight pieces)
+  for (const smooth of [true, false]) {
+    const faces = outers.map((ol) => makeFace(loopWire(ol, smooth), holes.filter((h) => ClipperLib.Clipper.PointInPolygon(h[0], ol) !== 0).map((h) => loopWire(h, smooth))));
+    let r: Face = faces[0];
+    if (faces.length > 1) r = mended(boolean("fuse", faces[0] as unknown as Shape3D, faces.slice(1) as unknown as Shape3D[]).simplify()).faces[0];
+    if (dot3(r.normalAt().toTuple() as V3, n) < 0) r = r.flipOrientation();
+    if (isValidShape(r)) return r;
+  }
+  throw new Error("Offset: the result is not a valid face");
+}
+
 /** `s` as it is if OpenCascade's check passes, else mended with ShapeFix_Shape (when that passes). */
 function mended<T extends Shape3D>(s: T): T {
   if (isValidShape(s as unknown as Shape)) return s;
@@ -3918,9 +3989,10 @@ function offsetLoose(face: Face, distance: number, round: boolean, noHoles = fal
   };
   const wires = [...face.wires].sort((a, b) => size(b) - size(a));
   // Grown round in steps: the same face (growing round by a, then b is growing by a + b) — a big step fails where an
-  // outline's own parts grow into each other (between an "a"'s bowl and stem at 3 mm on a 20 mm letter), small ones don't
+  // outline's own parts grow into each other (between an "a"'s bowl and stem at 3 mm on a 20 mm letter), small ones don't;
+  // failing still, the sure way (clipperGrown)
   const stepped = (f: Face, d: number): Face => {
-    for (const n of [2, 3, 4, 6, 8]) {
+    for (const n of [2, 3, 4]) {
       try {
         let g = f;
         for (let k = 0; k < n; k++) g = offsetPlanar(g, d / n, true);
@@ -3929,7 +4001,7 @@ function offsetLoose(face: Face, distance: number, round: boolean, noHoles = fal
         // (more, smaller steps)
       }
     }
-    throw new Error("Offset: the face vanishes at this distance");
+    return clipperGrown(f, d);
   };
   const one = (f: Face, d: number): Face => {
     const go = (r: boolean) => (r && d < 0 ? offsetPlanar(offsetPlanar(f, 2 * d, false), -d, true) : offsetPlanar(f, d, r));
@@ -3940,7 +4012,7 @@ function offsetLoose(face: Face, distance: number, round: boolean, noHoles = fal
         if (round) throw e;
         return go(true);
       }
-      // (growing: sharp corners it can't do come out round; round in smaller steps)
+      // (growing: sharp corners it can't do come out round; round in smaller steps, else the sure way)
       try {
         return go(true);
       } catch {

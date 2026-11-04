@@ -9,6 +9,8 @@ YDDD's own code is MIT (see `LICENSE`). It ships with these parts, each under it
 | replicad | `node_modules` | MIT, © QuaroTech Sàrl | `licenses/replicad-MIT.txt` |
 | Three.js | `node_modules` | MIT, © three.js authors | `licenses/three-MIT.txt` |
 | Noto Sans / Serif / Sans Thai fonts | `vendor/fonts` | SIL Open Font License 1.1, © Google LLC | `licenses/OFL-1.1.txt` |
+| Pacifico font | `vendor/fonts` | SIL Open Font License 1.1, © 2018 The Pacifico Project Authors | `licenses/OFL-1.1.txt` |
+| Lobster font | `vendor/fonts` | SIL Open Font License 1.1, © 2010 The Lobster Project Authors, Reserved Font Name "Lobster" | `licenses/OFL-1.1.txt` |
 
 ## OpenCascade (LGPL-2.1)
 

@@ -110,5 +110,8 @@
       ],
       "icon": "build/icon.png"
     }
+  },
+  "dependencies": {
+    "clipper-lib": "^6.4.2"
   }
 }
