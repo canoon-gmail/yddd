@@ -43,7 +43,7 @@ export type KernelJob =
   | { op: "round"; kind: "fillet" | "chamfer"; brep: string; /** by place in `shape.edges` (null: every real edge) */ edges: number[] | null; size: number }
   | { op: "shell"; brep: string; /** open faces, by place in `shape.faces` */ faces: number[]; thickness: number }
   /** Offset of several flat faces on one plane (see offsetFaces): the faces as BREP text. */
-  | { op: "offsetFaces"; faces: string[]; distance: number; round: boolean; fill: boolean; ring: boolean }
+  | { op: "offsetFaces"; faces: string[]; distance: number; round: boolean; fill: boolean; ring: boolean; join: boolean }
   | { op: "boolean"; kind: BooleanOp; target: string; tools: string[] }
   | { op: "exportStep"; items: { brep: string; name: string }[] }
   | { op: "exportStl"; items: JobShape[]; quality: StlQuality }
@@ -102,7 +102,7 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
     }
     case "offsetFaces": {
       const faces = job.faces.map((b) => deserialize(b) as unknown as Parameters<typeof offsetFaces>[0][number]);
-      return { op: "offsetFaces", faces: offsetFaces(faces, job.distance, job.round, job.fill, job.ring).map((f) => made(f as unknown as Solid)) };
+      return { op: "offsetFaces", faces: offsetFaces(faces, job.distance, job.round, job.fill, job.ring, job.join).map((f) => made(f as unknown as Solid)) };
     }
     case "boolean":
       return { op: "boolean", ...made(booleanOp(job.kind, solidOf(job.target), job.tools.map(solidOf))) };

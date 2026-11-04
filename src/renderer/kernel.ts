@@ -32,6 +32,8 @@ import {
   loadFont,
   getFont,
   textBlueprints,
+  BlueprintSketcher,
+  Blueprints,
   makeSphere,
   makeCylinder as occCylinder,
   makeCircle,
@@ -968,6 +970,104 @@ const facePlane = (frame: Frame, center: V3) => new Plane(center, frame.x, frame
  * replicad is not consistent here (e.g. circles come out reversed), and Push/Pull
  * uses the face normal as its positive direction.
  */
+/**
+ * A text's outlines (contours) straight from the font, each running the way the font draws it — replicad's
+ * textBlueprints, without its grouping into faces (organiseBlueprints turns each outline to suit how it grouped them).
+ * The same path, points and mirroring as textBlueprints, so the outlines lie exactly where its would.
+ */
+function textOutlines(text: string, size: number, family: string): Blueprints {
+  const font = getFont(family) ?? getFont();
+  const cmds = font!.getPath(text, 0, 0, size).commands as { type: string; x: number; y: number; x1: number; y1: number; x2: number; y2: number }[];
+  const out: ReturnType<BlueprintSketcher["done"]>[] = [];
+  let sk: BlueprintSketcher | null = null, last: [number, number] | null = null;
+  for (const c of cmds) {
+    if (c.type === "Z") {
+      if (sk) out.push(sk.close());
+      sk = null;
+      continue;
+    }
+    const p: [number, number] = [-c.x, c.y];
+    if (c.type === "M") {
+      if (sk) out.push(sk.done());
+      sk = new BlueprintSketcher();
+      sk.movePointerTo(p);
+      last = p;
+      continue;
+    }
+    if (last && Math.abs(p[0] - last[0]) < 1e-9 && Math.abs(p[1] - last[1]) < 1e-9) continue;
+    if (c.type === "L") sk?.lineTo(p);
+    if (c.type === "C") sk?.cubicBezierCurveTo(p, [-c.x1, c.y1], [-c.x2, c.y2]);
+    if (c.type === "Q") sk?.quadraticBezierCurveTo(p, [-c.x1, c.y1]);
+    last = p;
+  }
+  return new Blueprints(out as never).mirror([0, 0]) as Blueprints;
+}
+
+/**
+ * A run of text's faces as the font draws them: every outline (contour) of its letters on its own — filled ones run one
+ * way round, holes the other (the largest outline is filled) — the filled ones joined, the holes cut out. Not replicad's
+ * own grouping of outlines into faces (by which lies inside which): it lost letters where a script font tucks one under
+ * the next (Pacifico's "e" after a "T": gone in "Text", in "Tex" taken for a hole of the "x"). Its way if this fails.
+ */
+function runFaces(raw: Blueprints, bp: ReturnType<typeof textBlueprints>, plane: Plane, frame: Frame): Face[] {
+  const old = () => bp.sketchOnPlane(plane).sketches.flatMap((sk) => glyphFaces(orientFace(sk.face(), frame), frame));
+  try {
+    type Contour = { orientation: "clockwise" | "counterClockwise"; boundingBox: { width: number; height: number }; sketchOnPlane(p: Plane): { face(): Face } };
+    const contours = raw.blueprints as unknown as Contour[];
+    if (!contours.length) return [];
+    const boxArea = (c: Contour) => c.boundingBox.width * c.boundingBox.height;
+    const filledWay = contours.reduce((a, c) => (boxArea(c) > boxArea(a) ? c : a)).orientation;
+    const toFace = (c: Contour) => orientFace(c.sketchOnPlane(plane).face(), frame);
+    const fills = contours.filter((c) => c.orientation === filledWay).map(toFace), holes = contours.filter((c) => c.orientation !== filledWay).map(toFace);
+    // (replicad's own faces when they are right — the same area: most fonts, unchanged; ours only where it lost something)
+    const theirs = old(), area = (fs: Face[]) => fs.reduce((a, f) => a + measureArea(f), 0);
+    const holesArea = holes.reduce((a, f) => a + measureArea(f), 0), fillsArea = fills.reduce((a, f) => a + measureArea(f), 0);
+    // (no overlaps among the outlines — each a letter's own, holes inside — and theirs add up: theirs)
+    if (theirs.every((f) => isValidShape(f)) && Math.abs(area(theirs) - (fillsArea - holesArea)) <= 1e-3 * Math.max(1, fillsArea)) return theirs;
+    let r = fills.length > 1 ? mended(boolean("fuse", fills[0] as unknown as Shape3D, fills.slice(1) as unknown as Shape3D[]).simplify()).faces : fills;
+    if (holes.length) r = r.flatMap((f) => mended(boolean("cut", f as unknown as Shape3D, holes as unknown as Shape3D[]).simplify()).faces);
+    if (!r.length || !r.every((f) => isValidShape(f))) return theirs;
+    return r.map((f) => orientFace(f, frame));
+  } catch {
+    return old();
+  }
+}
+
+/**
+ * A letter's face as the font means it. Each outline inside the outermost one was taken for a hole — but script fonts
+ * (Pacifico) draw some letters as filled outlines overlapping each other: that "hole" crosses the outline round it and
+ * the face is broken (Push/Pull failed, or cut a hole where the letter is solid; a keychain plate's outline came apart).
+ * A broken face: the outlines that cross or touch the outermost (or another filled one) filled and joined, the rest
+ * holes cut out. As it was if it's fine, or that doesn't make valid faces.
+ */
+function glyphFaces(face: Face, frame: Frame): Face[] {
+  if (isValidShape(face)) return [face];
+  try {
+    const size = (w: Wire) => {
+      const b = w.boundingBox;
+      return b.width * b.height + b.height * b.depth + b.depth * b.width;
+    };
+    const wires = [...face.wires].sort((a, b) => size(b) - size(a));
+    const filled = [wires[0]], rest = wires.slice(1);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (let i = rest.length - 1; i >= 0; i--) {
+        if (filled.some((f) => measureDistanceBetween(f as never, rest[i] as never) < BOOLEAN_FUZZ)) {
+          filled.push(rest[i]);
+          rest.splice(i, 1);
+          grew = true;
+        }
+      }
+    }
+    const fill = filled.map((w) => orientFace(makeFace(w), frame)), holes = rest.map((w) => orientFace(makeFace(w), frame));
+    let r = fill.length > 1 ? mended(boolean("fuse", fill[0] as unknown as Shape3D, fill.slice(1) as unknown as Shape3D[]).simplify()).faces : fill;
+    if (holes.length) r = r.flatMap((f) => mended(boolean("cut", f as unknown as Shape3D, holes as unknown as Shape3D[]).simplify()).faces);
+    return r.length && r.every((f) => isValidShape(f)) ? r.map((f) => orientFace(f, frame)) : [face];
+  } catch {
+    return [face];
+  }
+}
+
 function orientFace(face: Face, frame: Frame): Face {
   const n = face.normalAt(face.center).toTuple();
   const dot = n[0] * frame.z[0] + n[1] * frame.z[1] + n[2] * frame.z[2];
@@ -1249,7 +1349,7 @@ export function makeTextFaces(frame: Frame, anchor: V3, text: string, o: TextOpt
         if (r.text.trim()) {
           patch(getFont(r.family)!);
           const bp = textBlueprints(r.text, { fontSize: size, fontFamily: r.family }).translate(x, -k * lineH);
-          for (const sk of bp.sketchOnPlane(plane).sketches) faces.push(orientFace(sk.face(), frame));
+          faces.push(...runFaces(textOutlines(r.text, size, r.family).translate(x, -k * lineH), bp, plane, frame));
         }
         x += r.w;
       }
@@ -3890,9 +3990,13 @@ export function offsetRing(shape: Shape, faceId: number, distance: number, round
  * their outer outlines (a name keychain's plate: no holes for the letters' counters); `ring`: just the band between
  * the joined offset and the faces themselves. Throws if a face isn't flat or not on the first one's plane.
  */
-export function offsetFaces(faces: Face[], distance: number, round = false, fill = false, ring = false): Face[] {
-  if (!faces.length) throw new Error("Offset: no faces");
-  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+export function offsetFaces(faces: Face[], distance: number, round = false, fill = false, ring = false, join = false): Face[] {
+  const out = offsetFacesOnce(faces, distance, round, fill, ring);
+  return join && !ring && distance > 0 && out.length > 1 ? bridged(faces, out, distance, round, fill) : out;
+}
+
+/** The faces' common plane's normal; throws if one isn't flat or not on the first one's plane. */
+function onePlane(faces: Face[]): V3 {
   const first = faces[0];
   if (faces.some((f) => f.geomType !== "PLANE")) throw new Error("Offset works on flat faces only");
   const n = norm3(first.normalAt().toTuple() as V3), p0 = first.center.toTuple() as V3;
@@ -3901,6 +4005,129 @@ export function offsetFaces(faces: Face[], distance: number, round = false, fill
     if (Math.abs(Math.abs(dot3(norm3(f.normalAt().toTuple() as V3), n)) - 1) > 1e-6 || Math.abs(dot3(sub3(f.center.toTuple() as V3, p0), n)) > tol)
       throw new Error("Offset: the faces must lie on one plane (drawn on the same face / the grid)");
   }
+  return n;
+}
+
+/** Points along a wire, in its own order, about `step` mm apart (at least `min`, at most `max`). */
+function wirePoints(w: Wire, step: number, max: number, min = 200): V3[] {
+  const cc = new oc.BRepAdaptor_CompCurve(w.wrapped, true), pts: V3[] = [];
+  try {
+    const u0 = cc.FirstParameter(), u1 = cc.LastParameter(), count = Math.min(max, Math.max(min, Math.ceil(measureLength(w) / step)));
+    for (let i = 0; i < count; i++) {
+      const p = cc.Value(u0 + ((u1 - u0) * i) / count);
+      pts.push([p.X(), p.Y(), p.Z()]);
+      p.delete();
+    }
+  } finally {
+    cc.delete();
+  }
+  return pts;
+}
+
+/**
+ * The several-faces Offset's quick preview (Apply makes the exact one: offsetFaces): the same outline from points along the
+ * faces' outlines (~0.5 mm apart) grown by Clipper alone — joined, filled, bridged, ring — as straight pieces, within
+ * ~0.1 mm: milliseconds, not the seconds OpenCascade's offsets and joins take on a script name.
+ */
+export function offsetFacesQuick(faces: Face[], distance: number, round = false, fill = false, ring = false, join = false): Face[] {
+  if (!faces.length) throw new Error("Offset: no faces");
+  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+  const n = onePlane(faces), o = faces[0].center.toTuple() as V3;
+  const ax = norm3(Math.abs(n[0]) < 0.9 ? cross3(n, [1, 0, 0]) : cross3(n, [0, 1, 0])), ay = cross3(n, ax), S = 1e5;
+  // (coarse: a preview — its many little straight pieces are what takes the time to draw)
+  const total = faces.reduce((a, f) => a + [...f.wires].reduce((b, w) => b + measureLength(w), 0), 0), step = Math.max(0.5, total / 3000);
+  const paths: { X: number; Y: number }[][] = [];
+  for (const f of faces) {
+    const size = (w: Wire) => w.boundingBox.width * w.boundingBox.height;
+    const ws = [...f.wires].sort((a, b) => size(b) - size(a));
+    ws.forEach((w, i) => {
+      let p = wirePoints(w, step, 1500, 40).map((q) => ({ X: Math.round(dot3(sub3(q, o), ax) * S), Y: Math.round(dot3(sub3(q, o), ay) * S) }));
+      // (the outline round one way, its holes the other — as Clipper reads filled and empty)
+      if (ClipperLib.Clipper.Orientation(p) !== (i === 0)) p = p.reverse();
+      paths.push(p);
+    });
+  }
+  const grow = (src: { X: number; Y: number }[][], d: number) => {
+    const co = new ClipperLib.ClipperOffset(2, 0.1 * S), sol: { X: number; Y: number }[][] = [];
+    co.AddPaths(src, round ? ClipperLib.JoinType.jtRound : ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+    co.Execute(sol, d * S);
+    return sol;
+  };
+  const outers = (sol: { X: number; Y: number }[][]) => sol.filter((l) => ClipperLib.Clipper.Orientation(l));
+  let sol = grow(paths, distance);
+  if (join && !ring && distance > 0 && outers(sol).length > 1) {
+    // (bridged: grown further till it's one piece, shrunk back — the margin kept)
+    // (a bridge just wide enough to join can vanish again when shrunk back: on to a wider one)
+    for (const c of [0.5, 1, 2, 3, 5, 8, 12, 20]) {
+      const big = grow(paths, distance + c);
+      if (outers(big).length !== 1) continue;
+      const back = grow(big, -c);
+      if (outers(back).length === 1) {
+        sol = back;
+        break;
+      }
+    }
+  }
+  if (fill) sol = outers(sol);
+  if (ring) {
+    const cl = new ClipperLib.Clipper(), band: { X: number; Y: number }[][] = [];
+    const [big, small] = distance > 0 ? [sol, paths] : [paths, sol];
+    cl.AddPaths(big, ClipperLib.PolyType.ptSubject, true);
+    cl.AddPaths(small, ClipperLib.PolyType.ptClip, true);
+    cl.Execute(ClipperLib.ClipType.ctDifference, band, ClipperLib.PolyFillType.pftNonZero, ClipperLib.PolyFillType.pftNonZero);
+    sol = band;
+  }
+  const to3 = (q: { X: number; Y: number }): V3 => [0, 1, 2].map((k) => o[k] + (q.X / S) * ax[k] + (q.Y / S) * ay[k]) as V3;
+  const wireOf = (l: { X: number; Y: number }[]) => [...makePolygon(l.map(to3)).wires][0];
+  const holes = sol.filter((l) => !ClipperLib.Clipper.Orientation(l));
+  const out = outers(sol).map((ol) => makeFace(wireOf(ol), holes.filter((h) => ClipperLib.Clipper.PointInPolygon(h[0], ol) !== 0).map(wireOf)));
+  if (!out.length) throw new Error("Offset: nothing left at this distance");
+  return out.map((f) => (dot3(f.normalAt().toTuple() as V3, n) < 0 ? f.flipOrientation() : f));
+}
+
+/**
+ * Offset pieces that don't all meet (a script font's capital standing apart from the next letter — a keychain plate in two
+ * pieces) bridged into one, the margin kept: grown further by `c` — half the widest gap that has to be crossed to link
+ * them all (the longest link of their shortest linking tree) — so they meet, then shrunk back by `c` (a morphological
+ * closing): only between pieces apart something is added, a smooth bridge. As they were if that can't be done.
+ */
+function bridged(faces: Face[], pieces: Face[], distance: number, round: boolean, fill: boolean): Face[] {
+  try {
+    // (Prim's tree over the pieces' distances: its longest link is the gap that must be bridged)
+    const n = pieces.length, inTree = [0], best = Array.from({ length: n }, (_, i) => (i ? measureDistanceBetween(pieces[0] as never, pieces[i] as never) : 0));
+    let widest = 0;
+    while (inTree.length < n) {
+      let k = -1;
+      for (let i = 0; i < n; i++) if (!inTree.includes(i) && (k < 0 || best[i] < best[k])) k = i;
+      widest = Math.max(widest, best[k]);
+      inTree.push(k);
+      for (let i = 0; i < n; i++) if (!inTree.includes(i)) best[i] = Math.min(best[i], measureDistanceBetween(pieces[k] as never, pieces[i] as never));
+    }
+    let c = widest / 2 + 0.05;
+    for (let tries = 0; tries < 3; tries++, c *= 1.25) {
+      const grown = offsetFacesOnce(faces, distance + c, round, fill, false);
+      if (grown.length !== 1) continue;
+      // (shrunk back by Clipper: OpenCascade's inward offset of such an outline came back with only part of it)
+      let back = clipperGrown(grown[0], -c);
+      if (fill && back.wires.length > 1) back = makeFace([...back.wires].sort((a, b) => b.boundingBox.width * b.boundingBox.height - a.boundingBox.width * a.boundingBox.height)[0]);
+      if (!isValidShape(back)) continue;
+      // (the margin kept: the same outer box as the pieces had together — else not this way)
+      const [lo, hi] = back.boundingBox.bounds, b = pieces.map((p) => p.boundingBox.bounds);
+      const want = [0, 1, 2].map((k) => [Math.min(...b.map((x) => x[0][k])), Math.max(...b.map((x) => x[1][k]))]);
+      if (want.some(([w0, w1], k) => Math.abs(lo[k] - w0) > 0.05 || Math.abs(hi[k] - w1) > 0.05)) continue;
+      const nrm = norm3(faces[0].normalAt().toTuple() as V3);
+      return [dot3(back.normalAt().toTuple() as V3, nrm) < 0 ? back.flipOrientation() : back];
+    }
+  } catch {
+    // (as they were)
+  }
+  return pieces;
+}
+
+function offsetFacesOnce(faces: Face[], distance: number, round: boolean, fill: boolean, ring: boolean): Face[] {
+  if (!faces.length) throw new Error("Offset: no faces");
+  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+  const n = onePlane(faces);
   const grown = faces.map((f) => offsetLoose(f, distance, round, fill && distance > 0));
   // (joined faces of offset curves can come out "invalid" by OpenCascade's check — mended with ShapeFix, the same outline)
   const join = (fs: Face[]): Face[] => (fs.length < 2 ? fs : mended(boolean("fuse", fs[0] as unknown as Shape3D, fs.slice(1) as unknown as Shape3D[]).simplify()).faces);
@@ -3922,6 +4149,9 @@ export function offsetFaces(faces: Face[], distance: number, round = false, fill
   if (out.some((f) => !isValidShape(f))) throw new Error("Offset: the result is not a valid face");
   return out.map((f) => (dot3(f.normalAt().toTuple() as V3, n) < 0 ? f.flipOrientation() : f));
 }
+
+/** How close a fitted outline follows its points (mm). (Looser didn't draw its pushed-up sides much quicker: 0.1 went wrong.) */
+const FIT_TOL = 0.01;
 
 /**
  * A face (no holes) grown round by `d` the sure way, where OpenCascade's offset fails — at the distance where an outline's
@@ -3960,7 +4190,7 @@ function clipperGrown(f: Face, d: number): Face {
         made.push(g);
         arr.SetValue(i + 1, g);
       });
-      const fit = new oc.GeomAPI_PointsToBSpline(arr, 3, 3, oc.GeomAbs_Shape.GeomAbs_C2, 0.01);
+      const fit = new oc.GeomAPI_PointsToBSpline(arr, 3, 3, oc.GeomAbs_Shape.GeomAbs_C2, FIT_TOL);
       made.push(fit);
       if (fit.IsDone()) {
         const mk = new oc.BRepBuilderAPI_MakeEdge(fit.Curve() as never);

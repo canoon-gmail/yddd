@@ -96,6 +96,7 @@ import {
   wrappedTextFaces,
   offsetRing,
   offsetFaces,
+  offsetFacesQuick,
   scaleShape,
   guidePlaneNormal,
   pushPullMoves,
@@ -360,7 +361,7 @@ export class App implements ToolHost {
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   nutBoltDefaults = { size: 2, length: 30, thread: 20, clearance: 0.3 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -2167,11 +2168,15 @@ export class App implements ToolHost {
         label: "Extrude face",
         fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
         compute: ({ d }) => {
-          const solid = extrudeFace(body.shape, faceId, d);
+          // (the instant preview: its prism drawn from its display mesh — the exact solid, a scanned / offset outline's
+          // slow to draw, only on Apply)
+          const instant = !!axis && this.dragPushPull(new Map(), d, new Map([[bodyId, axis.normal]]));
+          const solid = instant ? null : extrudeFace(body.shape, faceId, d);
           return {
-            ghost: new Map([[bodyId, solid]]),
+            ghost: solid ? new Map([[bodyId, solid]]) : new Map(),
+            drawn: instant,
             commit: () => {
-              const nb = extrudedFrom(this.doc.makeBody(solid, "Solid"), body);
+              const nb = extrudedFrom(this.doc.makeBody(solid ?? extrudeFace(body.shape, faceId, d), "Solid"), body);
               this.doc.commit(this.doc.bodies.map((b) => (b.id === bodyId ? nb : b)), "Extrude face");
               return { select: [nb.id], solidMode: true };
             },
@@ -2349,16 +2354,19 @@ export class App implements ToolHost {
       compute: ({ d }) => {
         // Fast preview; the exact solids are computed on Apply (see asPreview).
         const pushed = () => new Map<number, Shape>([...perSolid].map(([id, faces]) => [id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d)]));
-        const instant = exactMs > SLOW_PUSHPULL_MS && flatDirs.size === flats.length && this.dragPushPull(perSolid, d, flatDirs);
+        // (only face objects: always the instant preview — their prisms drawn from their display meshes; the exact solids,
+        // quick to make but a scanned / offset outline's slow to draw — ~1.4 s a "Kritsanee" ring —, only on Apply)
+        const flatsOnly = !perSolid.size && flatDirs.size === flats.length;
+        const instant = (flatsOnly || exactMs > SLOW_PUSHPULL_MS) && flatDirs.size === flats.length && this.dragPushPull(perSolid, d, flatDirs);
         const t0 = performance.now();
         const preview = instant ? new Map<number, Shape>() : asPreview(pushed);
         if (!instant) exactMs = performance.now() - t0;
-        const extruded = new Map<number, Shape>(flats.map((b) => [b.id, extrudeFace(b.shape, b.shape.faces[0].hashCode, d)]));
+        const extrude = () => new Map<number, Shape>(flats.map((b) => [b.id, extrudeFace(b.shape, b.shape.faces[0].hashCode, d)]));
         return {
-          ghost: new Map([...preview, ...extruded]),
+          ghost: instant ? new Map() : new Map([...preview, ...extrude()]),
           drawn: instant,
           commit: () => {
-            const solids = pushed();
+            const solids = pushed(), extruded = extrude();
             const made = new Map(flats.map((b) => [b.id, extrudedFrom(this.doc.makeBody(extruded.get(b.id)!, "Solid"), b)]));
             this.doc.commit(
               this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? withShape(b, solids.get(b.id)!) : b)),
@@ -2715,15 +2723,26 @@ export class App implements ToolHost {
       faces.push(f);
     }
     const first = this.doc.get(items[0].bodyId)!, axis = isBrep(first) ? offsetDragAxis(first.shape, items[0].faceId) : null;
+    // The panel previews a quick outline (Clipper alone: offsetFacesQuick — milliseconds); Apply makes the exact one in the
+    // background kernel behind the busy dialog (a script name: ~1–2 s) — as Macro → Nut and bolt; Stop: nothing added
     let breps: string[] | undefined;
-    const outcome = (out: Shape[], ring: boolean): OpOutcome => ({
-      ghost: new Map(out.map((f, i) => [-1 - i, f] as [number, Shape])),
-      commit: () => {
-        const made = out.map((f) => this.doc.makeBody(f, ring ? "Ring" : "Outline", "face"));
-        this.doc.commit([...this.doc.bodies, ...made], ring ? "Offset ring" : "Offset faces");
-        return { select: made.map((b) => b.id), solidMode: true };
-      },
-    });
+    const make = (v: { d: number; round: number; fill: number; ring: number; join: number }) =>
+      this.runBusy(true, `Offsetting ${faces.length} faces…`, async () => {
+        let out: Shape[];
+        try {
+          if (this.bgKernel.ready) {
+            breps ??= faces.map((f) => serializeShape(f as unknown as Shape));
+            const res = await this.bgKernel.run({ op: "offsetFaces", faces: breps, distance: v.d, round: !!v.round, fill: !!v.fill, ring: !!v.ring, join: !!v.join });
+            out = res.faces.map((m) => solidFrom(m) as unknown as Shape);
+          } else out = offsetFaces(faces, v.d, !!v.round, !!v.fill, !!v.ring, !!v.join);
+        } catch (err) {
+          return this.toast(err instanceof JobCancelled ? "Offset stopped — nothing added" : errorMessage(err), err instanceof JobCancelled ? undefined : "error");
+        }
+        const made = out.map((f) => this.doc.makeBody(f, v.ring ? "Ring" : "Outline", "face"));
+        this.doc.commit([...this.doc.bodies, ...made], v.ring ? "Offset ring" : "Offset faces");
+        this.setMode("body");
+        this.setSelection(made.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      });
     this.startOp({
       title: `Offset ${faces.length} faces`,
       label: "Offset",
@@ -2731,19 +2750,21 @@ export class App implements ToolHost {
         { key: "d", label: "Distance (mm)", value: this.defaults.offset, step: 1 },
         { key: "round", label: "Round corners", value: this.defaults.offsetRound ? 1 : 0, type: "checkbox" },
         { key: "fill", label: "Fill holes (outer outlines only)", value: this.defaults.offsetFill ? 1 : 0, type: "checkbox" },
+        { key: "join", label: "One plate (bridge gaps between letters)", value: this.defaults.offsetJoin ? 1 : 0, type: "checkbox" },
         { key: "ring", label: "Make ring", value: this.defaults.offsetRing ? 1 : 0, type: "checkbox" },
       ],
-      compute: ({ d, round, fill, ring }) => outcome(offsetFaces(faces, d, !!round, !!fill, !!ring), !!ring),
-      // The same in the background kernel (a long script name's outline: ~1–2 s — the window stays live)
-      computeAsync: async ({ d, round, fill, ring }) => {
-        breps ??= faces.map((f) => serializeShape(f as unknown as Shape));
-        const res = await this.bgKernel.run({ op: "offsetFaces", faces: breps, distance: d, round: !!round, fill: !!fill, ring: !!ring });
-        return outcome(res.faces.map((m) => solidFrom(m) as unknown as Shape), !!ring);
+      compute: (v) => {
+        const quick = offsetFacesQuick(faces, v.d, !!v.round, !!v.fill, !!v.ring, !!v.join);
+        return {
+          ghost: new Map(quick.map((f, i) => [-1 - i, f as unknown as Shape] as [number, Shape])),
+          commit: () => ({ select: [], then: () => make(v as never) }),
+        };
       },
-      remember: ({ d, round, fill, ring }) => {
+      remember: ({ d, round, fill, ring, join }) => {
         this.defaults.offset = d;
         this.defaults.offsetRound = !!round;
         this.defaults.offsetFill = !!fill;
+        this.defaults.offsetJoin = !!join;
         this.defaults.offsetRing = !!ring;
       },
       drag: axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined,
@@ -7313,7 +7334,7 @@ export class App implements ToolHost {
       ["Macro → Dividers", "Walls in an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits): equal compartments, Columns along its long side and Rows across it (1: no walls that way), the walls following the inside (round corners, an oval) from the floor up; Below the rim: their tops that far under it (room for an Inside Lip lid's lip). Fused into the box: one solid to print"],
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
-      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull · several flat faces on one plane (a text's letters, a logo): each grown, the outlines joined where they meet — Fill holes keeps only the outer outlines (a name keychain's plate)"],
+      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull · several flat faces on one plane (a text's letters, a logo): each grown, the outlines joined where they meet — Fill holes keeps only the outer outlines (a name keychain's plate), One plate bridges letters standing apart (the margin kept)"],
       ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Guide line for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; End size % makes the far end smaller / larger, evenly on the way — a spout along a curved path; a straight path: Twist ° turns it evenly on the way — a propeller blade); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
@@ -8108,7 +8129,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { offsetFaces, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { offsetFaces, offsetFacesQuick, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

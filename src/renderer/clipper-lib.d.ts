@@ -8,10 +8,19 @@ declare module "clipper-lib" {
   const ClipperLib: {
     ClipperOffset: new (miterLimit?: number, arcTolerance?: number) => {
       AddPath(path: Path, join: number, end: number): void;
+      AddPaths(paths: Path[], join: number, end: number): void;
       Execute(solution: Path[], delta: number): void;
     };
-    Clipper: { Orientation(path: Path): boolean; Area(path: Path): number; PointInPolygon(pt: IntPoint, path: Path): number };
-    JoinType: { jtRound: number };
+    Clipper: {
+      new (): { AddPaths(paths: Path[], polyType: number, closed: boolean): void; Execute(clipType: number, solution: Path[], subjFill: number, clipFill: number): boolean };
+      Orientation(path: Path): boolean;
+      Area(path: Path): number;
+      PointInPolygon(pt: IntPoint, path: Path): number;
+    };
+    ClipType: { ctDifference: number; ctUnion: number };
+    PolyType: { ptSubject: number; ptClip: number };
+    PolyFillType: { pftNonZero: number; pftPositive: number };
+    JoinType: { jtRound: number; jtMiter: number };
     EndType: { etClosedPolygon: number };
   };
   export default ClipperLib;
