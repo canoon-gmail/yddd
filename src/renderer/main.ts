@@ -95,6 +95,7 @@ import {
   METRIC_SIZES,
   wrappedTextFaces,
   offsetRing,
+  offsetFaces,
   scaleShape,
   guidePlaneNormal,
   pushPullMoves,
@@ -359,7 +360,7 @@ export class App implements ToolHost {
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   nutBoltDefaults = { size: 2, length: 30, thread: 20, clearance: 0.3 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -2643,9 +2644,11 @@ export class App implements ToolHost {
   /** Offset: a new flat face on the selected face's plane, its outline grown (or shrunk) by a distance. */
   private opOffset(): void {
     if (this.selection.length && this.selection.every((s) => s.kind === "edge")) return this.opOffsetEdges();
+    const many = this.selectedFlatFaces();
+    if (many.length > 1) return this.opOffsetMany(many);
     const target = this.oneFaceTarget();
     if (!target) {
-      this.toast("Offset: select one flat face (Face mode, key 2) or one flat face object", "error");
+      this.toast("Offset: select a flat face (Face mode, key 2) or flat face objects (several: their outlines joined)", "error");
       return;
     }
     const { bodyId, faceId } = target;
@@ -2679,6 +2682,63 @@ export class App implements ToolHost {
       remember: ({ d, round, ring }) => {
         this.defaults.offset = d;
         this.defaults.offsetRound = !!round;
+        this.defaults.offsetRing = !!ring;
+      },
+      drag: axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined,
+    });
+  }
+
+  /** The selected faces: faces picked in Face mode, and every face of the face objects picked whole. */
+  private selectedFlatFaces(): { bodyId: number; faceId: number }[] {
+    const out: { bodyId: number; faceId: number }[] = [];
+    for (const s of this.selection) {
+      if (s.kind === "face") out.push({ bodyId: s.body, faceId: s.id });
+      else if (s.kind === "body") {
+        const b = this.doc.get(s.body);
+        if (b?.kind === "face") for (const f of b.shape.faces) out.push({ bodyId: b.id, faceId: f.hashCode });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Offset of several flat faces on one plane (a text's letters, a logo): each grown by the distance, the outlines joined
+   * where they meet — Fill holes keeps only the outer outlines (a name keychain's plate); Make ring the band round them.
+   * New face objects; the faces themselves stay.
+   */
+  private opOffsetMany(items: { bodyId: number; faceId: number }[]): void {
+    const faces: NonNullable<ReturnType<typeof findFace>>[] = [];
+    for (const { bodyId, faceId } of items) {
+      const b = this.shapeBody(bodyId, "Offset"), f = b && findFace(b.shape, faceId);
+      if (!f) return;
+      if (f.geomType !== "PLANE") return this.toast("Offset works on flat faces only", "error");
+      faces.push(f);
+    }
+    const first = this.doc.get(items[0].bodyId)!, axis = isBrep(first) ? offsetDragAxis(first.shape, items[0].faceId) : null;
+    this.startOp({
+      title: `Offset ${faces.length} faces`,
+      label: "Offset",
+      fields: [
+        { key: "d", label: "Distance (mm)", value: this.defaults.offset, step: 1 },
+        { key: "round", label: "Round corners", value: this.defaults.offsetRound ? 1 : 0, type: "checkbox" },
+        { key: "fill", label: "Fill holes (outer outlines only)", value: this.defaults.offsetFill ? 1 : 0, type: "checkbox" },
+        { key: "ring", label: "Make ring", value: this.defaults.offsetRing ? 1 : 0, type: "checkbox" },
+      ],
+      compute: ({ d, round, fill, ring }) => {
+        const out = offsetFaces(faces, d, !!round, !!fill, !!ring);
+        return {
+          ghost: new Map(out.map((f, i) => [-1 - i, f] as [number, Shape])),
+          commit: () => {
+            const made = out.map((f) => this.doc.makeBody(f, ring ? "Ring" : "Outline", "face"));
+            this.doc.commit([...this.doc.bodies, ...made], ring ? "Offset ring" : "Offset faces");
+            return { select: made.map((b) => b.id), solidMode: true };
+          },
+        };
+      },
+      remember: ({ d, round, fill, ring }) => {
+        this.defaults.offset = d;
+        this.defaults.offsetRound = !!round;
+        this.defaults.offsetFill = !!fill;
         this.defaults.offsetRing = !!ring;
       },
       drag: axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined,
@@ -7248,7 +7308,7 @@ export class App implements ToolHost {
       ["Macro → Dividers", "Walls in an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits): equal compartments, Columns along its long side and Rows across it (1: no walls that way), the walls following the inside (round corners, an oval) from the floor up; Below the rim: their tops that far under it (room for an Inside Lip lid's lip). Fused into the box: one solid to print"],
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],
       ["C", "Cut by guide or axis: press C — the panel waits for the solid(s) / flat face(s) (selected first, or click them; Shift+click more) and a guide line, a red X / green Y / blue Z axis line (an axis cuts on the world plane through it that faces you most) or a straight path from the sketch (cuts upright through it) — split into 2 objects by the plane through the guide, straight across the face it lies on (off a flat face, e.g. on a sphere: along the line as seen in the view); the upper part is selected (Del removes it)"],
-      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull"],
+      ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull · several flat faces on one plane (a text's letters, a logo): each grown, the outlines joined where they meet — Fill holes keeps only the outer outlines (a name keychain's plate)"],
       ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Guide line for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; End size % makes the far end smaller / larger, evenly on the way — a spout along a curved path; a straight path: Twist ° turns it evenly on the way — a propeller blade); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
@@ -8043,7 +8103,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { offsetFaces, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

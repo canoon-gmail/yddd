@@ -3624,7 +3624,8 @@ export function offsetFace(shape: Shape, faceId: number, distance: number, round
   if (face.geomType !== "PLANE") throw new Error("Offset works on flat faces only");
   if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
   // Arc joins only round the corners that open up; to shrink with round corners, shrink twice as far, then grow back round.
-  return round && distance < 0 ? offsetPlanar(offsetPlanar(face, 2 * distance, false), -distance, true) : offsetPlanar(face, distance, round);
+  // (holes on their own: a letter's small counter closing up drops out, see offsetLoose)
+  return offsetLoose(face as Face, distance, round);
 }
 
 /** Box from Face (Macro menu): wall and bottom thickness, inside depth, the face's corners rounded (radius; 0 = sharp). */
@@ -3847,6 +3848,120 @@ export function offsetRing(shape: Shape, faceId: number, distance: number, round
   if (!faces.length) throw new Error("Offset: the ring is empty at this distance");
   if (faces.some((f) => !isValidShape(f))) throw new Error("Offset: the ring is not a valid face");
   return faces;
+}
+
+/**
+ * Offset of several flat faces on one plane (a text's letters, a logo's pieces): each outline grown (or shrunk) by
+ * `distance` (round corners as offsetFace), the results joined — faces that come to overlap become one. `fill`: only
+ * their outer outlines (a name keychain's plate: no holes for the letters' counters); `ring`: just the band between
+ * the joined offset and the faces themselves. Throws if a face isn't flat or not on the first one's plane.
+ */
+export function offsetFaces(faces: Face[], distance: number, round = false, fill = false, ring = false): Face[] {
+  if (!faces.length) throw new Error("Offset: no faces");
+  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+  const first = faces[0];
+  if (faces.some((f) => f.geomType !== "PLANE")) throw new Error("Offset works on flat faces only");
+  const n = norm3(first.normalAt().toTuple() as V3), p0 = first.center.toTuple() as V3;
+  for (const f of faces) {
+    const [[x0, y0, z0], [x1, y1, z1]] = f.boundingBox.bounds, tol = 1e-5 * Math.max(1, Math.hypot(x1 - x0, y1 - y0, z1 - z0));
+    if (Math.abs(Math.abs(dot3(norm3(f.normalAt().toTuple() as V3), n)) - 1) > 1e-6 || Math.abs(dot3(sub3(f.center.toTuple() as V3, p0), n)) > tol)
+      throw new Error("Offset: the faces must lie on one plane (drawn on the same face / the grid)");
+  }
+  const grown = faces.map((f) => offsetLoose(f, distance, round, fill && distance > 0));
+  // (joined faces of offset curves can come out "invalid" by OpenCascade's check — mended with ShapeFix, the same outline)
+  const join = (fs: Face[]): Face[] => (fs.length < 2 ? fs : mended(boolean("fuse", fs[0] as unknown as Shape3D, fs.slice(1) as unknown as Shape3D[]).simplify()).faces);
+  let out = join(grown);
+  if (fill) {
+    // (each piece's outer outline — the wire with the largest box; a piece now inside another's outline joins it)
+    const size = (w: Wire) => {
+      const b = w.boundingBox;
+      return b.width * b.height + b.height * b.depth + b.depth * b.width;
+    };
+    out = join(out.map((f) => makeFace([...f.wires].sort((a, b) => size(b) - size(a))[0])));
+  }
+  if (ring) {
+    // (the band: the larger faces, each less the smaller ones — grown: less the faces themselves; shrunk: the faces less the offset)
+    const [big, small] = distance > 0 ? [out, faces] : [join(faces), out];
+    out = big.flatMap((f) => mended(boolean("cut", f as unknown as Shape3D, small as unknown as Shape3D[]).simplify()).faces);
+  }
+  if (!out.length) throw new Error("Offset: nothing left at this distance");
+  if (out.some((f) => !isValidShape(f))) throw new Error("Offset: the result is not a valid face");
+  return out.map((f) => (dot3(f.normalAt().toTuple() as V3, n) < 0 ? f.flipOrientation() : f));
+}
+
+/** `s` as it is if OpenCascade's check passes, else mended with ShapeFix_Shape (when that passes). */
+function mended<T extends Shape3D>(s: T): T {
+  if (isValidShape(s as unknown as Shape)) return s;
+  const fx = new oc.ShapeFix_Shape(s.wrapped), pr = new oc.Message_ProgressRange();
+  try {
+    fx.Perform(pr);
+    const r = cast(fx.Shape()) as T;
+    return isValidShape(r as unknown as Shape) ? r : s;
+  } catch {
+    return s;
+  } finally {
+    fx.delete();
+    pr.delete();
+  }
+}
+
+/**
+ * A flat face offset by `distance` with its holes done on their own: the outer outline grown / shrunk, each hole the other
+ * way — a hole that closes up (a letter's counter) dropped, not the whole face failing; `noHoles`: the outer outline only.
+ * Sharp corners OpenCascade can't offset (where a font's curves meet at a point) fall back to round ones.
+ * (Shrinking round: shrunk twice as far, then grown back round — as offsetFace.)
+ */
+function offsetLoose(face: Face, distance: number, round: boolean, noHoles = false): Face {
+  const size = (w: Wire) => {
+    const b = w.boundingBox;
+    return b.width * b.height + b.height * b.depth + b.depth * b.width;
+  };
+  const wires = [...face.wires].sort((a, b) => size(b) - size(a));
+  // Grown round in steps: the same face (growing round by a, then b is growing by a + b) — a big step fails where an
+  // outline's own parts grow into each other (between an "a"'s bowl and stem at 3 mm on a 20 mm letter), small ones don't
+  const stepped = (f: Face, d: number): Face => {
+    for (const n of [2, 3, 4, 6, 8]) {
+      try {
+        let g = f;
+        for (let k = 0; k < n; k++) g = offsetPlanar(g, d / n, true);
+        return g;
+      } catch {
+        // (more, smaller steps)
+      }
+    }
+    throw new Error("Offset: the face vanishes at this distance");
+  };
+  const one = (f: Face, d: number): Face => {
+    const go = (r: boolean) => (r && d < 0 ? offsetPlanar(offsetPlanar(f, 2 * d, false), -d, true) : offsetPlanar(f, d, r));
+    try {
+      return go(round);
+    } catch (e) {
+      if (d < 0) {
+        if (round) throw e;
+        return go(true);
+      }
+      // (growing: sharp corners it can't do come out round; round in smaller steps)
+      try {
+        return go(true);
+      } catch {
+        return stepped(f, d);
+      }
+    }
+  };
+  const outer = one(wires.length > 1 ? makeFace(wires[0]) : face, distance);
+  if (noHoles || wires.length < 2) return outer;
+  const holes: Face[] = [];
+  for (const w of wires.slice(1)) {
+    try {
+      holes.push(one(makeFace(w), -distance));
+    } catch {
+      // (closed up at this distance: gone)
+    }
+  }
+  if (!holes.length) return outer;
+  const cut = mended(boolean("cut", outer as unknown as Shape3D, holes as unknown as Shape3D[]).simplify()).faces;
+  if (cut.length !== 1) throw new Error("Offset: the result is not one face");
+  return cut[0];
 }
 
 function offsetPlanar(face: Face, distance: number, round: boolean): Face {
