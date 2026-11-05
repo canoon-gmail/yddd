@@ -69,6 +69,8 @@ import {
   kindOf,
   faceAxis,
   edgeFaceIds,
+  facesBorderEdgeIds,
+  sideWallFaceIds,
   closeShapes,
   liesOnSolid,
   planarFaceFrame,
@@ -210,6 +212,8 @@ type Spine = { path: number } | { guide: number };
 
 /** Fillet / Chamfer on this many edges or more: the panel shows before the (slow) preview. */
 const SLOW_EDGES = 60;
+/** A panel's background preview for values since changed is stopped once it has run this long (ms); a quicker one finishes. */
+const STOP_STALE_JOB_MS = 1500;
 
 /** Cut: more upper pieces than this go in a new group of their own. */
 const CUT_GROUP_OVER = 4;
@@ -313,8 +317,10 @@ export class App implements ToolHost {
     previewMs?: number;
     dragTimer?: number;
     /** Its background job (computeAsync) under way, for the values `key`; `wanted`: the values changed meanwhile. */
-    job?: { key: string; done: Promise<void> };
+    job?: { key: string; done: Promise<void>; started: number };
     wanted?: boolean;
+    /** Waiting for the background kernel to load again (after a stopped job). */
+    waitingKernel?: boolean;
   } | null = null;
   /** The background kernel (a second OpenCascade in a worker) for slow operations: see kernelWorker.ts. */
   bgKernel = new KernelWorker();
@@ -1363,6 +1369,18 @@ export class App implements ToolHost {
         else this.click(e);
       }
     });
+    // Face mode, double-click on a side face (its first click selected it): the whole side wall — a keychain plate's strips
+    // (sideWallFaceIds; a box's side, between two pairs of faces, stays one face)
+    c.addEventListener("dblclick", (e) => {
+      if (e.button !== 0 || e.altKey || e.shiftKey || e.ctrlKey || this.tool || this.op || this.xf || this.viewport.gizmoHot || this.mode !== "face") return;
+      const [one] = this.selection;
+      if (this.selection.length !== 1 || one.kind !== "face") return;
+      const b = this.doc.get(one.body);
+      const wall = b && isBrep(b) ? sideWallFaceIds(b.shape, one.id) : null;
+      if (!wall) return;
+      this.setSelection(wall.map((id) => ({ kind: "face", body: one.body, id })));
+      this.hint(`Side wall selected (${wall.length} faces) · F rounds its rims · Esc deselects`);
+    });
     c.addEventListener("pointerleave", () => {
       if (this.hover) {
         this.hover = null;
@@ -1917,25 +1935,42 @@ export class App implements ToolHost {
     if (!op) return null;
     const { values, key } = this.opValues();
     if (key === op.key && op.result) return op.result;
-    const err = this.opPanel.querySelector(".op-error")!;
+    const err = this.opPanel.querySelector(".op-error")!, t0 = performance.now();
     try {
       if (Object.values(values).some((v) => !Number.isFinite(v))) throw new Error("enter a number");
       // Worked out in the background kernel: the app stays live; the newest values go next when this one's done
+      // (the kernel loading again after a stopped job: wait for it — not seconds of work on the main thread)
+      if (op.spec.computeAsync && this.bgKernel.restarting) {
+        err.textContent = "Working… (Esc stops it)";
+        err.classList.add("waiting");
+        if (!op.waitingKernel) {
+          op.waitingKernel = true;
+          void this.bgKernel.whenReady().then(() => {
+            op.waitingKernel = false;
+            if (this.op === op) this.previewOp();
+          });
+        }
+        return null;
+      }
       if (op.spec.computeAsync && this.bgKernel.ready) {
         if (op.job) {
-          if (op.job.key !== key) op.wanted = true;
+          if (op.job.key !== key) {
+            op.wanted = true;
+            // (a slow job for old values, alone in the kernel: stopped — the new values next, not after it)
+            if (performance.now() - op.job.started > STOP_STALE_JOB_MS && this.bgKernel.jobs === 1) this.bgKernel.cancel();
+          }
           return null;
         }
         this.startOpJob(op, values, key, err);
         return null;
       }
-      const t0 = performance.now();
       const result = op.spec.compute(values);
       this.showOpResult(op, result, key, err);
       op.previewMs = performance.now() - t0;
       return result;
     } catch (e) {
       this.showOpError(op, e, err);
+      op.previewMs = performance.now() - t0;
       return null;
     }
   }
@@ -1956,6 +1991,7 @@ export class App implements ToolHost {
         (e) => {
           if (e instanceof JobCancelled || this.op !== op) return;
           this.showOpError(op, e, err);
+          op.previewMs = performance.now() - t0; // (a slow failure is slow too: dragging then waits for a pause)
         },
       )
       .finally(() => {
@@ -1965,7 +2001,7 @@ export class App implements ToolHost {
           this.previewOp();
         }
       });
-    op.job = { key, done };
+    op.job = { key, done, started: t0 };
   }
 
   /** A preview worked out: shown (ghost / transform), with its note if it's not quite as asked (`warn`). */
@@ -2413,16 +2449,24 @@ export class App implements ToolHost {
     const isFillet = kind === "fillet";
     const title = isFillet ? "Fillet" : "Chamfer";
     const perBody = new Map<number, Set<number> | null>();
+    const perBodyFaces = new Map<number, Set<number>>();
     for (const s of this.selection) {
       if (s.kind === "body") perBody.set(s.body, null);
       else if (s.kind === "edge") {
         const set = perBody.get(s.body);
         if (set === null) continue;
         perBody.set(s.body, (set ?? new Set<number>()).add(s.id));
-      }
+      } else if (s.kind === "face") perBodyFaces.set(s.body, (perBodyFaces.get(s.body) ?? new Set<number>()).add(s.id));
+    }
+    // Faces selected: the edges round them (a side wall double-clicked: its top and bottom rims)
+    for (const [id, faceIds] of perBodyFaces) {
+      const b = this.doc.get(id), set = perBody.get(id);
+      if (set === null || !b || !isBrep(b)) continue;
+      const border = facesBorderEdgeIds(b.shape, faceIds);
+      if (border.size) perBody.set(id, new Set([...(set ?? []), ...border]));
     }
     if (!perBody.size) {
-      this.toast(`${title}: select edges (Edge mode, key 3) or whole solids`, "error");
+      this.toast(`${title}: select edges (Edge mode, key 3), faces or whole solids`, "error");
       return;
     }
     const flat = this.faceBodiesIn([...perBody.keys()]);
@@ -7150,7 +7194,7 @@ export class App implements ToolHost {
         if (b) rows.push([b.kind === "face" ? "Flat face" : "Solid", escapeHtml(b.name)]);
         if (f) rows.push(["Surface", f.geomType]);
       }
-      hints = `${job("op.pushpull", "P", "push/pull (flat face → new solid)")} · ${job("op.shell", "H", "shell (opens selected faces)")} · ${job("op.offset", "O", "offset")}`;
+      hints = `${job("op.pushpull", "P", "push/pull (flat face → new solid)")} · ${job("op.shell", "H", "shell (opens selected faces)")} · ${job("op.offset", "O", "offset")} · ${job("op.fillet", "F", "round its edges")}<br>Double-click a side face: the whole side wall`;
     } else {
       // (a path's lines — picked whole in Edge mode: it's the path)
       const paths = [...new Set(sel.map((s) => s.body))].map((id) => this.doc.get(id));
@@ -8129,7 +8173,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { offsetFaces, offsetFacesQuick, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

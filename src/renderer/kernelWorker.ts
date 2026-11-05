@@ -30,6 +30,9 @@ export class KernelWorker {
   private pending = new Map<number, { resolve: (r: KernelJobResult) => void; reject: (e: Error) => void }>();
   /** Loaded and working (false while loading, or if it failed to start: the caller then works on the main thread). */
   ready = false;
+  /** Loading again after `cancel` (not at start-up): a panel waits for it (whenReady) rather than working on the main thread. */
+  restarting = false;
+  private readyWaiters: (() => void)[] = [];
   /** OpenCascade threads it works with (1: just its own — see kernel.ts initKernel). */
   threads = 1;
 
@@ -50,6 +53,8 @@ export class KernelWorker {
       const m = e.data;
       if (m.ready !== undefined) {
         this.ready = m.ready;
+        this.restarting = false;
+        this.readyWaiters.splice(0).forEach((f) => f());
         this.threads = m.threads ?? 1;
         if (!m.ready) console.warn("background kernel failed to start:", m.error);
         return;
@@ -64,6 +69,8 @@ export class KernelWorker {
       if (w !== this.worker) return;
       console.warn("background kernel error:", e.message);
       this.ready = false;
+      this.restarting = false;
+      this.readyWaiters.splice(0).forEach((f) => f());
       this.failAll(new Error(`the background kernel stopped (${e.message || "crashed"})`));
     };
   }
@@ -81,12 +88,23 @@ export class KernelWorker {
     return this.pending.size > 0;
   }
 
+  /** How many jobs are running or waiting. */
+  get jobs(): number {
+    return this.pending.size;
+  }
+
+  /** Resolves once it has loaded (or failed to): at once if it isn't restarting. */
+  whenReady(): Promise<void> {
+    return this.restarting ? new Promise((r) => this.readyWaiters.push(r)) : Promise.resolve();
+  }
+
   /** Stop everything it's doing now (the jobs reject with JobCancelled) and start afresh. */
   cancel(): void {
     if (!this.pending.size) return;
     this.worker.terminate();
     this.failAll(new JobCancelled());
     this.spawn();
+    this.restarting = true;
   }
 
   private failAll(e: Error): void {

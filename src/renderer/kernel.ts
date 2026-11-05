@@ -686,7 +686,9 @@ function meshFaces(shape: Shape, opts: { tolerance: number; angularTolerance: nu
   if (!stand.some(Boolean) && !heavy.some(Boolean)) return { mesh: extractMesh(shape.wrapped, opts), whole: true };
   const rest = faces.filter((_, i) => !stand[i] && !heavy[i]);
   const parts: { mesh: ShapeMesh; id?: number }[] = rest.length ? [{ mesh: extractMesh((makeCompound(rest) as unknown as Shape).wrapped, opts) }] : [];
-  stand.forEach((f, i) => f && parts.push({ mesh: extractMesh(f.wrapped, opts), id: faces[i].hashCode }));
+  // (a straight wall: triangles between its two outlines lie on it exactly — no surface control, no inside points: a
+  // pushed-up name plate's wall ~52 000 triangles, 0.7 s → ~3 000)
+  stand.forEach((f, i) => f && parts.push({ mesh: extractMesh(f.wrapped, opts, 0), id: faces[i].hashCode }));
   heavy.forEach((o, i) => o && parts.push({ mesh: extractMesh(faces[i].wrapped, o), id: faces[i].hashCode }));
   const out: ShapeMesh = { vertices: [], normals: [], triangles: [], faceGroups: [] };
   for (const { mesh, id } of parts) {
@@ -714,8 +716,10 @@ function extrusionStandIn(face: Face): Face | null {
     if (!mk.IsDone()) return null;
     const made = mk.Face();
     const out = new Face(face.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? oc.TopoDS.Face(made.Reversed()) : made);
-    const a = measureArea(face);
-    return Math.abs(measureArea(out) - a) <= 1e-6 * Math.max(1, a) ? out : null;
+    // (the whole of its parameter rectangle: one loop, round the same length — the same curves. Not the areas: their quick
+    // estimate is ~1 % off on a long fitted curve, a name plate's one-curve wall, which then meshed into ~52 000 triangles)
+    const round = (f: Face) => f.edges.reduce((n, e) => n + measureLength(e), 0), L = round(face);
+    return face.wires.length === 1 && out.wires.length === 1 && Math.abs(round(out) - L) <= 1e-6 * Math.max(1, L) ? out : null;
   } catch {
     return null;
   } finally {
@@ -737,9 +741,9 @@ function extrusionStandIn(face: Face): Face | null {
  */
 const MESH_FLAGS = 5;
 
-/** Mesh `shape` (MESH_FLAGS) and read the triangles out. */
-function extractMesh(shape: unknown, opts: { tolerance: number; angularTolerance: number }): ShapeMesh {
-  const raw = oc.ReplicadMeshExtractor.extractWith(shape, opts.tolerance, opts.angularTolerance, -1, -1, 0, MESH_FLAGS, false);
+/** Mesh `shape` (MESH_FLAGS, or the flags given) and read the triangles out. */
+function extractMesh(shape: unknown, opts: { tolerance: number; angularTolerance: number }, flags = MESH_FLAGS): ShapeMesh {
+  const raw = oc.ReplicadMeshExtractor.extractWith(shape, opts.tolerance, opts.angularTolerance, -1, -1, 0, flags, false);
   try {
     // (read after meshing: the wasm memory may have grown)
     const buf = oc.wasmMemory.buffer;
@@ -1313,7 +1317,7 @@ function fontRuns(line: string, family: string, font: OtFont): { text: string; f
  * on the first line's baseline — its start (left), middle (center) or end (right); more lines go down frame.y.
  * Empty / spaces only → [].
  */
-export function makeTextFaces(frame: Frame, anchor: V3, text: string, o: TextOptions): Face[] {
+export function makeTextFaces(frame: Frame, anchor: V3, text: string, o: TextOptions, keepTiny = false): Face[] {
   const family = o.font || "default";
   const font = getFont(family);
   if (!font) throw new Error("the text font isn't loaded yet");
@@ -1349,7 +1353,7 @@ export function makeTextFaces(frame: Frame, anchor: V3, text: string, o: TextOpt
         if (r.text.trim()) {
           patch(getFont(r.family)!);
           const bp = textBlueprints(r.text, { fontSize: size, fontFamily: r.family }).translate(x, -k * lineH);
-          faces.push(...runFaces(textOutlines(r.text, size, r.family).translate(x, -k * lineH), bp, plane, frame));
+          faces.push(...runFaces(textOutlines(r.text, size, r.family).translate(x, -k * lineH), bp, plane, frame).map((f) => (keepTiny ? f : tinyEdgesDropped(f, frame.z))));
         }
         x += r.w;
       }
@@ -1358,6 +1362,113 @@ export function makeTextFaces(frame: Frame, anchor: V3, text: string, o: TextOpt
     for (const own of patched) delete (own as Partial<typeof own>).getPath; // (back to the prototype's)
   }
   return faces;
+}
+
+/**
+ * Outline pieces shorter than this (mm) left out of a flat face — a text's letters, a face pushed up into a solid —
+ * their neighbours meet in its middle instead (the outline moves at most half of it). A font's own tiny pieces
+ * (Pacifico's "e": a 0.04 mm straight one) push up into walls far thinner than any rounding: a fillet rolled across one
+ * for minutes ("Kritsanee": a fillet of all its edges never finished).
+ */
+const TINY_EDGE = 0.1;
+
+/**
+ * A flat face with its outlines' tiny pieces left out (see TINY_EDGE): each run of pieces end to end under TINY_EDGE in
+ * all — a longer run of short ones (a scanned outline's dense straight pieces) stays. Facing along `n`. As it was if
+ * none, or no valid face comes of it.
+ */
+function tinyEdgesDropped(face: Face, n: V3): Face {
+  // (by the face itself — a new wrapper of it each time it's looked up: a Push/Pull panel's every preview)
+  const known = tinyDropped.get(face.hashCode);
+  if (known && known.from.isSame(face)) return known.out;
+  const out = tinyEdgesDroppedOnce(face, n);
+  tinyDropped.set(face.hashCode, { from: face, out });
+  if (tinyDropped.size > 64) tinyDropped.delete(tinyDropped.keys().next().value!);
+  return out;
+}
+const tinyDropped = new Map<number, { from: Face; out: Face }>();
+
+function tinyEdgesDroppedOnce(face: Face, n: V3): Face {
+  const lens = new Map(face.edges.map((e) => [e.hashCode, measureLength(e)]));
+  if (![...lens.values()].some((l) => l < TINY_EDGE)) return face;
+  const made: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (made.push(o as unknown as { delete(): void }), o);
+  try {
+    const pole = (bs: { Pole(i: number): { X(): number; Y(): number; Z(): number } }, i: number): V3 => {
+      const p = keep(bs.Pole(i));
+      return [p.X(), p.Y(), p.Z()];
+    };
+    const wireWithout = (w: Wire): Wire => {
+      // (each piece as a B-spline with its ends, then end to end, each running on from the last)
+      type Piece = { bs: ReturnType<typeof oc.GeomConvert.CurveToBSplineCurve>; len: number; a: V3; b: V3 };
+      const all: Piece[] = w.edges.map((e) => {
+        const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0);
+        const bs = oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true)) as never);
+        if (bs.IsPeriodic()) bs.SetNotPeriodic();
+        return { bs, len: lens.get(e.hashCode) ?? measureLength(e), a: pole(bs, 1), b: pole(bs, bs.NbPoles()) };
+      });
+      if (!all.some((x) => x.len < TINY_EDGE)) return w;
+      const before = all.length;
+      const key = (p: V3) => p.map((x) => Math.round(x * 1e4)).join(",");
+      const at = new Map<string, Piece[]>();
+      for (const x of all) for (const p of [x.a, x.b]) (at.get(key(p)) ?? at.set(key(p), []).get(key(p))!).push(x);
+      const chain = [all[0]], used = new Set([all[0]]);
+      while (chain.length < all.length) {
+        const last = chain[chain.length - 1].b, next = (at.get(key(last)) ?? []).find((x) => !used.has(x));
+        if (!next) throw new Error("outline not end to end");
+        if (key(next.a) !== key(last)) {
+          next.bs.Reverse();
+          [next.a, next.b] = [next.b, next.a];
+        }
+        chain.push(next);
+        used.add(next);
+      }
+      // (a run of tiny pieces: gone, the pieces on either side meeting in its middle — or the one piece left closed there:
+      // an "e"'s eye of a curve and a 0.04 mm line)
+      for (;;) {
+        const m = chain.length;
+        let k = chain.findIndex((x) => x.len < TINY_EDGE);
+        if (k < 0 || m < 2) break;
+        for (let back = 0; back < m && chain[(k + m - 1) % m].len < TINY_EDGE; back++) k = (k + m - 1) % m; // (the run's start)
+        let run = 0, total = 0;
+        while (run < m && chain[(k + run) % m].len < TINY_EDGE) total += chain[(k + run++) % m].len;
+        // (a long run of short pieces — or all of them: kept)
+        if (total >= TINY_EDGE || run === m) {
+          for (let i = 0; i < run; i++) chain[(k + i) % m].len = Infinity;
+          continue;
+        }
+        const a = chain[k].a, b = chain[(k + run - 1) % m].b, mid = keep(new oc.gp_Pnt((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2));
+        const prev = chain[(k + m - 1) % m], next = chain[(k + run) % m];
+        prev.bs.SetPole(prev.bs.NbPoles(), mid);
+        next.bs.SetPole(1, mid);
+        for (let i = 0; i < run; i++) chain.splice(k < chain.length ? k : 0, 1);
+      }
+      if (chain.length === before) return w;
+      dropped = true;
+      return assembleWire(chain.map(({ bs }) => {
+        const mk = keep(new oc.BRepBuilderAPI_MakeEdge(bs as never));
+        return cast(mk.Edge()) as Edge;
+      }));
+    };
+    const size = (w: Wire) => w.boundingBox.width * w.boundingBox.height + w.boundingBox.height * w.boundingBox.depth + w.boundingBox.depth * w.boundingBox.width;
+    let dropped = false;
+    const [outer, ...holes] = [...face.wires].sort((a, b) => size(b) - size(a)).map(wireWithout);
+    if (!dropped) return face;
+    // (the holes then run whichever way their first piece did: set right by ShapeFix)
+    let out = mended(makeFace(outer, holes) as unknown as Shape3D) as unknown as Face;
+    if (dot3(out.normalAt().toTuple() as V3, n) < 0) out = out.flipOrientation();
+    return isValidShape(out) ? out : face;
+  } catch {
+    return face;
+  } finally {
+    for (const o of made) {
+      try {
+        o.delete();
+      } catch {
+        // already owned by OpenCascade
+      }
+    }
+  }
 }
 
 /** A text as the Text tool made it: its settings, and the plane it was written on (`origin` on the first baseline). */
@@ -1388,12 +1499,22 @@ export function textPlacement(src: TextSource, letters: Shape[]): TextPlacement 
   if (!letters.length) return null;
   const flat = letters.every(isFaceShape), solid = letters.every((l) => !isFaceShape(l));
   if (!flat && !solid) return null;
-  let made: Face[];
-  try {
-    made = makeTextFaces(src.frame, src.frame.origin, src.text, src);
-  } catch {
-    return null;
+  // (letters made before tiny pieces were left out of texts — see TINY_EDGE — line up with ones made keeping them)
+  for (const keepTiny of [false, true]) {
+    let made: Face[];
+    try {
+      made = makeTextFaces(src.frame, src.frame.origin, src.text, src, keepTiny);
+    } catch {
+      return null;
+    }
+    const got = placedAs(src, letters, made, flat, solid);
+    if (got) return got;
   }
+  return null;
+}
+
+/** Where `letters` are now if they're `made` (the same text made again) moved / scaled / pushed; null if not. */
+function placedAs(src: TextSource, letters: Shape[], made: Face[], flat: boolean, solid: boolean): TextPlacement | null {
   if (made.length !== letters.length) return null;
   // Pushed letters: compared with the made ones pushed 1 mm (the fit then finds how far they really went).
   const refs: Shape[] = solid ? made.map((f) => extrudeFace(f, f.hashCode, 1)) : made;
@@ -1471,8 +1592,10 @@ export function textLetters(src: TextSource, push: number | null, flip: boolean)
  * The source shape is not modified.
  */
 export function extrudeFace(shape: Shape, faceId: number, distance: number): Solid {
-  const face = findFace(shape, faceId);
+  let face = findFace(shape, faceId);
   if (!face) throw new Error("face not found");
+  // (a flat face object: its outline's tiny pieces left out first — walls no fillet fits on; a solid's own face stays)
+  if (isFaceShape(shape) && face.geomType === "PLANE") face = tinyEdgesDropped(face, norm3(face.normalAt().toTuple() as V3));
   if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
   const n = face.geomType === "PLANE" ? norm3(face.normalAt().toTuple() as V3) : normalAtUV(face, 0.5, 0.5);
   const along = (d: number) => new Vector([n[0] * d, n[1] * d, n[2] * d]);
@@ -1727,25 +1850,48 @@ export interface RoundResult {
   largest: number | null;
 }
 
+/** Rounding loop by loop (roundSome) may take this many times its budget, if the loops done so far say it'll all fit. */
+const LOOPS_BUDGET = 4;
+
 /**
  * Fillet (or chamfer) `edgeIds` (null: every real edge) at `size` — and when OpenCascade can't do them all, the most
  * it can: the edges halved again and again, what works in each half put together (each try a real fillet, kept only
  * if the solid comes out valid). Then, time allowing, the largest size that does them all (halving the size range).
- * Throws only if none of them can be done. `budgetMs` caps the tries (a fillet round a gear takes ~1 s).
+ * Edges in separate loops (top and bottom rims) go a loop at a time first. Throws only if none of them can be done.
+ * `budgetMs` caps the tries (a fillet round a gear takes ~1 s).
  */
 export function roundSome(kind: "fillet" | "chamfer", shape: Solid, edgeIds: Set<number> | null, size: number, budgetMs = 2500): RoundResult {
   const seams = seamEdgeIds(shape);
   const ids = shape.edges.map((e) => e.hashCode).filter((id) => !seams.has(id) && (!edgeIds || edgeIds.has(id)));
-  const run = (set: Set<number>, r: number) => (kind === "fillet" ? filletEdges(shape, set, r) : chamferEdges(shape, set, r));
-  const attempt = (set: Set<number>, r: number): Solid | null => {
+  const attemptOn = (on: Solid, set: Set<number>, r: number): Solid | null => {
     try {
-      const out = run(set, r);
+      const out = kind === "fillet" ? filletEdges(on, set, r) : chamferEdges(on, set, r);
       return isValidShape(out) && solidVolume(out) > 1e-9 ? out : null;
     } catch {
       return null;
     }
   };
+  const attempt = (set: Set<number>, r: number) => attemptOn(shape, set, r);
   const start = performance.now();
+  // Edges in separate loops (a keychain plate's top and bottom rims: OpenCascade won't round both in one go, but will one
+  // after the other) — a loop at a time, its edges found again on the shape so far by their middle points
+  const loops = edgeLoops(shape, ids);
+  if (loops.length > 1) {
+    const mid = (e: Edge) => e.pointAt(0.5).toTuple() as V3, byId = new Map(shape.edges.map((e) => [e.hashCode, e]));
+    let cur: Solid | null = shape;
+    for (const [k, loop] of loops.entries()) {
+      // (not all of them in time — the loops done so far took (k of them) — then not this way: a text's letters' many rims)
+      if (k && ((performance.now() - start) / k) * loops.length > LOOPS_BUDGET * budgetMs) {
+        cur = null;
+        break;
+      }
+      const want = loop.map((id) => mid(byId.get(id)!));
+      const set: Set<number> = new Set(cur.edges.filter((e) => want.some((w) => Math.hypot(...sub3(mid(e), w)) < 1e-4)).map((e) => e.hashCode));
+      cur = set.size === loop.length ? attemptOn(cur, set, size) : null;
+      if (!cur) break;
+    }
+    if (cur) return { shape: cur, skipped: [], asked: ids.length, largest: null };
+  }
   const whole = attempt(new Set(ids), size);
   if (whole) return { shape: whole, skipped: [], asked: ids.length, largest: null };
   // How many more tries fit in the budget, at what the first one took (a failed fillet round a gear's 170 edges:
@@ -1785,6 +1931,28 @@ export function roundSome(kind: "fillet" | "chamfer", shape: Solid, edgeIds: Set
   }
   const done = new Set(got.set);
   return { shape: got.shape, skipped: ids.filter((id) => !done.has(id)), asked: ids.length, largest: largest && floorNice(largest) };
+}
+
+/** The edges in groups that meet end to end (ids on `shape`): a rim, a loop round a hole. */
+function edgeLoops(shape: Shape, ids: number[]): number[][] {
+  const want = new Set(ids), key = (p: V3) => p.map((x) => Math.round(x * 1e4)).join(",");
+  const at = new Map<string, number[]>(), ends = new Map<number, string[]>();
+  for (const e of shape.edges) {
+    if (!want.has(e.hashCode)) continue;
+    const ks = [key(e.startPoint.toTuple() as V3), key(e.endPoint.toTuple() as V3)];
+    ends.set(e.hashCode, ks);
+    for (const k of ks) (at.get(k) ?? at.set(k, []).get(k)!).push(e.hashCode);
+  }
+  const seen = new Set<number>(), out: number[][] = [];
+  for (const id of ends.keys()) {
+    if (seen.has(id)) continue;
+    const group = [id];
+    seen.add(id);
+    for (let i = 0; i < group.length; i++)
+      for (const k of ends.get(group[i])!) for (const n of at.get(k)!) if (!seen.has(n)) (seen.add(n), group.push(n));
+    out.push(group);
+  }
+  return out;
 }
 
 /** A size rounded down to a tidy step (2 significant figures): 2.734 → 2.7, 0.4689 → 0.46. */
@@ -3179,6 +3347,54 @@ export function edgeFaceIds(shape: Shape, edgeId: number): number[] {
   return table.get(edgeId) ?? [];
 }
 
+/**
+ * The side wall a face is part of (double-click in Face mode): the faces joined to it edge to edge that all run between
+ * the same two parallel flat faces it touches (its caps) — a pushed-up outline's strips (a keychain plate's ~30), a
+ * prism's sides. Null when there's nothing more to it: no such pair of caps (a sphere, a sweep), more than one pair (a
+ * box's side lies between two pairs: which wall is meant can't be told), or the face alone.
+ */
+export function sideWallFaceIds(shape: Shape, faceId: number): number[] | null {
+  const faces = new Map(shape.faces.map((f) => [f.hashCode, f]));
+  const nearCache = new Map<number, Set<number>>();
+  const near = (id: number) => {
+    let n = nearCache.get(id);
+    if (!n) {
+      n = new Set((faces.get(id)?.edges ?? []).flatMap((e) => edgeFaceIds(shape, e.hashCode)));
+      n.delete(id);
+      nearCache.set(id, n);
+    }
+    return n;
+  };
+  if (!faces.has(faceId)) return null;
+  const flat = [...near(faceId)].flatMap((id) => {
+    const f = faces.get(id)!;
+    return f.geomType === "PLANE" ? [{ id, n: norm3(f.normalAt().toTuple() as V3), c: f.center.toTuple() as V3 }] : [];
+  });
+  const pairs: [number, number][] = [];
+  for (let i = 0; i < flat.length; i++)
+    for (let j = i + 1; j < flat.length; j++) {
+      const [a, b] = [flat[i], flat[j]];
+      if (Math.abs(Math.abs(dot3(a.n, b.n)) - 1) < 1e-6 && Math.abs(dot3(sub3(b.c, a.c), a.n)) > 1e-6) pairs.push([a.id, b.id]);
+    }
+  if (pairs.length !== 1) return null;
+  const [a, b] = pairs[0], wall = [faceId], seen = new Set([faceId, a, b]);
+  for (let k = 0; k < wall.length; k++)
+    for (const id of near(wall[k]))
+      if (!seen.has(id)) {
+        seen.add(id);
+        if (near(id).has(a) && near(id).has(b)) wall.push(id);
+      }
+  return wall.length > 1 ? wall : null;
+}
+
+/** The edges round a set of faces of a solid: each edge of theirs that also bounds a face not in the set (a side wall's top and bottom rims). */
+export function facesBorderEdgeIds(shape: Shape, faceIds: Set<number>): Set<number> {
+  const out = new Set<number>();
+  for (const f of shape.faces)
+    if (faceIds.has(f.hashCode)) for (const e of f.edges) if (edgeFaceIds(shape, e.hashCode).some((id) => !faceIds.has(id))) out.add(e.hashCode);
+  return out;
+}
+
 /** Straight edges of a planar face (with the face normal), or null if the face is not planar. */
 export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges: RefEdge[] } | null {
   const face = findFace(shape, faceId);
@@ -3507,6 +3723,7 @@ export function moveEdges(shape: Solid, edgeIds: Set<number>, v: V3): Solid {
     const flat = Math.hypot(...newell(outer)) > 1e-12 &&
       [outer, ...holes].every((l) => l.every((p) => Math.abs(dot3(sub3(p, outer[0]), n)) < tol));
     if (flat) {
+      for (const h of holes) if (dot3(newell(h), n) > 0) h.reverse(); // (against the outline, as in scaleShape)
       faces.push(makeFace(polyWire(outer), holes.filter((h) => h.length >= 3).map(polyWire)));
       continue;
     }
@@ -3992,7 +4209,38 @@ export function offsetRing(shape: Shape, faceId: number, distance: number, round
  */
 export function offsetFaces(faces: Face[], distance: number, round = false, fill = false, ring = false, join = false): Face[] {
   const out = offsetFacesOnce(faces, distance, round, fill, ring);
-  return join && !ring && distance > 0 && out.length > 1 ? bridged(faces, out, distance, round, fill) : out;
+  const plate = join && !ring && distance > 0 && out.length > 1 ? bridged(faces, out, distance, round, fill) : out;
+  return (fill && !ring && distance > 0 ? plate.map((f) => notchesRounded(f, distance)) : plate).map(textSafe);
+}
+
+/**
+ * How far a plate's inward notches are rounded off (mm; at most the offset distance): where two letters' grown outlines
+ * meet in a sharp notch (a script name's plate: a cloud of bumps, ~25 notches) the rim can't be filleted — OpenCascade
+ * gives up turning a notch. A round there of 2 mm makes the outline smooth all round: F rounds both rims.
+ * (Smaller ones come out split at corners again: clipperGrown's points ~0.4 mm apart, CORNER_TURN.)
+ */
+const NOTCH_ROUND = 2;
+
+/** A plate (one outline, no holes) with its inward notches rounded off: grown, then shrunk back (a closing); as it was if that fails. */
+function notchesRounded(f: Face, distance: number): Face {
+  const c = Math.min(NOTCH_ROUND, distance);
+  if (f.wires.length !== 1) return f;
+  try {
+    const r = clipperGrown(clipperGrown(f, c), -c);
+    return isValidShape(r) ? r : f;
+  } catch {
+    return f;
+  }
+}
+
+/**
+ * A face as it comes back from BREP text (the background kernel, a saved file) — valid. A joined outline of offset curves
+ * and fitted ones can pass OpenCascade's check as made yet fail it read back ("Mariah"'s plate: then no fillet, no push/pull
+ * that holds): read back and mended (ShapeFix — the same edges) when so.
+ */
+function textSafe(f: Face): Face {
+  const back = deserialize(serializeShape(f as unknown as Shape)) as unknown as Face;
+  return isValidShape(back as unknown as Shape) ? f : mended(back as unknown as Shape3D) as unknown as Face;
 }
 
 /** The faces' common plane's normal; throws if one isn't flat or not on the first one's plane. */
@@ -4069,6 +4317,16 @@ export function offsetFacesQuick(faces: Face[], distance: number, round = false,
     }
   }
   if (fill) sol = outers(sol);
+  // (a plate's inward notches rounded off, as on Apply: notchesRounded)
+  if (fill && !ring && distance > 0) {
+    const c = Math.min(NOTCH_ROUND, distance), close = (src: { X: number; Y: number }[][], d: number) => {
+      const co = new ClipperLib.ClipperOffset(2, 0.1 * S), out: { X: number; Y: number }[][] = [];
+      co.AddPaths(src, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+      co.Execute(out, d * S);
+      return out;
+    };
+    sol = outers(close(close(sol, c), -c));
+  }
   if (ring) {
     const cl = new ClipperLib.Clipper(), band: { X: number; Y: number }[][] = [];
     const [big, small] = distance > 0 ? [sol, paths] : [paths, sol];
@@ -4152,12 +4410,15 @@ function offsetFacesOnce(faces: Face[], distance: number, round: boolean, fill: 
 
 /** How close a fitted outline follows its points (mm). (Looser didn't draw its pushed-up sides much quicker: 0.1 went wrong.) */
 const FIT_TOL = 0.01;
+/** A turn sharper than this between neighbouring points of a grown outline is a corner, kept sharp (radians; ~20°). */
+const CORNER_TURN = 0.35;
 
 /**
  * A face (no holes) grown round by `d` the sure way, where OpenCascade's offset fails — at the distance where an outline's
  * parts grow into each other and close off a gap (Pacifico's curly "M" from ~2.6 mm on a 20 mm name), whatever its curves
  * are made of. Its outline as points (every ~0.4 mm: within ~0.04 mm at a letter's tightest curls), grown by Clipper (round joins, arcs within 0.01 mm), each loop a
- * smooth curve through its points again (cubic, within 0.01 mm; straight pieces if those don't make a valid face).
+ * smooth curve through its points again (cubic, within 0.01 mm; one between each two sharp corners; straight pieces if those
+ * don't make a valid face).
  */
 function clipperGrown(f: Face, d: number): Face {
   const w = [...f.wires][0], n = norm3(f.normalAt().toTuple() as V3);
@@ -4180,34 +4441,65 @@ function clipperGrown(f: Face, d: number): Face {
   co.AddPath(path, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
   co.Execute(sol, d * S);
   const to3 = (q: { X: number; Y: number }): V3 => [0, 1, 2].map((k) => o[k] + (q.X / S) * ax[k] + (q.Y / S) * ay[k]) as V3;
-  const loopWire = (loop: { X: number; Y: number }[], smooth: boolean): Wire => {
-    const p3 = loop.map(to3);
-    if (!smooth) return [...makePolygon(p3).wires][0];
-    const arr = new oc.NCollection_Array1_gp_Pnt(1, p3.length + 1), made: { delete(): void }[] = [arr];
+  // (a smooth run of points: a cubic through them, within FIT_TOL — null if that can't be made)
+  const fitted = (p3: V3[]): Edge[] | null => {
+    const arr = new oc.NCollection_Array1_gp_Pnt(1, p3.length), made: { delete(): void }[] = [arr];
     try {
-      [...p3, p3[0]].forEach((p, i) => {
+      p3.forEach((p, i) => {
         const g = new oc.gp_Pnt(p[0], p[1], p[2]);
         made.push(g);
         arr.SetValue(i + 1, g);
       });
       const fit = new oc.GeomAPI_PointsToBSpline(arr, 3, 3, oc.GeomAbs_Shape.GeomAbs_C2, FIT_TOL);
       made.push(fit);
-      if (fit.IsDone()) {
-        const mk = new oc.BRepBuilderAPI_MakeEdge(fit.Curve() as never);
-        made.push(mk);
-        const wire = assembleWire([cast(mk.Edge()) as Edge]);
+      if (!fit.IsDone()) return null;
+      const mk = new oc.BRepBuilderAPI_MakeEdge(fit.Curve() as never);
+      made.push(mk);
+      return inPieces(cast(mk.Edge()) as Edge);
+    } catch {
+      return null;
+    } finally {
+      made.forEach((m) => m.delete());
+    }
+  };
+  // The loop as smooth curves, one along each run between its sharp corners, the corners kept — two parts of an outline
+  // grown into each other meet at an inward corner, which one curve round the loop can overshoot into a loop of its own
+  // ("Kritsanee" in Pacifico at 5 mm: straight pieces, ~590 lines down its pushed-up side); short runs fit quicker too
+  // (that name ~4 s → ~0.8 s)
+  const loopWire = (loop: { X: number; Y: number }[], smooth: boolean): Wire => {
+    const p3 = loop.map(to3);
+    if (!smooth) return [...makePolygon(p3).wires][0];
+    const m = p3.length, turn = (i: number) => {
+      const [a, b, c] = [p3[(i + m - 1) % m], p3[i], p3[(i + 1) % m]], u = sub3(b, a), v = sub3(c, b);
+      return Math.acos(Math.max(-1, Math.min(1, dot3(u, v) / (Math.hypot(...u) * Math.hypot(...v) || 1))));
+    };
+    const corners = p3.map((_, i) => i).filter((i) => turn(i) > CORNER_TURN);
+    try {
+      if (!corners.length) {
+        const e = fitted([...p3, p3[0]]);
+        const wire = e && assembleWire(e);
+        if (wire?.isClosed) return wire;
+      } else {
+        const edges: Edge[] = [];
+        corners.forEach((c, k) => {
+          const end = k + 1 < corners.length ? corners[k + 1] : corners[0] + m, run: V3[] = [];
+          for (let i = c; i <= end; i++) run.push(p3[i % m]);
+          // (a short run: its straight pieces)
+          const e = run.length >= 4 ? fitted(run) : null;
+          if (e) edges.push(...e);
+          else for (let i = 0; i + 1 < run.length; i++) edges.push(makeLine(run[i], run[i + 1]));
+        });
+        const wire = assembleWire(edges);
         if (wire.isClosed) return wire;
       }
     } catch {
       // (the straight pieces below)
-    } finally {
-      made.forEach((m) => m.delete());
     }
     return [...makePolygon(p3).wires][0];
   };
   const outers = sol.filter((l) => ClipperLib.Clipper.Orientation(l)), holes = sol.filter((l) => !ClipperLib.Clipper.Orientation(l));
   if (!outers.length) throw new Error("Offset: the face vanishes at this distance");
-  // (smooth curves through the loops — or, if those don't make a valid face, the straight pieces)
+  // (smooth curves through the loops, split at sharp corners — or, if those don't make a valid face, the straight pieces)
   for (const smooth of [true, false]) {
     const faces = outers.map((ol) => makeFace(loopWire(ol, smooth), holes.filter((h) => ClipperLib.Clipper.PointInPolygon(h[0], ol) !== 0).map((h) => loopWire(h, smooth))));
     let r: Face = faces[0];
@@ -4216,6 +4508,36 @@ function clipperGrown(f: Face, d: number): Face {
     if (isValidShape(r)) return r;
   }
   throw new Error("Offset: the result is not a valid face");
+}
+
+/**
+ * How long the pieces of a fitted outline are (mm, about). One curve all round a name plate is one wall face, one fillet
+ * face per rim, each round the whole plate: a boolean can't rule them out for any letter on it and intersects them all
+ * ("Kritsanee" joined to its filleted plate: 38.9 s; in ~12 mm pieces 1.5 s), OpenCascade's fillet makes each rim one
+ * huge surface (2954 poles, degree 14 — a 1.7 mm round on a 24 mm plate failed) and its area / volume come out ~10 % off.
+ */
+const PIECE_LEN = 12;
+
+/** A fitted curve cut into pieces about PIECE_LEN long that join smoothly (the same curve); as it is if short. */
+function inPieces(e: Edge): Edge[] {
+  const n = Math.ceil(measureLength(e) / PIECE_LEN);
+  if (n < 2) return [e];
+  const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0), out: Edge[] = [];
+  for (let i = 0; i < n; i++) {
+    const tr = new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true);
+    const bs = oc.GeomConvert.CurveToBSplineCurve(tr as never);
+    try {
+      if (bs.IsPeriodic()) bs.SetNotPeriodic();
+      const u0 = bs.FirstParameter(), u1 = bs.LastParameter();
+      bs.Segment(u0 + ((u1 - u0) * i) / n, u0 + ((u1 - u0) * (i + 1)) / n);
+      const mk = new oc.BRepBuilderAPI_MakeEdge(bs as never);
+      out.push(cast(mk.Edge()) as Edge);
+      mk.delete();
+    } finally {
+      tr.delete();
+    }
+  }
+  return out;
 }
 
 /** `s` as it is if OpenCascade's check passes, else mended with ShapeFix_Shape (when that passes). */
@@ -6136,6 +6458,9 @@ export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
   const faces = shape.faces.map((src) => {
     // outerWire / innerWires delete the face they are called on.
     const [outer, ...holes] = [src.clone().outerWire(), ...src.clone().innerWires()].map((w) => loopPoints(w.edges).map(map));
+    // Holes wound against the outline (a face's holes can come either way round — a wall's windows; the same way round isn't a valid face)
+    const n0 = newell(outer);
+    for (const h of holes) if (dot3(newell(h), n0) > 0) h.reverse();
     let out = makeFace(polyWire(outer), holes.map(polyWire));
     // Normals transform by the inverse scale; keep the face facing the same way.
     const n = src.normalAt().toTuple();
@@ -7120,4 +7445,9 @@ export function wrappedTextFaces(shape: Shape, faceId: number, at: V3, text: str
     return toFrame(f.clone().translate([-c.x, -c.y, 0]) as Face, { origin: q.p, x: right, y: up, z: q.n });
   });
 }
+
+
+
+
+
 

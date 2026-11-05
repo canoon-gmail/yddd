@@ -118,7 +118,11 @@ export const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
 export const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 /** Toolbar commands that go into the recent strip (mode switches, undo/redo, views, X-ray and Delete have their own keys / buttons). */
 export const NOT_RECENT = new Set(["Select", "History", "View", "X-ray"]);
-export const RECENT_ITEMS = new Map(TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
+/** Single commands kept off the strip too: Move (G) is used all the time and has its key. */
+export const NOT_RECENT_CMDS = new Set(["xf.move"]);
+export const RECENT_ITEMS = new Map(
+  TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.filter((it) => !NOT_RECENT_CMDS.has(it.cmd)).map((it) => [it.cmd, it] as const)),
+);
 export const RECENT_MAX = 10;
 /** v2: the strip saved before "tool.line" became "tool.divideFace" is dropped (see loadRecent). */
 export const RECENT_KEY = "yddd.recentCmds.v2";
