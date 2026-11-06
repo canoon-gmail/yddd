@@ -1015,7 +1015,7 @@ export class App implements ToolHost {
   setSelection(items: SelItem[]): void {
     const before = new Set(this.selection.map((s) => s.body));
     this.selection = items.filter((s) => !this.doc.get(s.body)?.locked);
-    // Picked anywhere but the Bodies panel (the view, a tool, Select all…): its row to the panel's top
+    // Picked anywhere but the Bodies panel (the view, a tool, Select all…): its row to the panel's middle
     const added = this.selection.find((s) => !before.has(s.body));
     if (added && !this.olFromPanel) this.olScrollTo = added.body;
     this.located = null;
@@ -1041,6 +1041,7 @@ export class App implements ToolHost {
   }
 
   private click(e: PointerEvent): void {
+    if (this.mode === "body") this.bodyClick = { at: e.timeStamp, body: this.viewport.pick(e.clientX, e.clientY, "body")?.body ?? -1 };
     this.clearGuideGroup();
     if (this.selDim >= 0) {
       this.selDim = -1;
@@ -1181,6 +1182,8 @@ export class App implements ToolHost {
     return b?.kind === "solid" && isBrep(b) && smoothSurfaceFaces(b.shape).has(item.id) ? { kind: "body", body: item.body, id: 0 } : null;
   }
 
+  /** The last click in Solid mode: when, on which solid (a double-click's second click may have drilled down to its face / edge since). */
+  private bodyClick = { at: -Infinity, body: -1 };
   /** The last click on an edge (to tell a double click). */
   private lastEdgeClick: { body: number; id: number; at: number } | null = null;
 
@@ -1270,8 +1273,8 @@ export class App implements ToolHost {
   private refreshSelection(): void {
     this.viewport.setHighlight(this.located !== null ? [{ kind: "body", body: this.located, id: 0 }] : this.selection, this.hover);
     this.updateDots();
+    this.renderProps(); // (first: it sets the Bodies panel's height — the outliner scrolls a row to its middle)
     this.renderOutliner();
-    this.renderProps();
     this.renderToolbarState();
     if (!this.tool && !this.op) this.hint(this.xf ? "Drag the gizmo handles · Esc to finish" : this.modeHint());
     $("status-mode").textContent = { body: "Solid", face: "Face", edge: "Edge" }[this.mode] + " mode";
@@ -1371,6 +1374,22 @@ export class App implements ToolHost {
     });
     // Face mode, double-click on a side face (its first click selected it): the whole side wall — a keychain plate's strips
     // (sideWallFaceIds; a box's side, between two pairs of faces, stays one face)
+    // Solid mode, double-click on a solid in a group: the whole group (its unlocked members; Shift: added to the selection).
+    // (its second click drilled down to a face / edge of the selected solid: back to Solid mode — a slow second click still
+    // drills down; a solid in no group: the drill-down stays)
+    c.addEventListener("dblclick", (e) => {
+      if (e.button !== 0 || e.altKey || e.ctrlKey || this.tool || this.op || this.xf || this.viewport.gizmoHot) return;
+      // (the solid its first click hit — the second may have switched the mode; picking right after that finds nothing)
+      if (e.timeStamp - this.bodyClick.at > 800) return;
+      const b = this.doc.get(this.bodyClick.body);
+      if (!b?.group || b.locked) return;
+      e.stopImmediatePropagation(); // (not Face mode's side wall)
+      this.bodyClick = { at: -Infinity, body: -1 };
+      const g = b.group, items: SelItem[] = this.doc.bodies.filter((x) => x.group === g && !x.locked).map((x) => ({ kind: "body", body: x.id, id: 0 }));
+      this.setMode("body");
+      this.setSelection(e.shiftKey ? [...this.selection.filter((s) => !items.some((it) => sameItem(s, it))), ...items] : items);
+      this.hint(`${g} selected (${items.length} objects) · G move · R rotate · S scale · Esc deselects`);
+    });
     c.addEventListener("dblclick", (e) => {
       if (e.button !== 0 || e.altKey || e.shiftKey || e.ctrlKey || this.tool || this.op || this.xf || this.viewport.gizmoHot || this.mode !== "face") return;
       const [one] = this.selection;
@@ -2202,7 +2221,7 @@ export class App implements ToolHost {
         title: "Push / Pull → new solid",
         panelOnTab: true,
         label: "Extrude face",
-        fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
+        fields: [{ key: "d", label: "Distance (mm)", value: 0.2, step: 1 }],
         compute: ({ d }) => {
           // (the instant preview: its prism drawn from its display mesh — the exact solid, a scanned / offset outline's
           // slow to draw, only on Apply)
@@ -2233,7 +2252,7 @@ export class App implements ToolHost {
       panelOnTab: true,
       label: "Push/Pull",
       fields: [
-        { key: "d", label: "Distance (mm)", value: 1, step: 1 },
+        { key: "d", label: "Distance (mm)", value: 0.2, step: 1 },
         { key: "newBody", label: "New solid", value: this.defaults.pushpullNew ? 1 : 0, type: "checkbox" },
       ],
       compute: ({ d, newBody }) => {
@@ -2386,7 +2405,7 @@ export class App implements ToolHost {
       title: `Push / Pull (${n} faces)`,
       panelOnTab: true,
       label: "Push/Pull",
-      fields: [{ key: "d", label: "Distance (mm)", value: 1, step: 1 }],
+      fields: [{ key: "d", label: "Distance (mm)", value: 0.2, step: 1 }],
       compute: ({ d }) => {
         // Fast preview; the exact solids are computed on Apply (see asPreview).
         const pushed = () => new Map<number, Shape>([...perSolid].map(([id, faces]) => [id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d)]));
@@ -6553,6 +6572,33 @@ export class App implements ToolHost {
     this.toast(groups.size > 1 ? `${groups.size} groups taken apart` : `${[...groups][0]} taken apart`);
   }
 
+  /**
+   * Objects dragged in the Bodies panel (one undo step): into `group` (undefined: out of any group), placed before / after
+   * the `anchor` body (null: at the end). Nothing changed (dropped back where they were): no step.
+   */
+  private moveBodies(ids: number[], group: string | undefined, anchor: number | null, after: boolean): void {
+    const moving = new Set(ids), all = this.doc.bodies;
+    if (!all.some((b) => moving.has(b.id))) return;
+    if (this.op || this.tool) return this.toast("Finish the current tool first (Enter or Esc), then drag", "error");
+    if (this.xf) this.stopTransform();
+    const rest = all.filter((b) => !moving.has(b.id));
+    const at = anchor === null ? rest.length : all.slice(0, all.findIndex((b) => b.id === anchor)).filter((b) => !moving.has(b.id)).length + (after && !moving.has(anchor) ? 1 : 0);
+    const moved = all.filter((b) => moving.has(b.id)).map((b) => {
+      if (b.group === group) return b;
+      if (group !== undefined) return { ...b, group };
+      const { group: _g, ...plain } = b;
+      return plain as Body;
+    });
+    const next = [...rest.slice(0, at), ...moved, ...rest.slice(at)];
+    if (next.every((b, i) => b === all[i])) return;
+    if (group !== undefined) this.olCollapsed.delete(group);
+    const left = all.some((b) => moving.has(b.id) && b.group !== undefined);
+    this.doc.commit(next, group !== undefined ? `Move into ${group}` : left ? "Move out of group" : "Move");
+  }
+
+  /** The bodies being dragged in the Bodies panel (null: no drag). */
+  private olDragIds: number[] | null = null;
+
   /** Set while Union / Subtract / Intersect waits for solids: a click in the Bodies panel (a row, or a group) goes here. */
   private outlinerPick: ((ids: number[]) => void) | null = null;
   /** A locked body clicked in the Bodies panel: lit in the viewport to show where it is (not selected), null: none. */
@@ -6590,7 +6636,7 @@ export class App implements ToolHost {
   /** The body rows' ids in the panel's order (see renderOutliner); the row height and the spacers of a long list. */
   private olIds: number[] = [];
   private olRowH = 30;
-  /** A body picked outside the Bodies panel: its row scrolled to the panel's top at the next redraw (see setSelection). */
+  /** A body picked outside the Bodies panel: its row scrolled to the panel's middle at the next redraw (see setSelection). */
   private olScrollTo: number | null = null;
   /** A click in the panel is being handled (its picks don't scroll the panel). */
   private olFromPanel = false;
@@ -6741,6 +6787,66 @@ export class App implements ToolHost {
           this.renderOutliner();
         });
       });
+      // Drag objects into a group or out of it: a selected row drags all the selected ones. Dropped on a group's name: to
+      // the end of that group (its top third: just before the group, out of it); on a row: next to it, in its group (or
+      // in none); below the rows: to the end, out of any group.
+      const panel = el.parentElement!;
+      let mark: HTMLElement | null = null;
+      const unmark = () => {
+        mark?.classList.remove("drop-before", "drop-after", "drop-into");
+        mark = null;
+      };
+      const dropAt = (e: DragEvent): { el: HTMLElement | null; cls: string; group: string | undefined; anchor: number | null; after: boolean } | null => {
+        const t = e.target as HTMLElement, dragging = new Set(this.olDragIds ?? []);
+        if (t.closest(".ol-guides, input")) return null;
+        const head = t.closest<HTMLElement>(".ol-group");
+        if (head) {
+          const g = head.dataset.group!, ms = this.doc.bodies.filter((b) => b.group === g), r = head.getBoundingClientRect();
+          if (!ms.length) return null;
+          if (e.clientY < r.top + r.height / 3) return { el: head, cls: "drop-before", group: undefined, anchor: (ms.find((b) => !dragging.has(b.id)) ?? ms[0]).id, after: false };
+          return { el: head, cls: "drop-into", group: g, anchor: ms[ms.length - 1].id, after: true };
+        }
+        const row = t.closest<HTMLElement>(".ol-row");
+        if (row) {
+          const b = this.doc.get(Number(row.dataset.id));
+          if (!b || dragging.has(b.id)) return null;
+          const r = row.getBoundingClientRect(), after = e.clientY > r.top + r.height / 2;
+          return { el: row, cls: after ? "drop-after" : "drop-before", group: b.group, anchor: b.id, after };
+        }
+        return { el: null, cls: "", group: undefined, anchor: null, after: true };
+      };
+      el.addEventListener("dragstart", (e) => {
+        const b = bodyOf(e);
+        if (!b || !e.dataTransfer) return;
+        const sel = this.selectedBodyIds();
+        this.olDragIds = sel.includes(b.id) ? this.doc.bodies.filter((x) => sel.includes(x.id)).map((x) => x.id) : [b.id];
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", this.olDragIds.map((id) => this.doc.get(id)?.name ?? "").join(", "));
+      });
+      panel.addEventListener("dragover", (e) => {
+        if (!this.olDragIds) return;
+        const at = dropAt(e);
+        unmark();
+        if (!at) return;
+        e.preventDefault();
+        e.dataTransfer!.dropEffect = "move";
+        if (at.el) (mark = at.el).classList.add(at.cls);
+      });
+      panel.addEventListener("dragleave", (e) => {
+        if (!panel.contains(e.relatedTarget as Node | null)) unmark();
+      });
+      panel.addEventListener("drop", (e) => {
+        const ids = this.olDragIds, at = ids && dropAt(e);
+        unmark();
+        if (!ids || !at) return;
+        e.preventDefault();
+        this.olDragIds = null;
+        this.moveBodies(ids, at.group, at.anchor, at.after);
+      });
+      el.addEventListener("dragend", () => {
+        unmark();
+        this.olDragIds = null;
+      });
       el.addEventListener("dblclick", (e) => {
         const cell = (e.target as HTMLElement).closest(".ol-name");
         if (!cell) return;
@@ -6778,6 +6884,7 @@ export class App implements ToolHost {
       if (!entry || entry.body !== b || entry.hidden !== hidden || entry.lk !== lk) { // (a lock change: a new body object)
         const row = entry?.row ?? document.createElement("div");
         row.className = "ol-row";
+        row.draggable = true; // (into a group or out of one — see dropAt)
         row.dataset.id = String(b.id);
         const kind = { solid: "Solid", face: "Flat face", mesh: "Mesh (STL)", path: "Path (open lines from a sketch)" }[b.kind];
         // (a path's lines keep their colour: no look)
@@ -6826,13 +6933,14 @@ export class App implements ToolHost {
     for (const g of [...this.olGuideGroups.keys()]) if (!guideGroups.has(g)) this.olGuideGroups.delete(g);
     for (const g of [...this.hiddenGuideGroups]) if (!guideGroups.has(g)) this.hiddenGuideGroups.delete(g);
     this.olIds = ids;
-    // Selected outside the panel: that row to the panel's top (or as near as the list's end lets it) — by its place, as
+    // Selected outside the panel: that row to the panel's middle (or as near as the list's ends let it) — by its place, as
     // in a long list its row may not be on the page yet (the rows in view are made after this, from the new scroll)
     const scrollTo = this.olScrollTo !== null ? placeOf.get(this.olScrollTo) : undefined;
     this.olScrollTo = null;
     if (scrollTo !== undefined) {
       const sc = el.parentElement!;
-      sc.scrollTop = el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop + scrollTo * this.olRowH;
+      sc.scrollTop = el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop + scrollTo * this.olRowH
+        - (sc.clientHeight - this.olRowH) / 2;
     }
     // A long list: only the rows in view (and a few more each way) on the page, spacers for the rest
     let rows: HTMLElement[], above = 0, below = 0;
@@ -6871,7 +6979,10 @@ export class App implements ToolHost {
     // (exactly to its row, now it's on the page — the place × row height above was near enough to bring it here)
     if (scrollTo !== undefined) {
       const row = rows[scrollTo - (order.length > OL_VIRTUAL_MIN ? Math.round(above / this.olRowH) : 0)], sc = el.parentElement!;
-      if (row) sc.scrollTop += row.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+      if (row) {
+        const r = row.getBoundingClientRect();
+        sc.scrollTop += r.top + r.height / 2 - (sc.getBoundingClientRect().top + sc.clientTop + sc.clientHeight / 2);
+      }
     }
     for (const id of [...this.olRows.keys()]) if (!live.has(id)) this.olRows.delete(id);
     for (const g of [...this.olGroups.keys()]) if (!liveGroups.has(g)) this.olGroups.delete(g);
@@ -7178,6 +7289,7 @@ export class App implements ToolHost {
           : b?.kind === "mesh"
           ? `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("edit.duplicate", "Shift+D", "duplicate")} · File → Export STL (exported with the solids)<br>A mesh can't be edited (no faces or edges)`
           : `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("op.cut", "C", "cut by guide")} · ${job("op.fillet", "F", "fillet all edges")} · ${job("edit.duplicate", "Shift+D", "duplicate")}`;
+        if (b?.group) hints += `<br>Double-click it: its whole group (${escapeHtml(b.group)})`;
       } else {
         hints = `${job("bool.union", "Shift+U", "union")} · ${job("bool.subtract", "−", "subtract")} · ${job("bool.intersect", "Shift+I", "intersect")}<br>(first selected = target)`;
         // A whole array group (changed with its icon in the Bodies panel): what it is, or why it can't be changed now.
