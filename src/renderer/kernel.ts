@@ -1661,6 +1661,27 @@ export function faceAxis(shape: Shape, faceId: number): { center: V3; normal: V3
   return { center: p.toTuple() as V3, normal: face.geomType === "PLANE" ? norm3(face.normalAt().toTuple() as V3) : normalAtUV(face, 0.5, 0.5) };
 }
 
+/**
+ * How far a flat face of a solid can be pushed in until it meets the solid's flat face straight behind it (facing the
+ * other way, under a point of the face: e.g. a face divided by a guide on both sides) — pushed that far, the part between
+ * them is gone. null: none behind it (or not flat).
+ */
+export function throughDepth(shape: Shape, faceId: number): number | null {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") return null;
+  const [lo, hi] = shape.boundingBox.bounds;
+  const tol = Math.max(1e-5, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 1e-6);
+  const p = pointOnFace(face).toTuple() as V3, n = norm3(face.normalAt().toTuple() as V3);
+  let best: number | null = null;
+  for (const g of shape.faces) {
+    if (g.geomType !== "PLANE" || dot3(norm3(g.normalAt().toTuple() as V3), n) > -1 + 1e-9) continue;
+    const k = dot3(sub3(p, g.center.toTuple() as V3), n);
+    if (k <= tol || (best !== null && k >= best)) continue;
+    if (distToFace(g, [p[0] - n[0] * k, p[1] - n[1] * k, p[2] - n[2] * k]) < tol * 10) best = k;
+  }
+  return best;
+}
+
 /** Whether flat face `flat` lies on a flat face of `solid`: in its plane and touching it (e.g. a window drawn on a wall). */
 export function liesOnSolid(flat: Shape, solid: Shape): boolean {
   const f = flat.faces[0];
@@ -3847,6 +3868,63 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   builder.delete();
   if (solids.length !== 1 || !isValidShape(solids[0])) throw new Error("Divide face: dividing this face did not give a valid solid");
   return solids[0];
+}
+
+/**
+ * Where the line through a–b (a guide: as long as it needs to be) runs across a solid's flat faces: the pieces from one
+ * straight edge to another, each on those faces all the way (over a hole or a notch: a gap, two pieces) — for
+ * splitFaceByLine — each with the normal of the faces it's on. Not along an edge already there, nor on a face it only
+ * touches. [] if none.
+ */
+export function guideSpans(shape: Solid, a: V3, b: V3): [V3, V3, V3][] {
+  const [lo, hi] = shape.boundingBox.bounds;
+  const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const tol = Math.max(1e-5, diag * 1e-7);
+  const len = Math.hypot(...sub3(b, a));
+  if (len < tol) return [];
+  const d = norm3(sub3(b, a));
+  const at = (t: number): V3 => [a[0] + d[0] * t, a[1] + d[1] * t, a[2] + d[2] * t];
+  const spans: [V3, V3, V3][] = [];
+  // The flat faces the line lies in, by plane (one way round)
+  const planes: { n: V3; faces: Face[] }[] = [];
+  for (const f of shape.faces) {
+    if (f.geomType !== "PLANE") continue;
+    const n = f.normalAt(f.center).normalized().toTuple() as V3, c = f.center.toTuple() as V3;
+    if (Math.abs(dot3(n, d)) > 1e-9 || Math.abs(dot3(sub3(a, c), n)) > tol * 10) continue;
+    const p = planes.find((x) => dot3(x.n, n) > 1 - 1e-9);
+    if (p) p.faces.push(f);
+    else planes.push({ n, faces: [f] });
+  }
+  for (const { n, faces } of planes) {
+    // Where it crosses their straight edges (one along it: its ends)
+    const ts: number[] = [];
+    for (const e of faces.flatMap((f) => f.edges)) {
+      if (e.geomType !== "LINE") continue;
+      const p = e.startPoint.toTuple() as V3, q = e.endPoint.toTuple() as V3, r = sub3(q, p), x = cross3(d, r), xx = dot3(x, x);
+      if (xx < 1e-18 * dot3(r, r)) {
+        if (Math.hypot(...cross3(sub3(p, a), d)) < tol * 10) ts.push(dot3(sub3(p, a), d), dot3(sub3(q, a), d)); // (on the line)
+        continue;
+      }
+      const w = sub3(p, a), t = dot3(cross3(w, r), x) / xx, s = dot3(cross3(w, d), x) / xx;
+      if (s > -1e-9 && s < 1 + 1e-9) ts.push(t);
+    }
+    ts.sort((u, v) => u - v);
+    const cuts = ts.filter((t, i) => i === 0 || t - ts[i - 1] > tol * 10);
+    const onFaces = (p: V3) => faces.some((f) => distToFace(f, p) < tol * 10);
+    const onEdge = (p: V3) => faces.some((f) => f.edges.some((e) => e.geomType === "LINE" && segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10));
+    // Runs of pieces across the faces (not along an edge): one span each
+    let start: number | null = null;
+    for (let i = 0; i + 1 < cuts.length; i++) {
+      const m = at((cuts[i] + cuts[i + 1]) / 2), across = onFaces(m) && !onEdge(m);
+      if (across && start === null) start = cuts[i];
+      if (!across && start !== null) {
+        spans.push([at(start), at(cuts[i]), n]);
+        start = null;
+      }
+    }
+    if (start !== null) spans.push([at(start), at(cuts[cuts.length - 1]), n]);
+  }
+  return spans;
 }
 
 /** Hollow the solid inward, removing the given (open) faces, walls of `thickness`. */

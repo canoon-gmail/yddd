@@ -86,6 +86,8 @@ export interface OpDrag {
    * handle runs from `origin` along `dir` with `unit` instead (e.g. Scale about the centre, not the base).
    */
   shift?: { key: string; origin: V3; dir: V3; unit: number };
+  /** Double-click on the handle: the value to set and apply at once (e.g. Push/Pull through to the face behind), or why not. */
+  dblclick?: () => number | string;
 }
 
 export interface OpSpec {

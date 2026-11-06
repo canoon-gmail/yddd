@@ -68,6 +68,8 @@ export interface Tool {
   up?(e: PointerEvent): void;
   /** Returns true if the key was consumed. */
   key(e: KeyboardEvent): boolean;
+  /** Optional: a key let go (e.g. to tell a tap of Shift on its own). */
+  keyUp?(e: KeyboardEvent): void;
   /** Optional: a right click (no drag) in the viewport. */
   rightClick?(e: PointerEvent): void;
   /** Optional: mouse wheel in the viewport. Return true to consume it (no zoom). */
@@ -328,7 +330,10 @@ abstract class DrawTool implements Tool {
 
 // ------------------------------------------------------------------ Box
 
-/** Box solid, or (faceMode) a flat Rectangle face. */
+/**
+ * Box solid, or (faceMode) a flat Rectangle face. A tap of Left Shift (on its own, not held) toggles whether the first click
+ * is a corner or the centre (remembered while YDDD runs).
+ */
 export class BoxTool extends DrawTool {
   constructor(host: ToolHost, private readonly faceMode = false) {
     super(host);
@@ -339,18 +344,58 @@ export class BoxTool extends DrawTool {
   }
 
   protected get hints(): string[] {
-    const n = this.name;
+    const n = this.name, c = BoxTool.fromCenter;
+    const toggle = `Left Shift: from the ${c ? "corner" : "centre"}`;
     return [
-      `${n}: click the first corner (on the grid or on a planar face)`,
-      `${n}: click the opposite corner — or type width,depth (or 40x25) + Enter`,
+      `${n}: click the ${c ? "centre" : "first corner"} (on the grid or on a planar face) · ${toggle}`,
+      `${n}: click ${c ? "a corner (from the centre)" : "the opposite corner"} — or type width,depth (or 40x25) + Enter · ${toggle}`,
       `${n}: move to set the height and click — or type height + Enter`,
     ];
   }
+  /** The first click a corner (false) or the centre (true). */
+  private static fromCenter = false;
+  /** Left Shift down with no other key / click since: let go → a tap. */
+  private shiftTap = false;
+  /** The first click, and the corners (u1, v1) – (u2, v2): (u2, v2) the one at the cursor. */
+  private au = 0;
+  private av = 0;
   private u1 = 0;
   private v1 = 0;
   private u2 = 0;
   private v2 = 0;
   private h = 0;
+
+  key(e: KeyboardEvent): boolean {
+    this.shiftTap = e.code === "ShiftLeft" && !e.repeat && this.stage < 2;
+    return this.shiftTap ? false : super.key(e);
+  }
+
+  keyUp(e: KeyboardEvent): void {
+    if (e.code !== "ShiftLeft" || !this.shiftTap) return;
+    this.shiftTap = false;
+    if (this.stage >= 2) return;
+    BoxTool.fromCenter = !BoxTool.fromCenter;
+    if (this.stage === 1) {
+      this.corners(this.u2, this.v2);
+      this.drawRect();
+    }
+    this.updateHint();
+  }
+
+  /** The cursor's corner at (u, v): the other one the first click (from a corner) or across it (from the centre). */
+  private corners(u: number, v: number): void {
+    this.u2 = u;
+    this.v2 = v;
+    this.u1 = BoxTool.fromCenter ? 2 * this.au - u : this.au;
+    this.v1 = BoxTool.fromCenter ? 2 * this.av - v : this.av;
+  }
+
+  /** A typed width × depth, the cursor's side of the first click kept. */
+  private sized(w: number, d: number): void {
+    const su = this.u2 < this.u1 ? -1 : 1, sv = this.v2 < this.v1 ? -1 : 1;
+    const k = BoxTool.fromCenter ? 0.5 : 1;
+    this.corners(this.au + su * w * k, this.av + sv * d * k);
+  }
 
   move(e: PointerEvent): void {
     this.last = e;
@@ -365,8 +410,7 @@ export class BoxTool extends DrawTool {
     } else if (this.stage === 1) {
       const p = this.hit(e, step);
       if (!p) return;
-      this.u2 = p.u;
-      this.v2 = p.v;
+      this.corners(p.u, p.v);
       this.drawRect();
     } else {
       const h = this.height(e, this.rectCenter());
@@ -377,12 +421,13 @@ export class BoxTool extends DrawTool {
   }
 
   down(e: PointerEvent): void {
+    this.shiftTap = false; // (Shift+click: not a tap)
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
       const p = this.hit(e, step);
       if (!p) return;
-      this.u1 = this.u2 = p.u;
-      this.v1 = this.v2 = p.v;
+      this.au = this.u1 = this.u2 = p.u;
+      this.av = this.v1 = this.v2 = p.v;
       this.stage = 1;
     } else if (this.stage === 1) {
       if (Math.abs(this.u2 - this.u1) < 1e-6 || Math.abs(this.v2 - this.v1) < 1e-6) return;
@@ -404,8 +449,7 @@ export class BoxTool extends DrawTool {
     if (this.stage === 1) {
       const [w, d = w] = values;
       if (!w || !d) return;
-      this.u2 = this.u1 + Math.abs(w) * (this.u2 < this.u1 ? -1 : 1);
-      this.v2 = this.v1 + Math.abs(d) * (this.v2 < this.v1 ? -1 : 1);
+      this.sized(Math.abs(w), Math.abs(d));
       if (this.faceMode) {
         this.buildFace();
         return;
@@ -430,8 +474,7 @@ export class BoxTool extends DrawTool {
 
   protected applyProps([w, d, h]: number[]): void {
     if (!(w > 0) || !(d > 0)) return this.host.fail("width and depth must be > 0");
-    this.u2 = this.u1 + w * (this.u2 < this.u1 ? -1 : 1);
-    this.v2 = this.v1 + d * (this.v2 < this.v1 ? -1 : 1);
+    this.sized(w, d);
     if (this.faceMode) return this.buildFace();
     if (!h) return this.host.fail("height must not be 0");
     this.h = h;
@@ -448,6 +491,7 @@ export class BoxTool extends DrawTool {
     const w = Math.abs(this.u2 - this.u1);
     const d = Math.abs(this.v2 - this.v1);
     const objs: THREE.Object3D[] = [this.outline(pts), this.cursor(pts[2])];
+    if (BoxTool.fromCenter) objs.push(this.cursor(f.point(this.au, this.av)));
     if (w > 0 && d > 0) objs.push(f.place(new THREE.Mesh(new THREE.PlaneGeometry(w, d), this.host.viewport.mats.previewFill), this.rectCenter()));
     this.host.viewport.setOverlay(objs);
     this.host.hud(`${fmt(w)} × ${fmt(d)} mm`, pts[2]);

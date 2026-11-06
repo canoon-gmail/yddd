@@ -13,6 +13,8 @@ import {
   faceEdgeIds,
   moveEdges,
   splitFaceByLine,
+  throughDepth,
+  guideSpans,
   splitFacesByPlane,
   cutFaceByPlane,
   edgeEnds,
@@ -539,6 +541,17 @@ export class App implements ToolHost {
       };
       h.addEventListener("pointerup", release);
       h.addEventListener("pointercancel", release);
+      h.addEventListener("dblclick", (e) => {
+        const drag = this.op ? dragsOf(this.op.spec)[i] : undefined, input = drag && this.op!.inputs.find((x) => x.dataset.key === drag.key);
+        if (!drag?.dblclick || !input) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const v = drag.dblclick();
+        if (typeof v === "string") return this.toast(v, "error");
+        input.value = fmt(v);
+        this.op!.exact = { key: drag.key, shown: input.value, value: v };
+        this.applyOp();
+      });
       h.addEventListener("wheel", (e) => c.dispatchEvent(new WheelEvent("wheel", e)), { passive: true });
       this.handlesEl.appendChild(h);
     }
@@ -1067,7 +1080,7 @@ export class App implements ToolHost {
     }
     if (g >= 0) {
       this.setSelection([]);
-      this.hint("Guide line selected · G moves it · Del removes it");
+      this.hint("Guide line selected · G moves it · Shift+D copies it · P divides the faces it runs across · Del removes it");
       return;
     }
     // Moving solids (G): a click on a round / slanted edge turns the gizmo to it — slide along its axis / the edge.
@@ -1475,6 +1488,18 @@ export class App implements ToolHost {
   // ================================================================ keyboard
 
   private bindKeys(): void {
+    // (a key let go: to the tool — the Rectangle tool tells a tap of Left Shift by it; another key pressed meanwhile, even
+    // one handled before the tool sees it: not a tap)
+    let tapped = false;
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "ShiftLeft") tapped ||= !e.repeat;
+      else tapped = false;
+    }, true);
+    window.addEventListener("keyup", (e) => {
+      const t = e.target as HTMLElement, tap = e.code !== "ShiftLeft" || tapped;
+      if (e.code === "ShiftLeft") tapped = false;
+      if (tap && !this.busyNow && !keysPanelOpen() && !["INPUT", "SELECT", "TEXTAREA"].includes(t.tagName)) this.tool?.keyUp?.(e);
+    });
     window.addEventListener("keydown", (e) => {
       if (keysPanelOpen()) return; // ("/" panel: its own keys)
       if (this.busyNow) {
@@ -1842,7 +1867,7 @@ export class App implements ToolHost {
     if (spec.pick) this.viewport.canvas.style.cursor = "crosshair";
     const drags = dragsOf(spec);
     this.hint(spec.hint ?? (drags.length
-      ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (${this.viewport.snapTip("grid / points")})${spec.panelOnTab ? " · Tab: exact values" : ""} · click or Enter apply · Esc cancel`
+      ? `${spec.title}: drag the ${drags.length > 1 ? "handles" : "blue handle"} to set the ${drags[0].unit ? "scale" : "distance"} (${this.viewport.snapTip("grid / points")})${drags.some((d) => d.dblclick) ? " · double-click it: push through to the face behind" : ""}${spec.panelOnTab ? " · Tab: exact values" : ""} · click or Enter apply · Esc cancel`
       : `${spec.title}: adjust values (mouse wheel over a field to scrub) · Enter apply · Esc cancel`));
     this.renderToolbarState();
     if (spec.slow) this.previewAfterPaint();
@@ -2196,6 +2221,7 @@ export class App implements ToolHost {
   }
 
   private opPushPull(): void {
+    if (this.selGuide >= 0 && !this.selection.length) return this.divideByGuide();
     // Target: one selected face, or one selected flat-face body (it has a single face).
     let target: { bodyId: number; faceId: number } | null = null;
     const faces = this.selection.filter((s) => s.kind === "face");
@@ -2213,7 +2239,7 @@ export class App implements ToolHost {
     const body = this.shapeBody(bodyId, "Push/Pull");
     if (!body) return;
     const axis = faceAxis(body.shape, faceId);
-    const drag = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
+    const drag: OpDrag | undefined = axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined;
 
     if (body.kind === "face") {
       // Flat face → extrude into a brand-new solid that replaces the face.
@@ -2289,7 +2315,15 @@ export class App implements ToolHost {
         this.defaults.pushpullNew = !!newBody;
       },
       fastDrag: ({ d, newBody }) => !newBody && this.dragPushPull(new Map([[bodyId, [faceId]]]), d),
-      drag,
+      // Double-click the arrow: pushed in to the face straight behind — the part between them taken off
+      drag: drag && {
+        ...drag,
+        title: "Drag to push / pull · double-click: push through to the face behind (takes that part off)",
+        dblclick: () => {
+          const k = throughDepth(body.shape, faceId);
+          return k === null ? "Push through: no flat face straight behind this one (divide the face behind too — a guide line, P)" : -k;
+        },
+      },
     };
     this.startOp(spec);
   }
@@ -4375,6 +4409,77 @@ export class App implements ToolHost {
     this.startTool(tool.start());
   }
 
+  /**
+   * A guide line selected, P / Space: the flat faces of the solids it runs across divided along it, and the faces on their
+   * other side (facing the other way: the same line moved straight through — a profile's back) — one undo step; shown,
+   * unlocked solids; the new edges left selected (G lifts them).
+   */
+  private divideByGuide(): void {
+    const guide = this.doc.guides[this.selGuide];
+    if (!guide) return;
+    this.endInteractions();
+    const d = new THREE.Vector3(...guide.b).sub(new THREE.Vector3(...guide.a)).normalize().toArray();
+    // (the guide's line through a solid's bounds at all — quick, before looking at its faces)
+    const nearLine = (lo: V3, hi: V3): boolean => {
+      const e = 1e-3 * Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+      let t0 = -Infinity, t1 = Infinity;
+      for (let i = 0; i < 3; i++) {
+        if (Math.abs(d[i]) < 1e-12) {
+          if (guide.a[i] < lo[i] - e || guide.a[i] > hi[i] + e) return false;
+          continue;
+        }
+        const u = (lo[i] - e - guide.a[i]) / d[i], v = (hi[i] + e - guide.a[i]) / d[i];
+        t0 = Math.max(t0, Math.min(u, v));
+        t1 = Math.min(t1, Math.max(u, v));
+      }
+      return t0 <= t1;
+    };
+    const changed = new Map<number, Shape>(), made: { body: number; a: V3; b: V3 }[] = [];
+    let why = "";
+    for (const body of this.doc.bodies) {
+      if (body.kind !== "solid" || !isBrep(body) || body.locked || this.hidden.has(body.id) || !nearLine(...roughBounds(body.shape))) continue;
+      let shape = body.shape as Solid;
+      const split = (spans: [V3, V3, V3][]) => {
+        for (const [a, b] of spans) {
+          try {
+            shape = splitFaceByLine(shape, a, b);
+            made.push({ body: body.id, a, b });
+          } catch (e) {
+            why = errorMessage(e);
+          }
+        }
+      };
+      const own = guideSpans(shape, guide.a, guide.b);
+      split(own);
+      // The other side: each plane facing the other way, the guide moved onto it along the normal
+      const dot = (p: V3, q: V3) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+      for (const n of own.map((x) => x[2]).filter((n, i, all) => all.findIndex((m) => dot(m, n) > 1 - 1e-9) === i)) {
+        const offsets = new Set<number>();
+        for (const f of shape.faces) {
+          if (f.geomType !== "PLANE" || dot(f.normalAt(f.center).normalized().toTuple() as V3, n) > -1 + 1e-9) continue;
+          const c = f.center.toTuple() as V3;
+          offsets.add(+dot([c[0] - guide.a[0], c[1] - guide.a[1], c[2] - guide.a[2]], n).toFixed(6));
+        }
+        for (const k of offsets) {
+          const move = (p: V3): V3 => [p[0] + n[0] * k, p[1] + n[1] * k, p[2] + n[2] * k];
+          split(guideSpans(shape, move(guide.a), move(guide.b)).filter((x) => dot(x[2], n) < -1 + 1e-9));
+        }
+      }
+      if (shape !== body.shape) changed.set(body.id, shape);
+    }
+    if (!changed.size) return this.toast(why || "P on a guide line divides the flat faces of solids it runs across — this one runs across none (draw it on a face)", "error");
+    this.doc.replaceShapes(changed, "Divide face by guide");
+    this.selGuide = -1;
+    this.showGuides();
+    const edges = made.flatMap(({ body, a, b }) => {
+      const it = this.doc.get(body);
+      return it && isBrep(it) ? edgesOnSegment(it.shape, a, b, 1e-3).map((id): SelItem => ({ kind: "edge", body, id })) : [];
+    }).filter((x, i, all) => all.findIndex((y) => y.body === x.body && y.id === x.id) === i);
+    this.setMode("edge");
+    this.setSelection(edges);
+    this.toast(`Face${made.length > 1 ? "s" : ""} divided along the guide${why ? ` (not all: ${why})` : ""} — G moves the new edge${edges.length > 1 ? "s" : ""}`);
+  }
+
   /** Divide face: split the face under the line a–b (one undo step); false (said why) if it can't. */
   private divideFace(bodyId: number, a: V3, b: V3): boolean {
     const why = this.divideRefusal(bodyId);
@@ -5514,6 +5619,18 @@ export class App implements ToolHost {
   }
 
   private duplicate(): void {
+    // A guide line selected (nothing else): a copy of it, selected, to move with the gizmo (left out of its guide group)
+    const g = this.selection.length ? -1 : this.selGuide;
+    if (g >= 0 && this.doc.guides[g]) {
+      this.endInteractions();
+      const { group: _group, ...copy } = this.doc.guides[g];
+      this.doc.setGuides([...this.doc.guides, copy], "Duplicate guide");
+      this.selGuide = this.doc.guides.length - 1;
+      this.showGuides();
+      this.startGuideMove(true);
+      this.toast("Guide copied — drag the gizmo to move it (Tab: exact offset)");
+      return;
+    }
     this.endInteractions();
     const edgeSel = this.selection.filter((x) => x.kind === "edge");
     // A closed loop of edges (a circle, or edges end to end round a face / a hole): copied as a flat face.
@@ -7469,6 +7586,7 @@ export class App implements ToolHost {
       ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai or ♥, come from the built-in ones, Noto Sans Symbols / Symbols 2 too), height (a capital letter, mm), symbols (the ☺▾ button by the text: ♥ ☺ ★ ✿ ♪ ✓… — a click puts one in, its Recent row remembers the last 8; typed / pasted ones work in any font), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
       ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch Mode replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+C curve (Shift+A too; pulled towards each control point clicked, starting and ending on the first and last — click the start point to close; in Select, its control lines show and its blue points drag) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch Mode keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
+      ["Left Shift (Box / Rectangle)", "Tap it (don't hold): the first click is the centre instead of a corner — tap again for a corner (remembered while YDDD runs)"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
@@ -8285,7 +8403,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
