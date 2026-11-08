@@ -23,6 +23,7 @@ import {
   linkSimilarCopies,
   canMoveEdges,
   edgeLoopFace,
+  edgePaths,
   isEdgeLoop,
   MOVE_EDGE_REFUSED,
   errorMessage,
@@ -75,6 +76,8 @@ import {
   sideWallFaceIds,
   closeShapes,
   liesOnSolid,
+  walkPath,
+  type PathWalk,
   planarFaceFrame,
   sketchOfShape,
   type SketchLoop,
@@ -104,6 +107,7 @@ import {
   scaleShape,
   guidePlaneNormal,
   pushPullMoves,
+  pushPullPointMoves,
   edgesAlong,
   asPreview,
   splitByPlane,
@@ -163,7 +167,7 @@ import {
   movedIds,
   parseStl,
 } from "./kernel";
-import { Doc, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
+import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
@@ -183,7 +187,7 @@ import type { TutCtx, Tutorial } from "./tutorials";
 import * as macros from "./macros";
 import { $, escapeHtml, fmt, inchFields, isPro } from "./ui";
 import { dragsOf, OpWaiting, parsePercent, type OpDrag, type OpField, type OpInput, type OpOutcome, type OpSpec } from "./ops";
-import { extrudedFrom, inGroupOf, LOOK_PRESETS, notEditable, notMesh, relinkDimensions, swatchStyle, withTextOf } from "./bodies";
+import { extrudedFrom, inGroupOf, LOOK_PRESETS, movedDims, notEditable, notMesh, relinkDimensions, swatchStyle, withTextOf, type DimMove } from "./bodies";
 import { HISTORY_BYTES, SAVED_HISTORY, type SavedHistory, type SavedStep } from "./savefile";
 import { closeSymbols, openSymbols } from "./symbols";
 import { addImage, imagesOf, loadImages, PICTURE_TYPES, type PictureRecord } from "./picture";
@@ -392,7 +396,12 @@ export class App implements ToolHost {
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.viewport.onLabelDoubleClick = (i) => this.editLabel(i);
     this.viewport.onViewChange = () => this.positionHud();
-    this.doc.relinkDims = (dims, prev, next) => relinkDimensions(dims, prev, next);
+    // (a change a preview showed: its dimensions where the preview had them, so they're found again — a rotated edge isn't where it was)
+    this.doc.relinkDims = (dims, prev, next) => relinkDimensions(this.liveDims(dims), prev, next);
+    this.viewport.onBodiesMoved = (ids, m) => {
+      if (m) this.setDimMove(new Map(ids.map((id) => [id, { matrix: m }])), true);
+      else if (this.dimMove?.xf) this.setDimMove(null);
+    };
     this.doc.linkCopies = (prev, next, arrays, label) => this.linkCopies(prev, next, arrays, label);
     this.buildToolbar();
     this.buildCornerTools();
@@ -728,7 +737,7 @@ export class App implements ToolHost {
       ["op.revolve", "revolve", "Revolve a flat face about a line or axis"],
       ["edit.circular", "circular", "Circular copy: copies round an axis — the X / Y / Z axis, a guide line or a circle edge"],
       ["op.sweep", "sweep", "Sweep a flat face along a path or guide line"],
-      ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction (to change an array later: its icon in the Bodies panel)"],
+      ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction (to change an array later: its icon in the Bodies panel); with a path selected too (or click a path in its panel): copies along the path"],
     ];
     for (const [cmd, icon, title] of items) {
       const b = document.createElement("button");
@@ -1488,18 +1497,6 @@ export class App implements ToolHost {
   // ================================================================ keyboard
 
   private bindKeys(): void {
-    // (a key let go: to the tool — the Rectangle tool tells a tap of Left Shift by it; another key pressed meanwhile, even
-    // one handled before the tool sees it: not a tap)
-    let tapped = false;
-    window.addEventListener("keydown", (e) => {
-      if (e.code === "ShiftLeft") tapped ||= !e.repeat;
-      else tapped = false;
-    }, true);
-    window.addEventListener("keyup", (e) => {
-      const t = e.target as HTMLElement, tap = e.code !== "ShiftLeft" || tapped;
-      if (e.code === "ShiftLeft") tapped = false;
-      if (tap && !this.busyNow && !keysPanelOpen() && !["INPUT", "SELECT", "TEXTAREA"].includes(t.tagName)) this.tool?.keyUp?.(e);
-    });
     window.addEventListener("keydown", (e) => {
       if (keysPanelOpen()) return; // ("/" panel: its own keys)
       if (this.busyNow) {
@@ -2175,6 +2172,7 @@ export class App implements ToolHost {
     this.viewport.clearGhost();
     if (this.opDimsShown) this.showDimensions();
     this.opDimsShown = false;
+    if (this.dimMove && !this.dimMove.xf) this.setDimMove(null);
     this.hoverGuide = -1; // (Array copy lights up the guide under the cursor)
     this.showGuides(); // (Revolve / Sweep show their guide selected)
     this.viewport.canvas.style.cursor = this.selCursor();
@@ -2222,6 +2220,7 @@ export class App implements ToolHost {
 
   private opPushPull(): void {
     if (this.selGuide >= 0 && !this.selection.length) return this.divideByGuide();
+    if (this.pushedLettersSelected()) return void this.pushTextAgain();
     // Target: one selected face, or one selected flat-face body (it has a single face).
     let target: { bodyId: number; faceId: number } | null = null;
     const faces = this.selection.filter((s) => s.kind === "face");
@@ -2282,6 +2281,8 @@ export class App implements ToolHost {
         { key: "newBody", label: "New solid", value: this.defaults.pushpullNew ? 1 : 0, type: "checkbox" },
       ],
       compute: ({ d, newBody }) => {
+        if (newBody) this.setDimMove(null);
+        else this.pushPullDims(new Map([[bodyId, [faceId]]]), d);
         if (newBody) {
           const solid = extrudeFace(body.shape, faceId, d);
           return {
@@ -2314,7 +2315,10 @@ export class App implements ToolHost {
       remember: ({ d, newBody }) => {
         this.defaults.pushpullNew = !!newBody;
       },
-      fastDrag: ({ d, newBody }) => !newBody && this.dragPushPull(new Map([[bodyId, [faceId]]]), d),
+      fastDrag: ({ d, newBody }) => {
+        if (!newBody) this.pushPullDims(new Map([[bodyId, [faceId]]]), d);
+        return !newBody && this.dragPushPull(new Map([[bodyId, [faceId]]]), d);
+      },
       // Double-click the arrow: pushed in to the face straight behind — the part between them taken off
       drag: drag && {
         ...drag,
@@ -2406,6 +2410,93 @@ export class App implements ToolHost {
     this.toast(`Closed: "${nb.name}", a solid`);
   }
 
+  /** Only whole letters of pushed Text tool texts selected (Solid mode — e.g. a text group, after its first P). */
+  private pushedLettersSelected(): boolean {
+    return this.selection.length > 0 && this.selection.every((s) => {
+      const b = s.kind === "body" ? this.doc.get(s.body) : undefined;
+      return !!b?.text && b.kind === "solid";
+    });
+  }
+
+  /**
+   * P on pushed letters (a text group pushed once, selected again): their far ends — the faces the first push
+   * made, found where the letters are now (moved, turned, scaled...) — pushed / pulled together, so the text gets
+   * thicker or thinner; it stays a text (the pencil edits it), selected for another P.
+   */
+  private async pushTextAgain(): Promise<void> {
+    const picked = [...new Set(this.selection.map((s) => s.body))].map((id) => this.doc.get(id)!);
+    const version = this.doc.version;
+    // Each text on its own (all its letters, in order, to find where it is now): its letters made again, as thick as
+    // asked — not the faces moved, which would leave letters the pencil can't edit any more
+    const texts = new Map<string, Body[]>();
+    for (const b of picked) {
+      const k = `${b.group ?? ""}\n${JSON.stringify(b.text)}`;
+      if (!texts.has(k)) texts.set(k, this.doc.bodies.filter((x) => x.group === b.group && JSON.stringify(x.text) === JSON.stringify(b.text)));
+    }
+    const jobs: { letters: Body[]; src: TextRecord; place: TextPlacement & { push: number } }[] = [];
+    const tops = new Map<number, number[]>(); // (for the instant preview and the dimensions: each letter's far end)
+    for (const letters of texts.values()) {
+      const src = letters[0].text!;
+      const why = (await this.useTextFont(src.font)) ? "" : `its font isn't on this computer (${src.font.split(/[\\/]/).pop()})`;
+      if (this.doc.version !== version) return; // (changed meanwhile)
+      const place = why ? null : textPlacement(src, letters.map((b) => b.shape as Shape));
+      if (!place?.push) return this.toast(`Push/Pull: can't find how "${letters[0].group ?? letters[0].name}" was pushed — ${why || "its letters were changed since (cut, filleted...)"}; pick their top faces in Face mode (2)`, "error");
+      const D = new THREE.Vector3(...place.frame.z).multiplyScalar(Math.sign(place.push));
+      for (const b of letters) {
+        let best: { id: number; at: number } | null = null;
+        for (const f of (b.shape as Shape).faces) {
+          if (f.geomType !== "PLANE" || new THREE.Vector3(...(f.normalAt().toTuple() as V3)).normalize().dot(D) < 0.999) continue;
+          const at = new THREE.Vector3(...(f.center.toTuple() as V3)).dot(D);
+          if (!best || at > best.at) best = { id: f.hashCode, at };
+        }
+        if (best && picked.includes(b)) tops.set(b.id, [best.id]);
+      }
+      jobs.push({ letters, src, place: { ...place, push: place.push } });
+    }
+    if (this.selection.some((s) => !picked.includes(this.doc.get(s.body)!))) return; // (the selection changed meanwhile)
+    const first = [...tops][0], firstBody = first && this.doc.get(first[0]);
+    const axis = firstBody && isBrep(firstBody) ? faceAxis(firstBody.shape, first[1][0]) : null;
+    const thick = Math.min(...jobs.map((j) => Math.abs(j.place.push)));
+    /** The picked letters made again `d` mm thicker (along the way they were pushed). */
+    const remade = (d: number) => {
+      const out = new Map<number, Shape>();
+      for (const { letters, src, place } of jobs) {
+        const k = place.scale, rec: TextRecord = { ...src, height: src.height * k, letterSpacing: src.letterSpacing * k, frame: place.frame };
+        const shapes = textLetters(rec, place.push + Math.sign(place.push) * d, false);
+        letters.forEach((b, i) => picked.includes(b) && out.set(b.id, shapes[i]));
+      }
+      return out;
+    };
+    const n = picked.length;
+    this.startOp({
+      title: `Push / Pull (${n} letter${n > 1 ? "s" : ""})`,
+      panelOnTab: true,
+      label: "Push/Pull",
+      fields: [{ key: "d", label: "Distance (mm)", value: 0.2, step: 1 }],
+      compute: ({ d }) => {
+        if (-d >= thick - 1e-6) throw new Error(`Push/Pull: the text is ${+thick.toFixed(3)} mm thick — it can't be pushed in that far`);
+        this.pushPullDims(tops, d);
+        const instant = this.dragPushPull(tops, d);
+        const ghost = instant ? new Map<number, Shape>() : remade(d);
+        return {
+          ghost,
+          drawn: instant,
+          commit: () => {
+            const shapes = instant ? remade(d) : ghost;
+            this.doc.commit(this.doc.bodies.map((b) => (shapes.has(b.id) ? withShape(b, shapes.get(b.id)!) : b)), "Push/Pull");
+            return { select: [...shapes.keys()] };
+          },
+        };
+      },
+      remember: () => {},
+      fastDrag: ({ d }) => {
+        this.pushPullDims(tops, d);
+        return this.dragPushPull(tops, d);
+      },
+      drag: axis ? { origin: axis.center, dir: axis.normal, key: "d" } : undefined,
+    });
+  }
+
   /** Several faces (on one or more solids) and/or flat face objects, one distance. */
   private opPushPullMany(): void {
     const perSolid = new Map<number, number[]>();
@@ -2441,6 +2532,7 @@ export class App implements ToolHost {
       label: "Push/Pull",
       fields: [{ key: "d", label: "Distance (mm)", value: 0.2, step: 1 }],
       compute: ({ d }) => {
+        this.pushPullDims(perSolid, d);
         // Fast preview; the exact solids are computed on Apply (see asPreview).
         const pushed = () => new Map<number, Shape>([...perSolid].map(([id, faces]) => [id, pushPullMany(this.solidOf(id, "Push/Pull"), faces, d)]));
         // (only face objects: always the instant preview — their prisms drawn from their display meshes; the exact solids,
@@ -2466,7 +2558,10 @@ export class App implements ToolHost {
         };
       },
       remember: () => {},
-      fastDrag: ({ d }) => flatDirs.size === flats.length && this.dragPushPull(perSolid, d, flatDirs),
+      fastDrag: ({ d }) => {
+        this.pushPullDims(perSolid, d);
+        return flatDirs.size === flats.length && this.dragPushPull(perSolid, d, flatDirs);
+      },
       drag,
     });
   }
@@ -2667,6 +2762,8 @@ export class App implements ToolHost {
     }
     const logoIds = new Set(logo.map((b) => b.id));
     const faces = logo.flatMap((b) => (b.shape as Shape).faces);
+    // (what's put on stays lit while the tool waits for a click — the face clicked lights up besides it)
+    const lit = this.selection.filter((s) => logoIds.has(s.body));
     let target: { bodyId: number; faceId: number; at: V3 } | null = null;
     const todo = "Click the face to put it on — a cup's side (it wraps round it) or a flat face";
     const targetAt = (e: PointerEvent): { bodyId: number; faceId: number; at: V3 } | "bad" | null => {
@@ -2720,11 +2817,11 @@ export class App implements ToolHost {
       },
       hover: (e) => {
         const t = targetAt(e);
-        this.viewport.setHighlight([], t && t !== "bad" ? { kind: "face", body: t.bodyId, id: t.faceId } : null);
+        this.viewport.setHighlight(lit, t && t !== "bad" ? { kind: "face", body: t.bodyId, id: t.faceId } : null);
         this.viewport.canvas.style.cursor = t === "bad" ? "not-allowed" : t ? "pointer" : "crosshair";
       },
     });
-    this.viewport.setHighlight([], null);
+    this.viewport.setHighlight(lit, null);
   }
 
   /** The right side of the solids there (for a new ready-made object beside them), -Infinity if none. */
@@ -3256,6 +3353,7 @@ export class App implements ToolHost {
           .makeTranslation(...pivot)
           .multiply(new THREE.Matrix4().makeScale(...f))
           .multiply(new THREE.Matrix4().makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
+        this.setDimMove(new Map(ids.map((id) => [id, { matrix }])));
         return {
           ghost: new Map(),
           xform: { ids, matrix },
@@ -3706,15 +3804,16 @@ export class App implements ToolHost {
     const up = p.clone().addScaledVector(n, L).toArray() as V3;
     const off = (q: V3) => new THREE.Vector3(...q).sub(p).dot(n);
     for (const rec of this.doc.arrays) {
-      const S = rec.sources.length, members = [...rec.sources, ...rec.copies];
+      const members = [...rec.sources, ...rec.copies];
       if (!members.every((id) => set.has(id)) || members.some((id) => this.doc.get(id)?.kind !== "solid")) continue;
       if (this.arrayToChange(members) !== rec) continue;
       const { place, point: at } = this.arrayPlacement(rec, rec.circular ? this.circularShift(rec) ?? [0, 0, 0] : [0, 0, 0]);
+      const slots = copySlots(rec);
       rec.copies.forEach((id, i) => {
-        const k = Math.floor(i / S) + 1;
+        const [k, j] = slots[i];
         const tol = 1e-7 * (1 + p.length() + L);
         if (!probes.every((q) => Math.abs(off(at(q, k))) < tol) || off(at(up, k)) < L / 2) return;
-        out.set(id, { from: rec.sources[i % S], place: (s) => place(s, k) });
+        out.set(id, { from: rec.sources[j], place: (s) => place(s, k) });
       });
       if (rec.copies.every((id) => out.has(id))) recs.push(rec);
     }
@@ -4754,10 +4853,20 @@ export class App implements ToolHost {
         // (the group is renamed after the new words — unless it was given a name of its own, or holds other things too)
         const ownName = oldGroup !== undefined && (!oldGroup.startsWith('Text "') || this.doc.bodies.some((b) => b.group === oldGroup && !old.has(b.id)));
         const group = ownName ? oldGroup : oldGroup === undefined ? undefined : named === oldGroup.replace(/ \d+$/, "") ? oldGroup : this.uniqueGroupName(named);
-        const made = shapes.map((sh) => ({ ...this.doc.makeBody(sh, "Text", place!.push === null ? "face" : "solid"), ...(group ? { group } : {}), text: record }));
+        // Its colour kept: the letters' own (all alike, or letter by letter when there are as many; else the first's)
+        // and the group's, taken along when the group is renamed
+        const was = edit.letters.map((b) => b.look);
+        const alike = was.every((l) => JSON.stringify(l) === JSON.stringify(was[0]));
+        const lookAt = (i: number) => (alike || was.length !== shapes.length ? was[0] : was[i]);
+        const made = shapes.map((sh, i) => {
+          const look = lookAt(i);
+          return { ...this.doc.makeBody(sh, "Text", place!.push === null ? "face" : "solid"), ...(group ? { group } : {}), text: record, ...(look ? { look } : {}) };
+        });
+        const groupLook = oldGroup !== undefined ? this.doc.groupLooks[oldGroup] : undefined;
+        const looks = groupLook && group && group !== oldGroup ? { ...this.doc.groupLooks, [group]: groupLook } : this.doc.groupLooks;
         const at = this.doc.bodies.findIndex((b) => old.has(b.id));
         const rest = this.doc.bodies.filter((b) => !old.has(b.id));
-        this.doc.commit([...rest.slice(0, at), ...made, ...rest.slice(at)], "Edit text");
+        this.doc.commit([...rest.slice(0, at), ...made, ...rest.slice(at)], "Edit text", this.doc.guides, this.doc.dimensions, this.doc.arrays, looks);
         this.setMode("body");
         this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
         this.toast(`Text changed${group ? ` — ${group}` : ""}`);
@@ -4910,7 +5019,7 @@ export class App implements ToolHost {
     this.startTool(tool.load(loops, opens).start());
   }
 
-  /** Guide line tool; with an edge given (edge + Shift+D) it starts from that edge. */
+  /** Guide line tool; with an edge given (tests) it starts from that edge. */
   private startGuide(bodyId?: number, edgeId?: number): void {
     if (bodyId !== undefined && edgeId !== undefined && !this.edgeSides(bodyId, edgeId)) {
       return this.toast("Guide line: the edge must be straight and next to a flat face", "error");
@@ -5069,11 +5178,58 @@ export class App implements ToolHost {
   /** Selected dimension (click its text), -1 = none. */
   private selDim = -1;
 
+  /**
+   * Linked dimensions following a preview (Push/Pull, Move, Rotate, Scale — see DimMove), made on document `version`; the
+   * change it previews, committed, uses it too (see relinkDims). `xf`: the gizmo's (cleared when its bodies are put back).
+   */
+  private dimMove: { version: number; moves: Map<number, DimMove>; xf: boolean } | null = null;
+
+  private setDimMove(moves: Map<number, DimMove> | null, xf = false): void {
+    const had = this.dimMove;
+    this.dimMove = moves && { version: this.doc.version, moves, xf };
+    if (!had && !moves) return;
+    const follows = (id: number) => !!moves?.has(id) || (!!had && had.version === this.doc.version && had.moves.has(id));
+    if (this.doc.dimensions.some((d) => d.body !== undefined && follows(d.body))) this.showDimensions();
+  }
+
+  /** The dimensions as shown: linked ones moved with a preview (see dimMove). */
+  private liveDims(dims = this.doc.dimensions): readonly Dimension[] {
+    const m = this.dimMove;
+    return m && m.version === this.doc.version ? movedDims(dims, m.moves) : dims;
+  }
+
+  /** Push/Pull's linked dimensions follow the pushed faces (`perBody`: per solid) `d` mm. */
+  private pushPullDims(perBody: Map<number, number[]>, d: number): void {
+    const moves = new Map<number, DimMove>();
+    for (const [id, faces] of perBody) {
+      const pts = this.doc.dimensions.flatMap((x) => (x.body === id ? [x.a, x.b, ...(x.c ? [x.c] : [])] : []));
+      if (!pts.length) continue;
+      const k = `${this.doc.version}:${id}:${faces.join()}`;
+      let unit = this.ppDimMoves.get(k);
+      if (!unit) {
+        if (this.ppDimMoves.size > 20) this.ppDimMoves.clear();
+        try {
+          const got = pushPullPointMoves(this.solidOf(id, "Push/Pull"), faces, pts);
+          unit = new Map(pts.map((p, i) => [p.join(), got[i]]));
+        } catch {
+          unit = new Map(); // (a curved wall: they wait for Apply)
+        }
+        this.ppDimMoves.set(k, unit);
+      }
+      const u = unit;
+      moves.set(id, { shift: (p) => (u.get(p.join()) ?? [0, 0, 0]).map((n) => n * d) as V3 });
+    }
+    this.setDimMove(moves.size ? moves : null);
+  }
+
+  /** Per mm of a push/pull, where linked dimensions' points go (cached as ppMoves). */
+  private ppDimMoves = new Map<string, Map<string, V3>>();
+
   /** Draw the dimensions (and `preview`, one being placed by Measure + Tab). */
   private showDimensions(preview: Dimension | null = null): void {
     if (this.selDim >= this.doc.dimensions.length) this.selDim = -1;
     const opDims = this.op?.result?.dims ?? [];
-    this.viewport.setDimensions(this.doc.dimensions, this.selDim, opDims.length ? [...(preview ? [preview] : []), ...opDims] : preview);
+    this.viewport.setDimensions(this.liveDims(), this.selDim, opDims.length ? [...(preview ? [preview] : []), ...opDims] : preview);
   }
 
   private selectDimension(i: number): void {
@@ -5119,7 +5275,9 @@ export class App implements ToolHost {
           const b = this.doc.get(id);
           if (b) shapes.set(id, translateShape(b.shape, d));
         }
+        this.setDimMove(new Map(ids.map((id) => [id, { matrix: new THREE.Matrix4().makeTranslation(...d) }])), true);
         this.doc.replaceShapes(shapes, "Move");
+        this.setDimMove(null);
       },
         (p, frame) => {
           this.endTool();
@@ -5220,7 +5378,14 @@ export class App implements ToolHost {
       shapes.set(id, r.type === "translate" ? translateShape(b.shape, r.vector) : rotateShape(b.shape, r.angleDeg, r.center, r.axis));
     }
     const mode = this.xf.mode;
+    const m = r.type === "translate"
+      ? new THREE.Matrix4().makeTranslation(...r.vector)
+      : new THREE.Matrix4().makeTranslation(...r.center)
+          .multiply(new THREE.Matrix4().makeRotationAxis(new THREE.Vector3(...r.axis).normalize(), THREE.MathUtils.degToRad(r.angleDeg)))
+          .multiply(new THREE.Matrix4().makeTranslation(-r.center[0], -r.center[1], -r.center[2]));
+    this.setDimMove(new Map(this.xf.ids.map((id) => [id, { matrix: m }])), true);
     this.commitTransform(shapes, mode === "translate" ? "Move" : "Rotate");
+    this.setDimMove(null);
     this.startTransform(mode, true); // keep the gizmo on the moved bodies
   }
 
@@ -5652,7 +5817,29 @@ export class App implements ToolHost {
       this.repeatCopyIds = String(b.id);
       return;
     }
-    if (edgeSel.length === 1 && this.selection.length === 1) return this.startGuide(edgeSel[0].body, edgeSel[0].id);
+    // Edges (one, or several end to end — of solids, faces or paths): copied as paths, selected, with the move gizmo
+    // (e.g. to sweep along a rim); edges in separate runs: a path each
+    if (edgeSel.length && edgeSel.length === this.selection.length) {
+      const paths: Body[] = [];
+      try {
+        for (const id of new Set(edgeSel.map((x) => x.body))) {
+          const b = this.doc.get(id);
+          if (!b || (!isBrep(b) && b.kind !== "path")) continue;
+          for (const w of edgePaths(b.shape as Shape | Wire, edgeSel.filter((x) => x.body === id).map((x) => x.id))) paths.push(this.doc.makeBody(w, "Path", "path"));
+        }
+      } catch (e) {
+        return this.toast(`Duplicate: the edges couldn't be copied as a path — ${errorMessage(e)}`, "error");
+      }
+      if (!paths.length) return this.toast("Duplicate: could not copy the edges", "error");
+      this.doc.commit([...this.doc.bodies, ...paths], paths.length > 1 ? "Duplicate edges" : "Duplicate edge");
+      this.setMode("body");
+      this.setSelection(paths.map((b) => ({ kind: "body", body: b.id, id: 0 })));
+      this.toast(`${paths.length > 1 ? `${paths.length} paths` : "A path"} copied from the edge${edgeSel.length > 1 ? "s" : ""} — move ${paths.length > 1 ? "them" : "it"}; S W sweeps a face along a path`);
+      this.startTransform("translate");
+      this.placing = this.xf ? { ids: this.xf.ids.join(), version: this.doc.version } : null;
+      this.repeatCopyIds = paths.map((b) => b.id).join();
+      return;
+    }
     const faceSel = this.selection.filter((x) => x.kind === "face");
     if (faceSel.length && faceSel.length === this.selection.length) {
       const faces = faceSel.flatMap((x) => {
@@ -5955,6 +6142,9 @@ export class App implements ToolHost {
    */
   private arrayCopy(change = false): void {
     const ids = this.selectedBodyIds();
+    // A path selected besides the objects: copies along it
+    const paths = ids.filter((id) => this.doc.get(id)?.kind === "path");
+    if (!change && paths.length === 1 && ids.length > 1) return this.opPathArray(ids.filter((id) => id !== paths[0]), paths[0]);
     if (!ids.length && !change) return this.waitForArrayObjects();
     if (!ids.length) return this.toast("Array copy: select objects first (Solid mode, key 1)", "error");
     const rec = this.arrayToChange(ids);
@@ -6041,16 +6231,18 @@ export class App implements ToolHost {
     if (members.length !== ids.length) return null; // (part of a group)
     const why = (what: string) => `${group} can't be changed any more (${what}) — ${rec.circular ? "Circular" : "Array"} copy still makes new copies`;
     const made = new Set([...rec.sources, ...rec.copies]);
-    if (rec.copies.length !== (rec.n - 1) * rec.sources.length || members.length !== made.size || members.some((id) => !made.has(id))) {
+    const slots = copySlots(rec);
+    if (rec.copies.length !== slots.length || members.length !== made.size || members.some((id) => !made.has(id))) {
       return why("objects were added to it or taken out");
     }
     if (rec.circular) return this.circularShift(rec) ? rec : why("an object in it was moved or edited on its own");
     if (!this.copiesInPlace(rec)) {
-      const S = rec.sources.length, { point } = this.arrayPlacement(rec);
+      const { point } = this.arrayPlacement(rec);
       // (which one, to say so)
       const off = rec.copies.find((id, i) => {
-        const p = probePoints(this.doc.get(rec.sources[i % S])!.shape, 1)[0], q = probePoints(this.doc.get(id)!.shape, 1)[0];
-        return !p || !q || Math.hypot(...point(p, Math.floor(i / S) + 1).map((x, a) => x - q[a])) > 1e-6;
+        const [k, j] = slots[i];
+        const p = probePoints(this.doc.get(rec.sources[j])!.shape, 1)[0], q = probePoints(this.doc.get(id)!.shape, 1)[0];
+        return !p || !q || Math.hypot(...point(p, k).map((x, a) => x - q[a])) > 1e-6;
       });
       return why(`"${this.doc.get(off ?? rec.copies[0])!.name}" was moved or edited on its own`);
     }
@@ -6062,11 +6254,11 @@ export class App implements ToolHost {
    * placed there — not bounding boxes, slow on curved shapes), with the same kind and faces.
    */
   private copiesInPlace(rec: ArrayRecord, shift: V3 = [0, 0, 0]): boolean {
-    const S = rec.sources.length, { point } = this.arrayPlacement(rec, shift);
+    const { point } = this.arrayPlacement(rec, shift), slots = copySlots(rec);
     const faces = (b: Body) => (isBrep(b) ? b.shape.faces.length : -1);
     const probes = new Map(rec.sources.map((id) => [id, probePoints(this.doc.get(id)!.shape)]));
-    return rec.copies.every((id, i) => {
-      const k = Math.floor(i / S) + 1, src = this.doc.get(rec.sources[i % S])!, copy = this.doc.get(id);
+    return rec.copies.length === slots.length && rec.copies.every((id, i) => {
+      const [k, j] = slots[i], src = this.doc.get(rec.sources[j])!, copy = this.doc.get(id);
       if (!copy || copy.kind !== src.kind || faces(copy) !== faces(src)) return false;
       const ps = probes.get(src.id)!, qs = probePoints(copy.shape);
       if (ps.length !== qs.length) return false;
@@ -6105,8 +6297,10 @@ export class App implements ToolHost {
     const c = rec.circular;
     const plus = (p: V3, d: V3): V3 => [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
     if (!c) {
-      const axis = rec.dir >> 1;
-      const at = (k: number, sign: number): V3 => [0, 1, 2].map((i) => (i === axis ? sign * (rec.offsets[k] - rec.offsets[0]) : 0)) as V3;
+      const axis = rec.dir >> 1, st = rec.stagger;
+      // (staggered: the odd rows half a step along the row too)
+      const at = (k: number, sign: number): V3 =>
+        [0, 1, 2].map((i) => sign * ((i === axis ? rec.offsets[k] - rec.offsets[0] : 0) + (st && k % 2 && i === st.axis ? st.d : 0))) as V3;
       return { place: (s, k) => (k ? translateShape(s, at(k, 1)) : s), unplace: (s, k) => (k ? translateShape(s, at(k, -1)) : s), point: (p, k) => plus(p, at(k, 1)) };
     }
     const step = Math.abs(Math.abs(c.angle) - 360) < 1e-9 ? c.angle / rec.n : c.angle / (rec.n - 1);
@@ -6146,8 +6340,8 @@ export class App implements ToolHost {
     const before = new Map(prev.map((b) => [b.id, b])), after = new Map(next.map((b) => [b.id, b]));
     const replaced = new Map<number, Body>();
     const records = arrays.map((rec) => {
-      const S = rec.sources.length, members = [...rec.sources, ...rec.copies];
-      if (rec.copies.length !== (rec.n - 1) * S) return rec;
+      const S = rec.sources.length, members = [...rec.sources, ...rec.copies], slots = copySlots(rec);
+      if (rec.copies.length !== slots.length) return rec;
       if (members.some((id) => !before.has(id) || after.get(id)?.group !== rec.group || replaced.has(id))) return rec;
       const changed = members.filter((id) => after.get(id)!.shape !== before.get(id)!.shape);
       if (!changed.length || changed.length === members.length) return rec;
@@ -6155,20 +6349,21 @@ export class App implements ToolHost {
       if (this.arrayToChange(members) !== rec) return rec;
       const shift = rec.circular ? this.circularShift(rec) ?? [0, 0, 0] : ([0, 0, 0] as V3);
       const { place, unplace } = this.arrayPlacement(rec, shift);
-      const at = (k: number, j: number) => (k ? rec.copies[(k - 1) * S + j] : rec.sources[j]);
+      // Each source's column: it and its copies, row by row (a staggered grid's shifted rows may lack it)
+      const slot = new Map(slots.map(([k, j], i) => [`${k}:${j}`, rec.copies[i]]));
       let did = false;
       for (let j = 0; j < S; j++) {
-        const column = Array.from({ length: rec.n }, (_, k) => at(k, j));
-        const edited = column.findIndex((id) => after.get(id)!.shape !== before.get(id)!.shape);
-        if (edited < 0 || column.every((id) => after.get(id)!.shape !== before.get(id)!.shape)) continue;
-        const e = after.get(column[edited])!;
+        const column = Array.from({ length: rec.n }, (_, k) => ({ k, id: k ? slot.get(`${k}:${j}`) : rec.sources[j] })).filter((x): x is { k: number; id: number } => x.id !== undefined);
+        const edited = column.find((x) => after.get(x.id)!.shape !== before.get(x.id)!.shape);
+        if (!edited || column.every((x) => after.get(x.id)!.shape !== before.get(x.id)!.shape)) continue;
+        const e = after.get(edited.id)!;
         if (isMesh(e.shape)) continue;
-        const source = unplace(e.shape, edited);
-        column.forEach((id, k) => {
-          if (k === edited) return;
+        const source = unplace(e.shape, edited.k);
+        for (const { k, id } of column) {
+          if (id === edited.id) continue;
           const b = after.get(id)!;
           replaced.set(id, { ...b, kind: e.kind, shape: place(k ? cloneShape(source) : source, k) } as Body);
-        });
+        }
         did = true;
       }
       if (!did || !rec.circular) return rec;
@@ -6193,6 +6388,114 @@ export class App implements ToolHost {
 
   /** Last Array copy gap, direction and "Align centre" (the count starts at 2 each time). */
   private arrayPrefs = { gap: 0, dir: 0, centre: 0 };
+  /** Array along a path: the last copies / fill / spacing / turn. */
+  private pathArrayPrefs = { n: 10, fill: 1, gap: 10, turn: 1 };
+
+  /**
+   * Array along a path (Array copy with a path selected besides the objects): copies spaced along the path by its
+   * length — round its arcs and curves too — each keeping its place to the path where the original is; Turn with the
+   * curve: turned with it (a circle on a rounded wall stays square to it at its corners too). Fill: from the original
+   * to as far from the other end; else Spacing. One undo step; the copies in a group with the originals.
+   */
+  private opPathArray(ids: number[], pathId: number): void {
+    const path = this.doc.get(pathId)!;
+    let walk: PathWalk;
+    try {
+      walk = walkPath(path.shape as Wire);
+    } catch (e) {
+      return this.toast(`Array along a path: ${errorMessage(e)}`, "error");
+    }
+    const srcs = ids.map((id) => this.doc.get(id)!);
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const b of srcs) {
+      const [a, c] = boundsOf(b.shape);
+      for (let i = 0; i < 3; i++) (lo[i] = Math.min(lo[i], a[i])), (hi[i] = Math.max(hi[i], c[i]));
+    }
+    const mid = [0, 1, 2].map((i) => (lo[i] + hi[i]) / 2) as V3;
+    const s0 = walk.nearest(mid);
+    /** The path's frame at `s`: x along it, z square to its plane (not in a plane: the world Z, made square to x). */
+    const frameAt = (s: number): THREE.Matrix4 => {
+      const { p, t } = walk.at(s);
+      const x = new THREE.Vector3(...t);
+      const z = new THREE.Vector3(...(walk.normal ?? (Math.abs(t[2]) > 0.99 ? [1, 0, 0] : [0, 0, 1])));
+      z.addScaledVector(x, -z.dot(x)).normalize();
+      const y = z.clone().cross(x);
+      return new THREE.Matrix4().makeBasis(x, y, z).setPosition(p[0], p[1], p[2]);
+    };
+    const f0inv = frameAt(s0).invert(), p0 = walk.at(s0).p;
+    /** Distances along the path of the original (first) and each copy. */
+    const positions = (n: number, fill: boolean, gap: number): number[] => {
+      const L = walk.length;
+      if (walk.closed) {
+        const pitch = fill ? L / n : gap;
+        if (!(pitch > 1e-6)) throw new Error("Spacing must be more than 0");
+        if (pitch * (n - 1) >= L - 1e-6) throw new Error(`${n} at ${fmt(pitch)} mm don't fit round the path (${fmt(L)} mm)`);
+        return Array.from({ length: n }, (_, k) => (s0 + k * pitch) % L);
+      }
+      // Toward the farther end
+      const fwd = s0 <= L - s0, room = fwd ? L - s0 : s0;
+      let pitch: number;
+      if (fill) {
+        const span = Math.abs(L - 2 * s0);
+        if (span < 1e-6) throw new Error("The original is in the middle of the path — untick Fill and give a spacing");
+        pitch = span / (n - 1);
+      } else {
+        pitch = gap;
+        if (!(pitch > 1e-6)) throw new Error("Spacing must be more than 0");
+        if (pitch * (n - 1) > room + 1e-6) throw new Error(`Only ${Math.floor(room / pitch + 1e-9) + 1} fit along the path at ${fmt(pitch)} mm`);
+      }
+      return Array.from({ length: n }, (_, k) => s0 + (fwd ? 1 : -1) * k * pitch);
+    };
+    /** `shape` moved by the rigid move `m` (a turn about the origin, then a shift). */
+    const place = (shape: Geom, m: THREE.Matrix4): Geom => {
+      const pos = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+      m.decompose(pos, q, sc);
+      let out = shape;
+      const ang = 2 * Math.acos(Math.min(1, Math.max(-1, q.w))), sn = Math.sin(ang / 2);
+      if (ang > 1e-9 && Math.abs(sn) > 1e-12) out = rotateShape(out, THREE.MathUtils.radToDeg(ang), [0, 0, 0], [q.x / sn, q.y / sn, q.z / sn]);
+      if (pos.lengthSq() > 1e-24) out = translateShape(out, pos.toArray() as V3);
+      return out === shape ? cloneShape(shape) : out;
+    };
+    const copyName = (b: Body) => b.name.replace(/\s+\d+$/, "");
+    const prefs = this.pathArrayPrefs;
+    const note = `<span class="op-help">Along "${escapeHtml(path.name)}" (${fmt(walk.length)} mm${walk.closed ? ", closed" : ""}) — the original ${fmt(s0)} mm from its start</span>`;
+    this.startOp({
+      title: "Array along a path",
+      label: "Array along a path",
+      note,
+      fields: [
+        { key: "n", label: "Copies (the original counts)", value: prefs.n, step: 1, min: 2 },
+        { key: "fill", label: "Fill the path (to as far from the other end)", value: prefs.fill, type: "checkbox" },
+        { key: "gap", label: "Spacing along the path (mm, centre to centre)", value: prefs.gap, step: 0.5, min: 0, off: (v) => !!v.fill },
+        { key: "turn", label: "Turn with the curve", value: prefs.turn, type: "checkbox" },
+      ],
+      compute: ({ n, fill, gap, turn }) => {
+        if (!(n >= 2) || n !== Math.round(n)) throw new Error("Copies must be a whole number, 2 or more (the original counts)");
+        if (n > 500) throw new Error("At most 500 copies");
+        const at = positions(n, !!fill, gap);
+        const moves = at.map((s, k) => (k === 0 ? new THREE.Matrix4() : turn ? frameAt(s).multiply(f0inv) : (() => {
+          const p = walk.at(s).p;
+          return new THREE.Matrix4().makeTranslation(p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]);
+        })()));
+        const preview = moves.slice(1).flatMap((m) => ids.map((id) => ({ id, matrix: m })));
+        return {
+          ghost: new Map(),
+          placed: preview,
+          commit: () => {
+            const copies = moves.slice(1).flatMap((m) => srcs.map((b) => withTextOf(this.doc.makeBody(place(b.shape, m), copyName(b), b.kind), b)));
+            const groups = new Set(srcs.map((b) => b.group));
+            const group = groups.size === 1 && [...groups][0] ? [...groups][0]! : this.newGroupName("Array");
+            const idSet = new Set(ids);
+            this.doc.commit([...this.doc.bodies.map((b) => (idSet.has(b.id) ? { ...b, group } : b)), ...copies.map((b) => ({ ...b, group }))], `Array along a path ×${n}`);
+            return { select: [...ids, ...copies.map((b) => b.id)], solidMode: true, then: () => this.toast(`${n} along "${path.name}" (${n - 1} new) in "${group}"`) };
+          },
+        };
+      },
+      remember: ({ n, fill, gap, turn }) => (this.pathArrayPrefs = { n, fill, gap, turn }),
+      hint: "Array along a path: copies, Fill or spacing, Turn with the curve · Enter apply · Esc cancel",
+    });
+  }
+
 
   /**
    * Array copy: a row of `n` objects — the original counts, so n − 1 copies — along ±X / ±Y / ±Z,
@@ -6278,20 +6581,45 @@ export class App implements ToolHost {
       this.showGuides();
     };
     const input = (key: string) => this.op?.inputs.find((i) => i.dataset.key === key);
+    // Stagger (copying a row the other way: a grid): the row's axis and half its step — the row being copied (new
+    // copies), or the one this grid was made from (changing it)
+    const row = ((): { axis: number; half: number } | null => {
+      const of = (r: ArrayRecord) => (r.circular || r.offsets.length < 2 ? null : { axis: r.dir >> 1, half: (r.offsets[1] - r.offsets[0]) / 2 });
+      if (!rec) return null;
+      if (!change) return of(rec);
+      if (rec.stagger) return { axis: rec.stagger.axis, half: rec.stagger.d };
+      const mine = new Set(rec.sources);
+      const from = this.doc.arrays.find((r) => r !== rec && r.group === rec.group && !r.circular && r.sources.length + r.copies.length === mine.size && [...r.sources, ...r.copies].every((id) => mine.has(id)));
+      return from ? of(from) : null;
+    })();
+    const canStagger = (v: Record<string, number>) => !!row && Math.abs(row.half) > 1e-9 && v.dir >> 1 !== row.axis;
+    /** The sources at the row's far end (where the shift goes): left out of the shifted rows ("one fewer"). */
+    const farEnd = (srcIds: readonly number[]): Set<number> => {
+      if (!row) return new Set();
+      const at = srcIds.map((id) => {
+        const [a, b] = boundsOf(this.doc.get(id)!.shape);
+        return (a[row.axis] + b[row.axis]) / 2;
+      });
+      const end = row.half > 0 ? Math.max(...at) : Math.min(...at), tol = 1e-4 * (1 + Math.abs(end));
+      return new Set(at.flatMap((c, j) => (Math.abs(c - end) < tol ? [j] : [])));
+    };
     // New copies start from the last ones' gap / direction; changing an array, from its own settings.
     const fresh = { n: 2, gap: this.arrayPrefs.gap, total: 0, dir: this.arrayPrefs.dir, centre: this.arrayPrefs.centre };
     const start = change && rec ? rec : fresh;
     this.startOp({
       title: change && rec ? `Change ${rec.group}` : "Array copy",
       label: "Array copy",
+      ...(change ? {} : { note: `<span class="op-help">Click a path: the copies follow it (Array along a path)</span>` }),
       fields: [
         { key: "n", label: "Copies (the original counts)", value: start.n, step: 1, min: 2 },
         { key: "gap", label: "Gap between copies (mm)", value: start.gap, step: 0.5 },
         { key: "total", label: "Total length (mm, 0: use the gap)", value: start.total, step: 1, min: 0 },
         { key: "dir", label: "Direction", value: start.dir, type: "select", options: DIRS },
         { key: "centre", label: "Align centre (the original moves too)", value: start.centre, type: "checkbox" },
+        { key: "stagger", label: "Stagger rows (every other row half a step — copying a row the other way)", value: change && rec?.stagger ? 1 : 0, type: "checkbox", off: (v) => !canStagger(v) },
+        { key: "fewer", label: "Shifted rows: one fewer (none past the row's end)", value: change && rec?.stagger ? (rec.stagger.skip.length ? 1 : 0) : 1, type: "checkbox", off: (v) => !v.stagger || !canStagger(v) },
       ],
-      hint: "Array copy: copies, gap (edge to edge) and direction (click a ±X / ±Y / ±Z mark) — or click an edge, a guide line or a path: the copies spread to its far end (Align centre: the whole row fills it) · Enter apply · Esc cancel",
+      hint: "Array copy: copies, gap (edge to edge) and direction (click a ±X / ±Y / ±Z mark) — or click an edge or a guide line: the copies spread to its far end (Align centre: the whole row fills it); click a path: the copies follow it · Enter apply · Esc cancel",
       // ±X / ±Y / ±Z marks just outside the objects (axis colours): a click picks the direction
       choices: (() => {
         const { lo, hi } = bounds(editing());
@@ -6306,6 +6634,12 @@ export class App implements ToolHost {
       })(),
       pick: (e) => {
         const t = spanAt(e);
+        // A path: the copies follow it (Array along a path) — an edge or a guide line: a straight row over its length
+        if (t?.what === "Path" && t.item && !change) {
+          const pathId = t.item.body;
+          this.closeOpPanel();
+          return this.opPathArray(ids.filter((id) => id !== pathId), pathId);
+        }
         const total = input("total"), dir = input("dir");
         if (!t || !total || !dir) return;
         span = { axis: t.axis, a: t.a, b: t.b };
@@ -6321,7 +6655,7 @@ export class App implements ToolHost {
         const t = spanAt(e);
         lightGuide(t?.guide ?? -1);
         this.viewport.setHighlight(this.selection, t?.item ?? null);
-        this.hud(t ? `${t.what}: ${fmt(t.b - t.a)} mm along ${"XYZ"[t.axis]}` : null, t?.at);
+        this.hud(t ? (t.what === "Path" && !change ? "Path: click — the copies follow it" : `${t.what}: ${fmt(t.b - t.a)} mm along ${"XYZ"[t.axis]}`) : null, t?.at);
         this.viewport.canvas.style.cursor = t ? "pointer" : "crosshair";
       },
       compute: (values) => {
@@ -6371,6 +6705,11 @@ export class App implements ToolHost {
           offsets = Array.from({ length: n + 1 }, (_, k) => sign * step * k);
         }
         const moveOrig = Math.abs(offsets[0]) > 1e-9;
+        // Staggered: the odd rows half a step along the row, without its far-end objects ("one fewer")
+        const st = values.stagger && canStagger(values) ? row : null;
+        const skip = st && values.fewer ? farEnd(srcIds) : new Set<number>();
+        const plus = (v: V3, k: number): V3 => (st && k % 2 ? v.map((x, i) => x + (i === st.axis ? st.half : 0)) as V3 : v);
+        const left = (k: number, j: number) => k > 0 && k % 2 === 1 && skip.has(j);
         /** Where each source goes (k = 0) — changing an array, from where it started (it may have to move back). */
         const placed = (x: { id: number; shape: Geom }, d: number) => (Math.abs(d) > 1e-12 ? translateShape(x.shape, along(axis, d)) : x.shape);
         const sourceMoves = edit ? Math.abs(offsets[0] - rec!.offsets[0]) > 1e-9 || ((rec!.dir >> 1) !== axis && Math.abs(rec!.offsets[0]) > 1e-9) : moveOrig;
@@ -6384,7 +6723,9 @@ export class App implements ToolHost {
         const preview: { id: number; matrix: THREE.Matrix4; replaces?: boolean }[] = [];
         offsets.forEach((d, k) => {
           if (k === 0 && !sourceMoves) return;
-          for (const id of srcIds) preview.push({ id, matrix: new THREE.Matrix4().makeTranslation(...shift(d)), replaces: k === 0 });
+          srcIds.forEach((id, j) => {
+            if (!left(k, j)) preview.push({ id, matrix: new THREE.Matrix4().makeTranslation(...plus(shift(d), k)), replaces: k === 0 });
+          });
         });
         return {
           ghost: new Map(),
@@ -6395,9 +6736,10 @@ export class App implements ToolHost {
             const src = sourcesOf(edit);
             const copies: Body[] = [];
             for (let k = 1; k <= n; k++) {
-              copies.push(...src.map((x) => {
+              copies.push(...src.flatMap((x, j) => {
+                if (left(k, j)) return [];
                 const b = this.doc.get(x.id)!;
-                return withTextOf(this.doc.makeBody(translateShape(cloneShape(x.shape), along(axis, offsets[k])), copyName(b), b.kind), b);
+                return [withTextOf(this.doc.makeBody(translateShape(cloneShape(x.shape), plus(along(axis, offsets[k]), k)), copyName(b), b.kind), b)];
               }));
             }
             // The row is a group: the originals' own group if they share one (a second array → a grid), else a new "Array N".
@@ -6411,6 +6753,7 @@ export class App implements ToolHost {
             const made: ArrayRecord = {
               group, sources: srcIds, copies: copies.map((b) => b.id), n: count, gap: typed.gap, total: typed.total, dir, centre: alignCentre, offsets,
               ...(total > 0 && span ? { span } : {}),
+              ...(st ? { stagger: { axis: st.axis, d: st.half, skip: [...skip] } } : {}),
             };
             const arrays = [...this.doc.arrays.filter((r) => r !== rec || !edit), made];
             this.doc.commit([...bodies, ...copies.map((b) => ({ ...b, group }))], edit ? `Change ${group} ×${count}` : `Array copy ×${count}`, this.doc.guides, this.doc.dimensions, arrays);
@@ -6456,9 +6799,9 @@ export class App implements ToolHost {
     for (const rec of this.doc.arrays) {
       const shift = rec.circular ? this.circularShift(rec) : ([0, 0, 0] as V3);
       if (!shift || (!rec.circular && !this.copiesInPlace(rec))) continue;
-      const S = rec.sources.length, { point } = this.arrayPlacement(rec, shift);
+      const { point } = this.arrayPlacement(rec, shift), slots = copySlots(rec);
       rec.copies.forEach((id, i) => {
-        const copy = this.doc.get(id), src = this.doc.get(rec.sources[i % S]), k = Math.floor(i / S) + 1;
+        const [k, j] = slots[i], copy = this.doc.get(id), src = this.doc.get(rec.sources[j]);
         if (!copy || !src || copy.kind === "mesh" || src.kind !== copy.kind) return;
         // (p ↦ R·p + t from where the array puts three points)
         const t = point([0, 0, 0], k), cols = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map((e) => point(e as V3, k).map((v, a) => v - t[a]));
@@ -7586,7 +7929,7 @@ export class App implements ToolHost {
       ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai or ♥, come from the built-in ones, Noto Sans Symbols / Symbols 2 too), height (a capital letter, mm), symbols (the ☺▾ button by the text: ♥ ☺ ★ ✿ ♪ ✓… — a click puts one in, its Recent row remembers the last 8; typed / pasted ones work in any font), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
       ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch Mode replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+C curve (Shift+A too; pulled towards each control point clicked, starting and ending on the first and last — click the start point to close; in Select, its control lines show and its blue points drag) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch Mode keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
-      ["Left Shift (Box / Rectangle)", "Tap it (don't hold): the first click is the centre instead of a corner — tap again for a corner (remembered while YDDD runs)"],
+      [". (Box / Rectangle)", "The first click is the centre instead of a corner — press again for a corner (remembered while YDDD runs); while typing a size it's the decimal point"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
@@ -7623,8 +7966,9 @@ export class App implements ToolHost {
       ["Right-click a solid", "Switches to Solid mode and selects it (Shift+right-click adds)"],
       ["Click an edge of a selected face", "Face mode: selects that edge and switches to Edge mode"],
       ["Shift+G", "Move from point: show marks — click one → move gizmo there; or drag a mark to the target (snapping: the solid under the cursor shows its corners / midpoints / circle and face centres — centre to centre); click a round edge (circle / arc) or a slanted straight edge → slide along its axis / the edge, as with G"],
+      ["Array along a path", "Select the object(s) and a path (Shift+D on edges makes one), then Array copy: copies spaced along the path by its length — round its arcs and curves too — each keeping its place to the path (Turn with the curve: turned with it, e.g. square to a rounded wall); Fill the path, or a spacing — also by clicking a path in the Array copy panel"],
       ["Ctrl+G / Ctrl+Shift+G", "Group the selected objects / take their group apart — in the Bodies panel: click a group to select it, ▸ folds it, double-click renames, the eye hides it (Array copy groups its row itself)"],
-      ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), or on a single straight edge: add a guide line (like the Guide line tool)"],
+      ["Shift+D / Ctrl+D (or Ctrl+C, Ctrl+V)", "Duplicate solids, copy selected faces (then move), on a closed loop of edges (a circle, or edges round a face): copy it as a flat face (then move, P), on other edges (one, or several end to end): copy them as a path (then move; S W sweeps along it)"],
       ["M", "Mirror the selected objects: click a ±X / ±Y / ±Z mark — a mirrored copy beyond that side of them, touching it (a whole group's copies: a new group) · Join: a solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball) · to flip instead: delete the original"],
       ["Del / X", "Delete selected objects — with hole rims selected (Edge mode, one edge of each; any shape): fill the holes; round pins' rims: take off the pins"],
       ["Ctrl+H", "Hide the selected objects (the Bodies panel's eye shows them again)"],

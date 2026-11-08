@@ -1846,7 +1846,7 @@ export function edgesAlong(shape: Shape, which: "vertical" | "horizontal"): Set<
     const a = e.startPoint.toTuple(), b = e.endPoint.toTuple();
     if (which === "vertical") {
       const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-      if (e.geomType === "LINE" && len > tol && Math.abs(b[2] - a[2]) / len > 1 - 1e-9) out.add(e.hashCode);
+      if (len > tol && Math.abs(b[2] - a[2]) / len > 1 - 1e-9 && isStraightEdge(e)) out.add(e.hashCode);
     } else if ([0.25, 0.5, 0.75, 1].every((t) => Math.abs(e.pointAt(t).toTuple()[2] - a[2]) < tol)) {
       out.add(e.hashCode);
     }
@@ -2414,7 +2414,7 @@ export function edgeInfo(shape: Shape, edgeId: number): EdgeInfo | null {
   const e = shape.edges.find((x) => x.hashCode === edgeId);
   if (!e) return null;
   const length = measureLength(e);
-  if (e.geomType === "LINE") return { type: "line", length };
+  if (isStraightEdge(e)) return { type: "line", length };
   if (e.geomType !== "CIRCLE") {
     const c = curveCircle(e);
     if (!c) return { type: "curve", length };
@@ -2474,7 +2474,7 @@ export function matchStraightEdge(shape: Shape, old: Shape, a: V3, b: V3): [V3, 
   const tol = 1e-6 * Math.max(1, diag);
   const same = (p: V3, q: V3) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < tol;
   const u = norm3(sub3(b, a)), len = Math.hypot(...sub3(b, a));
-  const lines = shape.edges.filter((e) => e.geomType === "LINE").map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] as [V3, V3]);
+  const lines = shape.edges.filter(isStraightEdge).map((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] as [V3, V3]);
   /** The edge as [a-side, b-side] (oriented like a→b), if it runs between p and q. */
   const between = (p: V3, q: V3) => {
     const e = lines.find(([s, t]) => (same(s, p) && same(t, q)) || (same(s, q) && same(t, p)));
@@ -2973,7 +2973,7 @@ export function faceInfo(shape: Shape, faceId: number): FaceInfo | null {
   const area = measureArea(f);
   if (f.geomType === "PLANE") {
     const edges = f.edges;
-    if (edges.length === 4 && edges.every((e) => e.geomType === "LINE")) {
+    if (edges.length === 4 && edges.every(isStraightEdge)) {
       const len = edges.map((e) => measureLength(e)).sort((a, b) => a - b);
       const tol = 1e-6 * Math.max(1, len[3]);
       // Two pairs of equal sides with area = side × side: a rectangle (not a rhombus / parallelogram).
@@ -3054,7 +3054,7 @@ function cornerFills(faces: { face: Face; n: V3 }[], distance: number): Shape3D[
       if (c < 1e-3 || c > 2 - 1e-3) continue; // opposite or coplanar faces
       const m: V3 = [(n1[0] + n2[0]) / c, (n1[1] + n2[1]) / c, (n1[2] + n2[2]) / c]; // mitre: m·n1 = m·n2 = 1
       for (const e of flat[i].face.edges) {
-        if (e.geomType !== "LINE" || !flat[j].face.edges.some((x) => x.isSame(e))) continue;
+        if (!isStraightEdge(e) || !flat[j].face.edges.some((x) => x.isSame(e))) continue;
         const p = e.startPoint.toTuple() as V3;
         try {
           fills.push(prism([p, at(p, n1), at(p, m), at(p, n2)], sub3(e.endPoint.toTuple() as V3, p)));
@@ -3314,6 +3314,17 @@ export function pushPullMoves(shape: Solid, faceIds: number[]): Map<number, V3> 
   return out;
 }
 
+/**
+ * Where each of `pts` goes per mm of a push/pull of `faceIds` (see pushPullMoves): the way of a moved face it lies on,
+ * none ([0, 0, 0]) if it is on none — e.g. a linked dimension's ends, for its preview. Throws as pushPullMoves.
+ */
+export function pushPullPointMoves(shape: Solid, faceIds: number[], pts: V3[]): V3[] {
+  const moves = [...pushPullMoves(shape, faceIds)].map(([id, n]) => ({ face: findFace(shape, id), n }));
+  const [lo, hi] = shape.boundingBox.bounds;
+  const tol = 1e-5 * Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
+  return pts.map((p) => moves.find((m) => m.face && distToFace(m.face, p) < tol)?.n ?? [0, 0, 0]);
+}
+
 /** Push (negative) or pull (positive) a face of a solid along its normal, modifying that solid. */
 export function pushPull(shape: Solid, faceId: number, distance: number): Solid {
   const f = faceWithNormal(shape, faceId);
@@ -3417,6 +3428,19 @@ export function facesBorderEdgeIds(shape: Shape, faceIds: Set<number>): Set<numb
 }
 
 /** Straight edges of a planar face (with the face normal), or null if the face is not planar. */
+/** A straight edge: a line, or a spline that runs straight (a solid stretched per axis before, an imported STEP...). */
+function isStraightEdge(e: Edge): boolean {
+  if (e.geomType === "LINE") return true;
+  if (e.geomType !== "BSPLINE_CURVE" && e.geomType !== "BEZIER_CURVE") return false;
+  const a = e.startPoint.toTuple() as V3, b = e.endPoint.toTuple() as V3, len = Math.hypot(...sub3(b, a));
+  if (len < 1e-9) return false;
+  const u = norm3(sub3(b, a)), tol = 1e-6 * Math.max(1, len);
+  return [0.13, 0.31, 0.5, 0.69, 0.87].every((t) => {
+    const w = sub3(e.pointAt(t).toTuple() as V3, a), along = dot3(w, u);
+    return Math.hypot(w[0] - u[0] * along, w[1] - u[1] * along, w[2] - u[2] * along) < tol;
+  });
+}
+
 export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges: RefEdge[] } | null {
   const face = findFace(shape, faceId);
   if (!face || face.geomType !== "PLANE") return null;
@@ -3425,7 +3449,7 @@ export function faceRefEdges(shape: Shape, faceId: number): { normal: V3; edges:
   const pts = face.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
   const edges: RefEdge[] = [];
   for (const e of face.edges) {
-    if (e.geomType !== "LINE") continue;
+    if (!isStraightEdge(e)) continue;
     const a = e.startPoint.toTuple() as V3;
     const b = e.endPoint.toTuple() as V3;
     let p = norm3(cross3(n, norm3(sub3(b, a))));
@@ -3447,7 +3471,7 @@ export function edgeEnds(shape: Shape, edgeId: number): [V3, V3] | null {
 /** End points of a straight edge; null for any other edge. */
 export function lineOfEdge(shape: Shape, edgeId: number): [V3, V3] | null {
   const e = shape.edges.find((x) => x.hashCode === edgeId);
-  return e && e.geomType === "LINE" ? [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] : null;
+  return e && isStraightEdge(e) ? [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3] : null;
 }
 
 /** Centre, axis (unit, either way round) and radius of a circle / arc edge; null for any other edge. */
@@ -3481,7 +3505,7 @@ export function edgesOnSegment(shape: Shape, a: V3, b: V3, tol = 1e-5): number[]
     const t = len2 > 0 ? Math.max(0, Math.min(1, dot3(sub3(p, a), ab) / len2)) : 0;
     return Math.hypot(...sub3(p, [a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]])) < tol;
   };
-  return shape.edges.filter((e) => e.geomType === "LINE" && on(e.startPoint.toTuple() as V3) && on(e.endPoint.toTuple() as V3)).map((e) => e.hashCode);
+  return shape.edges.filter((e) => on(e.startPoint.toTuple() as V3) && on(e.endPoint.toTuple() as V3) && isStraightEdge(e)).map((e) => e.hashCode);
 }
 
 export const MOVE_EDGE_REFUSED = "Move edge: the edge must be straight, and the faces at its ends flat with straight edges meeting its ends (no curves or fillets there)";
@@ -3634,6 +3658,36 @@ function chainEdges<E extends { startPoint: { toTuple(): number[] }; endPoint: {
     out.unshift(left.splice(j, 1)[0]);
   }
   return out;
+}
+
+/**
+ * Copies of edges as paths (Shift+D on edges): the edges in runs joined end to end, one path each, in order along it
+ * (any edges — straight, arcs, curves). A run that branches (three edges at a corner) can't be one line: its edges a
+ * path each.
+ */
+export function edgePaths(shape: Shape | Wire, edgeIds: number[]): Wire[] {
+  const picked = [...new Set(edgeIds)].map((id) => shape.edges.find((e) => e.hashCode === id)).filter((e): e is Edge => !!e);
+  const ends = (e: Edge) => [ptKey(e.startPoint.toTuple() as V3), ptKey(e.endPoint.toTuple() as V3)];
+  // Runs: edges sharing an end point, joined (union–find)
+  const root = picked.map((_, i) => i);
+  const find = (i: number): number => (root[i] === i ? i : (root[i] = find(root[i])));
+  const at = new Map<string, number>();
+  picked.forEach((e, i) => {
+    for (const k of ends(e)) {
+      const j = at.get(k);
+      if (j === undefined) at.set(k, i);
+      else root[find(i)] = find(j);
+    }
+  });
+  const runs = new Map<number, Edge[]>();
+  picked.forEach((e, i) => runs.set(find(i), [...(runs.get(find(i)) ?? []), e]));
+  return [...runs.values()].flatMap((run) => {
+    const uses = new Map<string, number>();
+    for (const e of run) for (const k of ends(e)) uses.set(k, (uses.get(k) ?? 0) + 1);
+    const branched = [...uses.values()].some((n) => n > 2);
+    const pieces = branched ? run.map((e) => [e]) : [chainEdges(run)];
+    return pieces.map((es) => assembleWire(es.map((e) => e.clone())));
+  });
 }
 
 /** Wire edges chained into an ordered loop of corner points. */
@@ -3798,7 +3852,7 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   const len = Math.hypot(...sub3(b, a));
   if (len < tol * 10) throw new Error("Divide face: the two points are the same");
   const onBoundary = (f: Face, p: V3) =>
-    f.edges.some((e) => e.geomType === "LINE" && segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10);
+    f.edges.some((e) => segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10 && isStraightEdge(e));
   const along = (k: number): V3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
   const samples = [0.13, 0.29, 0.41, 0.5, 0.58, 0.71, 0.87].map(along);
   // The flat faces in the line's plane, facing one way (the plane of a face the line starts on)
@@ -3826,7 +3880,7 @@ export function splitFaceByLine(shape: Solid, a: V3, b: V3): Solid {
   const exact = (p: V3): V3 => {
     let best: V3 = p, bestD = Infinity;
     for (const e of faces.flatMap((x) => x.edges)) {
-      if (e.geomType !== "LINE") continue;
+      if (!isStraightEdge(e)) continue;
       const s = e.startPoint.toTuple() as V3, f = e.endPoint.toTuple() as V3;
       if (segDist(p, s, f) >= tol * 10) continue;
       const m: V3 = [(s[0] + f[0]) / 2, (s[1] + f[1]) / 2, (s[2] + f[2]) / 2];
@@ -3899,7 +3953,7 @@ export function guideSpans(shape: Solid, a: V3, b: V3): [V3, V3, V3][] {
     // Where it crosses their straight edges (one along it: its ends)
     const ts: number[] = [];
     for (const e of faces.flatMap((f) => f.edges)) {
-      if (e.geomType !== "LINE") continue;
+      if (!isStraightEdge(e)) continue;
       const p = e.startPoint.toTuple() as V3, q = e.endPoint.toTuple() as V3, r = sub3(q, p), x = cross3(d, r), xx = dot3(x, x);
       if (xx < 1e-18 * dot3(r, r)) {
         if (Math.hypot(...cross3(sub3(p, a), d)) < tol * 10) ts.push(dot3(sub3(p, a), d), dot3(sub3(q, a), d)); // (on the line)
@@ -3911,7 +3965,7 @@ export function guideSpans(shape: Solid, a: V3, b: V3): [V3, V3, V3][] {
     ts.sort((u, v) => u - v);
     const cuts = ts.filter((t, i) => i === 0 || t - ts[i - 1] > tol * 10);
     const onFaces = (p: V3) => faces.some((f) => distToFace(f, p) < tol * 10);
-    const onEdge = (p: V3) => faces.some((f) => f.edges.some((e) => e.geomType === "LINE" && segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10));
+    const onEdge = (p: V3) => faces.some((f) => f.edges.some((e) => segDist(p, e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3) < tol * 10 && isStraightEdge(e)));
     // Runs of pieces across the faces (not along an edge): one span each
     let start: number | null = null;
     for (let i = 0; i + 1 < cuts.length; i++) {
@@ -5123,6 +5177,100 @@ export function pathEnds(path: Wire): { point: V3; dir: V3 }[] {
   return ends.filter((a) => ends.filter((b) => near(a.point, b.point)).length === 1);
 }
 
+/**
+ * A path walked by length (Array along a path): its edges chained end to end from one end (a closed one: anywhere),
+ * each sampled finely, so a distance along it — round arcs and curves too — gives a point and the way it runs there.
+ * `normal`: square to the plane it lies in (a straight path: the world Z, or X if it runs up Z; one not in a plane:
+ * null). `nearest`: the distance along it of the point on it nearest `p`.
+ */
+export interface PathWalk {
+  length: number;
+  closed: boolean;
+  normal: V3 | null;
+  at(s: number): { p: V3; t: V3 };
+  nearest(p: V3): number;
+}
+
+export function walkPath(path: Wire): PathWalk {
+  const edges = [...path.edges];
+  if (!edges.length) throw new Error("the path has no lines");
+  const ends = pathEnds(path), closed = ends.length === 0;
+  const near = (p: V3, q: V3) => Math.hypot(...sub3(p, q)) < 1e-5 * Math.max(1, Math.hypot(...p));
+  // Chained from an end: each edge with whether it runs backwards along the path
+  const chain: { e: Edge; rev: boolean }[] = [];
+  let at = closed ? (edges[0].pointAt(0).toTuple() as V3) : ends[0].point;
+  const left = [...edges];
+  while (left.length) {
+    const i = left.findIndex((e) => near(e.pointAt(0).toTuple() as V3, at) || near(e.pointAt(1).toTuple() as V3, at));
+    if (i < 0) throw new Error("the path's lines don't join end to end");
+    const e = left.splice(i, 1)[0], rev = !near(e.pointAt(0).toTuple() as V3, at);
+    chain.push({ e, rev });
+    at = e.pointAt(rev ? 0 : 1).toTuple() as V3;
+  }
+  // Samples: each edge by its own parameter, the length up to each
+  type Sample = { s: number; k: number; u: number; p: V3 };
+  const samples: Sample[] = [];
+  let total = 0;
+  chain.forEach(({ e, rev }, k) => {
+    const n = e.geomType === "LINE" ? 1 : 96;
+    let prev: V3 | null = null;
+    for (let i = 0; i <= n; i++) {
+      const u = rev ? 1 - i / n : i / n, p = e.pointAt(u).toTuple() as V3;
+      if (prev) total += Math.hypot(...sub3(p, prev));
+      if (i > 0 || k === 0) samples.push({ s: total, k, u, p });
+      prev = p;
+    }
+  });
+  const pointOf = (s: number): { p: V3; t: V3 } => {
+    const x = Math.max(0, Math.min(total, s));
+    let lo = 0, hi = samples.length - 1;
+    while (hi - lo > 1) {
+      const m = (lo + hi) >> 1;
+      if (samples[m].s <= x) lo = m;
+      else hi = m;
+    }
+    const a = samples[lo], b = samples[hi];
+    // (a sample pair across two edges: the later edge from its start)
+    const k = b.k, ua = a.k === k ? a.u : chain[k].rev ? 1 : 0;
+    const f = b.s - a.s > 1e-12 ? (x - a.s) / (b.s - a.s) : 0, u = ua + (b.u - ua) * f;
+    const { e, rev } = chain[k];
+    const t = norm3(e.tangentAt(u).toTuple() as V3);
+    return { p: e.pointAt(u).toTuple() as V3, t: rev ? [-t[0], -t[1], -t[2]] : t };
+  };
+  // The plane it lies in
+  const pts = samples.map((x) => x.p);
+  let normal: V3 | null = null;
+  const c = pts.reduce((m, p) => add3(m, p.map((v) => v / pts.length) as V3), [0, 0, 0] as V3);
+  let best = 0;
+  for (const p of pts) for (const q of pts) {
+    const n = cross3(sub3(p, c), sub3(q, c)), l = Math.hypot(...n);
+    if (l > best) (best = l), (normal = norm3(n));
+  }
+  const size = Math.max(1e-9, ...pts.map((p) => Math.hypot(...sub3(p, c))));
+  if (!normal || best < 1e-9 * size * size) {
+    const d = norm3(sub3(pts[pts.length - 1], pts[0]));
+    normal = Math.abs(d[2]) > 0.99 ? [1, 0, 0] : [0, 0, 1];
+  } else if (pts.some((p) => Math.abs(dot3(sub3(p, c), normal!)) > 1e-6 * Math.max(1, size))) normal = null;
+  else if (normal[2] < -1e-9 || (Math.abs(normal[2]) <= 1e-9 && normal[0] + normal[1] < 0)) normal = [-normal[0], -normal[1], -normal[2]];
+  const nearest = (p: V3): number => {
+    let bi = 0, bd = Infinity;
+    samples.forEach((x, i) => {
+      const d = Math.hypot(...sub3(x.p, p));
+      if (d < bd) (bd = d), (bi = i);
+    });
+    // refined between the samples either side
+    let lo = samples[Math.max(0, bi - 1)].s, hi = samples[Math.min(samples.length - 1, bi + 1)].s;
+    const dist = (s: number) => Math.hypot(...sub3(pointOf(s).p, p));
+    for (let i = 0; i < 60; i++) {
+      const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
+      if (dist(m1) < dist(m2)) hi = m2;
+      else lo = m1;
+    }
+    return (lo + hi) / 2;
+  };
+  return { length: total, closed, normal, at: pointOf, nearest };
+}
+
 /** The end of `path` nearest the centre of a flat face, or null for a closed path. */
 function nearestEnd(face: Face, path: Wire): { point: V3; dir: V3 } | null {
   const c = face.center.toTuple() as V3;
@@ -5447,7 +5595,8 @@ export function guidePlaneNormal(shapes: Shape[], a: V3, b: V3, view?: V3, store
       const n = norm3(f.normalAt().toTuple() as V3);
       const c = f.center.toTuple() as V3;
       if (Math.abs(dot3(sub3(a, c), n)) > tol || Math.abs(dot3(sub3(b, c), n)) > tol) continue;
-      if (Math.abs(dot3(n, u)) > 1e-9) continue;
+      // (along it — not just square-on: a guide moved by the gizmo picks up float noise, ~2e-8 off parallel)
+      if (Math.abs(dot3(n, u)) > 1e-6) continue;
       // On the face itself, not just in its plane (another solid's face far away can share the plane).
       const d = Math.min(...[a, mid, b].map((p) => measureDistanceBetween(f, makeVertex(p))));
       if (d > tol * 100) continue;
@@ -6144,9 +6293,32 @@ export function mirrorShape<T extends Geom>(shape: T, point: V3, normal: V3): T 
  * (trimming curves, seams, poles) and sewn back into a solid.
  */
 function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
+  // Round things whose axis runs along X, Y or Z, the other two stretched alike, stay round — a cylinder stretched along
+  // its own axis is still one (a pin made longer): rebuilt as a true cylinder / circle, radius × those two, not as
+  // B-splines (booleans on them ~9× slower; holes, rims, radius dimensions no longer found)
+  const roundAlong = (d: V3): number | null => {
+    const k = [0, 1, 2].find((i) => Math.abs(Math.abs(d[i]) - 1) < 1e-9);
+    if (k === undefined) return null;
+    const [i, j] = [0, 1, 2].filter((x) => x !== k);
+    return Math.abs(f[i] - f[j]) <= 1e-9 * Math.max(f[i], f[j]) ? f[i] : null;
+  };
+  const cylAxis = (face: Face): V3 | null => {
+    if (face.geomType !== "CYLINDRE") return null;
+    const ad = new oc.BRepAdaptor_Surface(face.wrapped, true), cyl = ad.Cylinder(), ax = cyl.Position(), d = ax.Direction();
+    try {
+      return [d.X(), d.Y(), d.Z()];
+    } finally {
+      for (const o of [d, ax, cyl, ad]) o.delete();
+    }
+  };
+  const staysRound = (face: Face) => {
+    const d = cylAxis(face);
+    return !!d && roundAlong(d) !== null;
+  };
   // A face that wraps all the way round its axis (it has a seam) can't be rebuilt reliably
   // (edges lying on the seam are ambiguous): halve the solid through that axis — away from the
   // seam — stretch each half, and fuse them back.
+  const allRound = shape.faces.every((fc) => fc.geomType === "PLANE" || staysRound(fc));
   const wrap = !isFaceShape(shape) && shape.faces.length > 1 ? wrappingAxis(shape) : null;
   let halves: { above: Solid | null; below: Solid | null } | null = null;
   if (wrap && depth < 4) {
@@ -6166,7 +6338,9 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
     const { above, below } = halves;
     const parts = [above, below].filter((p): p is Solid => !!p).map((p) => stretchCurved(p, f, center, depth + 1));
     if (parts.length === 1) return parts[0];
-    const fused = boolean("fuse", parts[0] as Shape3D, parts[1] as Shape3D);
+    let fused = boolean("fuse", parts[0] as Shape3D, parts[1] as Shape3D);
+    // (the halves of a face that stayed round: one face again — a true cylinder is one face, as before the stretch)
+    if (allRound) fused = (fused as Shape3D).simplify() as typeof fused;
     if (!isValidShape(fused as Shape)) throw new Error("Per-axis scale: the stretched halves did not join — use the same % for X, Y and Z");
     return fused as Shape;
   }
@@ -6203,6 +6377,24 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
       const bs = oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true)) as never);
       for (let i = 1; i <= bs.NbPoles(); i++) bs.SetPole(i, map(keep(bs.Pole(i))));
       const p0 = vertexAt(keep(bs.Pole(1))), p1 = vertexAt(keep(bs.Pole(bs.NbPoles())));
+      // A circle (arc) whose axis runs along X / Y / Z, the other two stretched alike: still a circle, the same way round
+      if ((e as { geomType?: string }).geomType === "CIRCLE") {
+        const ad = keep(new oc.BRepAdaptor_Curve(e.wrapped as never)), circ = keep(ad.Circle()), ax = keep(circ.Position());
+        const n = keep(ax.Direction()), k = roundAlong([n.X(), n.Y(), n.Z()]);
+        if (k !== null) {
+          const ax2 = keep(new oc.gp_Ax2(map(keep(ax.Location())) as never, n, keep(ax.XDirection())));
+          const mc = keep(new oc.BRepBuilderAPI_MakeEdge(keep(new oc.gp_Circ(ax2, circ.Radius() * k)) as never, p0.v as never, p1.v as never));
+          if (mc.IsDone()) return { edge: mc.Edge() as { Reversed(): never }, a: p0.k, b: p1.k };
+        }
+      }
+      // A straight edge stays one (stretched, a line is still a line): as a spline it was no reference for a guide,
+      // a dimension, a slide... ("Box 1" filleted, then scaled per axis: all its edges splines)
+      if ((e as { geomType?: string }).geomType === "LINE") {
+        if (p0.k !== p1.k) {
+          const ml = keep(new oc.BRepBuilderAPI_MakeEdge(p0.v as never, p1.v as never));
+          if (ml.IsDone()) return { edge: ml.Edge() as { Reversed(): never }, a: p0.k, b: p1.k };
+        }
+      }
       // Explicit end parameters: on a closed curve (a full circle) both ends are the same vertex.
       const mk = keep(new oc.BRepBuilderAPI_MakeEdge(bs as never, p0.v as never, p1.v as never, bs.FirstParameter(), bs.LastParameter()));
       if (!mk.IsDone()) throw fail("an edge could not be rebuilt");
@@ -6240,6 +6432,14 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
       }
       return mk.Wire();
     };
+    /** A cylinder face staying round: its stretched cylinder (axis moved, radius × the two alike, its frame's handedness kept). */
+    const roundCylinder = (face: Face): unknown => {
+      const ad = keep(new oc.BRepAdaptor_Surface(face.wrapped, true)), cyl = keep(ad.Cylinder()), ax = keep(cyl.Position());
+      const d = keep(ax.Direction()), k = roundAlong([d.X(), d.Y(), d.Z()])!;
+      const ax3 = keep(new oc.gp_Ax3(map(keep(ax.Location())) as never, d, keep(ax.XDirection())));
+      if (!ax.Direct()) ax3.YReverse();
+      return new oc.Geom_CylindricalSurface(ax3, cyl.Radius() * k); // (not freed: the new face uses it)
+    };
     const sewing = keep(new oc.BRepBuilderAPI_Sewing(1e-4, true, true, true, false));
     let lastSurface: unknown = null;
     for (const face of shape.faces) {
@@ -6256,10 +6456,11 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
         const pln = keep(new oc.gp_Pln(map(keep(pos.Location())) as never, keep(new oc.gp_Dir(n.X() / f[0], n.Y() / f[1], n.Z() / f[2]))));
         mk = keep(new oc.BRepBuilderAPI_MakeFace(pln, outer, true));
       } else {
-        const surf = stretchedSurface(face, keep, map, shape.faces.length === 1);
+        const round = staysRound(face) ? roundCylinder(face) : null;
+        const surf = round ?? stretchedSurface(face, keep, map, shape.faces.length === 1);
         if (!surf) throw fail(`${face.geomType.toLowerCase().replace("cylindre", "cylinder")} faces are not supported`);
         lastSurface = surf;
-        if (shape.faces.length > 1 && coversItsRectangle(face)) {
+        if (!round && shape.faces.length > 1 && coversItsRectangle(face)) {
           // The face is its surface's whole (u, v) rectangle (e.g. the wrap-around side of an
           // extruded closed curve): build it from the new surface's own bounds — seam included —
           // with no outline repair; sewing joins it to its neighbours.
@@ -7442,12 +7643,27 @@ export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: numbe
       const holes: unknown[] = [];
       const ex = keep(new oc.TopExp_Explorer(fwd, oc.TopAbs_ShapeEnum.TopAbs_WIRE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
       for (; ex.More(); ex.Next()) if (!(ex.Current() as unknown as { IsSame(o: unknown): boolean }).IsSame(outer)) holes.push(oc.TopoDS.Wire(ex.Current()));
-      const mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, wireOnCyl(outer) as never, true));
-      for (const h of holes) mk.Add(wireOnCyl(h) as never);
-      if (!mk.IsDone()) throw new Error("Curve face: the face couldn't be made on the cylinder");
-      const fix = keep(new oc.ShapeFix_Face(mk.Face()));
-      fix.Perform();
-      let wrapped = new Face(fix.Face());
+      // Its holes (an "e", an "o"): laid on the cup the outline is turned to run the right way round by MakeFace, the holes
+      // not — when the laying turns them all over, they come out the same way as the outline (an invalid face). Wrapped
+      // round a cylinder nothing stretches: the right face has the flat one's area; else the holes are turned over.
+      const build = (flipHoles: boolean) => {
+        const mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, wireOnCyl(outer) as never, true));
+        for (const h of holes) {
+          const w = wireOnCyl(h) as { Reversed(): unknown };
+          mk.Add((flipHoles ? oc.TopoDS.Wire(w.Reversed() as never) : w) as never);
+        }
+        if (!mk.IsDone()) throw new Error("Curve face: the face couldn't be made on the cylinder");
+        const fix = keep(new oc.ShapeFix_Face(mk.Face()));
+        fix.Perform();
+        return new Face(fix.Face());
+      };
+      const flatArea = measureArea(f);
+      const right = (w: Face) => isValidShape(w) && Math.abs(measureArea(w) - flatArea) < 1e-3 * flatArea;
+      let wrapped = build(false);
+      if (holes.length && !right(wrapped)) {
+        const other = build(true);
+        if (right(other)) wrapped = other;
+      }
       if (!isValidShape(wrapped)) throw new Error("Curve face: the wrapped face isn't valid");
       if (dot3(normalAtUV(wrapped, 0.5, 0.5), radialOut(wrapped)) * dot3(nT, sub3(hit.p, add3(O, D.map((x) => x * v0) as V3))) < 0) wrapped = wrapped.flipOrientation();
       const thick = keep(new oc.BRepOffsetAPI_MakeThickSolid());

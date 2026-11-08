@@ -142,6 +142,12 @@ export interface ArrayRecord {
   readonly offsets: readonly number[];
   readonly span?: { readonly axis: number; readonly a: number; readonly b: number };
   /**
+   * Made from a row (an array copied the other way: a grid) with every other row — the odd ones, k = 1, 3… — shifted
+   * `d` along the row's `axis` (half its step: a zigzag, like a punched plate), those rows without the sources `skip`
+   * (indices into `sources`: their copies would stand past the row's end).
+   */
+  readonly stagger?: { readonly axis: number; readonly d: number; readonly skip: readonly number[] };
+  /**
    * Made by Circular copy instead (gap / total / dir / centre / offsets unused): round `axis`
    * (`name` as it was picked), `angle` in all, copies turned or not; `boxes` = each source's as it
    * was made (to tell how far the group moved since; older files: each copy's too, after them).
@@ -155,6 +161,13 @@ export interface ArrayRecord {
     /** The sources' centre it went round from (copies not turned move by where it went); older files: from `boxes`. */
     readonly centre?: V3;
   };
+}
+
+/** Which row (k = 1…) and source (index into `sources`) each of an array's copies is, in order — a staggered grid's shifted rows without its skipped sources. */
+export function copySlots(rec: ArrayRecord): [number, number][] {
+  const out: [number, number][] = [], skip = new Set(rec.stagger?.skip ?? []);
+  for (let k = 1; k < rec.n; k++) for (let j = 0; j < rec.sources.length; j++) if (!(k % 2 && skip.has(j))) out.push([k, j]);
+  return out;
 }
 
 type Snapshot = readonly Body[];

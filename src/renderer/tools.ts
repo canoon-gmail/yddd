@@ -68,8 +68,6 @@ export interface Tool {
   up?(e: PointerEvent): void;
   /** Returns true if the key was consumed. */
   key(e: KeyboardEvent): boolean;
-  /** Optional: a key let go (e.g. to tell a tap of Shift on its own). */
-  keyUp?(e: KeyboardEvent): void;
   /** Optional: a right click (no drag) in the viewport. */
   rightClick?(e: PointerEvent): void;
   /** Optional: mouse wheel in the viewport. Return true to consume it (no zoom). */
@@ -331,8 +329,8 @@ abstract class DrawTool implements Tool {
 // ------------------------------------------------------------------ Box
 
 /**
- * Box solid, or (faceMode) a flat Rectangle face. A tap of Left Shift (on its own, not held) toggles whether the first click
- * is a corner or the centre (remembered while YDDD runs).
+ * Box solid, or (faceMode) a flat Rectangle face. "." toggles whether the first click is a corner or the centre
+ * (remembered while YDDD runs).
  */
 export class BoxTool extends DrawTool {
   constructor(host: ToolHost, private readonly faceMode = false) {
@@ -345,7 +343,7 @@ export class BoxTool extends DrawTool {
 
   protected get hints(): string[] {
     const n = this.name, c = BoxTool.fromCenter;
-    const toggle = `Left Shift: from the ${c ? "corner" : "centre"}`;
+    const toggle = `. (full stop): from the ${c ? "corner" : "centre"}`;
     return [
       `${n}: click the ${c ? "centre" : "first corner"} (on the grid or on a planar face) · ${toggle}`,
       `${n}: click ${c ? "a corner (from the centre)" : "the opposite corner"} — or type width,depth (or 40x25) + Enter · ${toggle}`,
@@ -354,8 +352,6 @@ export class BoxTool extends DrawTool {
   }
   /** The first click a corner (false) or the centre (true). */
   private static fromCenter = false;
-  /** Left Shift down with no other key / click since: let go → a tap. */
-  private shiftTap = false;
   /** The first click, and the corners (u1, v1) – (u2, v2): (u2, v2) the one at the cursor. */
   private au = 0;
   private av = 0;
@@ -366,20 +362,18 @@ export class BoxTool extends DrawTool {
   private h = 0;
 
   key(e: KeyboardEvent): boolean {
-    this.shiftTap = e.code === "ShiftLeft" && !e.repeat && this.stage < 2;
-    return this.shiftTap ? false : super.key(e);
-  }
-
-  keyUp(e: KeyboardEvent): void {
-    if (e.code !== "ShiftLeft" || !this.shiftTap) return;
-    this.shiftTap = false;
-    if (this.stage >= 2) return;
-    BoxTool.fromCenter = !BoxTool.fromCenter;
-    if (this.stage === 1) {
-      this.corners(this.u2, this.v2);
-      this.drawRect();
+    // "." (the key itself, whatever the layout; Numpad too) switches the first click between corner and centre — not
+    // while a number is being typed (then it's its decimal point), nor once the height is being set
+    if ((e.code === "Period" || e.code === "NumpadDecimal") && !this.typed && this.stage < 2 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      BoxTool.fromCenter = !BoxTool.fromCenter;
+      if (this.stage === 1) {
+        this.corners(this.u2, this.v2);
+        this.drawRect();
+      }
+      this.updateHint();
+      return true;
     }
-    this.updateHint();
+    return super.key(e);
   }
 
   /** The cursor's corner at (u, v): the other one the first click (from a corner) or across it (from the centre). */
@@ -421,7 +415,6 @@ export class BoxTool extends DrawTool {
   }
 
   down(e: PointerEvent): void {
-    this.shiftTap = false; // (Shift+click: not a tap)
     const step = this.host.snapStep(e);
     if (this.stage === 0) {
       const p = this.hit(e, step);

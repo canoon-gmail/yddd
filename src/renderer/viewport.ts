@@ -3062,7 +3062,11 @@ export class Viewport {
     }
   }
 
+  /** Bodies drawn moved by the gizmo / a base-point move (`m` the move; null: back in place), e.g. for their dimensions. */
+  onBodiesMoved: ((ids: number[], m: THREE.Matrix4 | null) => void) | null = null;
+
   private resetBodyMatrices(): void {
+    this.onBodiesMoved?.([], null);
     for (const v of this.views.values()) {
       v.group.matrixAutoUpdate = true;
       v.group.position.set(0, 0, 0);
@@ -3160,6 +3164,7 @@ export class Viewport {
       return;
     }
     if (this.xfSet.size !== ids.length || ids.some((id) => !this.xfSet.has(id))) this.setXfSet(ids);
+    this.onBodiesMoved?.(ids, new THREE.Matrix4().makeTranslation(d.x, d.y, d.z));
     for (const id of ids) {
       const v = this.views.get(id);
       if (!v) continue;
@@ -3176,6 +3181,7 @@ export class Viewport {
     // (a move: just the offset — a turned gizmo's own turn isn't a rotation of the bodies)
     const d = this.pivot.position.clone().sub(this.xfStart);
     const m = this.xfMode === "translate" ? new THREE.Matrix4().makeTranslation(d.x, d.y, d.z) : this.pivot.matrixWorld.clone().multiply(start.invert());
+    this.onBodiesMoved?.(this.xfIds, m);
     for (const id of this.xfIds) {
       const v = this.views.get(id);
       if (!v) continue;
