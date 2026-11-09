@@ -118,8 +118,11 @@ export const EDGE_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
 export const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => [it.cmd, it] as const)));
 /** Toolbar commands that go into the recent strip (mode switches, undo/redo, views, X-ray and Delete have their own keys / buttons). */
 export const NOT_RECENT = new Set(["Select", "History", "View", "X-ray"]);
-/** Single commands kept off the strip too: Move (G) is used all the time and has its key. */
-export const NOT_RECENT_CMDS = new Set(["xf.move"]);
+/**
+ * Single commands kept off the strip too: Move (G) is used all the time and has its key; Revolve, Mirror, Circular copy,
+ * Sweep and Array copy have their own buttons in the viewport's corner.
+ */
+export const NOT_RECENT_CMDS = new Set(["xf.move", "op.revolve", "edit.mirror", "edit.circular", "op.sweep", "edit.array"]);
 export const RECENT_ITEMS = new Map(
   TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.filter((it) => !NOT_RECENT_CMDS.has(it.cmd)).map((it) => [it.cmd, it] as const)),
 );

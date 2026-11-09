@@ -22,7 +22,7 @@
 import { PICTURE_TYPES } from "./picture";
 import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
-import { joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
+import { flatFaceBoolean, joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
 import { circleSize, num, parseLen, typedUnit } from "./format";
 import { ICONS } from "./icons";
 import { scanGrid, type GP, type ScanOptions } from "./scan";
@@ -78,6 +78,11 @@ const rotP = (p: P, c: P, a: number): P => {
   return [c[0] + x * cs - y * sn, c[1] + x * sn + y * cs];
 };
 const rotLoop = (l: Loop, c: P, a: number): Loop => (l.kind === "circle" ? { ...l, c: rotP(l.c, c, a) } : { ...l, segs: l.segs.map((g) => mapSeg(g, (p) => rotP(p, c, a))) });
+/** Mirror (M): the sides of the selection's box to mirror across. */
+type MirrorSide = "+x" | "-x" | "+y" | "-y";
+const MIRROR_SIDES: MirrorSide[] = ["+x", "-x", "+y", "-y"];
+/** Mirror marks: how far out from the selection's side (px), their size (px), how near a click must be (px). */
+const MIRROR_OUT_PX = 30, MIRROR_MARK_PX = 9, MIRROR_PICK_PX = 14;
 /** Scale / rotate gizmo handles: X (red square), Y (green square), XY (yellow ring, even), rotate (blue ring, top left). */
 type Handle = "x" | "y" | "xy" | "rot";
 /** How near (px) the cursor must be to grab a handle; how far (px) the handles sit outside the selection. */
@@ -595,7 +600,9 @@ const insideOf = new WeakMap<Loop, WeakMap<Loop, boolean>>();
  * Outer outlines with their holes: an outline inside an odd number of others is a hole of the
  * smallest one around it. Inside = all of it inside or on the other's outline (one that only touches
  * or overlaps another — a half circle on a rectangle's side, two crossing circles — isn't); outlines
- * joined with J are never holes of each other.
+ * joined with J are never holes of each other. Outlines joined with J count as one: an outline inside their joined
+ * shape — across the line where two of them meet (a circle on a rectangle's seam with a half circle) — is a hole of it
+ * (listed with one of them; see groupFaces, which cuts a group's holes out of the joined face).
  */
 function nest(loops: Loop[]): { outer: number; holes: number[] }[] {
   const polys = loops.map(loopPolygon), areas = polys.map(polyArea);
@@ -626,10 +633,25 @@ function nest(loops: Loop[]): { outer: number; holes: number[] }[] {
   const joined = (i: number, j: number) => loops[i].g !== undefined && loops[i].g === loops[j].g;
   const parents = loops.map((_, i) => loops.map((_, j) => j).filter((j) => j !== i && !joined(i, j) && areas[j] > areas[i] && within(i, j)));
   const depth = parents.map((p) => p.length);
+  // An outline in nothing, with nothing in it, inside a group (also of outlines in nothing) as a whole: its hole
+  const inGroup = new Map<number, number>(); // (outline → the group's outline it's listed with)
+  const groups = new Map<number, number[]>();
+  loops.forEach((l, i) => l.g !== undefined && groups.set(l.g, [...(groups.get(l.g) ?? []), i]));
+  for (const [g, members] of groups) {
+    if (members.length < 2 || members.some((j) => depth[j])) continue;
+    const box = [Math.min(...members.map((j) => boxes[j][0])), Math.min(...members.map((j) => boxes[j][1])), Math.max(...members.map((j) => boxes[j][2])), Math.max(...members.map((j) => boxes[j][3]))];
+    const tol = 1e-6 * Math.max(1, Math.sqrt(members.reduce((t, j) => t + areas[j], 0)));
+    loops.forEach((l, i) => {
+      if (l.g === g || depth[i] || inGroup.has(i) || parents.some((p) => p.includes(i))) return;
+      const a = boxes[i];
+      if (a[0] < box[0] - tol || a[1] < box[1] - tol || a[2] > box[2] + tol || a[3] > box[3] + tol) return;
+      if (polys[i].every((p) => members.some((j) => inside(p, polys[j]) || edgeDist(p, polys[j]) < tol))) inGroup.set(i, members[0]);
+    });
+  }
   return loops
     .map((_, i) => i)
-    .filter((i) => depth[i] % 2 === 0)
-    .map((i) => ({ outer: i, holes: loops.map((_, j) => j).filter((j) => depth[j] === depth[i] + 1 && parents[j].includes(i)) }));
+    .filter((i) => depth[i] % 2 === 0 && !inGroup.has(i))
+    .map((i) => ({ outer: i, holes: loops.map((_, j) => j).filter((j) => (depth[j] === depth[i] + 1 && parents[j].includes(i)) || inGroup.get(j) === i) }));
 }
 
 interface State {
@@ -674,9 +696,16 @@ export class SketchTool implements Tool {
     hover: Handle | null;
   } | null = null;
   /** Moving the selection with the gizmo (G): from where it was (c0, loops, opens) by d; the part being dragged (from `grab`, the offset then `d0`), or under the cursor. */
+  /** Mirror (M): the selection's box, the sketch before (hovering a mark previews the copy in it), the side under the cursor. */
+  private mirroring: { lo: P; hi: P; loops: Loop[]; opens: Seg[][]; sel: Item[]; snap: string; hover: MirrorSide | null } | null = null;
   private moving: { c0: P; d: P; loops: Loop[]; opens: Seg[][]; snap: string; handle: MoveHandle | null; grab: P | null; d0: P; hover: MoveHandle | null } | null = null;
   /** Select: a press on a selected outline / path — dragging it moves the selection. */
   private drag: { x: number; y: number; at: P; loops: Loop[]; opens: Seg[][]; snap: string; moved: boolean; item: Item; wasSelected: boolean } | null = null;
+  /**
+   * Select: a box dragged from empty space (client px) — left → right picks what's wholly inside, right → left what it
+   * touches; `add` (Shift / Ctrl): to what was selected (`base`). `el`: the box on screen.
+   */
+  private boxSel: { x: number; y: number; x2: number; y2: number; add: boolean; base: Item[]; el: HTMLDivElement | null } | null = null;
   /** Finished open lines (Enter / double-click): paths. */
   private opens: Seg[][] = [];
   /** The outline being drawn (lines / arcs) and its first point. */
@@ -707,11 +736,32 @@ export class SketchTool implements Tool {
   private free = false;
   private typed = "";
   private undoStack: string[] = [];
+  /** Steps undone (Redo brings them back; a new step forgets them). */
+  private redoStack: string[] = [];
+
+  /** A sketch step about to happen: what it was before (Undo), and nothing left to redo. */
+  private pushUndo(snap: string): void {
+    this.undoStack.push(snap);
+    this.redoStack = [];
+  }
   private last: PointerEvent | null = null;
   /** Last click (for double-clicks). */
   private lastDown: { t: number; x: number; y: number } | null = null;
   private panel: HTMLElement;
-  private panelHtml = "";
+  /** What the panel shows (null: drawn again next time — an empty panel, Pro's, is "" too). */
+  private panelHtml: string | null = null;
+  /** The Sketch tools on the top toolbar (see the constructor). */
+  private bar: HTMLDivElement;
+  /** The closed outlines' sizes on the view: a rectangle's W × H, a circle's / arc's R (or Ø) — labels kept on their points. */
+  private sizeBox = Object.assign(document.createElement("div"), { id: "sketch-sizes" });
+  /** (`dir`: its label sits that way from its point — an angle's ~22 px into its corner, an arc's just outside the curve) */
+  private sizes: { el: HTMLElement; at: THREE.Vector3; dir?: THREE.Vector3; angle?: boolean }[] = [];
+  private sizeKey = "";
+  private sizeView = "";
+  private sizeRaf = 0;
+  /** The Sizes switch on the bar: the size labels shown (remembered; off to start with). */
+  private static sizesOn = localStorage.getItem("yddd.sketchSizes") === "1";
+  private barHtml = "";
   /** The sketch `version` the 3D corner view was last framed for. */
   private insetVersion = -1;
   /** Bumped on every change to the outlines (keeps the crossing points cached until then). */
@@ -772,11 +822,25 @@ export class SketchTool implements Tool {
   ) {
     this.panel = document.createElement("div");
     this.panel.id = "sketch-panel";
-    this.panel.addEventListener("click", (e) => {
+    // The top toolbar while sketching: the Sketch tools (text buttons), Undo / Redo, Exit Sketch — the main tools,
+    // the Recent strip and the corner tools hidden (none work in here); the bar keeps its height (the view doesn't jump)
+    this.bar = document.createElement("div");
+    this.bar.id = "sketch-bar";
+    const onClick = (e: MouseEvent) => {
       const b = (e.target as HTMLElement).closest<HTMLElement>("button");
-      if (!b) return;
+      if (!b || (b as HTMLButtonElement).disabled) return;
       b.blur();
+      this.endMirror(false);
       if (b.dataset.mode) this.setMode(b.dataset.mode as Mode);
+      else if (b.dataset.act === "undo") this.undo();
+      else if (b.dataset.act === "sizes") {
+        SketchTool.sizesOn = !SketchTool.sizesOn;
+        localStorage.setItem("yddd.sketchSizes", SketchTool.sizesOn ? "1" : "0");
+        this.sizeBox.hidden = !SketchTool.sizesOn;
+        this.sizeView = ""; // (placed again when shown)
+        this.update();
+      }
+      else if (b.dataset.act === "redo") this.redo();
       else if (b.dataset.act === "done") this.finish();
       else if (b.dataset.act === "cancel") this.cancel();
       else if (b.dataset.act === "join") this.join();
@@ -788,7 +852,9 @@ export class SketchTool implements Tool {
         SketchTool.scanOpts.dark = null;
         this.runScan();
       }
-    });
+    };
+    this.panel.addEventListener("click", onClick);
+    this.bar.addEventListener("click", onClick);
     // Scan's settings: scanned again (a slider / typed number: once it rests a moment)
     const scanField = (f: HTMLInputElement | HTMLSelectElement, soon: boolean) => {
       const k = f.dataset.scan, o = SketchTool.scanOpts;
@@ -838,6 +904,7 @@ export class SketchTool implements Tool {
       b.blur();
       const p = this.pic, act = b.dataset.act;
       if (act === "turn") this.turnView();
+      else if (act === "mirror") this.mirroring ? this.endMirror(false) : this.startMirror();
       else if (act === "picture") void this.loadPicture();
       else if (!p) return;
       else if (act === "pic") this.setMode(this.mode === "picture" ? this.prevMode : "picture"); // (on / off)
@@ -897,7 +964,7 @@ export class SketchTool implements Tool {
 
   /** The corner icons; with a picture: a gap, then its thumbnail, its menu shown on hover. */
   private renderCorner(): void {
-    this.corner.innerHTML = `<button type="button" data-act="turn" title="Turn the view a quarter (the sketch stays as it is)">${ICONS.turnView}</button><button type="button" data-act="picture" title="Load a picture to trace (shown only while sketching, remembered for this face)">${ICONS.picture}</button>`;
+    this.corner.innerHTML = `<button type="button" data-act="turn" title="Turn the view a quarter (the sketch stays as it is)">${ICONS.turnView}</button><button type="button" data-act="mirror" title="Mirror the selected outlines / paths (M): click a side mark — the copy appears beyond it, touching">${ICONS.mirror}</button><button type="button" data-act="picture" title="Load a picture to trace (shown only while sketching, remembered for this face)">${ICONS.picture}</button>`;
     const p = this.pic;
     if (!p) return;
     const opacity = Math.round(p.mat.opacity * 100);
@@ -1069,7 +1136,7 @@ export class SketchTool implements Tool {
   private scanAdd(): void {
     const f = this.scanFound;
     if (!f || (!f.loops.length && !f.opens.length)) return this.host.hint(this.scanArea ? "Scan: nothing found — try Dark below, Even out lighting or smaller specks" : "Scan: drag over the picture first (or click 2 corners)");
-    this.undoStack.push(JSON.stringify(this.state()));
+    this.pushUndo(JSON.stringify(this.state()));
     this.loops = [...this.loops, ...f.loops];
     this.opens = [...this.opens, ...f.opens];
     this.version++;
@@ -1144,6 +1211,30 @@ export class SketchTool implements Tool {
     vp.viewLocked = true;
     vp.setZAxisVisible(false);
     if (!vp.xray) vp.setXray(true);
+    // (the bar on the top toolbar from here to dispose — not from the constructor: a tool made but never started left one)
+    const top = document.getElementById("toolbar");
+    if (top) {
+      top.style.minHeight = `${top.offsetHeight}px`;
+      top.appendChild(this.bar);
+    }
+    document.body.classList.add("sketching");
+    SketchTool.sizesOn = localStorage.getItem("yddd.sketchSizes") === "1"; // (as last left — another window may have changed it)
+    this.sizeBox.hidden = !SketchTool.sizesOn;
+    vp.canvas.parentElement?.appendChild(this.sizeBox);
+    // Each frame: the size labels kept on their points; the view zoomed / panned (the mouse wheel draws nothing itself)
+    // with screen-sized handles up — the move / scale gizmo, the picture's, Round corner's, a Curve's points: drawn again
+    let viewWas = "";
+    const follow = () => {
+      this.placeSizes();
+      const c = vp.camera, view = c.matrixWorld.elements.concat(c.projectionMatrix.elements).join();
+      if (view !== viewWas) {
+        const first = !viewWas;
+        viewWas = view;
+        if (!first && (this.moving || this.scaling || this.mode === "picture" || this.mode === "round" || this.splineHandles().length)) this.update();
+      }
+      this.sizeRaf = requestAnimationFrame(follow);
+    };
+    this.sizeRaf = requestAnimationFrame(follow);
     this.update();
     return this;
   }
@@ -1161,6 +1252,13 @@ export class SketchTool implements Tool {
     vp.setOverlay([]);
     this.host.hud(null);
     this.panel.remove();
+    this.bar.remove();
+    this.boxSel?.el?.remove();
+    cancelAnimationFrame(this.sizeRaf);
+    this.sizeBox.remove();
+    document.body.classList.remove("sketching");
+    const top = document.getElementById("toolbar");
+    if (top) top.style.minHeight = "";
     this.corner.remove();
     this.pic?.mat.dispose(); // (the texture stays, remembered for this plane)
     for (const m of [...Object.values(this.mats), ...this.gizmoMats.values()]) m.dispose();
@@ -1279,6 +1377,7 @@ export class SketchTool implements Tool {
 
   move(e: PointerEvent): void {
     this.last = e;
+    if (this.boxSel) return this.dragBox(e);
     if (this.mode === "scan") {
       const q = this.planeAt(e), dr = this.scanDrag;
       this.cursor = q;
@@ -1310,6 +1409,15 @@ export class SketchTool implements Tool {
       if (this.picPts.length < 2) this.host.viewport.showSnapMarker(null);
       return this.update();
     }
+    if (this.mode === "select" && this.mirroring) {
+      const h = this.mirrorAt(e);
+      if (h !== this.mirroring.hover) {
+        this.mirroring.hover = h;
+        this.showMirror(h);
+        this.update();
+      }
+      return;
+    }
     if (this.mode === "select") {
       const mv = this.moving;
       if (mv) {
@@ -1330,7 +1438,7 @@ export class SketchTool implements Tool {
         d = add(mv.d0, d);
         const step = this.host.snapStep(e);
         if (step > 0) d = [Math.round(d[0] / step) * step, Math.round(d[1] / step) * step];
-        return this.moveTo(d);
+        return this.moveTo(this.catchPoints(d, mv.handle === "x" ? 0 : mv.handle === "y" ? 1 : null, mv.loops, mv.opens, e));
       }
       const sc = this.scaling;
       if (sc) {
@@ -1391,6 +1499,38 @@ export class SketchTool implements Tool {
   }
 
   /** The cursor's point in the sketch plane (no snapping). */
+  /**
+   * Moving the selection (the gizmo, or a drag) with snapping on (Auto snap — Ctrl: free; or Ctrl held): its corners,
+   * middles and circle centres catch on the other outlines' / paths' and the origin's within SNAP_PX — along the
+   * arrow dragged only (`axis`), as the main view's gizmo. `loops` / `opens`: the sketch before the move. The offset `d`, caught.
+   */
+  private catchPoints(d: P, axis: 0 | 1 | null, loops: Loop[], opens: Seg[][], e: PointerEvent): P {
+    const vp = this.host.viewport;
+    if (!vp.snapping(e)) {
+      vp.showSnapMarker(null);
+      return d;
+    }
+    type Pt = { p: P; kind: "vertex" | "midpoint" | "center" };
+    const ofSegs = (segs: Seg[], out: Pt[]) => segs.forEach((g) => out.push({ p: g.a, kind: "vertex" }, { p: g.b, kind: "vertex" }, { p: segMid(g), kind: "midpoint" }));
+    const ofLoop = (l: Loop, out: Pt[]) => (l.kind === "circle" ? out.push({ p: l.c, kind: "center" }) : ofSegs(l.segs, out));
+    const sel = (kind: Item["kind"], i: number) => this.selected.some((x) => x.kind === kind && x.i === i);
+    const mine: Pt[] = [], others: Pt[] = [{ p: [0, 0], kind: "center" }];
+    loops.forEach((l, i) => ofLoop(l, sel("loop", i) ? mine : others));
+    opens.forEach((o, i) => ofSegs(o, sel("open", i) ? mine : others));
+    if (!mine.length || mine.length * others.length > 400_000) return d; // (a scanned outline against another: too many to try)
+    const r = SNAP_PX * this.mmPerPixel(add(mine[0].p, d));
+    let best: { diff: P; at: Pt; dist: number } | null = null;
+    for (const m of mine) {
+      const x = m.p[0] + d[0], y = m.p[1] + d[1];
+      for (const t of others) {
+        const dx = t.p[0] - x, dy = t.p[1] - y, dist = axis === 0 ? Math.abs(dx) : axis === 1 ? Math.abs(dy) : Math.hypot(dx, dy);
+        if (dist <= r && (!best || dist < best.dist)) best = { diff: [axis === 1 ? 0 : dx, axis === 0 ? 0 : dy], at: t, dist };
+      }
+    }
+    vp.showSnapMarker(best ? { point: this.world(best.at.p), kind: best.at.kind } : null);
+    return best ? add(d, best.diff) : d;
+  }
+
   private planeAt(e: PointerEvent): P | null {
     const w = this.host.viewport.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(this.frame.z, this.frame.origin), new THREE.Vector3());
     return w && this.local(w);
@@ -1406,6 +1546,7 @@ export class SketchTool implements Tool {
     let d = sub(q, dr.at);
     const step = this.host.snapStep(e);
     if (step > 0) d = [Math.round(d[0] / step) * step, Math.round(d[1] / step) * step];
+    d = this.catchPoints(d, null, dr.loops, dr.opens, e);
     this.translateSelection(d, dr.loops, dr.opens);
     this.host.hud(`Move ${num(d[0])}, ${num(d[1])} mm`, this.world(q));
   }
@@ -1455,7 +1596,7 @@ export class SketchTool implements Tool {
         else chain = [...rev(o), ...chain];
       }
     }
-    this.undoStack.push(JSON.stringify(this.state()));
+    this.pushUndo(JSON.stringify(this.state()));
     this.version++;
     // The result stays selected (e.g. S scales it next).
     const result: Item[] = [];
@@ -1549,7 +1690,7 @@ export class SketchTool implements Tool {
     const sc = this.scaling;
     if (!sc) return;
     this.scaling = null;
-    if (apply && (Math.abs(sc.kx - 1) > 1e-12 || Math.abs(sc.ky - 1) > 1e-12 || Math.abs(sc.ang) > 1e-12)) this.undoStack.push(sc.snap);
+    if (apply && (Math.abs(sc.kx - 1) > 1e-12 || Math.abs(sc.ky - 1) > 1e-12 || Math.abs(sc.ang) > 1e-12)) this.pushUndo(sc.snap);
     else {
       this.loops = sc.loops;
       this.opens = sc.opens;
@@ -1569,9 +1710,15 @@ export class SketchTool implements Tool {
     this.update();
   }
 
+  /** Mm per screen pixel at a point of the sketch (a mm step there, measured on screen: right however the view is zoomed). */
+  private mmPerPixel(p: P): number {
+    const vp = this.host.viewport, a = vp.toScreen(this.world(p)), b = vp.toScreen(this.world(add(p, [1, 0]))), px = Math.hypot(b.x - a.x, b.y - a.y);
+    return px > 1e-9 ? 1 / px : vp.worldPerPixel(this.world(p));
+  }
+
   /** The move gizmo's parts in the plane: its centre, the X / Y arrow tips, the XY square's middle; w: mm per pixel there. */
   private moveGizmo(): { o: P; x: P; y: P; sq: P; w: number } {
-    const mv = this.moving!, o = add(mv.c0, mv.d), w = this.host.viewport.worldPerPixel(this.world(o));
+    const mv = this.moving!, o = add(mv.c0, mv.d), w = this.mmPerPixel(o);
     return { o, x: add(o, [MOVE_ARROW_PX * w, 0]), y: add(o, [0, MOVE_ARROW_PX * w]), sq: add(o, [MOVE_SQ_PX * w, MOVE_SQ_PX * w]), w };
   }
 
@@ -1601,7 +1748,8 @@ export class SketchTool implements Tool {
     const mv = this.moving;
     if (!mv) return;
     this.moving = null;
-    if (apply && (mv.d[0] || mv.d[1])) this.undoStack.push(mv.snap);
+    this.host.viewport.showSnapMarker(null);
+    if (apply && (mv.d[0] || mv.d[1])) this.pushUndo(mv.snap);
     else if (!apply) {
       this.loops = mv.loops;
       this.opens = mv.opens;
@@ -1639,6 +1787,7 @@ export class SketchTool implements Tool {
     }
     if (this.moving?.handle) {
       // (let go: the gizmo stays for more; Enter / a click elsewhere applies)
+      this.host.viewport.showSnapMarker(null);
       this.moving.handle = null;
       this.moving.grab = null;
       return this.update();
@@ -1652,15 +1801,17 @@ export class SketchTool implements Tool {
     if (this.ptDrag && e.button === 0) {
       const pd = this.ptDrag;
       this.ptDrag = null;
-      if (pd.moved) this.undoStack.push(pd.snap);
+      if (pd.moved) this.pushUndo(pd.snap);
       this.host.hud(null);
       this.host.viewport.showSnapMarker(null);
       return this.update();
     }
+    if (this.boxSel && e.button === 0) return this.endBox();
     const dr = this.drag;
     if (!dr || e.button !== 0) return;
     this.drag = null;
-    if (dr.moved) this.undoStack.push(dr.snap);
+    this.host.viewport.showSnapMarker(null);
+    if (dr.moved) this.pushUndo(dr.snap);
     // A click (no drag) on one of several selected: just that one.
     else if (dr.wasSelected && !e.shiftKey) this.selected = this.groupOf(dr.item); // (a joined outline: its whole group)
     this.host.hud(null);
@@ -1740,6 +1891,73 @@ export class SketchTool implements Tool {
   }
 
   /** Select: the path whose line is under the cursor, else the outline whose line is, else the smallest outline around it. */
+  /** The box being dragged: drawn (solid: wholly inside, dashed: touching), what it would pick lit as it goes. */
+  private dragBox(e: PointerEvent): void {
+    const b = this.boxSel!;
+    b.x2 = e.clientX;
+    b.y2 = e.clientY;
+    if (!b.el && Math.hypot(b.x2 - b.x, b.y2 - b.y) < DRAG_PX) return;
+    if (!b.el) {
+      b.el = Object.assign(document.createElement("div"), { className: "sk-box" });
+      document.body.appendChild(b.el);
+    }
+    const l = Math.min(b.x, b.x2), t = Math.min(b.y, b.y2);
+    Object.assign(b.el.style, { left: `${l}px`, top: `${t}px`, width: `${Math.abs(b.x2 - b.x)}px`, height: `${Math.abs(b.y2 - b.y)}px` });
+    b.el.classList.toggle("touch", b.x2 < b.x);
+    this.selected = this.boxPick(b);
+    this.update();
+  }
+
+  private endBox(): void {
+    const b = this.boxSel!;
+    this.boxSel = null;
+    if (b.el) {
+      b.el.remove();
+      this.selected = this.boxPick(b);
+    }
+    this.update();
+  }
+
+  /**
+   * What the box picks (with what was selected, adding): dragged left → right, the outlines / paths wholly inside it;
+   * right → left, those it touches (crosses, has a point in, or lies in). An outline joined to others brings its group.
+   */
+  private boxPick(b: NonNullable<SketchTool["boxSel"]>): Item[] {
+    const vp = this.host.viewport, l = Math.min(b.x, b.x2), r = Math.max(b.x, b.x2), t = Math.min(b.y, b.y2), bt = Math.max(b.y, b.y2);
+    const touch = b.x2 < b.x;
+    const scr = (p: P) => vp.toScreen(this.world(p));
+    const inBox = (q: { x: number; y: number }) => q.x >= l && q.x <= r && q.y >= t && q.y <= bt;
+    /** Does the screen segment p–q cross the box's outline? */
+    const crosses = (p: { x: number; y: number }, q: { x: number; y: number }) => {
+      const hit = (a: { x: number; y: number }, c: { x: number; y: number }, d: { x: number; y: number }, e2: { x: number; y: number }) => {
+        const den = (c.x - a.x) * (e2.y - d.y) - (c.y - a.y) * (e2.x - d.x);
+        if (Math.abs(den) < 1e-12) return false;
+        const u = ((d.x - a.x) * (e2.y - d.y) - (d.y - a.y) * (e2.x - d.x)) / den, v = ((d.x - a.x) * (c.y - a.y) - (d.y - a.y) * (c.x - a.x)) / den;
+        return u >= 0 && u <= 1 && v >= 0 && v <= 1;
+      };
+      const c = [{ x: l, y: t }, { x: r, y: t }, { x: r, y: bt }, { x: l, y: bt }];
+      return c.some((a, k) => hit(p, q, a, c[(k + 1) % 4]));
+    };
+    const picks = (pts: P[], closed: boolean): boolean => {
+      const s2 = pts.map(scr);
+      if (!touch) return s2.every(inBox);
+      if (s2.some(inBox)) return true;
+      for (let k = 0; k + (closed ? 0 : 1) < s2.length; k++) if (crosses(s2[k], s2[(k + 1) % s2.length])) return true;
+      // (the box wholly inside an outline)
+      if (closed) {
+        const c = this.local(vp.ray((l + r) / 2, (t + bt) / 2).intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(this.frame.z, this.frame.origin), new THREE.Vector3()) ?? this.frame.origin);
+        return inside(c, pts);
+      }
+      return false;
+    };
+    const hits: Item[] = [];
+    this.loops.forEach((lp, i) => picks(loopPolygon(lp), true) && hits.push(...this.groupOf({ kind: "loop", i })));
+    this.opens.forEach((o, i) => picks([...o.flatMap(segPoints), o[o.length - 1].b], false) && hits.push({ kind: "open", i }));
+    const out = [...b.base];
+    for (const h of hits) if (!out.some((x) => sameItem(x, h))) out.push(h);
+    return out;
+  }
+
   private itemAt(e: PointerEvent): Item | null {
     const vp = this.host.viewport;
     const w = vp.ray(e.clientX, e.clientY).intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(this.frame.z, this.frame.origin), new THREE.Vector3());
@@ -1848,7 +2066,7 @@ export class SketchTool implements Tool {
     this.setRoundR(roundR);
     const out = this.roundGroups().map((g) => ({ g, res: roundCorners(this.segsOf(g.item).segs, g.at, roundR) }));
     if (out.some((x) => typeof x.res === "number")) return this.host.toast("Round corner: the radius doesn't fit", "error");
-    this.undoStack.push(JSON.stringify(this.state()));
+    this.pushUndo(JSON.stringify(this.state()));
     this.version++;
     for (const { g, res } of out) {
       if (g.item.kind === "open") this.opens[g.item.i] = res as Seg[];
@@ -1901,7 +2119,7 @@ export class SketchTool implements Tool {
     if (this.mode !== "select" || !this.selected.length) return this.host.hint("Duplicate: select outlines / paths first (Esc: Select, click them), then Shift+D");
     if (this.scaling) this.endScale(true);
     if (this.moving) this.endMove(true);
-    this.undoStack.push(JSON.stringify(this.state()));
+    this.pushUndo(JSON.stringify(this.state()));
     this.version++;
     let g = Math.max(-1, ...this.loops.map((l) => l.g ?? -1)) + 1;
     const groups = new Map<number, number>();
@@ -1926,11 +2144,97 @@ export class SketchTool implements Tool {
     this.startMove();
   }
 
+  /**
+   * Mirror (M, or the corner button), as in the main view: marks just outside the selection's four sides (±X red,
+   * ±Y green); hovering one shows the mirrored copy beyond that side, touching it — a half drawn up to its middle
+   * line meets its mirror there (J joins them); a click keeps it (the copies selected, the originals kept; one
+   * undo step). Esc, a right click or a click away: none. Joined outlines stay joined in the copy.
+   */
+  private startMirror(): void {
+    if (this.scaling) this.endScale(true);
+    if (this.moving) this.endMove(true);
+    if (this.mode !== "select" || !this.selected.length) return this.host.hint("Mirror: select outlines / paths first (Esc: Select, click them), then M");
+    const pts = this.selected.flatMap((it) => (it.kind === "loop" ? loopPolygon(this.loops[it.i]) : this.opens[it.i].flatMap((g) => [...segPoints(g), g.b])));
+    const lo: P = [Math.min(...pts.map((p) => p[0])), Math.min(...pts.map((p) => p[1]))], hi: P = [Math.max(...pts.map((p) => p[0])), Math.max(...pts.map((p) => p[1]))];
+    this.mirroring = { lo, hi, loops: this.loops, opens: this.opens, sel: this.selected, snap: JSON.stringify(this.state()), hover: null };
+    this.update();
+  }
+
+  /** The mirror marks: each side's middle (`from`), the mark beyond it (`at`), outwards (`dir`); w: mm per pixel. */
+  private mirrorMarks(): { side: MirrorSide; from: P; at: P; dir: P; w: number }[] {
+    const { lo, hi } = this.mirroring!, c: P = mul(add(lo, hi), 0.5), w = this.mmPerPixel(c);
+    return MIRROR_SIDES.map((side) => {
+      const axis = side[1] === "x" ? 0 : 1, sgn = side[0] === "+" ? 1 : -1, from: P = [...c], dir: P = [0, 0];
+      from[axis] = sgn > 0 ? hi[axis] : lo[axis];
+      dir[axis] = sgn;
+      return { side, from, at: add(from, mul(dir, MIRROR_OUT_PX * w)), dir, w };
+    });
+  }
+
+  /** The mirror mark under the cursor. */
+  private mirrorAt(e: PointerEvent): MirrorSide | null {
+    const vp = this.host.viewport;
+    for (const m of this.mirrorMarks()) {
+      const s = vp.toScreen(this.world(m.at));
+      if (Math.hypot(s.x - e.clientX, s.y - e.clientY) <= MIRROR_PICK_PX) return m.side;
+    }
+    return null;
+  }
+
+  /** The sketch with the selection's mirror copies beyond `side` added (none: as it was); the copies' items. */
+  private showMirror(side: MirrorSide | null): Item[] {
+    const mr = this.mirroring!;
+    this.loops = [...mr.loops];
+    this.opens = [...mr.opens];
+    this.version++;
+    const copies: Item[] = [];
+    if (side) {
+      const axis = side[1] === "x" ? 0 : 1, at = side[0] === "+" ? mr.hi[axis] : mr.lo[axis];
+      const flip = (p: P): P => (axis ? [p[0], 2 * at - p[1]] : [2 * at - p[0], p[1]]);
+      // (paths run the other way after a flip: turned back, so outlines keep their direction)
+      const flipSegs = (segs: Seg[]) => segs.map((g) => revSeg(mapSeg(g, flip))).reverse();
+      let g = Math.max(-1, ...this.loops.map((l) => l.g ?? -1)) + 1;
+      const groups = new Map<number, number>();
+      for (const it of [...mr.sel].sort((a, b) => a.i - b.i)) {
+        if (it.kind === "loop") {
+          const src = mr.loops[it.i];
+          const l: Loop = src.kind === "circle" ? { ...src, c: flip(src.c) } : { ...src, segs: flipSegs(src.segs) };
+          if (l.g !== undefined) {
+            if (!groups.has(l.g)) groups.set(l.g, g++);
+            l.g = groups.get(l.g);
+          }
+          this.loops.push(l);
+          copies.push({ kind: "loop", i: this.loops.length - 1 });
+        } else {
+          this.opens.push(flipSegs(mr.opens[it.i]));
+          copies.push({ kind: "open", i: this.opens.length - 1 });
+        }
+      }
+    }
+    return copies;
+  }
+
+  /** Mirror ends: `apply` with a mark hovered keeps that copy (selected), else the sketch as it was. */
+  private endMirror(apply: boolean): void {
+    const mr = this.mirroring;
+    if (!mr) return;
+    const side = apply ? mr.hover : null, copies = this.showMirror(side);
+    this.mirroring = null;
+    if (side) {
+      this.pushUndo(mr.snap);
+      this.selected = copies;
+      this.hoverItem = null;
+      this.host.toast(`Mirrored across the ${side.toUpperCase().replace("-", "−")} side${copies.some((it) => it.kind === "open") ? " — J joins paths that meet into an outline" : ""}`);
+    } else this.selected = mr.sel;
+    this.host.hud(null);
+    this.update();
+  }
+
   /** Delete the selected outlines / paths (one undo step). */
   private deleteSelected(): void {
     if (!this.selected.length) return;
     if (this.moving) this.endMove(true);
-    this.undoStack.push(JSON.stringify(this.state()));
+    this.pushUndo(JSON.stringify(this.state()));
     this.version++;
     const gone = (kind: Item["kind"], i: number) => this.selected.some((s) => s.kind === kind && s.i === i);
     this.loops = this.loops.filter((_, i) => !gone("loop", i));
@@ -1965,6 +2269,10 @@ export class SketchTool implements Tool {
       if (this.pic && at) this.picDrag = { x: e.clientX, y: e.clientY, at, c0: this.pic.c, moved: false };
       return;
     }
+    if (this.mode === "select" && this.mirroring) {
+      this.mirroring.hover = this.mirrorAt(e);
+      return this.endMirror(true); // (a mark: that copy kept; a click away: none)
+    }
     if (this.mode === "select") {
       if (this.moving) {
         const h = this.moveHandleAt(e), q = this.planeAt(e);
@@ -1984,6 +2292,13 @@ export class SketchTool implements Tool {
         return this.update();
       }
       const it = this.itemAt(e);
+      if (!it) {
+        // Empty space: a box (dragged) — or, just a click, nothing selected (Shift / Ctrl: as it was)
+        const add = e.shiftKey || e.ctrlKey || e.metaKey;
+        this.boxSel = { x: e.clientX, y: e.clientY, x2: e.clientX, y2: e.clientY, add, base: add ? [...this.selected] : [], el: null };
+        if (!add) this.selected = [];
+        return this.update();
+      }
       const wasSelected = !!it && this.selected.some((s) => sameItem(s, it));
       // (an outline joined to others brings its whole group along)
       const group = it ? this.groupOf(it) : [];
@@ -2019,7 +2334,7 @@ export class SketchTool implements Tool {
    */
   private endLines(): void {
     if (this.mode === "rect" || this.mode === "circle" || !this.first) return;
-    this.undoStack.push(JSON.stringify(this.state()));
+    this.pushUndo(JSON.stringify(this.state()));
     this.version++;
     if (this.mode === "curve") {
       // (two points: a straight line)
@@ -2091,7 +2406,7 @@ export class SketchTool implements Tool {
       changed = this.addSegment(p);
     }
     if (!changed) return;
-    this.undoStack.push(snap);
+    this.pushUndo(snap);
     this.version++;
     this.typed = "";
     this.update();
@@ -2210,8 +2525,33 @@ export class SketchTool implements Tool {
 
   key(e: KeyboardEvent): boolean {
     const k = e.key;
+    if (this.mirroring) {
+      // (Esc: none; Enter: the copy shown kept; M again: none; any other key: none, then the key as usual)
+      if (k === "Escape" || k === "m" || k === "M") {
+        this.endMirror(false);
+        return true;
+      }
+      if (k === "Enter") {
+        this.endMirror(true);
+        return true;
+      }
+      this.endMirror(false);
+    }
+    if ((k === "m" || k === "M") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      this.startMirror();
+      return true;
+    }
     if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "z" && !e.shiftKey) {
       this.undo();
+      return true;
+    }
+    // Ctrl+A: every outline and path selected (in Select — what was being drawn dropped, as Esc)
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && k.toLowerCase() === "a") {
+      if (this.scaling) this.endScale(true);
+      if (this.moving) this.endMove(true);
+      if (this.mode !== "select") this.setMode("select");
+      this.selected = [...this.loops.map((_, i): Item => ({ kind: "loop", i })), ...this.opens.map((_, i): Item => ({ kind: "open", i }))];
+      this.update();
       return true;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
@@ -2247,7 +2587,7 @@ export class SketchTool implements Tool {
       else if (this.picPts.length) this.picPts = [];
       else if (this.arcR) this.arcR = null;
       else if (this.first || this.arcEnd || this.anchor) {
-        this.undoStack.push(JSON.stringify(this.state()));
+        this.pushUndo(JSON.stringify(this.state()));
         this.version++;
         this.path = [];
         this.thru = [];
@@ -2256,7 +2596,7 @@ export class SketchTool implements Tool {
         this.setMode("select"); // nothing being drawn: Select
         return true;
       } else if (this.selected.length) this.selected = [];
-      else this.host.hint("Sketch: click Exit Sketch Mode to keep the closed outlines as faces");
+      else this.host.hint("Sketch: click Exit Sketch to keep the closed outlines as faces");
       this.update();
       return true;
     }
@@ -2324,6 +2664,7 @@ export class SketchTool implements Tool {
   }
 
   private setMode(mode: Mode): void {
+    this.endMirror(false);
     if (this.scaling) this.endScale(false);
     if (this.moving) this.endMove(true); // (moved with the gizmo: kept)
     // (a line being drawn ends here, as with Enter — while still in its tool, so undo goes back to it)
@@ -2419,7 +2760,7 @@ export class SketchTool implements Tool {
         return this.endMove(true);
       }
       if (this.selected.length && vals.length >= 2) {
-        this.undoStack.push(JSON.stringify(this.state()));
+        this.pushUndo(JSON.stringify(this.state()));
         this.translateSelection([vals[0], vals[1]]);
       } else this.host.hint("Sketch: select outlines / paths, then type dx,dy + Enter to move them");
       return this.update();
@@ -2517,7 +2858,7 @@ export class SketchTool implements Tool {
           this.scaling = null;
           if (!ok) return this.update();
         }
-        this.undoStack.push(before); // (one undo step: the move, the scale and the turn)
+        this.pushUndo(before); // (one undo step: the move, the scale and the turn)
         this.update();
       });
     }
@@ -2573,6 +2914,7 @@ export class SketchTool implements Tool {
 
   /** Right click: to Select (the lines being drawn are kept, as with Enter); in Select, clears the selection. */
   rightClick(): void {
+    if (this.mirroring) return this.endMirror(false);
     if (this.scaling) return this.endScale(false);
     if (this.moving) return this.endMove(false);
     if (this.mode !== "select") return this.setMode("select");
@@ -2582,6 +2924,7 @@ export class SketchTool implements Tool {
 
   /** Undo the last sketch step (Ctrl+Z / Backspace). */
   undo(): void {
+    if (this.mirroring) return this.endMirror(false);
     if (this.scaling) return this.endScale(false);
     if (this.moving) return this.endMove(false);
     if (this.roundPicks.length) {
@@ -2591,7 +2934,22 @@ export class SketchTool implements Tool {
     }
     const s = this.undoStack.pop();
     if (!s) return this.host.hint("Sketch: nothing to undo");
-    const st = JSON.parse(s) as State;
+    this.redoStack.push(JSON.stringify(this.state()));
+    this.restore(JSON.parse(s) as State);
+  }
+
+  /** Redo the last step undone. */
+  redo(): void {
+    if (this.scaling) this.endScale(false);
+    if (this.moving) this.endMove(false);
+    const s = this.redoStack.pop();
+    if (!s) return this.host.hint("Sketch: nothing to redo");
+    this.undoStack.push(JSON.stringify(this.state()));
+    this.restore(JSON.parse(s) as State);
+  }
+
+  /** The sketch as it was in `st` (Undo / Redo). */
+  private restore(st: State): void {
     ({ loops: this.loops, opens: this.opens, path: this.path, first: this.first, arcEnd: this.arcEnd, anchor: this.anchor } = st);
     this.thru = st.thru ?? [];
     // Back to something half drawn (e.g. lines a right click ended): the tool that was drawing it, to go on —
@@ -2638,8 +2996,11 @@ export class SketchTool implements Tool {
 
   private groupFaces(g: number, groups = this.nested()): Shape[] {
     const n = this.frame.z.toArray() as V3;
-    const faces = groups.filter((x) => this.loops[x.outer].g === g).flatMap((x) => sketchFaces(this.kernelLoop(this.loops[x.outer]), x.holes.map((h) => this.kernelLoop(this.loops[h])), n));
-    return joinFlatFaces(faces as Parameters<typeof joinFlatFaces>[0], n);
+    // The outlines joined first, then their holes cut out of that: a hole may lie across two of them (see nest)
+    const mine = groups.filter((x) => this.loops[x.outer].g === g);
+    const joined = joinFlatFaces(mine.flatMap((x) => sketchFaces(this.kernelLoop(this.loops[x.outer]), [], n)), n);
+    const holes = mine.flatMap((x) => x.holes).map((h) => sketchFaces(this.kernelLoop(this.loops[h]), [], n)[0]);
+    return holes.length ? joined.flatMap((f) => flatFaceBoolean("subtract", f as unknown as Shape, holes as unknown as Shape[])) : joined;
   }
 
   /** Joined outlines on screen: their merged shape (fill + outline), worked out again only when the sketch changes. */
@@ -2687,7 +3048,144 @@ export class SketchTool implements Tool {
 
   // ------------------------------------------------------------ drawing
 
+  /**
+   * The closed outlines' sizes: a circle's R (Ø with diameters chosen in Settings) at its centre; a rectangle (4 straight
+   * sides, square corners — turned too) W × H in its middle; an outline's arcs R at their middle — arcs of one circle
+   * one after another: once (all of the outline: at the centre). Free curves: none (no one radius). And the angle inside
+   * the outline at each corner where two straight sides meet — not the square ones (90°: a rectangle's, an L's).
+   */
+  private showSizes(): void {
+    const out: { text: string; at: P; dir?: P; angle?: boolean }[] = [];
+    const R = (r: number) => `${circleSize.tag} ${num(circleSize.shown(r))}`;
+    const sub = (a: P, b: P): P => [a[0] - b[0], a[1] - b[1]];
+    const len = (v: P) => Math.hypot(v[0], v[1]);
+    /** The circle through an arc's three points. */
+    const circle = (a: P, m: P, b: P): { c: P; r: number } | null => {
+      const d = 2 * (a[0] * (m[1] - b[1]) + m[0] * (b[1] - a[1]) + b[0] * (a[1] - m[1]));
+      if (Math.abs(d) < 1e-12) return null;
+      const s2 = (p: P) => p[0] * p[0] + p[1] * p[1];
+      const c: P = [(s2(a) * (m[1] - b[1]) + s2(m) * (b[1] - a[1]) + s2(b) * (a[1] - m[1])) / d, (s2(a) * (b[0] - m[0]) + s2(m) * (a[0] - b[0]) + s2(b) * (m[0] - a[0])) / d];
+      return { c, r: len(sub(a, c)) };
+    };
+    /** How much of its circle an arc goes round (degrees): from a, through m, to b. */
+    const sweep = (a: P, m: P, b: P, c: P): number => {
+      const ang = (p: P) => Math.atan2(p[1] - c[1], p[0] - c[0]);
+      const wrap = (d: number) => ((d + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
+      return (Math.abs(wrap(ang(m) - ang(a)) + wrap(ang(b) - ang(m))) * 180) / Math.PI;
+    };
+    const deg = (d: number) => `${num(Math.round(d * 10) / 10)}°`;
+    for (const l of this.loops) {
+      if (l.kind === "circle") {
+        out.push({ text: R(l.r), at: l.c });
+        continue;
+      }
+      const segs = l.segs, size = Math.max(...segs.map((g) => len(sub(g.b, g.a))), 1e-9), tol = 1e-6 * Math.max(1, size);
+      // Corners of two straight sides: the angle inside (which side is inside: the way the outline runs round)
+      const area = segs.reduce((t, g) => t + g.a[0] * g.b[1] - g.b[0] * g.a[1], 0), turnSign = area >= 0 ? 1 : -1;
+      for (let i = 0; i < segs.length; i++) {
+        const g1 = segs[i], g2 = segs[(i + 1) % segs.length];
+        if (g1.kind !== "line" || g2.kind !== "line") continue;
+        const d1 = sub(g1.b, g1.a), d2 = sub(g2.b, g2.a), l1 = len(d1), l2 = len(d2);
+        if (l1 < tol || l2 < tol) continue;
+        const turn = Math.atan2(d1[0] * d2[1] - d1[1] * d2[0], d1[0] * d2[0] + d1[1] * d2[1]) * turnSign;
+        const inside = 180 - (turn * 180) / Math.PI;
+        if (Math.abs(inside - 90) < 1e-6 || Math.abs(inside - 180) < 1e-6) continue;
+        // into the corner: between the two sides leaving it (the way round: a reflex corner's opening)
+        const u1: P = [-d1[0] / l1, -d1[1] / l1], u2: P = [d2[0] / l2, d2[1] / l2];
+        let dir: P = [u1[0] + u2[0], u1[1] + u2[1]];
+        if (len(dir) < 1e-9) dir = [-u2[1] * turnSign, u2[0] * turnSign];
+        if (inside > 180) dir = [-dir[0], -dir[1]];
+        out.push({ text: deg(inside), at: g1.b, dir, angle: true });
+      }
+      if (segs.length === 4 && segs.every((g) => g.kind === "line")) {
+        const d = segs.map((g) => sub(g.b, g.a)), L = d.map(len);
+        const square = d.every((v, i) => Math.abs(v[0] * d[(i + 1) % 4][0] + v[1] * d[(i + 1) % 4][1]) <= tol * (L[i] + L[(i + 1) % 4]));
+        if (square && Math.abs(L[0] - L[2]) <= tol && Math.abs(L[1] - L[3]) <= tol) {
+          const mid: P = [segs.reduce((t, g) => t + g.a[0], 0) / 4, segs.reduce((t, g) => t + g.a[1], 0) / 4];
+          out.push({ text: `${num(L[0])} × ${num(L[1])}`, at: mid });
+          continue;
+        }
+      }
+      // Arcs: runs of the same circle, one label each — its R (or Ø) and how far round it goes
+      const arcs = segs.map((g) => (g.kind === "arc" ? circle(g.a, g.m, g.b) : null));
+      // A straight side and an arc (a D, a circle's segment): the side's length × how far the arc stands out from it
+      if (segs.length === 2 && segs.some((g) => g.kind === "line") && segs.some((g) => g.kind === "arc")) {
+        const ln = segs.find((g) => g.kind === "line")!, ai = segs.findIndex((g) => g.kind === "arc"), ar = segs[ai] as { kind: "arc"; a: P; m: P; b: P }, c = arcs[ai];
+        if (c) {
+          const chord = len(sub(ln.b, ln.a)), u: P = [(ln.b[0] - ln.a[0]) / chord, (ln.b[1] - ln.a[1]) / chord];
+          const off = (p: P) => Math.abs((p[0] - ln.a[0]) * u[1] - (p[1] - ln.a[1]) * u[0]);
+          const sw = sweep(ar.a, ar.m, ar.b, c.c), h = sw > 180 ? c.r + off(c.c) : c.r - off(c.c);
+          // (in the middle of the shape: half way out from the side, towards the arc)
+          const mid: P = [(ln.a[0] + ln.b[0]) / 2, (ln.a[1] + ln.b[1]) / 2], toArc = sub(ar.m, mid), side = Math.sign(toArc[0] * -u[1] + toArc[1] * u[0]) || 1;
+          out.push({ text: `${num(chord)} × ${num(h)}`, at: [mid[0] - u[1] * side * h / 2, mid[1] + u[0] * side * h / 2] });
+        }
+      }
+      const same = (x: { c: P; r: number } | null, y: { c: P; r: number } | null) => !!x && !!y && len(sub(x.c, y.c)) <= tol && Math.abs(x.r - y.r) <= tol;
+      if (arcs.every((x) => same(x, arcs[0]))) {
+        out.push({ text: R(arcs[0]!.r), at: arcs[0]!.c });
+        continue;
+      }
+      /** The arcs i…j (one circle) together: how far round. */
+      const round = (i: number, j: number, c: P) => segs.slice(i, j + 1).reduce((t, g) => t + (g.kind === "arc" ? sweep(g.a, g.m, g.b, c) : 0), 0);
+      for (let i = 0; i < segs.length; i++) {
+        const c = arcs[i];
+        if (!c || (i > 0 && same(arcs[i - 1], c))) continue;
+        let j = i;
+        while (j + 1 < segs.length && same(arcs[j + 1], c)) j++;
+        const g = segs[Math.floor((i + j) / 2)] as { kind: "arc"; a: P; m: P; b: P };
+        // (just outside the curve: the shape's own label inside stays clear)
+        const away = sub(g.m, c.c), k = len(away) || 1;
+        out.push({ text: `${R(c.r)} · ${deg(round(i, j, c.c))}`, at: g.m, dir: [away[0] / k, away[1] / k] });
+      }
+    }
+    // (sizes first, angles after: where labels would overlap on screen, the later ones are left out — see placeSizes)
+    out.sort((x, y) => +!!x.angle - +!!y.angle);
+    const key = JSON.stringify(out);
+    if (key === this.sizeKey) return;
+    this.sizeKey = key;
+    this.sizeView = "";
+    this.sizeBox.replaceChildren();
+    this.sizes = out.map(({ text, at, dir, angle }) => {
+      const el = Object.assign(document.createElement("span"), { className: angle ? "sk-size sk-angle" : "sk-size", textContent: text });
+      this.sizeBox.appendChild(el);
+      return { el, at: this.world(at), angle, ...(dir ? { dir: this.frame.x.clone().multiplyScalar(dir[0]).addScaledVector(this.frame.y, dir[1]).normalize() } : {}) };
+    });
+  }
+
+  /** Keep the size labels on their points (each frame: the view may have been panned / zoomed). */
+  private placeSizes(): void {
+    const vp = this.host.viewport, c = vp.camera;
+    const view = c.matrixWorld.elements.concat(c.projectionMatrix.elements).join() + this.sizeKey;
+    if (view === this.sizeView || !this.sizes.length || this.sizeBox.hidden) return;
+    this.sizeView = view;
+    const box = this.sizeBox.getBoundingClientRect();
+    for (const { el, at, dir, angle } of this.sizes) {
+      const s = vp.toScreen(at);
+      let [x, y] = [s.x, s.y];
+      if (dir) {
+        // On screen, whatever the zoom: an angle ~22 px into its corner; an arc's label clear of the curve (its edge 6 px off)
+        const t = vp.toScreen(at.clone().addScaledVector(dir, vp.worldPerPixel(at) * 10)), dx = t.x - s.x, dy = t.y - s.y, d = Math.hypot(dx, dy) || 1;
+        const gap = angle ? 22 : 6 + (Math.abs(dx / d) * el.offsetWidth + Math.abs(dy / d) * el.offsetHeight) / 2;
+        x += (dx / d) * gap;
+        y += (dy / d) * gap;
+      }
+      el.style.transform = `translate(${x - box.left}px, ${y - box.top}px) translate(-50%, -50%)`;
+    }
+    // Labels that would overlap one shown before them (zoomed out, small shapes): hidden — zoom in to see them
+    const shown: DOMRect[] = [];
+    for (const { el } of this.sizes) {
+      el.style.visibility = "";
+      const r = el.getBoundingClientRect();
+      const hit = shown.some((q) => r.left < q.right + 2 && r.right > q.left - 2 && r.top < q.bottom + 1 && r.bottom > q.top - 1);
+      if (hit) el.style.visibility = "hidden";
+      else shown.push(r);
+    }
+  }
+
   private update(): void {
+    this.showSizes();
+    // (the size labels out of the way while the move / scale gizmo is up)
+    this.sizeBox.style.visibility = this.moving || this.scaling ? "hidden" : "";
     const vp = this.host.viewport;
     const objs: THREE.Object3D[] = [];
     const lines = (pts: P[], mat: THREE.LineBasicMaterial, closed = false) => {
@@ -2947,22 +3445,53 @@ export class SketchTool implements Tool {
       dot(g.o);
       const color = (h: MoveHandle) => (h === "x" ? 0xe5484d : h === "y" ? 0x30a46c : 0xffd84a);
       const big = (h: MoveHandle) => (mv.hover === h || mv.handle === h ? 1.3 : 1);
+      // (drawn over the outlines and the selected fill: `order` — see Viewport.setOverlay)
+      const onTop = () => (objs[objs.length - 1].userData.order = 22);
       const fill = (shape: P[], h: MoveHandle) => {
         const m = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape(shape.map(([u, v]) => new THREE.Vector2(u, v)))), this.gizmoMat(color(h), "fill"));
         m.matrixAutoUpdate = false;
         m.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
         objs.push(m);
+        onTop();
       };
       for (const h of ["x", "y"] as const) {
         const dir: P = h === "x" ? [1, 0] : [0, 1], side: P = [-dir[1], dir[0]], k = w * big(h), tip = g[h], base = add(tip, mul(dir, -14 * k));
         lines([add(g.o, mul(dir, 10 * w)), base], this.gizmoMat(color(h), "line") as THREE.LineBasicMaterial);
+        onTop();
         fill([tip, add(base, mul(side, 5 * k)), add(base, mul(side, -5 * k))], h);
       }
       const r = MOVE_SQ_HALF_PX * w * big("xy"), sq: P[] = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([i, j]) => add(g.sq, [i * r, j * r]));
       fill(sq, "xy");
       lines(sq, this.gizmoMat(color("xy"), "line") as THREE.LineBasicMaterial, true);
+      onTop();
       hud = `Move ${num(mv.d[0])}, ${num(mv.d[1])} mm`;
       moveAt = g.x;
+    }
+    // Mirror (M): a triangle beyond each side of the selection's box, pointing out (±X red, ±Y green); the one under
+    // the cursor bigger, with its side drawn — the mirror line.
+    const mr = this.mirroring;
+    if (mr) {
+      for (const m of this.mirrorMarks()) {
+        const color = m.side[1] === "x" ? 0xe5484d : 0x30a46c, on = mr.hover === m.side, k = m.w * MIRROR_MARK_PX * (on ? 1.4 : 1);
+        const n: P = [-m.dir[1], m.dir[0]], base = add(m.at, mul(m.dir, -k));
+        const tri = new THREE.Mesh(new THREE.ShapeGeometry(new THREE.Shape([add(m.at, mul(m.dir, k)), add(base, mul(n, k)), add(base, mul(n, -k))].map(([u, v]) => new THREE.Vector2(u, v)))), this.gizmoMat(color, "fill"));
+        tri.matrixAutoUpdate = false;
+        tri.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
+        objs.push(tri);
+        objs[objs.length - 1].userData.order = 22;
+        lines([add(m.from, mul(m.dir, 4 * m.w)), base], this.gizmoMat(color, "line") as THREE.LineBasicMaterial);
+        objs[objs.length - 1].userData.order = 22;
+        if (on) {
+          const axis = m.side[1] === "x" ? 1 : 0, a: P = [...m.from], b: P = [...m.from], pad = 12 * m.w;
+          a[axis] = mr.lo[axis] - pad;
+          b[axis] = mr.hi[axis] + pad;
+          lines([a, b], this.gizmoMat(color, "line") as THREE.LineBasicMaterial);
+          objs[objs.length - 1].userData.order = 22;
+        }
+      }
+      const h = this.mirrorMarks().find((m) => m.side === mr.hover);
+      hud = h ? `Mirror across the ${h.side.toUpperCase().replace("-", "−")} side — click` : "Mirror: click a side's mark";
+      moveAt = h?.at ?? this.mirrorMarks()[0].at;
     }
     // Picture mode: its handles (the one under the cursor / dragged bigger) — the scale two-headed arrow along the
     // diagonal, the rotate curved arrow.
@@ -3022,8 +3551,38 @@ export class SketchTool implements Tool {
 
   /** Redraw the panel (e.g. after switching the Pro layout). */
   refresh(): void {
-    this.panelHtml = "";
+    this.panelHtml = null;
     this.update();
+  }
+
+  /** The top bar's buttons: the tool in use lit (sk-on — the main toolbar's refresh clears "active"), what can't be used now greyed (Move / Scale need a selection in Select…). */
+  private renderBar(nSel: number): void {
+    const b = (attrs: string, label: string, title: string, on = false, off = false, cls = "") =>
+      `<button type="button" class="tb-btn sk-btn${cls}${on ? " sk-on" : ""}" ${attrs} title="${title}"${off ? " disabled" : ""}>${label}</button>`;
+    const group = (title: string, btns: string) => `<div class="tb-group"><div class="tb-buttons">${btns}</div><div class="tb-label">${title}</div></div>`;
+    const mode = (m: Mode, label: string, key: string, title = label) => b(`data-mode="${m}"`, label, `${title} (${key})`, this.mode === m);
+    /** An icon-only tool button (its name in the tooltip). */
+    const iconMode = (m: Mode, icon: string, name: string, key: string) => b(`data-mode="${m}" aria-label="${name}"`, ICONS[icon], `${name} (${key})`, this.mode === m, false, " sk-icon");
+    const select = this.mode === "select";
+    const html =
+      group("Select", mode("select", "Select", "Esc", "Select outlines and paths")) +
+      group("Draw", iconMode("line", "skLine", "Line", "L") + iconMode("arc", "skArc", "Arc", "A") + iconMode("curve", "skCurve", "Curve", "Shift+C") + iconMode("rect", "skRect", "Rectangle", "R") + iconMode("circle", "circle", "Circle", "C") +
+        mode("round", "Round corner", "F") + (this.pic ? mode("scan", "Scan", "drag over the picture", "Scan the picture into outlines / paths") : "")) +
+      group("Edit",
+        b(`data-act="move"`, "Move", "Move the selection with the gizmo (G)", !!this.moving, !select || !nSel) +
+        b(`data-act="scale"`, "Scale", "Scale or rotate the selection about its centre (S)", !!this.scaling, !select || !nSel) +
+        b(`data-act="join"`, "Join", "Join the selected outlines into one face, paths end to end (J)", false, this.mode === "picture" || (select && nSel < 2))) +
+      // (a pill switch: its knob right and lit when on)
+      group("Show",
+        b(`data-act="sizes" role="switch" aria-checked="${SketchTool.sizesOn}"`, `<span class="sw-track"><span class="sw-knob"></span></span>Sizes`,
+          "Show the closed outlines' sizes, radii and corner angles — click to turn them off / on", SketchTool.sizesOn, false, " sk-switch")) +
+      group("History",
+        b(`data-act="undo"`, "Undo", "Undo the last sketch step (Ctrl+Z)", false, !this.undoStack.length && !this.roundPicks.length && !this.scaling && !this.moving) +
+        b(`data-act="redo"`, "Redo", "Redo the step undone (Ctrl+R)", false, !this.redoStack.length)) +
+      group("Sketch",
+        b(`data-act="done"`, "Exit Sketch", "Keep the closed outlines as flat faces, open lines as paths", false, false, " sk-exit") +
+        `<button type="button" data-act="cancel" hidden>Cancel</button>`);
+    if (html !== this.barHtml) this.bar.innerHTML = this.barHtml = html;
   }
 
   private renderPanel(): void {
@@ -3031,9 +3590,10 @@ export class SketchTool implements Tool {
     this.host.viewport.canvas.style.cursor = this.mode === "select" ? "default" : "crosshair";
     const nSel = this.selected.length;
     const tips: Record<Mode, string> = {
-      select: this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
+      select: this.mirroring ? "Mirror: point at a mark beyond a side (red ±X, green ±Y) to see the copy there, click to keep it · Esc / right click / a click elsewhere: cancel"
+        : this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps, catches on points")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
         : this.scaling ? `Scale / rotate: drag the red square (X), green (Y), the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} or the blue ring (rotate) — ${this.host.viewport.stepTip("round steps, 15°")} · Tab: exact %, ° · Enter / click elsewhere: apply · Esc / right click: cancel`
-        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
+        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps, catches on points")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · M: mirror · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
       line: this.first ? "Click the next point · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
@@ -3045,20 +3605,14 @@ export class SketchTool implements Tool {
       scan: !this.pic ? "Scan: no picture — click the picture icon (bottom left) to load one"
         : this.scanFirst ? "Scan: click the area's other corner"
         : this.scanFound ? "Scan: blue = what was found — change the settings in the box to scan again · Enter / Add: into the sketch · drag again: another area · Esc: drop it"
-        : "Scan: drag over the part of the picture to trace (or click 2 corners) · Faces: dark areas become outlines (Exit Sketch Mode: faces) · Outlines: drawn lines become paths along their middle · Esc: back",
+        : "Scan: drag over the part of the picture to trace (or click 2 corners) · Faces: dark areas become outlines (Exit Sketch: faces) · Outlines: drawn lines become paths along their middle · Esc: back",
       rect: this.anchor ? "Click the opposite corner · type width,height (or 23x30) + Enter" : "Click the first corner",
       circle: this.anchor ? `Click a point on the circle · type the ${circleSize.word} + Enter` : "Click the centre",
       picture: !this.pic ? "No picture — click the picture icon (bottom left) to load one"
         : ["Drag the picture to move it · its corner: the two-headed arrow scales, the curved arrow rotates · type a % + Enter to scale it · Match: click a point on the picture · click off the picture: back to drawing", "Match: click a 2nd point on the picture", "Match: click where the 1st point belongs (on the model / sketch)", "Match: click where the 2nd point belongs"][this.picPts.length]
           + " · the menu by the thumbnail (bottom left): scale, rotate, opacity · thumbnail again: done · Del: remove it · L A R C: draw",
     };
-    const btn = (m: Mode, label: string, key: string) => `<button type="button" class="btn${this.mode === m ? " primary" : ""}" data-mode="${m}" title="${label} (${key})">${label} <kbd>${key}</kbd></button>`;
     const closed = this.loops.length, open = this.opens.length;
-    const scanBtn = this.pic ? `<button type="button" class="btn${this.mode === "scan" ? " primary" : ""}" data-mode="scan" title="Scan the picture: drag over a part of it — dark areas become outlines (faces), or drawn lines paths">Scan</button>` : "";
-    const moveBtn = this.mode === "select" ? `<button type="button" class="btn${this.moving ? " primary" : ""}" data-act="move" ${nSel ? "" : "disabled"} title="Move the selection with the gizmo: X / Y arrows, the square free — G (or type dx,dy + Enter)">Move <kbd>G</kbd></button>` : "";
-    const scaleBtn = this.mode === "select" ? `<button type="button" class="btn${this.scaling ? " primary" : ""}" data-act="scale" ${nSel ? "" : "disabled"} title="Scale or rotate the selection about its centre: the squares / yellow ring scale, the blue ring rotates — S (or type a % + Enter)">Scale / Rotate <kbd>S</kbd></button>` : "";
-    // (Join while drawing too: there it goes to Select, to pick the outlines)
-    const joinBtn = this.mode !== "picture" ? `<button type="button" class="btn" data-act="join" ${nSel >= 2 || this.mode !== "select" ? "" : "disabled"} title="Join the selected outlines into one face (paths: end to end into one) — J · select two or more first (Shift+click adds)">Join <kbd>J</kbd></button>` : "";
     // Round corner: its box — the radius (typed or dragged; too big: the largest that fits), the corners picked, Done.
     const nPick = this.roundPicks.length;
     const roundBox = this.mode === "round" ? `<div class="round-box"><b>Round corner</b><label>Radius <input type="number" data-round="r" min="0" step="0.5"> mm</label><span class="muted">${nPick ? `${nPick} corner${nPick > 1 ? "s" : ""}` : "pick corners"}</span><button type="button" class="btn primary" data-act="round-done" ${nPick ? "" : "disabled"} title="Round the picked corners (Enter) — then pick more">Done</button></div>` : "";
@@ -3074,17 +3628,18 @@ export class SketchTool implements Tool {
       <span class="muted" data-scan-out="found"></span>
       <button type="button" class="btn primary" data-act="scan-add" title="Put what was found (blue) into the sketch — Enter">Add</button></div>` : "";
     const html = `<h4>Sketch on ${this.what}</h4>
-      <div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("curve", "Curve", "Shift+C")}${btn("rect", "Rectangle", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round corner", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}</div>
       ${roundBox}${scanBox}
       <div class="tip">${tips[this.mode]}</div>
-      <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · Tab: exact values · ${this.mode === "select" ? "L A Shift+C R C: draw · F: round corners" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>
-      <div class="op-buttons"><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>`;
-    // Pro layout: one row of modes, Exit Sketch Mode — no tips. (Cancel: hidden, for the smoke test)
+      <div class="muted">${closed ? `${closed} closed outline${closed > 1 ? "s" : ""}` : "No closed outline yet"}${open ? ` · ${open} open path${open > 1 ? "s" : ""}` : ""} · Tab: exact values · ${this.mode === "select" ? "L A Shift+C R C: draw · F: round corners" : "Esc: drop the outline being drawn, again: Select"} · Ctrl+Z: undo</div>`;
+    // Pro layout: one row of modes, Exit Sketch — no tips. (Cancel: hidden, for the smoke test)
     const pro = document.body.classList.contains("pro");
-    const proHtml = `<div class="modes">${btn("select", "Select", "Esc")}${btn("line", "Line", "L")}${btn("arc", "Arc", "A")}${btn("curve", "Curve", "⇧C")}${btn("rect", "Rect", "R")}${btn("circle", "Circle", "C")}${btn("round", "Round", "F")}${scanBtn}${moveBtn}${scaleBtn}${joinBtn}<span class="spacer"></span><button type="button" class="btn primary" data-act="done" title="Keep the closed outlines as flat faces, open lines as paths">Exit Sketch Mode</button><button type="button" class="btn" data-act="cancel" hidden>Cancel</button></div>${roundBox}${scanBox}`;
+    // (the tools, Undo / Redo and Exit Sketch: on the top bar — see renderBar)
+    const proHtml = `${roundBox}${scanBox}`;
     const out = pro ? proHtml : html;
     this.panel.classList.toggle("compact", pro);
     if (out !== this.panelHtml) this.panel.innerHTML = this.panelHtml = out;
+    this.panel.hidden = !out.trim(); // (Pro: nothing to show but a Round corner / Scan box)
+    this.renderBar(nSel);
     const rf = this.panel.querySelector<HTMLInputElement>("input[data-round=r]");
     if (rf && rf !== document.activeElement && rf.value !== num(roundR)) rf.value = num(roundR);
     if (this.mode === "scan") this.syncScanBox();
@@ -3092,6 +3647,6 @@ export class SketchTool implements Tool {
     this.syncPicMenu();
     if (pro && this.mode === "picture") return this.host.hint(`Sketch — picture: ${tips.picture}`);
     if (pro) return this.host.hint(this.mode === "select" ? `Sketch — select${nSel ? `: ${nSel}, Del deletes` : ""} — L A R C: draw` : "Sketch — L line, A arc, Shift+C curve, R rect, C circle, F round corner — Enter: done");
-    this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · Shift+C curve · R rectangle · C circle · F round corner · Exit Sketch Mode in the panel`);
+    this.host.hint(`Sketch: ${tips[this.mode]} · L line · A arc · Shift+C curve · R rectangle · C circle · F round corner · Exit Sketch on the top bar`);
   }
 }

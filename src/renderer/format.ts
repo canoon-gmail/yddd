@@ -11,6 +11,14 @@ export const CIRCLE_SIZE_KEY = "yddd.circleSize";
 export const byDiameter = () => localStorage.getItem(CIRCLE_SIZE_KEY) === "d";
 /** Settings: solids' opacity, % — normally and in x-ray. */
 export const SOLID_OPACITY_KEY = "yddd.solidOpacity", XRAY_OPACITY_KEY = "yddd.xrayOpacity";
+/** Settings → Interface text: the menu bar's, toolbar's, Recent strip's and Sketch bar's text, % (80–160, 100 by default). */
+export const TB_TEXT_KEY = "yddd.toolbarText";
+export const toolbarTextSetting = (): number => {
+  const v = Number(localStorage.getItem(TB_TEXT_KEY));
+  return v >= 80 && v <= 160 ? v : 100;
+};
+/** Show the toolbar captions at `pct` % (the stylesheet's --tb-text). */
+export const applyToolbarText = (pct: number): void => document.documentElement.style.setProperty("--tb-text", String(pct / 100));
 export const opacitySetting = (key: string, fallback: number): number => {
   const v = Number(localStorage.getItem(key));
   return localStorage.getItem(key) !== null && v >= 5 && v <= 100 ? v : fallback;

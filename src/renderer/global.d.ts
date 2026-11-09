@@ -34,6 +34,10 @@ interface YDDDApi {
   setMenuKeys?(keys: Record<string, string>): void;
   closeNow(): void;
   onMenu(cb: (cmd: string) => void): void;
+  /** Open Recent → Clear Recent (YDDD's own menu bar). */
+  clearRecent(): Promise<void>;
+  /** The menu bar's system items: quit, reload, devtools, fullscreen, clear-recoveries. */
+  appAction(act: string): void;
 }
 
 interface Window {

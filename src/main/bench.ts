@@ -2,10 +2,12 @@
  * Opt-in benchmarks, not loaded during normal use. Each prints a report and quits.
  * - Snapping:  N=2000 npm run bench — loads the stress scene, times object-snap queries and draw-tool pointer moves.
  * - Modelling: npm run bench:ops — times kernel operations (boolean, fillet / chamfer / shell, stretch, array)
- *   and meshing their results for display; YDDD_BENCH_FILE=model.yddd also times opening that model.
+ *   and meshing their results for display; YDDD_BENCH_FILE=model.yddd also times opening that model;
+ *   YDDD_BENCH_STEP=dir writes the boolean / fillet inputs there as STEP (to time the same in another CAD program).
  */
 import type { BrowserWindow } from "electron";
 import { app } from "electron";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 const SCENARIO = String.raw`
@@ -195,7 +197,27 @@ const OPS = String.raw`
       }
     }
   }
-  return { rows };
+  // YDDD_BENCH_STEP=dir: the inputs of the boolean / fillet cases as STEP, to repeat them in another CAD program
+  const steps = [];
+  if (window.__benchStep) {
+    const cases = [
+      ["boolean-box-minus-cylinder", [box, cyl]],
+      ["boolean-box-union-sphere", [box, sphere]],
+      ["boolean-cylinder-intersect-sphere", [K.makeCylinder(G, [0, 0, 0], 10, 20), K.makeSphereAt([0, 0, 10], 12)]],
+      ["boolean-plate-minus-100-holes", [plate, ...holes100]],
+      ["boolean-union-20-cylinders", row20],
+      ["fillet-box-all-edges-r2", [box]],
+      ["fillet-box-minus-cylinder-all-edges-r1", holed ? [holed] : []],
+      ["fillet-plate-25-holes-all-edges-r0.5", [plate25]],
+      ["fillet-stretched-cylinder-r1", oval ? [oval] : []],
+    ];
+    for (const [file, shapes] of cases) {
+      if (!shapes.length) continue;
+      const buf = await K.exportStep(shapes.map((shape, i) => ({ shape, name: i ? "tool " + i : "target" })));
+      steps.push({ file: file + ".step", bytes: Array.from(new Uint8Array(buf)) });
+    }
+  }
+  return { rows, steps };
 })()
 `;
 
@@ -203,11 +225,17 @@ export async function runBench(win: BrowserWindow): Promise<void> {
   try {
     if (process.env.YDDD_BENCH === "ops") {
       const file = process.env.YDDD_BENCH_FILE ? path.resolve(process.env.YDDD_BENCH_FILE) : "";
-      await win.webContents.executeJavaScript(`window.__benchFile = ${JSON.stringify(file)}; 0`, true);
+      const stepDir = process.env.YDDD_BENCH_STEP ? path.resolve(process.env.YDDD_BENCH_STEP) : "";
+      await win.webContents.executeJavaScript(`window.__benchFile = ${JSON.stringify(file)}; window.__benchStep = ${!!stepDir}; 0`, true);
       const res = await win.webContents.executeJavaScript(OPS, true);
       for (const r of res.rows) {
         const ok = r.valid === undefined ? "" : r.valid ? "  valid" : "  INVALID";
         console.log(`${r.group.padEnd(8)} ${r.name.padEnd(42)} ${r.error ? "ERROR " + r.error : `${String(r.ms).padStart(8)} ms${ok}${r.tris == null ? "" : `  ${r.tris} tris`}`}`);
+      }
+      if (stepDir) {
+        fs.mkdirSync(stepDir, { recursive: true });
+        for (const s of res.steps) fs.writeFileSync(path.join(stepDir, s.file), Buffer.from(s.bytes));
+        console.log(`${res.steps.length} STEP files in ${stepDir}`);
       }
     } else {
       const res = await win.webContents.executeJavaScript(SCENARIO, true);

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol } from "electron";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
@@ -116,121 +116,13 @@ async function windowsFonts(): Promise<FontFile[]> {
   return fonts;
 }
 
-/** "name.yddd   ~/folder" for the menu ("&" doubled: it marks a mnemonic). */
-function recentLabel(file: string): string {
-  const home = os.homedir();
-  const dir = path.dirname(file);
-  const shown = dir === home ? "~" : dir.startsWith(home + path.sep) ? "~" + dir.slice(home.length) : dir;
-  return `${path.basename(file)}   ${shown}`.replace(/&/g, "&&");
-}
-
 /** The renderer's shortcuts for the menu to show (command → accelerator, "" = none; see keymap.ts). */
 let menuKeys: Record<string, string> = {};
 
 function buildMenu(): void {
-  // The renderer handles the keys (they can be changed with "/"): the menu only shows them.
-  const item = (label: string, cmd: string, accelerator?: string): MenuItemConstructorOptions => ({
-    label,
-    accelerator: (cmd in menuKeys ? menuKeys[cmd] : accelerator) || undefined,
-    registerAccelerator: false,
-    click: () => send(cmd),
-  });
-  const template: MenuItemConstructorOptions[] = [
-    {
-      label: "&File",
-      submenu: [
-        item("New", "file.new", "CmdOrCtrl+N"),
-        item("Open…", "file.open", "CmdOrCtrl+O"),
-        item("Open Picture…", "file.openPicture"),
-        {
-          label: "Open Recent",
-          submenu: recent.length
-            ? [
-                ...recent.map((file, i): MenuItemConstructorOptions => ({
-                  label: recentLabel(file),
-                  accelerator: i < 9 ? `CmdOrCtrl+Shift+${i + 1}` : undefined,
-                  click: () => send(`file.openRecent:${file}`),
-                })),
-                { type: "separator" },
-                { label: "Clear Recent", click: () => setRecent([]) },
-              ]
-            : [{ label: "No recent files", enabled: false }],
-        },
-        item("Save", "file.save", "CmdOrCtrl+S"),
-        item("Save As…", "file.saveAs", "CmdOrCtrl+Shift+S"),
-        { type: "separator" },
-        item("Import STEP…", "file.importStep"),
-        item("Import STL…", "file.importStl"),
-        item("Export STEP…", "file.exportStep"),
-        item("Export STL…", "file.exportStl", "CmdOrCtrl+Shift+E"),
-        item("Export 3MF… (Bambu Studio, PrusaSlicer, Cura)", "file.export3mf"),
-        item("Save View as Image…", "file.exportImage", "CmdOrCtrl+P"),
-        { type: "separator" },
-        item("Settings…", "file.settings"),
-        { type: "separator" },
-        { role: "quit" },
-      ],
-    },
-    {
-      label: "&Edit",
-      submenu: [
-        item("Undo", "edit.undo", "CmdOrCtrl+Z"),
-        item("Redo", "edit.redo", "CmdOrCtrl+R"),
-        { type: "separator" },
-        item("Duplicate", "edit.duplicate", "CmdOrCtrl+D"),
-        item("Repeat Last", "xf.repeat", "Shift+R"),
-        item("Delete", "edit.delete", "Delete"),
-        item("Select All", "edit.selectAll", "CmdOrCtrl+A"),
-        { type: "separator" },
-        item("Group", "edit.group", "CmdOrCtrl+G"),
-        item("Ungroup", "edit.ungroup", "CmdOrCtrl+Shift+G"),
-        item("Hide", "edit.hide", "CmdOrCtrl+H"),
-        { type: "separator" },
-        item("Clear All Guides", "edit.clearGuides"),
-      ],
-    },
-    {
-      label: "&View",
-      submenu: [
-        item("Fit All", "view.fit", "Home"),
-        item("Top", "view.top"),
-        item("Front", "view.front"),
-        item("Right", "view.right"),
-        item("Isometric", "view.iso"),
-        { type: "separator" },
-        item("Clear Recent Tools", "view.clearRecent"),
-        { type: "separator" },
-        { label: "Reload", click: (_m, w) => (w as BrowserWindow | undefined)?.webContents.reload() }, // no shortcut: Ctrl+R is Redo
-        { role: "toggleDevTools" },
-        { role: "togglefullscreen" },
-      ],
-    },
-    {
-      label: "&Macro",
-      submenu: [
-        item("Box from Face…", "macro.box"),
-        { label: "Box Lid", submenu: [item("Inside Lip…", "macro.lidIn"), item("Over the Box…", "macro.lidOver")] },
-        item("Dividers…", "macro.dividers"),
-        { type: "separator" },
-        item("Battery Case…", "macro.battery"),
-        item("Nut and Bolt…", "macro.nutBolt"),
-        item("Gridfinity Bin…", "macro.gridfinity"),
-        item("Gridfinity Baseplate…", "macro.baseplate"),
-        item("Gear…", "macro.gear"),
-        { type: "separator" },
-        item("Random…", "macro.random"),
-      ],
-    },
-    {
-      label: "&Help",
-      submenu: [
-        item("Shortcuts: Search & Change…", "help.keys", "/"), item("Keyboard Shortcuts", "help.shortcuts", "F1"), item("Bird House", "help.birdhouse"), item("Cable Storage Box", "help.cablebox"), item("House", "help.house"), item("Planter", "help.planter"), item("Propeller", "help.propeller"),
-        { type: "separator" },
-        { label: "Clear Old Recovery Files…", click: () => void clearOldRecoveries() },
-      ],
-    },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  // YDDD draws its own menu bar (menubar.ts): no system menu — the page asks for what only this process can do
+  // ("app-action": quit, reload…) and reads the recent files when Open Recent opens.
+  Menu.setApplicationMenu(null);
 }
 
 interface SaveRequest {
@@ -322,6 +214,16 @@ function registerIpc(): void {
   ipcMain.handle("recent-add", (_e, filePath: string) => setRecent([filePath, ...recent.filter((p) => p !== filePath)]));
   ipcMain.handle("recent-remove", (_e, filePath: string) => setRecent(recent.filter((p) => p !== filePath)));
   ipcMain.handle("recent-list", () => recent);
+  ipcMain.handle("recent-clear", () => setRecent([]));
+  // The menu bar's system items (menubar.ts)
+  ipcMain.on("app-action", (e, act: string) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (act === "quit") app.quit();
+    else if (act === "reload") w?.webContents.reload();
+    else if (act === "devtools") w?.webContents.toggleDevTools();
+    else if (act === "fullscreen") w?.setFullScreen(!w.isFullScreen());
+    else if (act === "clear-recoveries") void clearOldRecoveries();
+  });
 
   ipcMain.handle("confirm", async (_e, message: string) => {
     if (!win) return false;

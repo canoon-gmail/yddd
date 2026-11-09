@@ -181,7 +181,8 @@ import { PROPELLER } from "./propeller";
 import { MeasureTool } from "./measure";
 import { LABEL_TEXT, LabelTool } from "./label";
 import { SketchTool, type SketchFrame } from "./sketch";
-import { byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, XRAY_OPACITY_KEY } from "./format";
+import { MenuBar } from "./menubar";
+import { applyToolbarText, byDiameter, circleSize, CIRCLE_SIZE_KEY, opacitySetting, SOLID_OPACITY_KEY, TB_TEXT_KEY, toolbarTextSetting, XRAY_OPACITY_KEY } from "./format";
 import { COMMANDS, dragGesture, eventKey, isDefault, navAction, keyTable, keysPanelOpen, keysText, loadKeys, toolbarKeysText, menuAccelerators, mouseKey, navGestures, openKeysPanel, saveKeys, type Keys } from "./keymap";
 import type { TutCtx, Tutorial } from "./tutorials";
 import * as macros from "./macros";
@@ -393,6 +394,7 @@ export class App implements ToolHost {
     this.viewport.orbitPivot = () => this.turnPivot();
     this.viewport.meshLater = (shape) => this.meshInBackground(shape);
     this.viewport.setOpacity(opacitySetting(SOLID_OPACITY_KEY, 100) / 100, opacitySetting(XRAY_OPACITY_KEY, 80) / 100);
+    applyToolbarText(toolbarTextSetting());
     this.viewport.onDimensionClick = (i) => this.selectDimension(i);
     this.viewport.onLabelDoubleClick = (i) => this.editLabel(i);
     this.viewport.onViewChange = () => this.positionHud();
@@ -419,6 +421,16 @@ export class App implements ToolHost {
     this.doc.onChange(() => this.scheduleAutosave());
     window.yddd?.setMenuKeys?.(menuAccelerators(this.keys));
     window.yddd?.onMenu((cmd) => (cmd.startsWith(OPEN_RECENT) ? void this.openRecent(cmd.slice(OPEN_RECENT.length)) : this.run(cmd)));
+    // The menu bar: YDDD's own (menubar.ts) — the shortcuts as they are now, Undo / Redo greyed with nothing to do
+    this.menubar = new MenuBar($("menubar"), {
+      run: (cmd) => this.run(cmd),
+      action: (act) => window.yddd?.appAction(act),
+      keyOf: (cmd) => (this.keys[cmd] ?? []).find((k) => !/Mouse\d|Drag$/.test(k)) ?? "",
+      enabled: (cmd) => (this.tool instanceof SketchTool ? true : cmd === "edit.undo" ? this.doc.canUndo : cmd === "edit.redo" ? this.doc.canRedo : true),
+      recentFiles: () => window.yddd?.recentFiles() ?? Promise.resolve([]),
+      openRecent: (file) => void this.openRecent(file),
+      clearRecent: () => void window.yddd?.clearRecent(),
+    });
     // Unsaved-changes prompt on close is handled by the main process (see setDirty);
     // a beforeunload handler would silently block closing in Electron.
 
@@ -717,10 +729,11 @@ export class App implements ToolHost {
   // ================================================================ commands
 
   run(cmd: string, recordRecent = true): void {
-    // While sketching, only the view may change: Ctrl+Z undoes a sketch step, Exit Sketch Mode ends it.
+    // While sketching, only the view may change: Ctrl+Z undoes a sketch step, Exit Sketch ends it.
     if (this.tool instanceof SketchTool && !SKETCH_COMMANDS.has(cmd)) {
       if (cmd === "edit.undo") return this.tool.undo();
-      return this.toast("Sketch: click Exit Sketch Mode first (keeps the outlines as faces)", "error");
+      if (cmd === "edit.redo") return this.tool.redo();
+      return this.toast("Sketch: click Exit Sketch first (keeps the outlines as faces)", "error");
     }
     try {
       this.dispatch(cmd);
@@ -730,11 +743,12 @@ export class App implements ToolHost {
     }
   }
 
-  /** Rarely used tools (Revolve / Circular copy / Sweep / Array copy) as small buttons in the viewport's bottom-left corner. */
+  /** Rarely used tools (Revolve / Mirror / Circular copy / Sweep / Array copy) as small buttons in the viewport's bottom-left corner. */
   private buildCornerTools(): void {
     const box = $("corner-tools");
     const items: [string, string, string][] = [
       ["op.revolve", "revolve", "Revolve a flat face about a line or axis"],
+      ["edit.mirror", "mirror", "Mirror: a mirrored copy of the selection across a plane (M)"],
       ["edit.circular", "circular", "Circular copy: copies round an axis — the X / Y / Z axis, a guide line or a circle edge"],
       ["op.sweep", "sweep", "Sweep a flat face along a path or guide line"],
       ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction (to change an array later: its icon in the Bodies panel); with a path selected too (or click a path in its panel): copies along the path"],
@@ -1738,6 +1752,7 @@ export class App implements ToolHost {
     this.tool = tool;
     this.viewport.canvas.style.cursor = "crosshair";
     this.renderToolbarState();
+    if (tool instanceof SketchTool) this.renderOutliner(); // (just its face objects and paths meanwhile)
   }
 
   private endTool(): void {
@@ -2055,19 +2070,21 @@ export class App implements ToolHost {
     if (result.warn) {
       err.textContent = result.warn.text;
       const act = result.warn.action;
-      if (act) {
+      const put = (set: Record<string, number>) => {
+        for (const [k, v] of Object.entries(set)) {
+          const i = this.opPanel.querySelector<HTMLInputElement>(`[data-key="${k}"]`);
+          if (!i) continue;
+          i.value = fmt(v);
+          i.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      };
+      if (act?.auto) setTimeout(() => this.op === op && put(act.set)); // (after this preview has been taken in)
+      else if (act) {
         const b = document.createElement("button");
         b.type = "button";
         b.className = "op-warn-act";
         b.textContent = act.label;
-        b.addEventListener("click", () => {
-          for (const [k, v] of Object.entries(act.set)) {
-            const i = this.opPanel.querySelector<HTMLInputElement>(`[data-key="${k}"]`);
-            if (!i) continue;
-            i.value = fmt(v);
-            i.dispatchEvent(new Event("input", { bubbles: true }));
-          }
-        });
+        b.addEventListener("click", () => put(act.set));
         err.append(" ", b);
       }
     }
@@ -2622,7 +2639,11 @@ export class App implements ToolHost {
       this.toast(`${title} works on solids — "${flat[0].name}" is a flat face. Push/Pull it first.`, "error");
       return;
     }
-    const fields: OpField[] = [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: isFillet ? this.defaults.fillet : this.defaults.chamfer, step: 0.1, min: 0 }];
+    const startR = isFillet ? this.defaults.fillet : this.defaults.chamfer;
+    const fields: OpField[] = [{ key: "r", label: isFillet ? "Radius (mm)" : "Distance (mm)", value: startR, step: 0.1, min: 0 }];
+    // The last size used (remembered) too big for these edges: the first preview switches to the largest that does
+    // them all, and says so — once (a size typed or dragged afterwards is left as it is, with the usual note).
+    let firstLook = true, switched: string | null = null;
     // Whole solids selected: which of their edges (e.g. just the vertical corners of a box).
     const WHICH = ["all", "vertical", "horizontal"] as const;
     const wholeSolids = [...perBody.values()].some((v) => v === null);
@@ -2659,8 +2680,21 @@ export class App implements ToolHost {
         if (g.skipped && g.largest !== null) largest = Math.min(largest ?? Infinity, g.largest);
       }
       const done = this.replaceOutcome(new Map([...got].map(([id, g]) => [id, g.shape])), title);
-      if (!skipped) return done;
-      const what = isFillet ? "rounded" : "chamfered", unit = isFillet ? "R " : "";
+      const first = firstLook;
+      firstLook = false;
+      const unit = isFillet ? "R " : "";
+      if (!skipped) {
+        const note = switched;
+        switched = null;
+        return note ? { ...done, warn: { text: note } } : done;
+      }
+      if (first && r === startR && largest !== null && largest > 0) {
+        const to = largest >= 0.1 ? Math.floor(largest * 10) / 10 : largest; // (a round number, under the largest)
+        switched = `${unit}${fmt(r)} (last used) is too big for these edges — set to ${unit}${fmt(to)}, about the largest that does them all.`;
+        return { ...done, warn: { text: switched, action: { label: "", set: { r: to }, auto: true } } };
+      }
+      switched = null; // (switched and still short: the usual note)
+      const what = isFillet ? "rounded" : "chamfered";
       return {
         ...done,
         warn: {
@@ -2668,6 +2702,17 @@ export class App implements ToolHost {
           ...(largest !== null ? { action: { label: `Use ${unit}${fmt(largest)}`, set: { r: largest } } } : {}),
         },
       };
+    };
+    /** The same switch when none of the edges can be done at the last size used (roundSome throws, with the largest that works). */
+    const tooBig = (e: unknown, r: number): OpOutcome | null => {
+      const first = firstLook;
+      firstLook = false;
+      const m = /the largest that works is about ([\d.]+) mm/.exec(e instanceof Error ? e.message : String(e));
+      if (!first || r !== startR || !m || !(+m[1] > 0)) return null;
+      const to = +m[1], unit = isFillet ? "R " : "";
+      switched = `${unit}${fmt(r)} (last used) is too big for ${perBody.size > 1 || [...perBody.values()].some((v) => !v || v.size > 1) ? "these edges" : "this edge"} — set to ${unit}${fmt(to)}, about the largest that works.`;
+      const same = this.replaceOutcome(new Map([...perBody.keys()].map((id) => [id, this.solidOf(id, title)])), title); // (unchanged till the switch is in)
+      return { ...same, warn: { text: switched, action: { label: "", set: { r: to }, auto: true } } };
     };
     /** Each body's BREP text, made once per op (sent to the background kernel with every new size). */
     const breps = new WeakMap<object, string>();
@@ -2679,10 +2724,16 @@ export class App implements ToolHost {
         if (wholeSolids) spec.drag = dragFor(which); // "Edges" can move the handle to another edge
         if (r <= 0) throw new Error("value must be greater than 0");
         const got = new Map<number, Pick<RoundResult, "shape" | "asked" | "largest"> & { skipped: number }>();
-        for (const [id, picked] of perBody) {
-          const { shape, edges } = checked(id, picked, which);
-          const res = roundSome(kind, shape, edges, r);
-          got.set(id, { ...res, skipped: res.skipped.length });
+        try {
+          for (const [id, picked] of perBody) {
+            const { shape, edges } = checked(id, picked, which);
+            const res = roundSome(kind, shape, edges, r);
+            got.set(id, { ...res, skipped: res.skipped.length });
+          }
+        } catch (e) {
+          const o = tooBig(e, r);
+          if (o) return o;
+          throw e;
         }
         return outcome(got, r);
       },
@@ -2691,13 +2742,20 @@ export class App implements ToolHost {
         if (wholeSolids) spec.drag = dragFor(which);
         if (r <= 0) throw new Error("value must be greater than 0");
         const got = new Map<number, Pick<RoundResult, "shape" | "asked" | "largest"> & { skipped: number }>();
-        for (const [id, picked] of perBody) {
-          const { shape, edges } = checked(id, picked, which);
-          const all = shape.edges.map((e) => e.hashCode);
-          let brep = breps.get(shape);
-          if (brep === undefined) breps.set(shape, (brep = serializeShape(shape)));
-          const res = await this.bgKernel.run({ op: "round", kind, brep, edges: edges ? [...edges].map((h) => all.indexOf(h)).filter((i) => i >= 0) : null, size: r });
-          got.set(id, { shape: solidFrom(res), skipped: res.skipped.length, asked: res.asked, largest: res.largest }); // (meshed there too)
+        try {
+          for (const [id, picked] of perBody) {
+            const { shape, edges } = checked(id, picked, which);
+            const all = shape.edges.map((e) => e.hashCode);
+            let brep = breps.get(shape);
+            if (brep === undefined) breps.set(shape, (brep = serializeShape(shape)));
+            const res = await this.bgKernel.run({ op: "round", kind, brep, edges: edges ? [...edges].map((h) => all.indexOf(h)).filter((i) => i >= 0) : null, size: r });
+            got.set(id, { shape: solidFrom(res), skipped: res.skipped.length, asked: res.asked, largest: res.largest }); // (meshed there too)
+          }
+        } catch (e) {
+          if (e instanceof JobCancelled) throw e;
+          const o = tooBig(e, r);
+          if (o) return o;
+          throw e;
         }
         return outcome(got, r);
       },
@@ -5183,6 +5241,8 @@ export class App implements ToolHost {
    * change it previews, committed, uses it too (see relinkDims). `xf`: the gizmo's (cleared when its bodies are put back).
    */
   private dimMove: { version: number; moves: Map<number, DimMove>; xf: boolean } | null = null;
+  /** YDDD's own menu bar (see menubar.ts). */
+  menubar!: MenuBar;
 
   private setDimMove(moves: Map<number, DimMove> | null, xf = false): void {
     const had = this.dimMove;
@@ -7319,6 +7379,16 @@ export class App implements ToolHost {
     const selected = new Set(this.selection.map((s) => s.body));
     const guideGroups = new Map<string, number>();
     for (const g of this.doc.guides) if (g.group !== undefined) guideGroups.set(g.group, (guideGroups.get(g.group) ?? 0) + 1);
+    // (while sketching: just the face objects and paths — what a sketch makes and edits; a group with none: not shown)
+    const sketching = this.tool instanceof SketchTool;
+    const listed = sketching ? this.doc.bodies.filter((b) => b.kind === "face" || b.kind === "path") : this.doc.bodies;
+    if (sketching && !listed.length && !guideGroups.size) {
+      this.olRows.clear();
+      this.olGroups.clear();
+      this.olGuideGroups.clear();
+      el.innerHTML = `<div class="ol-empty">No face objects or paths yet — Exit Sketch makes them from what you draw.</div>`;
+      return;
+    }
     if (!this.doc.bodies.length && !guideGroups.size) {
       this.olRows.clear();
       this.olGroups.clear();
@@ -7336,7 +7406,7 @@ export class App implements ToolHost {
     const placeOf = new Map<number, number>();
     const live = new Set<number>(), liveGroups = new Set<string>();
     const members = new Map<string, Body[]>();
-    for (const b of this.doc.bodies) if (b.group) (members.get(b.group) ?? members.set(b.group, []).get(b.group)!).push(b);
+    for (const b of listed) if (b.group) (members.get(b.group) ?? members.set(b.group, []).get(b.group)!).push(b);
     const bodyRow = (b: Body): HTMLElement => {
       const hidden = this.hidden.has(b.id);
       const look = this.doc.lookOf(b), lk = `${look.color}:${look.opacity}`;
@@ -7366,7 +7436,7 @@ export class App implements ToolHost {
       row.classList.toggle("in-group", !!b.group);
       return row;
     };
-    for (const b of this.doc.bodies) {
+    for (const b of listed) {
       if (!b.group) {
         live.add(b.id);
         ids.push(b.id);
@@ -7927,7 +7997,7 @@ export class App implements ToolHost {
       ["B B · B C · B S · B O", "Draw solid Box · Cylinder · Sphere · Cone (B O: base, then height — a sharp tip; Tab or height,top size + Enter: a flat top) (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
       ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai or ♥, come from the built-in ones, Noto Sans Symbols / Symbols 2 too), height (a capital letter, mm), symbols (the ☺▾ button by the text: ♥ ☺ ★ ✿ ♪ ✓… — a click puts one in, its Recent row remembers the last 8; typed / pasted ones work in any font), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
-      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch Mode replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+C curve (Shift+A too; pulled towards each control point clicked, starting and ending on the first and last — click the start point to close; in Select, its control lines show and its blue points drag) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch Mode keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
+      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+C curve (Shift+A too; pulled towards each control point clicked, starting and ending on the first and last — click the start point to close; in Select, its control lines show and its blue points drag) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       [". (Box / Rectangle)", "The first click is the centre instead of a corner — press again for a corner (remembered while YDDD runs); while typing a size it's the decimal point"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
@@ -8466,9 +8536,18 @@ export class App implements ToolHost {
       `<div class="seg-row" title="Selection: orbiting — and Top / Front / Right / Iso — turn about the selected objects, which stay put on screen (nothing selected: the view's centre)"><span>Orbit around</span><span class="seg orbit-seg"><button type="button" class="btn" data-v="view">View centre</button><button type="button" class="btn" data-v="selection">Selection</button></span></div>` +
       `<label class="range-row" title="How solid the solids look normally — 100%: opaque"><span>Solid opacity</span><input type="range" data-k="solid" min="5" max="100" step="5"><output></output></label>` +
       `<label class="range-row" title="How solid the solids look in X-ray (Shift+X), where hidden faces and edges show through"><span>X-ray opacity</span><input type="range" data-k="xray" min="5" max="100" step="5"><output></output></label>` +
+      `<label class="range-row" title="The size of the text on the menu bar and its menus, the toolbar, the Recent strip and the Sketch bar"><span>Interface text</span><input type="range" data-k="tbtext" min="80" max="160" step="10"><output></output></label>` +
       `<div class="op-buttons"><button type="submit" class="btn primary">Done</button></div>`;
     const vp = this.viewport;
-    for (const r of dlg.querySelectorAll<HTMLInputElement>(".range-row input")) {
+    const tb = dlg.querySelector<HTMLInputElement>("input[data-k=tbtext]")!, tbOut = tb.nextElementSibling!;
+    tb.value = String(toolbarTextSetting());
+    tbOut.textContent = `${tb.value}%`;
+    tb.addEventListener("input", () => {
+      tbOut.textContent = `${tb.value}%`;
+      localStorage.setItem(TB_TEXT_KEY, tb.value);
+      applyToolbarText(Number(tb.value));
+    });
+    for (const r of dlg.querySelectorAll<HTMLInputElement>(".range-row input[data-k=solid], .range-row input[data-k=xray]")) {
       const solid = r.dataset.k === "solid", out = r.nextElementSibling!;
       r.value = String(Math.round((solid ? vp.solidOpacity : vp.xrayOpacity) * 100));
       out.textContent = `${r.value}%`;

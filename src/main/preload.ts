@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("yddd", {
   addRecent: (filePath: string) => ipcRenderer.invoke("recent-add", filePath) as Promise<void>,
   removeRecent: (filePath: string) => ipcRenderer.invoke("recent-remove", filePath) as Promise<void>,
   recentFiles: () => ipcRenderer.invoke("recent-list") as Promise<string[]>,
+  clearRecent: () => ipcRenderer.invoke("recent-clear") as Promise<void>,
+  appAction: (act: string) => ipcRenderer.send("app-action", act),
   confirm: (message: string) => ipcRenderer.invoke("confirm", message) as Promise<boolean>,
   ask: (req: { message: string; detail?: string; buttons: string[] }) => ipcRenderer.invoke("ask", req) as Promise<number>,
   writeRecovery: (rec: { savedAt: number; filePath: string | null; data: string }) => ipcRenderer.invoke("recovery-write", rec) as Promise<void>,

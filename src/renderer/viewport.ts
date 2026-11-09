@@ -251,14 +251,19 @@ export class Viewport {
     this.camera.position.set(140, -190, 130);
     this.scene.add(this.camera);
 
-    // Lights follow the camera so shading is consistent from every angle.
-    this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x30343a, 1.6));
-    const key = new THREE.DirectionalLight(0xffffff, 1.6);
-    key.position.set(1, 1.5, 2);
-    this.camera.add(key);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.5);
-    fill.position.set(-2, -1, 0.5);
-    this.camera.add(fill);
+    // Lights follow the camera so shading is consistent from every angle. Their targets ride with
+    // it too (at the camera): a target left at the world origin made every light shine from about
+    // the camera itself, so all faces in view came out alike. A weak sky light and a key from the
+    // upper left: tops bright, the front a step darker, the right side darker still.
+    // (The old, flatter look, to go back to: sky 1.6; key 1.6 at (1, 1.5, 2); fill 0.5 at
+    // (-2, -1, 0.5); targets not added to the camera; inset light 1.6 at (1, 1.5, 2).)
+    this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x30343a, 1.0));
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
+    key.position.set(-0.8, 2, 2);
+    this.camera.add(key, key.target);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+    fill.position.set(1.5, -0.3, 1);
+    this.camera.add(fill, fill.target);
 
     this.scene.add(this.makeGrid(), this.batchRoot, this.bodyRoot, this.ghostRoot, this.overlayRoot, this.guideRoot, this.dimRoot);
 
@@ -359,13 +364,16 @@ export class Viewport {
     window.addEventListener("pointerdown", (e) => this.updateXfSnap(e.ctrlKey), { capture: true });
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Control") return;
+      this.setCtrl(e.type === "keydown");
       if (this.xfPointer) this.xfPointer.ctrl = e.type === "keydown";
       this.updateXfSnap(e.type === "keydown");
     };
     window.addEventListener("keydown", onKey, { capture: true });
     window.addEventListener("keyup", onKey, { capture: true });
+    window.addEventListener("blur", () => this.setCtrl(false));
 
     this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+    this.showOriginMark();
     new ResizeObserver(() => this.resize(container)).observe(container);
     this.resize(container);
     this.updateClipPlanes();
@@ -460,7 +468,7 @@ export class Viewport {
   snapshot(): Promise<Uint8Array> {
     const { sel, hover } = this.hl;
     const glow = { body: this.glowBody, sel: this.glowSel };
-    const shown = [...this.axes, this.guideRoot, this.dimRoot, this.overlayRoot];
+    const shown = [...this.axes, this.guideRoot, this.dimRoot, this.overlayRoot, ...(this.originMark ? [this.originMark] : [])];
     const was = shown.map((o) => o.visible);
     this.setHighlight([], null);
     for (const o of shown) o.visible = false;
@@ -554,10 +562,10 @@ export class Viewport {
     if (!this.inset) {
       const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 100000);
       camera.up.set(0, 0, 1);
-      const light = new THREE.DirectionalLight(0xffffff, 1.6);
-      light.position.set(1, 1.5, 2);
+      const light = new THREE.DirectionalLight(0xffffff, 2.2);
+      light.position.set(-0.8, 2, 2);
       light.visible = false; // only while the inset is drawn
-      camera.add(light);
+      camera.add(light, light.target);
       this.scene.add(camera);
       this.inset = { camera, light };
     }
@@ -1807,7 +1815,7 @@ export class Viewport {
     input.className = `${el.className} editing`;
     input.dataset.i = el.dataset.i;
     input.value = el.textContent ?? "";
-    input.size = Math.max(6, input.value.length + 2);
+    // (as wide as its text, growing as it's typed — CSS field-sizing; a size in characters left long text a long tail)
     input.style.transform = el.style.transform;
     el.replaceWith(input);
     const entry = this.dimLabels.find((x) => x.el === el);
@@ -1818,7 +1826,6 @@ export class Viewport {
       over = true;
       done(text);
     };
-    input.addEventListener("input", () => (input.size = Math.max(6, input.value.length + 2)));
     input.addEventListener("keydown", (e) => {
       e.stopPropagation();
       if (e.key === "Enter") finish(input.value);
@@ -1898,7 +1905,39 @@ export class Viewport {
   axisSnapStep = 1;
 
   /** Auto snap (the default): tools snap to points / grid without a key, Ctrl places freely. Off: snap only while Ctrl is held. */
-  autoSnap = true;
+  get autoSnap(): boolean {
+    return this.autoSnapOn;
+  }
+  set autoSnap(on: boolean) {
+    this.autoSnapOn = on;
+    this.showOriginMark();
+  }
+  private autoSnapOn = true;
+  /** Ctrl held now (keys / pointer events say so; let go when the window loses focus). */
+  private ctrlDown = false;
+  /** A centre mark at the world origin (0, 0, 0), shown while snapping is on — Auto snap, or Ctrl held with it off. */
+  private originMark: THREE.Points | null = null;
+
+  private showOriginMark(): void {
+    const on = this.ctrlDown !== this.autoSnapOn;
+    if (on && !this.originMark) {
+      const m = new THREE.PointsMaterial({ color: 0x1e88ff, size: 14, map: this.ringTexture(), sizeAttenuation: false, depthTest: false, transparent: true, alphaTest: 0.1 });
+      this.originMark = new THREE.Points(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3()]), m);
+      this.originMark.renderOrder = 28;
+      this.originMark.raycast = () => {};
+      this.scene.add(this.originMark);
+    }
+    if (this.originMark && this.originMark.visible !== on) {
+      this.originMark.visible = on;
+      this.requestRender();
+    }
+  }
+
+  private setCtrl(down: boolean): void {
+    if (down === this.ctrlDown) return;
+    this.ctrlDown = down;
+    this.showOriginMark();
+  }
 
   /** Should this pointer event snap? Auto snap flips what Ctrl does. */
   snapping(e: { ctrlKey: boolean } | null | undefined): boolean {
@@ -2396,7 +2435,8 @@ export class Viewport {
       child.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
     }
     for (const o of objects) {
-      o.renderOrder = o.userData.under ? 19 : 20; // (e.g. a sketch's picture: below its lines)
+      // (e.g. a sketch's picture: below its lines; its move gizmo: `order` — above them and the selected fill)
+      o.renderOrder = o.userData.order ?? (o.userData.under ? 19 : 20);
       this.overlayRoot.add(o);
     }
     this.requestRender();

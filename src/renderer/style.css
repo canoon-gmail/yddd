@@ -20,6 +20,24 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 #app { display: flex; flex-direction: column; height: 100vh; }
 
 /* ---------------------------------------------------------------- toolbar */
+/* The menu bar (menubar.ts): YDDD's own, its text following Settings → Interface text */
+#menubar { display: flex; gap: 1px; padding: 1px 6px; background: var(--panel); border-bottom: 1px solid var(--border); flex: none; }
+.mb-top { background: transparent; color: var(--text); border: 1px solid transparent; border-radius: 4px; padding: 2px 9px; font: inherit; font-size: calc(13px * var(--tb-text, 1)); cursor: default; }
+.mb-top u { text-decoration: none; }
+#menubar.keys .mb-top u { text-decoration: underline; }
+.mb-top:hover, .mb-top.open, .mb-top.focus { background: var(--panel-2); border-color: var(--border); }
+.mb-drop {
+  position: fixed; z-index: 60; min-width: 220px; padding: 4px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5); font-size: calc(13px * var(--tb-text, 1));
+}
+.mb-item { display: flex; align-items: center; gap: 24px; padding: 4px 10px; border-radius: 4px; cursor: default; white-space: nowrap; }
+.mb-item .mb-label { flex: 1; }
+.mb-item .mb-key { color: var(--muted); font-size: 0.9em; }
+.mb-item.lit { background: #3d342a; color: var(--accent-2); }
+.mb-item.lit .mb-key { color: var(--accent-2); }
+.mb-item.off { opacity: 0.4; }
+.mb-item.off.lit { background: transparent; color: inherit; }
+.mb-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 #toolbar {
   display: flex;
   gap: 4px;
@@ -31,13 +49,13 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 .tb-group { display: flex; flex-direction: column; padding: 0 4px; border-right: 1px solid var(--border); flex: none; }
 .tb-group:last-child { border-right: none; }
 .tb-buttons { display: flex; gap: 2px; }
-.tb-label { font-size: 10px; color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 1px; }
+.tb-label { font-size: calc(10px * var(--tb-text, 1)); color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 1px; }
 .tb-btn {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
   min-width: 42px; padding: 5px 3px 3px;
   background: transparent; color: var(--text);
   border: 1px solid transparent; border-radius: 6px;
-  font: inherit; font-size: 10.5px; cursor: pointer; white-space: nowrap;
+  font: inherit; font-size: calc(10.5px * var(--tb-text, 1)); cursor: pointer; white-space: nowrap;
 }
 #toolbar::-webkit-scrollbar { height: 5px; }
 #toolbar::-webkit-scrollbar-track { background: transparent; }
@@ -48,7 +66,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 .tb-main {
   position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
   min-width: 48px; padding: 5px 10px 3px 6px; background: transparent; color: var(--text);
-  border: 1px solid transparent; border-radius: 6px; font: inherit; font-size: 10.5px; cursor: pointer; white-space: nowrap;
+  border: 1px solid transparent; border-radius: 6px; font: inherit; font-size: calc(10.5px * var(--tb-text, 1)); cursor: pointer; white-space: nowrap;
 }
 .tb-main:hover, .tb-drawer.open .tb-main { background: var(--panel-2); border-color: var(--border); }
 .tb-main.active { background: #3d342a; border-color: var(--accent); color: var(--accent-2); }
@@ -60,7 +78,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 .tb-drawer.open .tb-flyout { display: flex; }
 .tb-flyout .tb-item { flex-direction: row; justify-content: flex-start; gap: 8px; padding: 4px 8px; min-width: 150px; }
 .tb-flyout .tb-item span { flex: 1; text-align: left; }
-.tb-flyout .tb-item kbd { font-size: 10px; color: var(--muted); font-family: inherit; }
+.tb-flyout .tb-item kbd { font-size: calc(10px * var(--tb-text, 1)); color: var(--muted); font-family: inherit; }
 .tb-btn:disabled { opacity: 0.35; cursor: default; background: transparent; border-color: transparent; }
 
 /* ---------------------------------------------------------------- layout */
@@ -79,7 +97,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
   background: var(--panel); border-left: 1px solid var(--border);
 }
 #recent {
-  width: 60px; flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px 4px;
+  width: calc(60px * max(1, var(--tb-text, 1))); /* (wider with bigger captions: Settings → Toolbar text) */ flex: none; display: flex; flex-direction: column; gap: 4px; padding: 6px 4px;
   background: var(--panel); border-right: 1px solid var(--border); overflow-y: auto;
 }
 #recent-list { display: flex; flex-direction: column; gap: 2px; }
@@ -92,7 +110,7 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 body.pro #recent { width: 50px; padding: 4px 2px; }
 body.pro #recent-list .tb-btn { padding: 3px 1px; min-width: 0; }
 body.pro #recent-list .tb-btn svg { display: none; }
-body.pro #recent-list .tb-btn span { font-size: 9.5px; }
+body.pro #recent-list .tb-btn span { font-size: calc(9.5px * var(--tb-text, 1)); }
 /* Pro: tool panels without their help text (what to click, how a field works) */
 body.pro .op-help, body.pro #measure-panel .tip, body.pro #measure-panel .intro { display: none; }
 .panel { padding: 8px 10px; border-bottom: 1px solid var(--border); overflow: auto; }
@@ -261,7 +279,7 @@ kbd {
 .dim-label.preview { pointer-events: none; }
 .dim-label.note { background: #7ee787; color: #0b2e13; font-size: 13px; }
 .dim-label.note.sel { background: #ffd166; }
-.dim-label.editing { border: 1px solid #0b2e13; outline: none; font: inherit; font-size: 13px; cursor: text; }
+.dim-label.editing { border: 1px solid #0b2e13; outline: none; font: inherit; font-size: 13px; cursor: text; field-sizing: content; min-width: 3em; }
 
 #measure-panel {
   position: absolute; top: 12px; left: 12px; width: 250px; padding: 10px 12px; z-index: 15;
@@ -286,6 +304,33 @@ kbd {
 #tool-panel .tp-check { display: flex; align-items: center; gap: 6px; margin-top: 6px; cursor: pointer; }
 #tool-panel .tp-check input { accent-color: var(--accent); }
 #tool-panel .op-buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+/* Sketch: its tools on the top bar (text buttons); the main tools, the Recent strip and the corner tools hidden meanwhile */
+body.sketching #toolbar > .tb-group, body.sketching #recent, body.sketching #corner-tools { display: none; }
+/* (the Selection panel too: the Bodies panel — just face objects and paths then — takes the whole side) */
+body.sketching #sidebar .panel:has(> #props) { display: none; }
+#sketch-bar { display: flex; align-items: stretch; gap: 4px; }
+#sketch-bar .tb-buttons { flex: 1; align-items: center; }
+#sketch-bar .sk-btn { justify-content: center; min-width: 0; padding: 6px 10px; font-size: calc(12.5px * var(--tb-text, 1)); }
+/* The Sizes switch: a pill track, its knob sliding right (orange) when on */
+#sketch-bar .sk-switch { flex-direction: row; gap: 7px; }
+#sketch-bar .sk-btn.sk-switch.sk-on { background: transparent; border-color: transparent; color: var(--text); }
+#sketch-bar .sk-btn.sk-switch:hover { background: var(--panel-2); border-color: var(--border); }
+.sw-track { position: relative; width: 30px; height: 16px; border-radius: 8px; background: #4a4e56; transition: background 0.15s; flex: none; }
+.sw-knob { position: absolute; left: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: #d7dade; transition: left 0.15s; }
+.sk-switch.sk-on .sw-track { background: var(--accent); }
+.sk-switch.sk-on .sw-knob { left: 16px; background: #fff; }
+#sketch-bar .sk-btn.sk-icon { padding: 4px 7px; }
+#sketch-bar .sk-btn.sk-icon svg { width: calc(22px * var(--tb-text, 1)); height: calc(22px * var(--tb-text, 1)); }
+#sketch-bar .sk-btn.sk-on { background: #3d342a; border-color: var(--accent); color: var(--accent-2); }
+#sketch-bar .sk-exit { background: var(--accent); border-color: var(--accent); color: #1b1408; font-weight: 600; }
+#sketch-bar .sk-exit:hover { background: var(--accent-2); }
+/* Sketch → Select: the box dragged from empty space — solid: wholly inside, dashed (right → left): touching */
+.sk-box { position: fixed; z-index: 40; pointer-events: none; border: 1px solid #1e88ff; background: rgba(30, 136, 255, 0.12); }
+.sk-box.touch { border-style: dashed; background: rgba(30, 136, 255, 0.07); }
+/* The closed outlines' sizes in the sketch (sketch.ts showSizes) */
+#sketch-sizes { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 5; }
+.sk-size { position: absolute; left: 0; top: 0; padding: 0 5px; border-radius: 3px; background: rgba(20, 22, 26, 0.78); color: var(--accent-2); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sk-size.sk-angle { color: #8fd3ff; font-size: 10.5px; }
 #sketch-panel {
   position: absolute; top: 12px; left: 12px; width: 300px; padding: 10px 12px; z-index: 15;
   background: rgba(38, 40, 44, 0.96); border: 1px solid var(--border); border-radius: 8px;

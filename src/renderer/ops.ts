@@ -56,7 +56,8 @@ export interface OpOutcome {
   /** Hide the selected edges' highlight while previewed (they change with it, e.g. a resized hole's rim). */
   hideSelection?: boolean;
   /** It worked, but not quite as asked (e.g. some edges left sharp): shown in the panel (Apply still works), with a button to set fields. */
-  warn?: { text: string; action?: { label: string; set: Record<string, number> } };
+  /** A note when the result isn't quite as asked; `action.auto`: its values are put in the panel at once (no button). */
+  warn?: { text: string; action?: { label: string; set: Record<string, number>; auto?: boolean } };
   /** Apply to the document. Returns the body ids to select afterwards (`then`: run once the panel has closed). */
   commit(): { select: number[]; solidMode?: boolean; then?: () => void };
 }
