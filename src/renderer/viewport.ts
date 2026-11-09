@@ -226,7 +226,7 @@ export class Viewport {
       new THREE.MeshStandardMaterial({ color: 0xc0c4c8, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
       new THREE.MeshStandardMaterial({ color: 0xf0d78c, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
     ],
-    edge: new LineMaterial({ color: 0x15171a, linewidth: 1.4 }),
+    edge: new LineMaterial({ color: 0x15171a, linewidth: 1 }),
     /** Paths (open lines from a sketch): bright, so they show on the dark background and on solids. */
     pathEdge: new LineMaterial({ color: 0xff69b4, linewidth: 2.4 }),
     edgeHover: new LineMaterial({ color: 0xe2e5e8, linewidth: 3.5 }),

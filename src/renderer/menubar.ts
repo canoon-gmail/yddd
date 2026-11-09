@@ -1,6 +1,6 @@
 /**
  * The menu bar (File, Edit, View, Macro, Help) drawn by YDDD itself — not the system's: its text follows Settings →
- * Interface text, it's in YDDD's colours, and it shows the shortcuts as they are now ("/" changes them). Mouse: click a
+ * UI Scale, it's in YDDD's colours, and it shows the shortcuts as they are now ("/" changes them). Mouse: click a
  * title, move along the titles while one is open, click an item. Keys: Alt (tapped) or F10 lights the titles, Alt+letter
  * opens one (the underlined letter), arrows move, Enter picks, Esc steps back.
  */

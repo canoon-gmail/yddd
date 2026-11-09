@@ -637,12 +637,13 @@ function nest(loops: Loop[]): { outer: number; holes: number[] }[] {
   const inGroup = new Map<number, number>(); // (outline → the group's outline it's listed with)
   const groups = new Map<number, number[]>();
   loops.forEach((l, i) => l.g !== undefined && groups.set(l.g, [...(groups.get(l.g) ?? []), i]));
+  const around = new Set(parents.flat()); // (outlines with others inside them)
   for (const [g, members] of groups) {
     if (members.length < 2 || members.some((j) => depth[j])) continue;
     const box = [Math.min(...members.map((j) => boxes[j][0])), Math.min(...members.map((j) => boxes[j][1])), Math.max(...members.map((j) => boxes[j][2])), Math.max(...members.map((j) => boxes[j][3]))];
     const tol = 1e-6 * Math.max(1, Math.sqrt(members.reduce((t, j) => t + areas[j], 0)));
     loops.forEach((l, i) => {
-      if (l.g === g || depth[i] || inGroup.has(i) || parents.some((p) => p.includes(i))) return;
+      if (l.g === g || depth[i] || inGroup.has(i) || around.has(i)) return;
       const a = boxes[i];
       if (a[0] < box[0] - tol || a[1] < box[1] - tol || a[2] > box[2] + tol || a[3] > box[3] + tol) return;
       if (polys[i].every((p) => members.some((j) => inside(p, polys[j]) || edgeDist(p, polys[j]) < tol))) inGroup.set(i, members[0]);

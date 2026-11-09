@@ -168,7 +168,7 @@ import {
   parseStl,
 } from "./kernel";
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
-import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame } from "./viewport";
+import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type SnapKind } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
@@ -953,6 +953,7 @@ export class App implements ToolHost {
       case "xf.rotate": return this.startTransform("rotate");
       case "xf.scale": return this.opScale();
       case "xf.moveFrom": return this.startPointMove();
+      case "xf.rotateFrom": return this.startPointRotate();
       case "xf.repeat": return this.repeatLast();
 
       case "edit.undo": return this.undoRedo("undo");
@@ -5319,6 +5320,46 @@ export class App implements ToolHost {
     this.renderOutliner();
   }
 
+  /**
+   * Shift+G / Shift+R: more marks to start from — each selected face's centre (a round face's: its circle's) and, on
+   * each full circle round it, its 4 quarter points (along the circle's plane, from X — Y for a circle across X); a
+   * whole solid selected: the quarter points of its full circles (up to CIRCLE_MARKS of them — a plate of holes: none).
+   */
+  private selectedFaceMarks(): { point: THREE.Vector3; kind: SnapKind }[] {
+    const CIRCLE_MARKS = 12;
+    const out: { point: THREE.Vector3; kind: SnapKind }[] = [];
+    const fullCircles = (b: Body & { shape: Shape }, edgeIds: Iterable<number>) => [...edgeIds].flatMap((id) => {
+      const e = b.shape.edges.find((x) => x.hashCode === id), c = e && e.geomType === "CIRCLE" ? circleOfEdge(b.shape, id) : null;
+      if (!e || !c) return [];
+      const p = e.startPoint.toTuple(), q = e.endPoint.toTuple();
+      return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < 1e-6 ? [c] : [];
+    });
+    const quarters = (c: { center: V3; normal: V3; r: number }) => {
+      const n = new THREE.Vector3(...c.normal), u = new THREE.Vector3(1, 0, 0);
+      if (Math.abs(n.x) > 0.9) u.set(0, 1, 0);
+      u.addScaledVector(n, -u.dot(n)).normalize();
+      const v = n.clone().cross(u);
+      for (const d of [u, v, u.clone().negate(), v.clone().negate()]) out.push({ point: new THREE.Vector3(...c.center).addScaledVector(d, c.r), kind: "vertex" });
+    };
+    for (const s of this.selection) {
+      const b = this.doc.get(s.body);
+      if (!b || !isBrep(b)) continue;
+      if (s.kind === "body") {
+        const circles = fullCircles(b, b.shape.edges.map((e) => e.hashCode));
+        if (circles.length <= CIRCLE_MARKS) circles.forEach(quarters);
+        continue;
+      }
+      if (s.kind !== "face") continue;
+      const circles = fullCircles(b, facesBorderEdgeIds(b.shape, new Set([s.id])));
+      // (the biggest circle round it: its rim — a ring's outer one)
+      const rim = circles.reduce<(typeof circles)[number] | null>((m, c) => (!m || c.r > m.r ? c : m), null);
+      const centre = rim?.center ?? faceAxis(b.shape, s.id)?.center;
+      if (centre) out.push({ point: new THREE.Vector3(...centre), kind: "center" });
+      circles.forEach(quarters);
+    }
+    return out;
+  }
+
   /** Base-point move: pick a point on/near the selection, then a target point. */
   private startPointMove(): void {
     const ids = this.selectedBodyIds();
@@ -5347,7 +5388,34 @@ export class App implements ToolHost {
         },
         (e) => this.slideEdgeAt(e),
         () => this.endTool(),
+        false,
+        this.selectedFaceMarks(),
       ).start(),
+    );
+  }
+
+  /**
+   * Rotate from point (Shift+R), as Shift+G: the selection's marks shown — a click on one puts the rotate gizmo there
+   * (turning about that point); a round edge: about its centre. (World X / Y / Z rings, as R.)
+   */
+  private startPointRotate(): void {
+    const ids = this.selectedBodyIds();
+    if (!ids.length) return this.toast("Rotate from point: select one or more solids first", "error");
+    const pick = (p: V3) => {
+      this.endTool();
+      this.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
+      this.startTransform("rotate", false, p);
+      this.hint(`Rotate about the picked point: drag a ring (${this.viewport.snapTip("5° steps")}) · Tab: type the angles · Enter/Esc: done`);
+    };
+    this.startTool(
+      new PointMoveTool(this, ids, () => {}, pick, (e) => {
+        // (a round edge: its centre; a straight one: no pivot of its own — the marks are)
+        const c = this.slideEdgeAt(e);
+        const hit = c && this.viewport.pick(e.clientX, e.clientY, "edge");
+        const b = hit?.kind === "edge" ? this.doc.get(hit.body) : null;
+        const circle = b && isBrep(b) ? circleOfEdge(b.shape, hit!.id) : null;
+        return circle ? { point: circle.center, frame: c!.frame } : null;
+      }, () => this.endTool(), true, this.selectedFaceMarks()).start(),
     );
   }
 
@@ -5456,12 +5524,12 @@ export class App implements ToolHost {
     for (const r of rs) if (r.type === "translate") for (let k = 0; k < 3; k++) p[k] += r.vector[k];
   }
 
-  /** Move/rotate steps of the current transform session (for Shift+R). */
+  /** Move/rotate steps of the current transform session (for Ctrl+Shift+R). */
   private repeatOps: TransformResult[] = [];
-  /** Ids of the bodies made by the last duplicate: moving them makes Shift+R copy again. */
+  /** Ids of the bodies made by the last duplicate: moving them makes Ctrl+Shift+R copy again. */
   private repeatCopyIds = "";
 
-  /** Shift+R: repeat the last move/rotate on the selection; if it was a copy+move, copy again (array). */
+  /** Ctrl+Shift+R: repeat the last move/rotate on the selection; if it was a copy+move, copy again (array). */
   private repeatLast(): void {
     const ops = [...this.repeatOps];
     if (!ops.length) return this.toast("Repeat: move or rotate something first (e.g. Shift+D then drag)", "error");
@@ -6822,7 +6890,7 @@ export class App implements ToolHost {
               select: [...srcIds, ...copies.map((b) => b.id)],
               solidMode: true,
               then: () => {
-                // (Shift+R would move the whole selected row — not repeat this array)
+                // (Ctrl+Shift+R would move the whole selected row — not repeat this array)
                 this.repeatOps = [];
                 this.repeatCopyIds = "";
                 this.toast(edit ? `${group}: now ${count} in a row` : `${count} in a row (${n} new) — all selected: Array copy again for a grid`);
@@ -8001,7 +8069,8 @@ export class App implements ToolHost {
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       [". (Box / Rectangle)", "The first click is the centre instead of a corner — press again for a corner (remembered while YDDD runs); while typing a size it's the decimal point"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
-      ["Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
+      ["Shift+R", "Rotate from point: show marks — click one (or a round edge: its centre) → the rotate gizmo there, turning about it"],
+      ["Ctrl+Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Toolbar → Divide face", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap; move the end along X / Y / Z and it locks parallel to that axis, the line in the axis colour); the new edge is selected"],
       ["G with a guide line selected", `Move the guide with the gizmo (${this.viewport.snapTip("points / other guides")}) · Tab: exact ΔX,ΔY,ΔZ · Enter done`],
@@ -8531,12 +8600,12 @@ export class App implements ToolHost {
     dlg.id = "props-dlg";
     dlg.innerHTML =
       `<h4>Settings</h4>` +
+      `<label class="range-row" title="The size of the text on the menu bar and its menus, the toolbar, the Recent strip and the Sketch bar"><span>UI Scale</span><input type="range" data-k="tbtext" min="80" max="160" step="10"><output></output></label>` +
       `<div class="seg-row"><span>Circles, cylinders, spheres</span><span class="seg"><button type="button" class="btn" data-v="r">Radius</button><button type="button" class="btn" data-v="d">Diameter</button></span></div>` +
       `<div class="seg-row" title="Auto: tools snap without a key, Ctrl places freely. Hold Ctrl: no snapping unless Ctrl is held"><span>Snap</span><span class="seg snap-seg"><button type="button" class="btn" data-v="auto">Auto (Ctrl: free)</button><button type="button" class="btn" data-v="ctrl">Hold Ctrl</button></span></div>` +
       `<div class="seg-row" title="Selection: orbiting — and Top / Front / Right / Iso — turn about the selected objects, which stay put on screen (nothing selected: the view's centre)"><span>Orbit around</span><span class="seg orbit-seg"><button type="button" class="btn" data-v="view">View centre</button><button type="button" class="btn" data-v="selection">Selection</button></span></div>` +
       `<label class="range-row" title="How solid the solids look normally — 100%: opaque"><span>Solid opacity</span><input type="range" data-k="solid" min="5" max="100" step="5"><output></output></label>` +
       `<label class="range-row" title="How solid the solids look in X-ray (Shift+X), where hidden faces and edges show through"><span>X-ray opacity</span><input type="range" data-k="xray" min="5" max="100" step="5"><output></output></label>` +
-      `<label class="range-row" title="The size of the text on the menu bar and its menus, the toolbar, the Recent strip and the Sketch bar"><span>Interface text</span><input type="range" data-k="tbtext" min="80" max="160" step="10"><output></output></label>` +
       `<div class="op-buttons"><button type="submit" class="btn primary">Done</button></div>`;
     const vp = this.viewport;
     const tb = dlg.querySelector<HTMLInputElement>("input[data-k=tbtext]")!, tbOut = tb.nextElementSibling!;

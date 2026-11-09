@@ -56,6 +56,7 @@ export const ICONS: Record<string, string> = {
   // Transforms & copies.
   move: svg(`<path d="M12 2.5v19M2.5 12h19M12 2.5l-2.8 2.8M12 2.5l2.8 2.8M12 21.5l-2.8-2.8M12 21.5l2.8-2.8M2.5 12l2.8-2.8M2.5 12l2.8 2.8M21.5 12l-2.8-2.8M21.5 12l-2.8 2.8"/><circle cx="12" cy="12" r="1.7" ${DOT}/>`),
   moveFrom: svg(`<circle cx="5.5" cy="18.5" r="2.3" ${SOFT} ${DASH}/><circle cx="18.5" cy="5.5" r="2.5" ${FILL}/><path d="M7.5 16.5l8.5-8.5M11.5 8h4.5v4.5"/>`),
+  rotateFrom: svg(`<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 3v4h-4"/><circle cx="7.5" cy="16.5" r="2.5" ${FILL}/>`),
   rotate: svg(`<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 3v4h-4"/><circle cx="12" cy="12" r="2" ${FILL}/>`),
   scale: svg(`<rect x="3" y="11" width="9.5" height="9.5" rx="1" ${FILL}/><path d="M3 10.5V3.5h17v17h-7" ${SOFT} ${DASH}/><path d="M12.5 11.5L19.5 4.5M15 4.5h4.5V9"/>`),
   repeat: svg(`<rect x="3" y="12" width="6.5" height="6.5" rx="1" ${SOFT} ${DASH}/><rect x="14.5" y="12" width="6.5" height="6.5" rx="1" ${FILL}/><path d="M6.2 9.5c2-4 9.6-4 11.6 0M15.2 9.2l2.6.5.4-2.6"/>`),

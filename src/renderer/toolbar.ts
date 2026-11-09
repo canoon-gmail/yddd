@@ -71,6 +71,7 @@ export const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[
       { cmd: "xf.move", icon: "move", label: "Move" },
       { cmd: "xf.moveFrom", icon: "moveFrom", label: "Move from point" },
       { cmd: "xf.rotate", icon: "rotate", label: "Rotate" },
+      { cmd: "xf.rotateFrom", icon: "rotateFrom", label: "Rotate from point" },
       { cmd: "xf.scale", icon: "scale", label: "Scale" },
       { cmd: "xf.repeat", icon: "repeat", label: "Repeat last" },
       { cmd: "edit.duplicate", icon: "duplicate", label: "Duplicate" },

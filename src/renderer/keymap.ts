@@ -89,6 +89,7 @@ export const COMMANDS: Command[] = [
     ["xf.move", "Move"],
     ["xf.moveFrom", "Move from point"],
     ["xf.rotate", "Rotate"],
+    ["xf.rotateFrom", "Rotate from point"],
     ["xf.scale", "Scale"],
     ["xf.repeat", "Repeat last move / rotate"],
     ["edit.mirror", "Mirror"],
@@ -189,7 +190,8 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "xf.moveFrom": ["Shift+G"],
   "xf.rotate": ["R"],
   "xf.scale": ["S"],
-  "xf.repeat": ["Shift+R"],
+  "xf.rotateFrom": ["Shift+R"],
+  "xf.repeat": ["Ctrl+Shift+R"],
   "edit.mirror": ["M"],
   "tool.measure": ["="],
   "tool.label": ["+"], // Shift+=; Union keeps Shift+U and Num+

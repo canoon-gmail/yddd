@@ -1244,7 +1244,9 @@ function upright(f: PlaneFrame): PlaneFrame {
 const MANY_MARKS = 40;
 
 export class PointMoveTool implements Tool {
-  readonly name = "Move from point";
+  get name(): string {
+    return this.rotate ? "Rotate from point" : "Move from point";
+  }
   private base: THREE.Vector3 | null = null;
   private delta: THREE.Vector3 | null = null;
   private typed = "";
@@ -1268,6 +1270,10 @@ export class PointMoveTool implements Tool {
     private slideEdgeAt?: (e: PointerEvent) => { point: V3; frame: GizmoFrame } | null,
     /** A click on nothing (no mark, edge or solid under it) before a base is picked: the tool ends (as Esc). */
     private onMiss?: () => void,
+    /** Rotate from point (Shift+R): a mark (or a round / slanted edge) only picks the pivot — handed to onPick at once, no drag to a target. */
+    private rotate = false,
+    /** More marks to start from (the selected faces' centres, their circles' quarter points), shown with the solids' own. */
+    private extra: { point: THREE.Vector3; kind: SnapKind }[] = [],
   ) {
     this.exclude = new Set(ids);
   }
@@ -1275,8 +1281,8 @@ export class PointMoveTool implements Tool {
   start(): this {
     const vp = this.host.viewport, all = vp.pivotCandidates(this.ids);
     // (over MANY_MARKS of its own: the box's marks instead, its own points snapping under the cursor)
-    if (all.filter((p) => !p.inside).length > MANY_MARKS) [this.all, this.detail] = [vp.boxMarks(this.ids), all];
-    else this.all = all;
+    if (all.filter((p) => !p.inside).length > MANY_MARKS) [this.all, this.detail] = [[...this.extra, ...vp.boxMarks(this.ids)], all];
+    else this.all = [...this.extra, ...all];
     this.refreshPivots();
     this.updateHint();
     return this;
@@ -1302,6 +1308,7 @@ export class PointMoveTool implements Tool {
   private updateHint(): void {
     const base = this.base
       ? `Move: drop on a corner / midpoint / centre (snapping: the solid under the cursor shows its marks) or any point (Shift = axis lock, ${this.host.viewport.autoSnap ? "Ctrl = free" : "Ctrl = snap"}) — or type dx,dy,dz + Enter · Esc cancel`
+      : this.rotate ? `Rotate: click a blue mark (corner / edge midpoint / centre) to turn about it — the rotate gizmo there${this.slideEdgeAt ? " · a round edge: about its centre" : ""} · Esc cancel`
       : `Move: click a blue mark to get the move gizmo there — or press a mark and drag it to the target${this.detail ? " (many points: the outline box's marks — its own corners / midpoints / centres snap under the cursor)" : ""}${this.slideEdgeAt ? " · click a round or slanted edge: the gizmo turned to it (Z along its axis / the edge)" : ""}`;
     this.host.hint(this.typed ? `${base}   ⌨ ${this.typed}_ (Enter to apply)` : base);
   }
@@ -1359,10 +1366,11 @@ export class PointMoveTool implements Tool {
         const round = this.onPick ? this.slideEdgeAt?.(e) : null;
         if (round) return this.onPick!(round.point, round.frame);
         if (this.onMiss && !this.host.viewport.pick(e.clientX, e.clientY, "body")) return this.onMiss();
-        this.host.hint("Move: start from a blue mark (corner / edge midpoint / centre) · Esc cancel");
+        this.host.hint(`${this.rotate ? "Rotate" : "Move"}: start from a blue mark (corner / edge midpoint / centre) · Esc cancel`);
         return;
       }
       const p = pv.point;
+      if (this.rotate && this.onPick) return this.onPick([p.x, p.y, p.z]);
       this.base = p.clone();
       this.press = { x: e.clientX, y: e.clientY };
       this.host.viewport.showPivotDots([]);
