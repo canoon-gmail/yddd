@@ -116,6 +116,8 @@ const CHUNK_SIZE = 256;
 /** The most triangles kept from views no longer on screen (see Viewport.kept): ~3 million, ~70 MB. */
 const KEEP_TRIANGLES = 3_000_000;
 const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xc0c4c8, selected: 0xf0d78c };
+/** Flat faces: a light see-through fill (the grid shows through) under a blue outline; drawn without depth, so two on one plane blend, not flicker. */
+const REGION_OPACITY = 0.5;
 
 /**
  * An angle dimension's lines: an arc of radius r round `vertex` from the arm towards `a` to the arm
@@ -172,7 +174,7 @@ export class Viewport {
   private glow: SilhouetteGlow | null = null;
   private batchMats = {
     solid: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
-    region: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.87, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    region: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: REGION_OPACITY, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
   };
   private ghostRoot = new THREE.Group();
   private overlayRoot = new THREE.Group();
@@ -222,11 +224,13 @@ export class Viewport {
     // Flat face bodies: bluish, pulled slightly toward the camera so they win over
     // coplanar solid faces / the grid.
     regionFaces: [
-      new THREE.MeshStandardMaterial({ color: 0x6f9bd1, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.85, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+      new THREE.MeshStandardMaterial({ color: 0x6f9bd1, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: REGION_OPACITY, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
       new THREE.MeshStandardMaterial({ color: 0xc0c4c8, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
       new THREE.MeshStandardMaterial({ color: 0xf0d78c, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: 0.9, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
     ],
     edge: new LineMaterial({ color: 0x15171a, linewidth: 1 }),
+    /** Flat faces' outlines. */
+    regionEdge: new LineMaterial({ color: 0x2f7bea, linewidth: 1 }),
     /** Paths (open lines from a sketch): bright, so they show on the dark background and on solids. */
     pathEdge: new LineMaterial({ color: 0xff69b4, linewidth: 2.4 }),
     edgeHover: new LineMaterial({ color: 0xe2e5e8, linewidth: 3.5 }),
@@ -325,7 +329,7 @@ export class Viewport {
 
     this.tc = new TransformControls(this.camera, this.canvas);
     this.tc.setSpace("world");
-    this.tc.setSize(0.75);
+    this.tc.setSize(0.65);
     // A little see-through, so the model shows behind it (the handle under the cursor still turns solid).
     const gizmoMats = new Set<THREE.Material>();
     this.tc.getHelper().traverse((o) => {
@@ -336,6 +340,28 @@ export class Viewport {
       m.transparent = true;
       m.opacity *= 0.7;
     }
+    // The centre (move freely) handle: a white ring turned to the screen (was a faint white diamond; it
+    // is still picked by the bigger invisible diamond round it). The plane squares sit further out from the
+    // centre, away from the ring and the arrows, so they are easy to pick.
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false, toneMapped: false, side: THREE.DoubleSide });
+    const PLANE_OUT = 0.15; // added to their 0.15 along each of the plane's two axes
+    this.tc.getHelper().traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      const g = mesh.geometry as THREE.BufferGeometry | undefined;
+      if (!g) return;
+      if (o.name === "XYZ" && g.type === "OctahedronGeometry" && (g as THREE.OctahedronGeometry).parameters.radius === 0.1) {
+        mesh.geometry = new THREE.RingGeometry(0.085, 0.1, 40);
+        mesh.material = ringMat;
+        mesh.onBeforeRender = (_r, _s, camera) => {
+          // Face the camera (updateMatrixWorld turned it back square to the world).
+          mesh.quaternion.copy(camera.quaternion);
+          mesh.updateMatrix();
+          mesh.matrixWorld.multiplyMatrices(mesh.parent!.matrixWorld, mesh.matrix);
+        };
+      } else if (g.type === "BoxGeometry" && (o.name === "XY" || o.name === "YZ" || o.name === "XZ")) {
+        mesh.geometry = g.clone().translate(o.name.includes("X") ? PLANE_OUT : 0, o.name.includes("Y") ? PLANE_OUT : 0, o.name.includes("Z") ? PLANE_OUT : 0);
+      }
+    });
     this.scene.add(this.pivot, this.tc.getHelper());
     this.tc.addEventListener("change", () => this.requestRender());
     this.tc.addEventListener("dragging-changed", (e) => {
@@ -418,7 +444,7 @@ export class Viewport {
     this.renderer.setSize(this.width, this.height);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
-    for (const m of [this.mats.edge, this.mats.pathEdge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker, ...this.glowMats.values()]) m.resolution.set(this.width, this.height);
+    for (const m of [this.mats.edge, this.mats.regionEdge, this.mats.pathEdge, this.mats.edgeHover, this.mats.edgeSelected, this.mats.outlineHover, this.mats.outlineSelected, this.mats.snapMarker, ...this.glowMats.values()]) m.resolution.set(this.width, this.height);
     this.stamp++;
     this.render();
   }
@@ -724,7 +750,7 @@ export class Viewport {
     if (edgePos.length >= 6) {
       const eg = new LineSegmentsGeometry();
       eg.setPositions(edgePos);
-      lines = new LineSegments2(eg, body.kind === "path" ? this.mats.pathEdge : this.mats.edge);
+      lines = new LineSegments2(eg, body.kind === "path" ? this.mats.pathEdge : body.kind === "face" ? this.mats.regionEdge : this.mats.edge);
       lines.raycast = () => {};
     }
     const edgeIds: number[] = [];
@@ -1021,9 +1047,9 @@ export class Viewport {
       geom.computeBoundingSphere();
       c.root.add(mesh);
     }
-    // Edges: solids' / faces' in one batch, paths' (drawn brighter) in another.
-    for (const paths of [false, true]) {
-      const list = members.filter((v) => (v.body.kind === "path") === paths);
+    // Edges: solids', flat faces' (blue) and paths' (drawn brighter), a batch each.
+    for (const kind of ["solid", "face", "path"] as const) {
+      const list = members.filter((v) => (v.body.kind === "path" || v.body.kind === "face" ? v.body.kind : "solid") === kind);
       let ne = 0;
       for (const v of list) ne += v.edgePos.length;
       if (ne < 6) continue;
@@ -1035,7 +1061,7 @@ export class Viewport {
       }
       const eg = new LineSegmentsGeometry();
       eg.setPositions(ep);
-      const lines = new LineSegments2(eg, paths ? this.mats.pathEdge : this.mats.edge);
+      const lines = new LineSegments2(eg, kind === "path" ? this.mats.pathEdge : kind === "face" ? this.mats.regionEdge : this.mats.edge);
       lines.raycast = () => {};
       c.root.add(lines);
     }
@@ -1101,10 +1127,10 @@ export class Viewport {
 
   /** A look's material's opacity: its own times the Settings' (flat faces: times their usual see-through). */
   private applyLookOpacity({ mat, kind, op }: { mat: THREE.MeshStandardMaterial; kind: "solid" | "face"; op: number }): void {
-    const opacity = (kind === "face" ? 0.87 : this.xray ? this.xrayOpacity : this.solidOpacity) * op;
+    const opacity = (kind === "face" ? REGION_OPACITY : this.xray ? this.xrayOpacity : this.solidOpacity) * op;
     mat.transparent = kind === "face" || this.xray || opacity < 1;
     mat.opacity = opacity;
-    if (kind === "solid") mat.depthWrite = !this.xray;
+    mat.depthWrite = kind === "solid" && !this.xray;
     mat.needsUpdate = true;
   }
 
