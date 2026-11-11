@@ -1318,8 +1318,8 @@ export class SketchTool implements Tool {
 
   /**
    * Cursor point in the plane: the sketch's own points, then the model's points, else the plane (grid when snapping).
-   * Free as the Snap setting says (Settings → Snap: Auto — with Ctrl; Hold Ctrl — without it): no points, grid, level /
-   * upright lock or lining up — but the outline's start still catches, so it can always be closed.
+   * Free as the Snap setting says (Settings → Snap: Auto — with Ctrl; Hold Ctrl — without it): no points, grid or lining
+   * up — but the outline's start still catches, so it can always be closed; the level / upright lock stays (Auto: Ctrl frees it).
    */
   private pointAt(e: PointerEvent): P | null {
     const vp = this.host.viewport;
@@ -1349,10 +1349,11 @@ export class SketchTool implements Tool {
     let p = this.local(q);
     const step = this.host.snapStep(e);
     if (step > 0) p = [Math.round(p[0] / step) * step, Math.round(p[1] / step) * step];
-    if (free) return p;
-    // Lines lock horizontal / vertical (in the plane) near those directions.
+    // Lines — and an arc's end, picked after its start — lock horizontal / vertical (in the plane) near those directions:
+    // with snapping off too (Hold Ctrl: no Ctrl needed); with Auto snap, Ctrl frees it.
     const from = this.cur;
-    if (from && this.mode === "line") {
+    const locks = !(vp.autoSnap && e.ctrlKey) && (this.mode === "line" || (this.mode === "arc" && !this.path.length && !this.arcEnd));
+    if (from && locks) {
       const d = sub(p, from), l = len(d);
       if (l > 1e-9 && Math.abs(d[1]) / l < LOCK_SIN) {
         p = [p[0], from[1]];
@@ -1362,6 +1363,7 @@ export class SketchTool implements Tool {
         this.lock = 1;
       }
     }
+    if (free) return p;
     // Lined up with a sketch point — same X or same Y in the plane: onto that line (e.g. an arc's end
     // straight above the line it bends on from: a half circle).
     const tol = ALIGN_PX * vp.worldPerPixel(this.world(p));

@@ -1606,6 +1606,24 @@ export function extrudeFace(shape: Shape, faceId: number, distance: number): Sol
   return basicFaceExtrusion(moved, along(-distance)).simplify();
 }
 
+/**
+ * A flat face pushed / pulled straight out along its normal, its profile growing / shrinking evenly to `endScale`
+ * (1 = as drawn, a plain prism) at the far end, about the face's centre: a circle → a cone with a flat top, a square →
+ * a flat-topped pyramid; holes taper with it.
+ */
+export function extrudeFaceScaled(shape: Shape, faceId: number, distance: number, endScale: number): Solid {
+  if (Math.abs(endScale - 1) < 1e-9) return extrudeFace(shape, faceId, distance);
+  let face = findFace(shape, faceId);
+  if (!face) throw new Error("face not found");
+  if (face.geomType !== "PLANE") throw new Error("Scale profile: only a flat face");
+  if (!(endScale > 0)) throw new Error("Scale profile must be more than 0%");
+  if (Math.abs(distance) < 1e-9) throw new Error("distance must not be 0");
+  const n = norm3(face.normalAt().toTuple() as V3);
+  if (isFaceShape(shape)) face = tinyEdgesDropped(face, n);
+  const c = face.center.toTuple() as V3;
+  return twistedSweep(face.clone().outerWire(), face.clone().innerWires(), c, [c[0] + n[0] * distance, c[1] + n[1] * distance, c[2] + n[2] * distance], 0, endScale);
+}
+
 // ---------------------------------------------------------------- topology lookup
 
 export function findFace(shape: Shape, faceId: number): Face | undefined {
@@ -3529,14 +3547,30 @@ export function isEdgeLoop(shape: Shape, edgeIds: number[]): boolean {
 
 /** A flat face filling a closed loop of a shape's edges (see isEdgeLoop); throws if the loop isn't flat. */
 export function edgeLoopFace(shape: Shape, edgeIds: number[]): Face {
-  const edges = chainEdges(shape.edges.filter((e) => edgeIds.includes(e.hashCode))).map((e) => e.clone());
+  // Each edge made again from its curve where it is (a solid's edges can carry a placement — e.g. a part moved — which
+  // Offset would apply a second time, the grown face landing off its plane), keeping its kind (a circle stays one).
+  const edges = chainEdges(shape.edges.filter((e) => edgeIds.includes(e.hashCode))).map((e) => {
+    const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0);
+    const mk = new oc.BRepBuilderAPI_MakeEdge(c.returnValue as never, c.First as never, c.Last as never);
+    try {
+      const ne = mk.Edge();
+      return cast(e.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? ne.Reversed() : ne) as Edge;
+    } finally {
+      mk.delete();
+    }
+  });
+  const notFlat = "Duplicate: the loop isn't flat — only a flat loop becomes a face";
   let face: Face;
   try {
-    face = makeFace(assembleWire(edges));
+    const wire = assembleWire(edges);
+    face = makeFace(wire);
+    // A hole's edges run the other way round: its face would shrink when Offset grows it — then the wire turned round
+    const area = measureArea(face), grown = measureArea(offsetPlanar(face, 1e-3 * Math.sqrt(area), true));
+    if (grown < area) face = makeFace(cast(wire.wrapped.Reversed()) as Wire);
   } catch {
-    throw new Error("Duplicate: the loop isn't flat — only a flat loop becomes a face");
+    throw new Error(notFlat);
   }
-  if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error("Duplicate: the loop isn't flat — only a flat loop becomes a face");
+  if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error(notFlat);
   return face;
 }
 

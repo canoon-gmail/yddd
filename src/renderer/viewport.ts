@@ -15,7 +15,7 @@ import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
 import { ICONS } from "./icons";
-import { tessellate, pointCenter, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, needsBackgroundMesh, standInTessellation, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
+import { tessellate, circleOf, pointCenter, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, needsBackgroundMesh, standInTessellation, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 import { imageUrl } from "./picture";
 
 /** A dimension on screen: a panel's measurement may say more than its length ("2 squares · 83.5"). */
@@ -80,6 +80,19 @@ interface BodyView {
   snaps?: { pts: Float64Array; kinds: Uint8Array; inner: Uint8Array; curved: Uint8Array; proj: Float32Array | null; projStamp: number };
   /** Its straight edges' ends (exact B-rep, 6 numbers an edge): where a guide crosses one snaps (see guideCrossings). */
   lines?: Float64Array;
+  /** Its circles and arcs (exact B-rep): where a guide crosses one snaps too (see arcsOf). */
+  arcs?: Arc[];
+}
+
+/** A circle edge, or an arc of one: centre, unit normal, radius; `u` (to its start) and `w` = normal × u span its
+ *  plane; `sweep`: the angle it runs from `u` toward `w` (negative: the other way; 2π: a whole circle). */
+interface Arc {
+  c: THREE.Vector3;
+  n: THREE.Vector3;
+  r: number;
+  u: THREE.Vector3;
+  w: THREE.Vector3;
+  sweep: number;
 }
 
 /** Object snap kinds, in priority order. */
@@ -1563,9 +1576,37 @@ export class Viewport {
     return (v.lines = Float64Array.from(out));
   }
 
+  /** A body's circles and arcs, worked out once (see BodyView.arcs). */
+  private arcsOf(v: BodyView): Arc[] {
+    if (v.arcs) return v.arcs;
+    const out: Arc[] = [];
+    if (v.body.kind !== "mesh")
+      for (const ed of v.body.shape.edges) {
+        if (ed.geomType !== "CIRCLE") continue;
+        try {
+          const ci = circleOf(v.body.shape as Shape, ed.hashCode);
+          if (!ci) continue;
+          const c = new THREE.Vector3(...ci.center), n = new THREE.Vector3(...ci.normal).normalize();
+          const S = new THREE.Vector3(...ed.startPoint.toTuple()), E = new THREE.Vector3(...ed.endPoint.toTuple()), M = new THREE.Vector3(...ed.pointAt(0.5).toTuple());
+          const u = S.clone().sub(c).normalize(), w = n.clone().cross(u);
+          const ang = (p: THREE.Vector3) => {
+            const q = p.clone().sub(c), a = Math.atan2(q.dot(w), q.dot(u));
+            return a < 0 ? a + 2 * Math.PI : a;
+          };
+          const whole = S.distanceTo(E) < 1e-7 * Math.max(1, ci.radius);
+          // (it runs from its start through its middle to its end: toward w if the middle comes before the end that way)
+          const aE = ang(E), aM = ang(M);
+          out.push({ c, n, r: ci.radius, u, w, sweep: whole ? 2 * Math.PI : aM < aE ? aE : aE - 2 * Math.PI });
+        } catch {
+          // (a broken edge: left out)
+        }
+      }
+    return (v.arcs = out);
+  }
+
   /**
-   * Where guide lines cross each other, a world X / Y / Z axis line or one of `views`' straight edges (snap points,
-   * like corners — e.g. to divide a face exactly where a guide meets its edge).
+   * Where guide lines cross each other, a world X / Y / Z axis line or one of `views`' straight edges, circles or arcs
+   * (snap points, like corners — e.g. to divide a face exactly where a guide meets its edge).
    */
   private guideCrossings(views: BodyView[] = []): THREE.Vector3[] {
     const lines = this.guides
@@ -1598,6 +1639,38 @@ export class Viewport {
         if (pA.distanceTo(pB) <= tol) out.push(pA);
       }
     }
+    // Guides across circles / arcs: in the circle's plane, where the line meets it (two points, one touching); through
+    // the plane, the one point there if it's on the circle
+    if (lines.length)
+      for (const v of views)
+        for (const a of this.arcsOf(v))
+          for (const L of lines) {
+            const tol = 1e-6 * Math.max(1, L.len, a.r);
+            const f = L.o.clone().sub(a.c), dn = L.dir.dot(a.n), ss: number[] = [];
+            if (Math.abs(dn) < 1e-9) {
+              if (Math.abs(f.dot(a.n)) > tol) continue;
+              const bq = f.dot(L.dir), disc = bq * bq - (f.lengthSq() - a.r * a.r);
+              if (disc < -tol * a.r) continue;
+              const root = Math.sqrt(Math.max(0, disc));
+              ss.push(-bq - root);
+              if (root > 1e-12) ss.push(-bq + root);
+            } else {
+              const t = -f.dot(a.n) / dn;
+              if (Math.abs(f.clone().addScaledVector(L.dir, t).length() - a.r) <= tol) ss.push(t);
+            }
+            for (const t of ss) {
+              if (t < -tol || t > L.len + tol) continue;
+              const p = L.o.clone().addScaledVector(L.dir, t);
+              if (Math.abs(a.sweep) < 2 * Math.PI - 1e-9) {
+                const q = p.clone().sub(a.c);
+                let ang = Math.atan2(q.dot(a.w), q.dot(a.u));
+                if (a.sweep > 0 ? ang < -1e-9 : ang > 1e-9) ang += a.sweep > 0 ? 2 * Math.PI : -2 * Math.PI;
+                const eps = 1e-7;
+                if (a.sweep > 0 ? ang > a.sweep + eps : ang < a.sweep - eps) continue;
+              }
+              out.push(p);
+            }
+          }
     return out;
   }
 

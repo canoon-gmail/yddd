@@ -62,6 +62,7 @@ import {
   boundingSize,
   findFace,
   extrudeFace,
+  extrudeFaceScaled,
   makeSphereAt,
   seamEdgeIds,
   smoothSurfaceFaces,
@@ -234,6 +235,8 @@ const PASTE_BUSY_BYTES = 300_000;
 const SLOW_PREVIEW_MS = 60;
 /** A Push/Pull's exact preview slower than this (a letter cut into a gear: ~1.2 s): typed values get the instant drag preview, the exact result on Apply. */
 const SLOW_PUSHPULL_MS = 250;
+/** Keys that apply an open Push/Pull, then start that command (a drag, then G: the result moved). */
+const PUSHPULL_THEN = ["xf.move", "xf.moveFrom", "xf.rotate", "xf.rotateFrom", "xf.scale"];
 
 
 
@@ -2124,14 +2127,23 @@ export class App implements ToolHost {
   }
 
   /** A follow-on key (OpSpec.then): the panel applied — or, nothing changed in it, closed — then `cmd` on the result. */
+  /** The bodies the last applied op selected (or would have, outside Solid mode). */
+  private opApplied: number[] = [];
+
   private async applyThen(cmd: string): Promise<void> {
     const op = this.op;
     if (!op) return;
     const { values } = this.opValues();
     if (op.spec.fields.every((f) => values[f.key] === f.value)) this.cancelOp();
     else {
+      this.opApplied = [];
       await this.applyOpWhenReady();
       if (this.op === op) return; // (not applied: its error is in the panel)
+      // (Face mode: the selection went on Apply — the solids it made / changed moved, rotated…)
+      if (!this.selection.length && this.opApplied.length) {
+        this.setMode("body");
+        this.setSelection(this.opApplied.map((id) => ({ kind: "body", body: id, id: 0 })));
+      }
     }
     this.run(cmd);
   }
@@ -2165,6 +2177,7 @@ export class App implements ToolHost {
     }
     this.closeOpPanel();
     const { select, solidMode, then } = done;
+    this.opApplied = select;
     if (solidMode) this.setMode("body");
     this.setSelection(this.mode === "body" ? select.map((id) => ({ kind: "body", body: id, id: 0 })) : []);
     if (then) return then();
@@ -2264,25 +2277,31 @@ export class App implements ToolHost {
         title: "Push / Pull → new solid",
         panelOnTab: true,
         label: "Extrude face",
-        fields: [{ key: "d", label: "Distance (mm)", value: 0.2, step: 1 }],
-        compute: ({ d }) => {
+        fields: [
+          { key: "d", label: "Distance (mm)", value: 0.2, step: 1 },
+          // (the far end's size: under 100% narrows — a circle → a cone with a flat top; over 100% widens)
+          { key: "scale", label: "Scale profile (%)", value: 100, step: 5, min: 1 },
+        ],
+        compute: ({ d, scale }) => {
+          const plain = Math.abs(scale - 100) < 1e-9;
           // (the instant preview: its prism drawn from its display mesh — the exact solid, a scanned / offset outline's
-          // slow to draw, only on Apply)
-          const instant = !!axis && this.dragPushPull(new Map(), d, new Map([[bodyId, axis.normal]]));
-          const solid = instant ? null : extrudeFace(body.shape, faceId, d);
+          // slow to draw, only on Apply; a scaled profile is always the exact solid)
+          const instant = plain && !!axis && this.dragPushPull(new Map(), d, new Map([[bodyId, axis.normal]]));
+          const solid = instant ? null : extrudeFaceScaled(body.shape, faceId, d, scale / 100);
           return {
             ghost: solid ? new Map([[bodyId, solid]]) : new Map(),
             drawn: instant,
             commit: () => {
-              const nb = extrudedFrom(this.doc.makeBody(solid ?? extrudeFace(body.shape, faceId, d), "Solid"), body);
+              const nb = extrudedFrom(this.doc.makeBody(solid ?? extrudeFaceScaled(body.shape, faceId, d, scale / 100), "Solid"), body);
               this.doc.commit(this.doc.bodies.map((b) => (b.id === bodyId ? nb : b)), "Extrude face");
               return { select: [nb.id], solidMode: true };
             },
           };
         },
         remember: () => {},
-        fastDrag: ({ d }) => !!axis && this.dragPushPull(new Map(), d, new Map([[bodyId, axis.normal]])),
+        fastDrag: ({ d, scale }) => Math.abs(scale - 100) < 1e-9 && !!axis && this.dragPushPull(new Map(), d, new Map([[bodyId, axis.normal]])),
         drag,
+        then: PUSHPULL_THEN, // G / Shift+G / R / Shift+R / S: applied, then that (as Scale)
       });
       return;
     }
@@ -2293,6 +2312,7 @@ export class App implements ToolHost {
     const spec: OpSpec = {
       title: "Push / Pull",
       panelOnTab: true,
+      then: PUSHPULL_THEN, // G / Shift+G / R / Shift+R / S: applied, then that (as Scale)
       label: "Push/Pull",
       fields: [
         { key: "d", label: "Distance (mm)", value: 0.2, step: 1 },
@@ -2546,6 +2566,7 @@ export class App implements ToolHost {
     let exactMs = 0; // (as in opPushPull)
     this.startOp({
       title: `Push / Pull (${n} faces)`,
+      then: PUSHPULL_THEN, // G / Shift+G / R / Shift+R / S: applied, then that (as Scale)
       panelOnTab: true,
       label: "Push/Pull",
       fields: [{ key: "d", label: "Distance (mm)", value: 0.2, step: 1 }],
@@ -8080,7 +8101,7 @@ export class App implements ToolHost {
         ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). File → Settings → Snap: Hold Ctrl turns it off: then hold Ctrl to snap"]
         : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (File → Settings → Snap: Auto to snap without Ctrl)"],
       ["Shift+B", "Bump: select a flat face drawn on a solid's flat face (a window on a wall) — Length and Out (pushed out, joined to the solid) or In (pushed in, cut out of it); the face is used up · with the dialog open, click the next face: this one applied, the same on that one"],
-      ["P / Space", "Push/Pull: flat face → new solid; solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
+      ["P / Space", "Push/Pull: flat face → new solid (Scale profile %: the far end smaller / larger — a circle → a cone with a flat top); solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["Dot · G", "Pull to a point: select a flat circle, rectangle or polygon face (or its face object) — a dot shows in its middle; click the dot, G, drag or type the height: a cone / pyramid (out of a solid: added to it; a minus height into it: cut out of it) · Top size %: a flat top instead of a point"],
       ["Tip dot · F", "Round tip: a selected solid shows a dot on each sharp tip (a cone's point, a pyramid's — not box corners); click the dot, F, the radius (mm): the point becomes a ball — on a cone it blends smoothly into the side, on a pyramid into its edges (a slight crease on the flat sides); the panel says the largest radius the tip takes"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list); edges it can't do at that size are left sharp — the panel says how many (orange), Apply keeps the rest, and a button sets the largest size that does them all"],
@@ -8895,7 +8916,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, extrudeFaceScaled, edgeLoopFace, offsetFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

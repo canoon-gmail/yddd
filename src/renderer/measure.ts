@@ -76,6 +76,10 @@ export class MeasureTool implements Tool {
   private last: PointerEvent | null = null;
   /** World axis (0 = X, 1 = Y, 2 = Z) the point under the cursor is locked onto, or -1. */
   private axis = -1;
+  /** Pressed on a lit edge / circle: a drag from here places its dimension (as Tab), no drag is a click. */
+  private press: { x: number; y: number; edge: MeasureTool["hoverEdge"]; circle: MeasureTool["hoverCircle"] } | null = null;
+  /** The dimension being placed came from such a drag: letting go places it. */
+  private dragged = false;
 
   constructor(
     private host: ToolHost,
@@ -108,6 +112,18 @@ export class MeasureTool implements Tool {
 
   move(e: PointerEvent): void {
     this.last = e;
+    if (this.press) {
+      if (!(e.buttons & 1)) this.press = null;
+      else if (Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) < 5) return;
+      else {
+        // (the edge lit when pressed, whatever is under the cursor now)
+        ({ edge: this.hoverEdge, circle: this.hoverCircle } = this.press);
+        this.press = null;
+        this.startDimension(true);
+        this.dragged = !!this.placing;
+        return;
+      }
+    }
     if (this.placing) return this.placeAt(e);
     const vp = this.host.viewport;
     // Points first (corner > centre > midpoint), always snapping.
@@ -179,11 +195,14 @@ export class MeasureTool implements Tool {
     this.hoverCircle = c ? { shape: shape!, edgeId: edgeId!, body, ...c } : null;
   }
 
-  /** Tab: start placing a dimension between the first two clicked points, or for the straight edge / circle under the cursor. */
-  private startDimension(): void {
-    this.placingPts = this.pts.length >= 2;
+  /**
+   * Tab: start placing a dimension between the first two clicked points, or for the straight edge / circle under the
+   * cursor (`onEdge`: that one, the clicked points left alone — a drag from a lit edge).
+   */
+  private startDimension(onEdge = false): void {
+    this.placingPts = !onEdge && this.pts.length >= 2;
     this.placingCircle = null;
-    const [a, b, c] = this.pts;
+    const [a, b, c] = onEdge ? [] : this.pts;
     if (c && a.clone().sub(b).cross(c.clone().sub(b)).lengthSq() > 1e-12) {
       const r = Math.min(a.distanceTo(b), c.distanceTo(b)) * 0.3;
       this.placing = { kind: "angle", a: a.toArray() as V3, b: b.toArray() as V3, c: c.toArray() as V3, o: [0, 0, 0], r };
@@ -209,7 +228,7 @@ export class MeasureTool implements Tool {
     const how = this.placingCircle ? "Radius: move the mouse round the circle to choose where it points"
       : this.placing.kind === "angle" ? "Angle: move the mouse to set the size of the arc"
       : "Dimension: move the mouse to set how far it stands off the edge";
-    this.host.hint(`${how} · click / Tab / Enter: place · Esc: cancel`);
+    this.host.hint(`${how} · ${onEdge ? "let go" : "click / Tab / Enter"}: place · Esc: cancel`);
   }
 
   /**
@@ -285,6 +304,25 @@ export class MeasureTool implements Tool {
   down(e: PointerEvent): void {
     if (e.button !== 0) return;
     if (this.placing) return this.placeDimension();
+    if (this.hoverEdge || this.hoverCircle) {
+      this.press = { x: e.clientX, y: e.clientY, edge: this.hoverEdge, circle: this.hoverCircle };
+      return; // (a click or a drag: see up / move)
+    }
+    this.click();
+  }
+
+  up(e: PointerEvent): void {
+    if (this.dragged) {
+      this.dragged = false;
+      if (this.placing) this.placeDimension();
+    } else if (this.press) {
+      this.press = null;
+      this.click();
+    }
+  }
+
+  /** A click: the point under the cursor is the next one of the length / angle. */
+  private click(): void {
     if (!this.cursor) return this.host.hint("Measure: click on a point, edge or face");
     if (this.pts.length >= 3) this.pts = [];
     // A second click on the same point would measure nothing.
@@ -390,7 +428,7 @@ export class MeasureTool implements Tool {
       "Click a third point for the angle at the second · Esc: new measurement",
       "Click to start a new measurement · Esc: clear",
     ][n];
-    this.host.hint(`Measure: ${tip} · hover anything to see its sizes · Tab: dimension (${n >= 3 ? "of this angle" : n === 2 ? "of this length" : "of the edge, or radius of the circle / arc, under the cursor"})`);
+    this.host.hint(`Measure: ${tip} · hover anything to see its sizes · drag a lit edge / circle: its dimension · Tab: dimension (${n >= 3 ? "of this angle" : n === 2 ? "of this length" : "of the edge, or radius of the circle / arc, under the cursor"})`);
     this.panel.innerHTML = `<h4>Measure</h4>${rows || '<div class="muted intro">Hover a point, edge or face for its sizes. Click points to measure a length (2 clicks) or an angle (3 clicks).</div>'}
       <div class="tip">${tip}</div>
       <div class="op-buttons"><button type="button" class="btn" data-act="clear-dims" ${this.dims.count() ? "" : "disabled"} title="Remove every dimension (Ctrl+Z brings them back)">Delete all dimensions</button><button type="button" class="btn" data-act="cancel">Done</button></div>`;
