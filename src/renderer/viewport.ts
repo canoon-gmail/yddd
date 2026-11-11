@@ -105,7 +105,7 @@ export interface GizmoFrame {
   toAxis?: number;
 }
 
-export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge";
+export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge" | "tangent";
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
 const SNAP_PX = 10;
 /** While a move is dragged with snapping: the marks of the solid under the cursor shown within this many px of it. */
@@ -2364,7 +2364,9 @@ export class Viewport {
       const geo = (arr: number[]) => new LineSegmentsGeometry().setPositions(arr);
       const cross = [-1, -1, 0, 1, 1, 0, -1, 1, 0, 1, -1, 0];
       const diamond = [0, -1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, -1, 0, 0, -1, 0, 0, 0, -1, 0];
-      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)), axis: mk(geo(cross)), edge: mk(geo(diamond)) };
+      // (tangent: a circle with a line along its top — where a line just touches a circle)
+      const tan = [...circ.map((v, i) => (i % 3 === 1 ? v * 0.8 - 0.2 : v * 0.8)), -1, 0.6, 0, 1, 0.6, 0];
+      this.snapMarker = { vertex: mk(geo(sq)), center: mk(geo(circ)), midpoint: mk(geo(tri)), axis: mk(geo(cross)), edge: mk(geo(diamond)), tangent: mk(geo(tan)) };
       for (const m of Object.values(this.snapMarker)) {
         m.visible = false;
         this.overlayScene.add(m);

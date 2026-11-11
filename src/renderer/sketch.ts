@@ -1,7 +1,7 @@
 /**
  * Sketch (K): draw flat outlines on a plane — a selected flat face, or the ground — with the view
  * turned square to it (orbit off; pan and zoom still work) and a small 3D view in the corner.
- * L lines, A arcs (tangent to the previous segment; the first one: its end point, then a point it
+ * L lines (a line's end catches where it just touches a circle / arc), A arcs (tangent to the previous segment; the first one: its end point, then a point it
  * passes through — a typed number fixes the arc's radius), R rectangles, C circles. Points snap to the model's corners / midpoints / centres
  * and to the sketch's own points; a line near horizontal / vertical (in the plane) locks onto it;
  * typed numbers + Enter give exact sizes. Clicking the start point closes an outline; Enter or a
@@ -22,7 +22,7 @@
 import { PICTURE_TYPES } from "./picture";
 import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
-import { flatFaceBoolean, joinFlatFaces, sketchFaces, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
+import { flatFaceBoolean, joinFlatFaces, sketchFaces, sketchOfShape, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
 import { circleSize, num, parseLen, typedUnit } from "./format";
 import { ICONS } from "./icons";
 import { scanGrid, type GP, type ScanOptions } from "./scan";
@@ -258,6 +258,20 @@ function cornerArc(a: P, p: P, b: P, r: number): { t: number; arc: Extract<Seg, 
   if (th < 1e-6 || th > Math.PI - 1e-6) return null;
   const t = r / Math.tan(th / 2), bis = norm(add(u1, u2)), c = add(p, mul(bis, r / Math.sin(th / 2)));
   return { t, arc: { kind: "arc", a: add(p, mul(u1, t)), m: sub(c, mul(bis, r)), b: add(p, mul(u2, t)) } };
+}
+
+/**
+ * Round corner's bridge between two circles (centres c1 / c2, radii r1 / r2): the centre p of the circle of radius
+ * r touching both from outside, on `side` (+1: left of c1 → c2). { min } if r can't reach both (the smallest that does);
+ * null if one circle is inside the other (or they share a centre).
+ */
+function bridgeCircle(c1: P, r1: number, c2: P, r2: number, r: number, side: number): { p: P } | { min: number } | null {
+  const d = dist(c1, c2);
+  if (d < 1e-9 || d <= Math.abs(r1 - r2) + 1e-9) return null;
+  const a = r1 + r, b = r2 + r;
+  if (d >= a + b - 1e-9) return { min: (d - r1 - r2) / 2 };
+  const x = (a * a - b * b + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a * a - x * x)), u = norm(sub(c2, c1));
+  return { p: add(add(c1, mul(u, x)), mul([-u[1], u[0]], side * h)) };
 }
 
 /** The corners of an outline (closed) / a path that Round corner can round: j = between segs[j] and the next, both straight, not in line. */
@@ -723,7 +737,11 @@ export class SketchTool implements Tool {
   private anchor: P | null = null;
   /** Round corner: the corners picked (rounded at the box's Done); the ones under the cursor (one, or all of an outline / path), and where the cursor is. */
   private roundPicks: { item: Item; j: number }[] = [];
-  private roundHover: { item: Item; at: number[]; q: P } | null = null;
+  private roundHover: { item: Item; at: number[]; q: P; circ?: { c: P; r: number } } | null = null;
+  /** Round corner's bridge: the circles (or arcs of outlines: their circles) picked, at most 2; the side it goes on (+1: left of the first → the second). */
+  private bridge: { item: Item; c: P; r: number }[] = [];
+  private bridgeSide = 1;
+  private bridgeCache: { key: string; res: { loops: Loop[]; members: number[] } | { err: string } } | null = null;
   /** Round corner: the radius handle — under the cursor, being dragged. */
   private roundGrip = { hover: false, drag: false };
   /** Radius typed for the next arc (the mouse then picks where it ends). */
@@ -731,6 +749,8 @@ export class SketchTool implements Tool {
   private cursor: P | null = null;
   /** Line lock: 0 = horizontal, 1 = vertical, -1 = none. */
   private lock = -1;
+  /** The cursor is on a point where the line just touches a circle / arc (see tangentPoints). */
+  private touching = false;
   /** The sketch points the cursor is lined up with (same X: k = 0, same Y: k = 1), drawn as dashed guides. */
   private aligned: { ref: P; k: 0 | 1 }[] = [];
   /** The last cursor point was placed free (Auto snap + Ctrl, or Hold Ctrl without it): no arc snapping to a quarter / half turn either. */
@@ -1304,6 +1324,27 @@ export class SketchTool implements Tool {
     return pts;
   }
 
+  /** Where a line from `from` just touches one of the sketch's circles / arcs (two per circle it's outside of; on an arc: those on it). */
+  private tangentPoints(from: P): P[] {
+    const out: P[] = [];
+    const curves: { c: P; r: number; k?: Extract<Curve, { kind: "arc" }> }[] = [];
+    for (const l of this.loops) {
+      if (l.kind === "circle") curves.push({ c: l.c, r: l.r });
+      else for (const g of l.segs) if (g.kind === "arc") { const k = arcGeom(g); if (k) curves.push({ c: k.c, r: k.r, k: { kind: "arc", ...k } }); }
+    }
+    for (const o of [...this.opens, this.path]) for (const g of o) if (g.kind === "arc") { const k = arcGeom(g); if (k) curves.push({ c: k.c, r: k.r, k: { kind: "arc", ...k } }); }
+    for (const { c, r, k } of curves) {
+      const d = dist(from, c);
+      if (d <= r * (1 + 1e-9)) continue;
+      const base = Math.atan2(from[1] - c[1], from[0] - c[0]), alpha = Math.acos(r / d);
+      for (const a of [base + alpha, base - alpha]) {
+        const p: P = [c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)];
+        if (!k || onArc(k, p)) out.push(p);
+      }
+    }
+    return out;
+  }
+
   /** Where the sketch's lines / arcs / circles cross each other. */
   private crossingPoints(): P[] {
     if (this.crossCache?.version !== this.version) {
@@ -1324,16 +1365,24 @@ export class SketchTool implements Tool {
   private pointAt(e: PointerEvent): P | null {
     const vp = this.host.viewport;
     this.lock = -1;
+    this.touching = false;
     this.aligned = [];
     const free = (this.free = !vp.snapping(e));
-    let best: { p: P; kind: "vertex" | "midpoint" | "center"; score: number } | null = null;
+    let best: { p: P; kind: "vertex" | "midpoint" | "center" | "tangent"; score: number } | null = null;
     for (const { p, kind } of free ? (this.first ? [{ p: this.first, kind: "vertex" as const }] : []) : this.ownPoints()) {
       const s = vp.toScreen(this.world(p));
       const d = Math.hypot(s.x - e.clientX, s.y - e.clientY);
       const score = d + (kind === "vertex" ? 0 : 4); // ends before middles / centres
       if (d <= SNAP_PX && (!best || score < best.score)) best = { p, kind, score };
     }
+    // A line's end where it just touches a circle / arc (tangent) — like the level lock, with snapping off too (Auto: Ctrl frees it)
+    if (this.mode === "line" && this.cur && !(vp.autoSnap && e.ctrlKey))
+      for (const p of this.tangentPoints(this.cur)) {
+        const s = vp.toScreen(this.world(p)), d = Math.hypot(s.x - e.clientX, s.y - e.clientY), score = d + 2;
+        if (d <= SNAP_PX && (!best || score < best.score)) best = { p, kind: "tangent", score };
+      }
     if (best) {
+      this.touching = best.kind === "tangent";
       vp.showSnapMarker({ point: this.world(best.p), kind: best.kind });
       return best.p;
     }
@@ -1495,6 +1544,8 @@ export class SketchTool implements Tool {
       if (this.roundGrip.drag) return this.roundGripTo(e);
       this.roundGrip.hover = this.roundGripAt(e);
       this.roundHover = this.roundGrip.hover ? null : this.roundAt(e);
+      const q = this.bridge.length === 2 ? this.planeAt(e) : null;
+      if (q) this.bridgeSide = this.sideOf(q);
       return this.update();
     }
     this.cursor = this.pointAt(e);
@@ -2001,7 +2052,7 @@ export class SketchTool implements Tool {
   }
 
   /** Round corner: the corner under the cursor (where two straight lines meet), else all the corners of the outline / path there. */
-  private roundAt(e: PointerEvent): { item: Item; at: number[]; q: P } | null {
+  private roundAt(e: PointerEvent): { item: Item; at: number[]; q: P; circ?: { c: P; r: number } } | null {
     const q = this.planeAt(e);
     if (!q) return null;
     const vp = this.host.viewport;
@@ -2015,6 +2066,23 @@ export class SketchTool implements Tool {
       }
     }
     if (best) return { item: best.item, at: [best.j], q };
+    // A circle, or an arc of an outline: picked for a bridge (its whole circle)
+    const tol = PICK_PX * vp.worldPerPixel(this.world(q));
+    let near: { item: Item; c: P; r: number; d: number } | null = null;
+    this.loops.forEach((l, i) => {
+      const curves = l.kind === "circle" ? [{ c: l.c, r: l.r, on: true }] : l.segs.flatMap((g) => {
+        const k = g.kind === "arc" ? arcGeom(g) : null;
+        return k ? [{ c: k.c, r: k.r, on: onArc({ kind: "arc", ...k }, q) }] : [];
+      });
+      for (const k of curves) {
+        const d = Math.abs(dist(q, k.c) - k.r);
+        if (k.on && d <= tol && (!near || d < near.d)) near = { item: { kind: "loop", i }, c: k.c, r: k.r, d };
+      }
+    });
+    if (near) {
+      const n = near as { item: Item; c: P; r: number };
+      return { item: n.item, at: [], q, circ: { c: n.c, r: n.r } };
+    }
     const it = this.itemAt(e);
     if (!it) return null;
     const { segs, closed } = this.segsOf(it), at = lineCorners(segs, closed);
@@ -2054,7 +2122,15 @@ export class SketchTool implements Tool {
   /** Round corner click: the corners under the cursor picked (all of them picked already: unpicked); the radius cut down if they don't take it. */
   private roundPick(): void {
     const h = this.roundHover;
-    if (!h) return this.host.hint("Round corner: click where two straight lines meet — or on an outline, for all its corners");
+    if (!h) return this.host.hint("Round corner: click where two straight lines meet — or on an outline, for all its corners — or two circles, for a bridge between them");
+    if (h.circ) {
+      const { c, r } = h.circ, i = this.bridge.findIndex((b) => sameItem(b.item, h.item) && same(b.c, c) && Math.abs(b.r - r) < 1e-9);
+      if (i >= 0) this.bridge.splice(i, 1);
+      else if (this.nested().some((g) => g.holes.includes(h.item.i))) return this.host.hint("Bridge: that circle is a hole — pick outlines (circles or arcs) on the outside");
+      else this.bridge = [...(this.bridge.length < 2 ? this.bridge : []), { item: h.item, c, r }];
+      if (this.bridge.length === 2) this.bridgeSide = this.sideOf(h.q);
+      return this.update();
+    }
     const picked = (j: number) => this.roundPicks.some((p) => sameItem(p.item, h.item) && p.j === j);
     if (h.at.every(picked)) this.roundPicks = this.roundPicks.filter((p) => !(sameItem(p.item, h.item) && h.at.includes(p.j)));
     else this.roundPicks.push(...h.at.filter((j) => !picked(j)).map((j) => ({ item: h.item, j })));
@@ -2065,7 +2141,8 @@ export class SketchTool implements Tool {
 
   /** The box's Done: the picked corners rounded (one undo step); Round corner stays on for more. */
   private roundDone(): void {
-    if (!this.roundPicks.length) return this.host.hint("Round corner: click the corners to round first");
+    if (!this.roundPicks.length && this.bridge.length === 2) return this.bridgeDone();
+    if (!this.roundPicks.length) return this.host.hint(this.bridge.length ? "Bridge: click a second circle" : "Round corner: click the corners to round first — or two circles, for a bridge");
     this.setRoundR(roundR);
     const out = this.roundGroups().map((g) => ({ g, res: roundCorners(this.segsOf(g.item).segs, g.at, roundR) }));
     if (out.some((x) => typeof x.res === "number")) return this.host.toast("Round corner: the radius doesn't fit", "error");
@@ -2077,8 +2154,78 @@ export class SketchTool implements Tool {
     }
     this.roundPicks = [];
     this.roundGrip = { hover: false, drag: false };
+    if (this.bridge.length === 2) return this.bridgeDone(false); // (both: one undo step each)
     this.roundHover = this.last && this.roundAt(this.last);
     this.update();
+  }
+
+  /** Which side of the line from the first picked circle's centre to the second's `q` is on (+1: left). */
+  private sideOf(q: P): number {
+    const [a, b] = this.bridge;
+    return !a || !b || cross(sub(b.c, a.c), sub(q, a.c)) >= 0 ? 1 : -1;
+  }
+
+  /**
+   * The bridge between the two picked circles, as it would be: the outlines they're on and everything joined to them
+   * (J), with the web between the circles (the triangle from each centre to the bridge circle's centre) added and the
+   * bridge circle cut out — one outline (or more, if it comes apart). `members`: the outlines it replaces.
+   */
+  private bridgeResult(): { loops: Loop[]; members: number[] } | { err: string } {
+    const [p1, p2] = this.bridge;
+    const key = `${this.version}:${p1.item.i}:${p1.c}:${p1.r}:${p2.item.i}:${p2.c}:${p2.r}:${this.bridgeSide}:${roundR}`;
+    if (this.bridgeCache?.key === key) return this.bridgeCache.res;
+    const res = ((): { loops: Loop[]; members: number[] } | { err: string } => {
+      const bc = bridgeCircle(p1.c, p1.r, p2.c, p2.r, roundR, this.bridgeSide);
+      if (!bc) return { err: "one circle is inside the other — nothing to bridge" };
+      if ("min" in bc) return { err: `R ${num(roundR)} can't reach both circles — at least R ${num(Math.ceil(bc.min * 1000 + 1e-6) / 1000)}` };
+      const groups = new Set([this.loops[p1.item.i].g, this.loops[p2.item.i].g].filter((g) => g !== undefined));
+      const members = this.loops.flatMap((l, i) => (i === p1.item.i || i === p2.item.i || (l.g !== undefined && groups.has(l.g)) ? [i] : []));
+      const n = this.frame.z.toArray() as V3;
+      try {
+        const face = (l: Loop) => sketchFaces(this.kernelLoop(l), [], n)[0];
+        const web: Loop = { kind: "path", segs: [{ kind: "line", a: p1.c, b: bc.p }, { kind: "line", a: bc.p, b: p2.c }, { kind: "line", a: p2.c, b: p1.c }] };
+        const joined = joinFlatFaces([...members.map((i) => face(this.loops[i])), face(web)], n);
+        const cut = face({ kind: "circle", c: bc.p, r: roundR });
+        const faces = joined.flatMap((f) => flatFaceBoolean("subtract", f as unknown as Shape, [cut as unknown as Shape]));
+        const loops = faces.flatMap((f) => sketchOfShape(f as unknown as Shape, "Bridge").loops.map((l) => this.fromKernelLoop(l)));
+        return loops.length ? { loops, members } : { err: "nothing left — the bridge circle covers it all" };
+      } catch (e) {
+        return { err: e instanceof Error ? e.message : String(e) };
+      }
+    })();
+    this.bridgeCache = { key, res };
+    return res;
+  }
+
+  /** Done with two circles picked: the bridge put in (one undo step); Round corner stays on for more. */
+  private bridgeDone(undoStep = true): void {
+    const res = this.bridgeResult();
+    if ("err" in res) return this.host.toast(`Bridge: ${res.err}`, "error");
+    if (undoStep) this.pushUndo(JSON.stringify(this.state()));
+    this.version++;
+    const drop = new Set(res.members);
+    this.loops = [...this.loops.filter((_, i) => !drop.has(i)), ...res.loops];
+    this.bridge = [];
+    this.selected = [];
+    this.hoverItem = null;
+    this.roundHover = this.last && this.roundAt(this.last);
+    this.host.hint(`Bridge R ${num(roundR)} added — pick more corners or circles`);
+    this.update();
+  }
+
+  /** An outline read back from the kernel (3D, on the plane) as the sketch's own. */
+  private fromKernelLoop(l: SketchLoop): Loop {
+    const p2 = (p: V3): P => this.local(new THREE.Vector3(...p));
+    if (l.kind === "circle") return { kind: "circle", c: p2(l.c), r: l.r };
+    return {
+      kind: "path",
+      segs: l.segs.map((g): Seg => {
+        if (g.kind === "line") return { kind: "line", a: p2(g.a), b: p2(g.b) };
+        if (g.kind === "arc") return { kind: "arc", a: p2(g.a), m: p2(g.m), b: p2(g.b) };
+        const pts = g.pts.map(p2);
+        return withCtrl({ kind: "spline", a: pts[0], b: pts[pts.length - 1], pts, w: g.w });
+      }),
+    };
   }
 
   /**
@@ -2586,7 +2733,7 @@ export class SketchTool implements Tool {
     }
     if (k === "Escape") {
       if (this.typed) this.typed = "";
-      else if (this.roundPicks.length) this.roundPicks = [];
+      else if (this.roundPicks.length || this.bridge.length) (this.roundPicks = []), (this.bridge = []);
       else if (this.picPts.length) this.picPts = [];
       else if (this.arcR) this.arcR = null;
       else if (this.first || this.arcEnd || this.anchor) {
@@ -2674,7 +2821,7 @@ export class SketchTool implements Tool {
     if (this.first && (mode === "select" || mode === "round" || mode === "scan" || (mode === "curve") !== (this.mode === "curve"))) this.endLines();
     if (mode === "picture" && this.mode !== "picture") this.prevMode = this.mode;
     // (corners picked to round: rounded on the way out, as lines being drawn end)
-    if (this.mode === "round" && mode !== "round" && this.roundPicks.length) this.roundDone();
+    if (this.mode === "round" && mode !== "round" && (this.roundPicks.length || this.bridge.length === 2)) this.roundDone();
     this.mode = mode;
     this.typed = "";
     this.arcEnd = null;
@@ -2683,6 +2830,7 @@ export class SketchTool implements Tool {
     this.hoverItem = null;
     this.roundHover = null;
     this.roundPicks = [];
+    this.bridge = [];
     this.roundGrip = { hover: false, drag: false };
     this.picPts = [];
     this.picDrag = null;
@@ -2930,9 +3078,10 @@ export class SketchTool implements Tool {
     if (this.mirroring) return this.endMirror(false);
     if (this.scaling) return this.endScale(false);
     if (this.moving) return this.endMove(false);
-    if (this.roundPicks.length) {
-      // (picked corners, not rounded yet: unpicked)
+    if (this.roundPicks.length || this.bridge.length) {
+      // (picked corners / circles, not rounded yet: unpicked)
       this.roundPicks = [];
+      this.bridge = [];
       return this.update();
     }
     const s = this.undoStack.pop();
@@ -3034,7 +3183,7 @@ export class SketchTool implements Tool {
   }
 
   private finish(): void {
-    if (this.roundPicks.length) this.roundDone();
+    if (this.roundPicks.length || this.bridge.length === 2) this.roundDone();
     const groups = this.nested();
     try {
       const n = this.frame.z.toArray() as V3;
@@ -3240,11 +3389,23 @@ export class SketchTool implements Tool {
       objs.push(new THREE.LineSegments(v.lines.clone(), line));
       return true;
     };
+    // (a bridge being previewed: the outlines it replaces left out — its result is drawn in their place)
+    const bp = this.mode === "round" && this.bridge.length === 2 ? this.bridgeResult() : null;
+    const dropped = new Set(bp && !("err" in bp) ? bp.members.map((i) => this.loops[i]) : []);
     const merged = new Set<number>();
-    for (const g of new Set(this.loops.map((l) => l.g).filter((x): x is number => x !== undefined))) if (groupObj(g, this.mats.fill, this.mats.line)) merged.add(g);
-    const shown = (l: Loop) => l.g === undefined || !merged.has(l.g);
+    for (const g of new Set(this.loops.filter((l) => !dropped.has(l)).map((l) => l.g).filter((x): x is number => x !== undefined))) if (groupObj(g, this.mats.fill, this.mats.line)) merged.add(g);
+    const shown = (l: Loop) => !dropped.has(l) && (l.g === undefined || !merged.has(l.g));
     // Closed outlines: filled (holes left open) and outlined.
     const nested = this.nested();
+    if (bp && !("err" in bp))
+      for (const l of bp.loops) {
+        const shape = new THREE.Shape(loopPolygon(l).map(([u, v]) => new THREE.Vector2(u, v)));
+        for (const { outer, holes } of nested) if (dropped.has(this.loops[outer])) for (const h of holes) shape.holes.push(new THREE.Path(loopPolygon(this.loops[h]).map(([u, v]) => new THREE.Vector2(u, v))));
+        const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), this.mats.fill);
+        mesh.matrixAutoUpdate = false;
+        mesh.matrix.makeBasis(this.frame.x, this.frame.y, this.frame.z).setPosition(this.frame.origin);
+        objs.push(mesh);
+      }
     for (const { outer, holes } of nested) {
       if (!shown(this.loops[outer])) continue;
       const shape = new THREE.Shape(loopPolygon(this.loops[outer]).map(([u, v]) => new THREE.Vector2(u, v)));
@@ -3343,7 +3504,7 @@ export class SketchTool implements Tool {
         lines([from, c], this.mats.rubber);
         hudAway = from;
         const d = sub(c, from);
-        hud = `${num(len(d))} mm${this.lock === 0 ? " · horizontal" : this.lock === 1 ? " · vertical" : ` · ${num((Math.atan2(d[1], d[0]) * 180) / Math.PI)}°`}`;
+        hud = `${num(len(d))} mm${this.lock === 0 ? " · horizontal" : this.lock === 1 ? " · vertical" : ` · ${num((Math.atan2(d[1], d[0]) * 180) / Math.PI)}°`}${this.touching ? " · touching the circle" : ""}`;
       } else if (from && this.mode === "arc") {
         const g = this.path.length || this.arcEnd ? this.arcAt(from, c) : null;
         const fixed = this.arcR ? ` · R ${num(this.arcR)} (typed)` : "";
@@ -3388,6 +3549,18 @@ export class SketchTool implements Tool {
         else lines([...pts, res[res.length - 1].b], this.mats.sel);
       }
       if (rh) for (const j of rh.at) dot(this.segsOf(rh.item).segs[j].b);
+      // Bridge: the picked circles lit, the circle under the cursor too; both picked: the outline it would make
+      const ring = (c: P, r: number) => lines(Array.from({ length: 72 }, (_, i) => [c[0] + r * Math.cos((i * TAU) / 72), c[1] + r * Math.sin((i * TAU) / 72)] as P), this.mats.sel, true);
+      const res = this.bridge.length === 2 ? this.bridgeResult() : null;
+      if (!res || "err" in res) for (const b of this.bridge) ring(b.c, b.r); // (a bridge shown: its outline instead)
+      if (rh?.circ && this.bridge.length < 2) ring(rh.circ.c, rh.circ.r);
+      if (res) {
+        if ("err" in res) hud = `Bridge: ${res.err}`;
+        else {
+          for (const l of res.loops) lines(l.kind === "circle" ? Array.from({ length: 72 }, (_, i) => [l.c[0] + l.r * Math.cos((i * TAU) / 72), l.c[1] + l.r * Math.sin((i * TAU) / 72)] as P) : l.segs.flatMap(segPoints), this.mats.sel, true);
+          hud = `Bridge R ${num(roundR)} mm · the cursor's side: which way · Enter / Done: put it in`;
+        }
+      }
       const gl = this.roundGripLine();
       if (gl) {
         const live = this.roundGrip.hover || this.roundGrip.drag, w = this.host.viewport.worldPerPixel(this.world(gl.at)) * (live ? 7 : 5);
@@ -3401,7 +3574,10 @@ export class SketchTool implements Tool {
           gripAt = gl.at;
         }
       }
-      if (!gripAt && rh) {
+      if (!gripAt && rh?.circ && this.bridge.length < 2) {
+        const picked = this.bridge.some((b) => sameItem(b.item, rh.item) && same(b.c, rh.circ!.c));
+        hud = picked ? "Unpick this circle" : this.bridge.length ? `Pick the second circle · bridge R ${num(roundR)} mm` : `Pick this circle · then a second one: a bridge between them, R ${num(roundR)} mm`;
+      } else if (!gripAt && rh && !rh.circ) {
         const n = this.roundPicks.length;
         hud = rh.at.every((j) => this.roundPicks.some((p) => sameItem(p.item, rh.item) && p.j === j)) ? `Unpick ${rh.at.length > 1 ? `${rh.at.length} corners` : "this corner"}` : `Pick ${rh.at.length > 1 ? `${rh.at.length} corners` : "this corner"} · R ${num(roundR)} mm${n ? ` · ${n} picked` : ""}`;
       }
@@ -3597,14 +3773,14 @@ export class SketchTool implements Tool {
         : this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps, catches on points")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
         : this.scaling ? `Scale / rotate: drag the red square (X), green (Y), the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} or the blue ring (rotate) — ${this.host.viewport.stepTip("round steps, 15°")} · Tab: exact %, ° · Enter / click elsewhere: apply · Esc / right click: cancel`
         : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps, catches on points")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · M: mirror · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
-      line: this.first ? "Click the next point · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
+      line: this.first ? "Click the next point (near a circle / arc: where the line just touches it) · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
         : this.path.length ? "Click the arc's end (it bends on from the last segment) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it · L: back to lines" : this.arcEnd ? "Click a point the arc passes through (near a half circle it snaps to one) · Enter / double-click: done (left open: a path) · type a radius + Enter to fix it" : "Click the arc's end point · type a radius + Enter to fix it",
       curve: this.first
         ? `Click the next control point — the curve is pulled towards each, starting and ending on the first and last · click the start point to close (after 2 more) · Enter / double-click: done (left open: a path) · Esc: drop it`
         : "Click where the curve starts · then click control points that pull it (later: Select it and drag its points)",
-      round: "Click the corners to round (where two straight lines meet; an outline / inside it: all its corners; again: unpick) · drag the yellow handle, or type the radius · Done (in the box, or Enter) rounds them — then pick more · Esc: unpick all",
+      round: "Click the corners to round (where two straight lines meet; an outline / inside it: all its corners; again: unpick) — or two circles (or arcs): a bridge between them, on the cursor's side, the bridge circle cut out of what they're joined to · drag the yellow handle, or type the radius · Done (in the box, or Enter) — then pick more · Esc: unpick all",
       scan: !this.pic ? "Scan: no picture — click the picture icon (bottom left) to load one"
         : this.scanFirst ? "Scan: click the area's other corner"
         : this.scanFound ? "Scan: blue = what was found — change the settings in the box to scan again · Enter / Add: into the sketch · drag again: another area · Esc: drop it"
@@ -3617,8 +3793,9 @@ export class SketchTool implements Tool {
     };
     const closed = this.loops.length, open = this.opens.length;
     // Round corner: its box — the radius (typed or dragged; too big: the largest that fits), the corners picked, Done.
-    const nPick = this.roundPicks.length;
-    const roundBox = this.mode === "round" ? `<div class="round-box"><b>Round corner</b><label>Radius <input type="number" data-round="r" min="0" step="0.5"> mm</label><span class="muted">${nPick ? `${nPick} corner${nPick > 1 ? "s" : ""}` : "pick corners"}</span><button type="button" class="btn primary" data-act="round-done" ${nPick ? "" : "disabled"} title="Round the picked corners (Enter) — then pick more">Done</button></div>` : "";
+    const nPick = this.roundPicks.length, nCirc = this.bridge.length;
+    const picks = [nPick ? `${nPick} corner${nPick > 1 ? "s" : ""}` : "", nCirc ? (nCirc === 2 ? "bridge" : "1 circle") : ""].filter(Boolean).join(" · ") || "pick corners or two circles";
+    const roundBox = this.mode === "round" ? `<div class="round-box"><b>Round corner</b><label>Radius <input type="number" data-round="r" min="0" step="0.5"> mm</label><span class="muted">${picks}</span><button type="button" class="btn primary" data-act="round-done" ${nPick || nCirc === 2 ? "" : "disabled"} title="Round the picked corners / put the bridge in (Enter) — then pick more">Done</button></div>` : "";
     // Scan: its box — what to make, Dark below (automatic until moved; Auto: back), Even out lighting, specks, Smooth, Add.
     // (no values in the HTML: a slider being dragged isn't replaced — they're set below)
     const scanBox = this.mode === "scan" ? `<div class="round-box scan-box"><b>Scan</b>
