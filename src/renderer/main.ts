@@ -5016,11 +5016,14 @@ export class App implements ToolHost {
     }
     this.endInteractions();
     this.setSelection([]); // (the face's selection colour would cover the sketch)
-    const tool = new SketchTool(this, frame, center, what, (faces, paths) => {
+    const tool: SketchTool = new SketchTool(this, frame, center, what, (faces, paths, guides) => {
       this.endTool();
-      if (!faces.length && !paths.length) return this.toast("Sketch closed — nothing drawn to keep");
+      const nextGuides = this.sketchGuides(tool, guides);
+      if (!faces.length && !paths.length && !nextGuides) return this.toast("Sketch closed — nothing drawn to keep");
       const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))];
-      this.doc.commit([...this.doc.bodies, ...made], "Sketch");
+      this.doc.commit([...this.doc.bodies, ...made], "Sketch", nextGuides ?? this.doc.guides);
+      if (nextGuides) this.showGuides();
+      if (!made.length) return this.toast(`Sketch closed — its guide lines kept (${guides.length})`);
       this.setMode("body");
       this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
       const n = (k: number, what: string) => (k ? `${k} ${what}${k > 1 ? "s" : ""}` : "");
@@ -5030,7 +5033,7 @@ export class App implements ToolHost {
       this.toast("Sketch cancelled");
     });
     tool.viewRadius = viewRadius * 1.25;
-    this.startTool(tool.start());
+    this.startTool(tool.loadGuides(this.doc.guides).start());
     if (curved) this.toast("Curved face: the sketch is on the flat plane touching it at that point — what you draw stays flat, it doesn't follow the curve");
   }
 
@@ -5083,10 +5086,12 @@ export class App implements ToolHost {
     const group = bodies.every((b) => b.group && b.group === bodies[0].group) ? bodies[0].group : undefined;
     this.endInteractions();
     this.setSelection([]);
-    const tool = new SketchTool(this, frame, box.getCenter(new THREE.Vector3()), names, (faces, paths) => {
+    const tool: SketchTool = new SketchTool(this, frame, box.getCenter(new THREE.Vector3()), names, (faces, paths, guides) => {
       this.endTool();
+      const nextGuides = this.sketchGuides(tool, guides);
       const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))].map((m) => (group ? { ...m, group } : m));
-      this.doc.commit([...this.doc.bodies.filter((b) => !ids.has(b.id)), ...made], "Edit in sketch");
+      this.doc.commit([...this.doc.bodies.filter((b) => !ids.has(b.id)), ...made], "Edit in sketch", nextGuides ?? this.doc.guides);
+      if (nextGuides) this.showGuides();
       this.setMode("body");
       this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
       const n = (k: number, what: string) => (k ? `${k} ${what}${k > 1 ? "s" : ""}` : "");
@@ -5096,7 +5101,28 @@ export class App implements ToolHost {
       this.toast(`Sketch cancelled — ${names} unchanged`);
     });
     tool.viewRadius = box.getBoundingSphere(new THREE.Sphere()).radius * 1.25; // (the outlines and a little round them)
-    this.startTool(tool.load(loops, opens).start());
+    this.startTool(tool.load(loops, opens).loadGuides(this.doc.guides).start());
+  }
+
+  /**
+   * The model's guide lines after a sketch: those it didn't take in, then its own (the ones on its plane — kept, moved,
+   * new; deleted ones gone) — null if nothing changed.
+   */
+  private sketchGuides(tool: SketchTool, guides: Guide[]): Guide[] | null {
+    const taken = new Set(tool.loadedGuides);
+    const before = this.doc.guides.filter((_, i) => taken.has(i));
+    // (each as an endless line: a point on it nearest the origin and its direction — a guide given back longer is the same)
+    const lineKey = (g: Guide) => {
+      const a = new THREE.Vector3(...g.a), d = new THREE.Vector3(...g.b).sub(a).normalize();
+      if (d.x < -1e-9 || (Math.abs(d.x) < 1e-9 && (d.y < -1e-9 || (Math.abs(d.y) < 1e-9 && d.z < 0)))) d.negate();
+      const p = a.clone().addScaledVector(d, -a.dot(d));
+      return [...p.toArray(), ...d.toArray()].map((v) => (Math.abs(v) < 1e-6 ? 0 : v).toFixed(4)).join();
+    };
+    const key = (gs: readonly Guide[]) => gs.map(lineKey).sort().join("|");
+    if (key(before) === key(guides)) return null;
+    // (one given back unchanged: the model's own, as it was — its group, its ends)
+    const old = new Map(before.map((g) => [lineKey(g), g]));
+    return [...this.doc.guides.filter((_, i) => !taken.has(i)), ...guides.map((g) => old.get(lineKey(g)) ?? g)];
   }
 
   /** Guide line tool; with an edge given (tests) it starts from that edge. */
@@ -5597,7 +5623,11 @@ export class App implements ToolHost {
     const r3 = (n: number) => +n.toFixed(3);
     // (after a drag: the cursor in the field it changed — the biggest, if a plane square moved two)
     const moved = (v: number[]) => v.reduce((m, x, k) => (Math.abs(x) > Math.abs(v[m]) ? k : m), 0);
-    const fields = (v: V3) => [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }].map((f, k) => ({ ...f, focus: k === moved(v) }));
+    // (after a drag along an arrow: just its field, along a plane square: those two — the rest behind More…; no drag: all three)
+    const fields = (v: V3) => {
+      const dragged = v.some((x) => Math.abs(x) > 1e-9);
+      return [{ label: "ΔX", value: r3(v[0]) }, { label: "ΔY", value: r3(v[1]) }, { label: "ΔZ", value: r3(v[2]) }].map((f, k) => ({ ...f, focus: k === moved(v), more: dragged && Math.abs(v[k]) < 1e-9 }));
+    };
     const same = (a: V3, b: number[]) => a.every((x, k) => Math.abs(x - b[k]) < 1e-9);
     if (this.xf.guide !== undefined) {
       // Just moved (dragged)? Prefilled with that move; OK replaces it (one undo step).

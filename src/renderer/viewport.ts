@@ -481,6 +481,7 @@ export class Viewport {
   private render(): void {
     this.flushBatches();
     this.sizeLabelArrows();
+    this.sizeGuideDashes();
     this.renderer.render(this.scene, this.camera);
     this.renderGlow();
     this.renderOverlay();
@@ -491,6 +492,24 @@ export class Viewport {
     if (key !== this.viewKey) {
       this.viewKey = key;
       this.onViewChange?.();
+    }
+  }
+
+  /**
+   * Guide lines' dashes the same size on screen at any zoom (8 px dash, 5 px gap — as in Sketch): sized where each
+   * guide comes nearest the point the view turns round.
+   */
+  private sizeGuideDashes(): void {
+    const t = this.controls.target, a = new THREE.Vector3(), b = new THREE.Vector3(), p = new THREE.Vector3();
+    for (const o of this.guideRoot.children) {
+      if (!(o instanceof THREE.Line) || !(o.material instanceof THREE.LineDashedMaterial)) continue;
+      const pos = o.geometry.getAttribute("position");
+      a.fromBufferAttribute(pos, 0);
+      b.fromBufferAttribute(pos, 1);
+      new THREE.Line3(a, b).closestPointToPoint(t, true, p);
+      const w = this.worldPerPixel(p);
+      o.material.dashSize = w * 8;
+      o.material.gapSize = w * 5;
     }
   }
 
@@ -1469,6 +1488,11 @@ export class Viewport {
             add(p1[0], p1[1], p1[2], 0);
             const m = ed.pointAt(0.5).toTuple();
             add(m[0], m[1], m[2], 2, 0, ed.geomType === "LINE" ? 0 : 1);
+            // An arc: its circle's centre too (a capsule / belt's ends, a rounded corner) — once for arcs sharing it
+            if (ed.geomType === "CIRCLE") {
+              const ci = circleOf(v.body.shape as Shape, ed.hashCode);
+              if (ci) add(ci.center[0], ci.center[1], ci.center[2], 1);
+            }
           }
           continue;
         } catch {
@@ -1969,6 +1993,7 @@ export class Viewport {
     this.guides = list.map((g) => ({ a: new THREE.Vector3(...g.a), b: new THREE.Vector3(...g.b) }));
     this.guides.forEach((g, i) => {
       if (this.hiddenGuides.has(i)) return;
+      // (dashes sized on screen each frame: see sizeGuideDashes)
       const mat = new THREE.LineDashedMaterial({ color: isSel(i) ? 0xffd166 : i === hover ? 0xffffff : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
       const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([g.a, g.b]), mat);
       l.computeLineDistances();

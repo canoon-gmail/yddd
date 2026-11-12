@@ -39,7 +39,13 @@ type P = [number, number];
 type Seg = { kind: "line"; a: P; b: P } | { kind: "arc"; a: P; m: P; b: P } | { kind: "spline"; a: P; b: P; pts: P[]; w: number[]; ctrl?: P[]; closed?: boolean };
 /** A closed outline; `g`: its join group (outlines joined with J become one face at Done). */
 type Loop = ({ kind: "path"; segs: Seg[] } | { kind: "circle"; c: P; r: number }) & { g?: number };
-type Mode = "select" | "line" | "arc" | "curve" | "rect" | "circle" | "round" | "picture" | "scan";
+type Mode = "select" | "line" | "arc" | "curve" | "rect" | "circle" | "round" | "guide" | "picture" | "scan";
+/** A guide line: through `a`, along unit `d` — as long as the view (to snap to; never a face). */
+type Guide = { a: P; d: P };
+/** How long a guide counts as, for where it crosses things (mm each way). */
+const GUIDE_REACH = 1e5;
+/** What Round corner would pick at the cursor: corners (`at`), a circle / arc (`circ`), or a straight side between two arcs (`side`). */
+type RoundHover = { item: Item; at: number[]; q: P; circ?: { c: P; r: number }; side?: { c1: P; r1: number; c2: P; r2: number; a: P; b: P } };
 /** A selectable part of the sketch: a closed outline or an open path (by index). */
 type Item = { kind: "loop" | "open"; i: number };
 const sameItem = (a: Item | null, b: Item | null) => !!a && !!b && a.kind === b.kind && a.i === b.i;
@@ -272,6 +278,17 @@ function bridgeCircle(c1: P, r1: number, c2: P, r2: number, r: number, side: num
   if (d >= a + b - 1e-9) return { min: (d - r1 - r2) / 2 };
   const x = (a * a - b * b + d * d) / (2 * d), h = Math.sqrt(Math.max(0, a * a - x * x)), u = norm(sub(c2, c1));
   return { p: add(add(c1, mul(u, x)), mul([-u[1], u[0]], side * h)) };
+}
+
+/**
+ * The straight line touching two circles on the same side (an outer tangent, as a belt runs), on `side` (+1: left of
+ * c1 → c2): its ends on each circle; null if one circle is inside the other.
+ */
+function outerTangent(c1: P, r1: number, c2: P, r2: number, side: number): [P, P] | null {
+  const d = dist(c1, c2);
+  if (d < 1e-9 || d <= Math.abs(r1 - r2) + 1e-9) return null;
+  const u = norm(sub(c2, c1)), k = (r1 - r2) / d, m = add(mul(u, k), mul([-u[1], u[0]], side * Math.sqrt(1 - k * k)));
+  return [add(c1, mul(m, r1)), add(c2, mul(m, r2))];
 }
 
 /** The corners of an outline (closed) / a path that Round corner can round: j = between segs[j] and the next, both straight, not in line. */
@@ -679,6 +696,7 @@ interface State {
   thru?: P[];
   /** The tool it was in (undo back to a half-drawn outline: that tool again). */
   mode?: Mode;
+  guides?: Guide[];
 }
 
 export class SketchTool implements Tool {
@@ -713,7 +731,7 @@ export class SketchTool implements Tool {
   /** Moving the selection with the gizmo (G): from where it was (c0, loops, opens) by d; the part being dragged (from `grab`, the offset then `d0`), or under the cursor. */
   /** Mirror (M): the selection's box, the sketch before (hovering a mark previews the copy in it), the side under the cursor. */
   private mirroring: { lo: P; hi: P; loops: Loop[]; opens: Seg[][]; sel: Item[]; snap: string; hover: MirrorSide | null } | null = null;
-  private moving: { c0: P; d: P; loops: Loop[]; opens: Seg[][]; snap: string; handle: MoveHandle | null; grab: P | null; d0: P; hover: MoveHandle | null } | null = null;
+  private moving: { c0: P; d: P; loops: Loop[]; opens: Seg[][]; snap: string; handle: MoveHandle | null; grab: P | null; d0: P; hover: MoveHandle | null; last?: MoveHandle } | null = null;
   /** Select: a press on a selected outline / path — dragging it moves the selection. */
   private drag: { x: number; y: number; at: P; loops: Loop[]; opens: Seg[][]; snap: string; moved: boolean; item: Item; wasSelected: boolean } | null = null;
   /**
@@ -737,7 +755,18 @@ export class SketchTool implements Tool {
   private anchor: P | null = null;
   /** Round corner: the corners picked (rounded at the box's Done); the ones under the cursor (one, or all of an outline / path), and where the cursor is. */
   private roundPicks: { item: Item; j: number }[] = [];
-  private roundHover: { item: Item; at: number[]; q: P; circ?: { c: P; r: number } } | null = null;
+  private roundHover: RoundHover | null = null;
+  /** Guide lines (Shift+L): the sketch's own, to snap to — they stay out of the faces. */
+  private guides: Guide[] = [];
+  /** Guide: the straight line it slides off (picked), the one under the cursor (to pick). */
+  private guideFrom: Guide | null = null;
+  private guideHover: Guide | null = null;
+  /** Select: the guide lines selected (Del removes them, Shift+D copies one off), the one under the cursor. */
+  private selGuides: number[] = [];
+  private hoverGuide = -1;
+  /** The bridge's side is that of a picked straight side (not the cursor's): its ends (on the first circle, the second). */
+  private bridgeFixed = false;
+  private bridgeLine: [P, P] | null = null;
   /** Round corner's bridge: the circles (or arcs of outlines: their circles) picked, at most 2; the side it goes on (+1: left of the first → the second). */
   private bridge: { item: Item; c: P; r: number }[] = [];
   private bridgeSide = 1;
@@ -830,6 +859,11 @@ export class SketchTool implements Tool {
     ctrl: new THREE.LineBasicMaterial({ color: 0x4f9dff, depthTest: false, transparent: true, opacity: 0.5 }),
     fill: new THREE.MeshBasicMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
     guide: new THREE.LineDashedMaterial({ color: 0xff6fb5, dashSize: 1, gapSize: 1, depthTest: false, transparent: true }),
+    /** Guide lines (Shift+L). */
+    // (as the main view's guide lines: pink, white under the cursor, yellow selected / picked)
+    guideLine: new THREE.LineDashedMaterial({ color: 0xff6fb5, dashSize: 1, gapSize: 1, depthTest: false, transparent: true }),
+    guideHover: new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 1, gapSize: 1, depthTest: false, transparent: true }),
+    guideSel: new THREE.LineDashedMaterial({ color: 0xffd166, dashSize: 1, gapSize: 1, depthTest: false, transparent: true }),
   };
 
   constructor(
@@ -838,7 +872,8 @@ export class SketchTool implements Tool {
     /** Where the view is centred (e.g. the face's centre). */
     private center: THREE.Vector3,
     private what: string,
-    private done: (faces: Shape[], paths: Wire[]) => void,
+    /** Exit Sketch: the faces, paths and the guide lines (3D, for the model's guides — see loadGuides). */
+    private done: (faces: Shape[], paths: Wire[], guides: { a: V3; b: V3; n: V3 }[]) => void,
     private cancel: () => void,
   ) {
     this.panel = document.createElement("div");
@@ -1222,6 +1257,33 @@ export class SketchTool implements Tool {
     return this;
   }
 
+  /** The model's guide lines that lie in this sketch's plane (their indices): taken in by loadGuides, given back on Exit Sketch. */
+  loadedGuides: number[] = [];
+
+  /** The model's guide lines lying in the sketch's plane come in as its guides (Exit Sketch puts them back — see guides3D). */
+  loadGuides(list: readonly { a: V3; b: V3 }[]): this {
+    const z = this.frame.z, o = this.frame.origin;
+    list.forEach((g, i) => {
+      const a = new THREE.Vector3(...g.a), b = new THREE.Vector3(...g.b), tol = 1e-6 * Math.max(1, a.length(), b.length());
+      if (Math.abs(a.clone().sub(o).dot(z)) > tol || Math.abs(b.clone().sub(o).dot(z)) > tol || a.distanceTo(b) < 1e-9) return;
+      const pa = this.local(a), pb = this.local(b);
+      this.guides.push({ a: pa, d: norm(sub(pb, pa)) });
+      this.loadedGuides.push(i);
+    });
+    if (this.loadedGuides.length) this.version++;
+    return this;
+  }
+
+  /** The sketch's guide lines in 3D for the model: long lines through the point nearest its centre; n: across, in the plane (Cut's plane). */
+  private guides3D(): { a: V3; b: V3; n: V3 }[] {
+    const c = this.local(this.center), reach = Math.max(50, 6 * (this.viewRadius || 20));
+    return this.guides.map((g) => {
+      const t = (c[0] - g.a[0]) * g.d[0] + (c[1] - g.a[1]) * g.d[1], at = add(g.a, mul(g.d, t));
+      const n = this.frame.x.clone().multiplyScalar(-g.d[1]).add(this.frame.y.clone().multiplyScalar(g.d[0])).normalize();
+      return { a: this.world(add(at, mul(g.d, -reach))).toArray() as V3, b: this.world(add(at, mul(g.d, reach))).toArray() as V3, n: n.toArray() as V3 };
+    });
+  }
+
   /** How much around the centre the view shows at the start (a face's size, with a margin); 0: every body. */
   viewRadius = 0;
 
@@ -1345,11 +1407,28 @@ export class SketchTool implements Tool {
     return out;
   }
 
-  /** Where the sketch's lines / arcs / circles cross each other. */
+  /** Where guide lines cross the sketch's lines / arcs / circles, each other and its X / Y axes (in crossingPoints too). */
+  private guideCrossings(): P[] {
+    if (this.guideCrossCache?.version !== this.version) {
+      const cs = curvesOf(this.loops, [...this.opens.flat(), ...this.path]), gs = this.guides.map((g): Curve => ({ kind: "line", a: add(g.a, mul(g.d, -GUIDE_REACH)), b: add(g.a, mul(g.d, GUIDE_REACH)) })), pts: P[] = [];
+      // (and the sketch's own X / Y axes, through its origin)
+      const axes: Curve[] = [{ kind: "line", a: [-GUIDE_REACH, 0], b: [GUIDE_REACH, 0] }, { kind: "line", a: [0, -GUIDE_REACH], b: [0, GUIDE_REACH] }];
+      gs.forEach((g, i) => {
+        for (const c of [...cs, ...axes]) pts.push(...crossings(g, c));
+        for (let j = i + 1; j < gs.length; j++) pts.push(...crossings(g, gs[j]));
+      });
+      this.guideCrossCache = { version: this.version, pts };
+    }
+    return this.guideCrossCache.pts;
+  }
+  private guideCrossCache: { version: number; pts: P[] } | null = null;
+
+  /** Where the sketch's lines / arcs / circles (and guide lines) cross each other. */
   private crossingPoints(): P[] {
     if (this.crossCache?.version !== this.version) {
-      const cs = curvesOf(this.loops, [...this.opens.flat(), ...this.path]), pts: P[] = [];
+      const cs = [...curvesOf(this.loops, [...this.opens.flat(), ...this.path]), ...this.guides.map((g): Curve => ({ kind: "line", a: add(g.a, mul(g.d, -GUIDE_REACH)), b: add(g.a, mul(g.d, GUIDE_REACH)) }))], pts: P[] = [];
       for (let i = 0; i < cs.length; i++) for (let j = i + 1; j < cs.length; j++) pts.push(...crossings(cs[i], cs[j]));
+      if (this.guides.length) pts.push(...this.guideCrossings()); // (guides on the axes too)
       this.crossCache = { version: this.version, pts };
     }
     return this.crossCache.pts;
@@ -1375,6 +1454,13 @@ export class SketchTool implements Tool {
       const score = d + (kind === "vertex" ? 0 : 4); // ends before middles / centres
       if (d <= SNAP_PX && (!best || score < best.score)) best = { p, kind, score };
     }
+    // Where guide lines cross things — like the level lock, with snapping off too (Auto: Ctrl frees it)
+    const helpers = !(vp.autoSnap && e.ctrlKey);
+    if (free && helpers && this.guides.length)
+      for (const p of this.guideCrossings()) {
+        const s = vp.toScreen(this.world(p)), d = Math.hypot(s.x - e.clientX, s.y - e.clientY);
+        if (d <= SNAP_PX && (!best || d < best.score)) best = { p, kind: "vertex", score: d };
+      }
     // A line's end where it just touches a circle / arc (tangent) — like the level lock, with snapping off too (Auto: Ctrl frees it)
     if (this.mode === "line" && this.cur && !(vp.autoSnap && e.ctrlKey))
       for (const p of this.tangentPoints(this.cur)) {
@@ -1412,7 +1498,8 @@ export class SketchTool implements Tool {
         this.lock = 1;
       }
     }
-    if (free) return p;
+    // (snapping off: still caught onto a guide line — Auto snap's Ctrl frees it)
+    if (free) return vp.autoSnap && e.ctrlKey ? p : this.onGuide(p, from, vp.worldPerPixel(this.world(p)));
     // Lined up with a sketch point — same X or same Y in the plane: onto that line (e.g. an arc's end
     // straight above the line it bends on from: a half circle).
     const tol = ALIGN_PX * vp.worldPerPixel(this.world(p));
@@ -1424,7 +1511,25 @@ export class SketchTool implements Tool {
       p = k === 0 ? [ref[0], p[1]] : [p[0], ref[1]];
       this.aligned.push({ ref, k });
     }
-    return p;
+    return this.onGuide(p, from, vp.worldPerPixel(this.world(p)));
+  }
+
+  /** `p` caught onto a guide line within a few px (locked level / upright from `from`: where that line meets the guide). */
+  private onGuide(p: P, from: P | null, wpp: number): P {
+    let best: { q: P; d: number } | null = null;
+    for (const g of this.guides) {
+      const off = cross(g.d, sub(p, g.a)), d = Math.abs(off);
+      if (d > SNAP_PX * wpp || (best && d >= best.d)) continue;
+      let q: P = sub(p, mul([-g.d[1], g.d[0]], off));
+      if (from && this.lock >= 0) {
+        // (along the locked direction from `from` to the guide)
+        const u: P = this.lock === 0 ? [1, 0] : [0, 1], den = cross(g.d, u);
+        if (Math.abs(den) < 1e-9) continue;
+        q = add(from, mul(u, -cross(g.d, sub(from, g.a)) / den));
+      }
+      best = { q, d };
+    }
+    return best ? best.q : p;
   }
 
   move(e: PointerEvent): void {
@@ -1536,15 +1641,29 @@ export class SketchTool implements Tool {
       }
       if (pt) return;
       const h = this.itemAt(e);
+      const hg = h ? -1 : this.guideIndexAt(e);
+      if (hg !== this.hoverGuide) {
+        this.hoverGuide = hg;
+        if (sameItem(h, this.hoverItem) || (!h && !this.hoverItem)) return this.update();
+      }
       if (sameItem(h, this.hoverItem) || (!h && !this.hoverItem)) return;
       this.hoverItem = h;
+      return this.update();
+    }
+    if (this.mode === "guide") {
+      if (this.guideFrom) this.cursor = this.pointAt(e);
+      else {
+        this.guideHover = this.guideRefAt(e);
+        this.cursor = null;
+        this.host.viewport.showSnapMarker(null);
+      }
       return this.update();
     }
     if (this.mode === "round") {
       if (this.roundGrip.drag) return this.roundGripTo(e);
       this.roundGrip.hover = this.roundGripAt(e);
       this.roundHover = this.roundGrip.hover ? null : this.roundAt(e);
-      const q = this.bridge.length === 2 ? this.planeAt(e) : null;
+      const q = this.bridge.length === 2 && !this.bridgeFixed ? this.planeAt(e) : null;
       if (q) this.bridgeSide = this.sideOf(q);
       return this.update();
     }
@@ -1633,6 +1752,9 @@ export class SketchTool implements Tool {
       if (this.mode !== "select") this.setMode("select"); // (from drawing: pick them now)
       return this.host.hint("Join: select two or more outlines (or paths) first — Shift+click adds");
     }
+    // Two separate circles: a belt round them — straight lines just touching both, one outline (same sizes: a capsule)
+    const [ca, cb] = loopIdx.map((i) => this.loops[i]);
+    if (loopIdx.length === 2 && !openIdx.length && ca.kind === "circle" && cb.kind === "circle" && dist(ca.c, cb.c) > ca.r + cb.r + 1e-9) return this.belt(loopIdx[0], loopIdx[1]);
     // Paths: chain them end to end (turning a path round where needed).
     let chain: Seg[] | null = null;
     if (openIdx.length >= 2) {
@@ -1673,6 +1795,29 @@ export class SketchTool implements Tool {
     this.selected = result;
     this.hoverItem = null;
     this.host.toast(chain && same(chain[0].a, chain[chain.length - 1].b) ? "Joined: the paths close into an outline" : "Joined");
+    this.update();
+  }
+
+  /** J on two separate circles: the belt round them (see join) in their place, selected; one undo step. */
+  private belt(i: number, j: number): void {
+    const a = this.loops[i] as Extract<Loop, { kind: "circle" }>, b = this.loops[j] as Extract<Loop, { kind: "circle" }>;
+    const top = outerTangent(a.c, a.r, b.c, b.r, 1), bottom = outerTangent(a.c, a.r, b.c, b.r, -1);
+    if (!top || !bottom) return this.host.hint("Join: one circle is inside the other");
+    const n = this.frame.z.toArray() as V3, face = (l: Loop) => sketchFaces(this.kernelLoop(l), [], n)[0];
+    const quad = ([p, q]: [P, P]): Loop => ({ kind: "path", segs: [{ kind: "line", a: a.c, b: p }, { kind: "line", a: p, b: q }, { kind: "line", a: q, b: b.c }, { kind: "line", a: b.c, b: a.c }] });
+    let loops: Loop[];
+    try {
+      const faces = joinFlatFaces([face(a), face(b), face(quad(top)), face(quad(bottom))], n);
+      loops = faces.flatMap((f) => sketchOfShape(f as unknown as Shape, "Belt").loops.map((l) => this.fromKernelLoop(l)));
+    } catch (e) {
+      return this.host.toast(`Join: ${e instanceof Error ? e.message : String(e)}`, "error");
+    }
+    this.pushUndo(JSON.stringify(this.state()));
+    this.version++;
+    this.loops = [...this.loops.filter((_, k) => k !== i && k !== j), ...loops];
+    this.selected = loops.map((_, k) => ({ kind: "loop" as const, i: this.loops.length - loops.length + k }));
+    this.hoverItem = null;
+    this.host.toast(Math.abs(a.r - b.r) < 1e-9 ? "Joined: a capsule round the two circles — F on a straight side curves it in" : "Joined: a belt round the two circles — F on a straight side curves it in");
     this.update();
   }
 
@@ -1842,6 +1987,7 @@ export class SketchTool implements Tool {
     if (this.moving?.handle) {
       // (let go: the gizmo stays for more; Enter / a click elsewhere applies)
       this.host.viewport.showSnapMarker(null);
+      this.moving.last = this.moving.handle; // (Tab then: just that arrow's field)
       this.moving.handle = null;
       this.moving.grab = null;
       return this.update();
@@ -2052,7 +2198,7 @@ export class SketchTool implements Tool {
   }
 
   /** Round corner: the corner under the cursor (where two straight lines meet), else all the corners of the outline / path there. */
-  private roundAt(e: PointerEvent): { item: Item; at: number[]; q: P; circ?: { c: P; r: number } } | null {
+  private roundAt(e: PointerEvent): RoundHover | null {
     const q = this.planeAt(e);
     if (!q) return null;
     const vp = this.host.viewport;
@@ -2066,8 +2212,25 @@ export class SketchTool implements Tool {
       }
     }
     if (best) return { item: best.item, at: [best.j], q };
-    // A circle, or an arc of an outline: picked for a bridge (its whole circle)
     const tol = PICK_PX * vp.worldPerPixel(this.world(q));
+    // A straight side between two arcs that it just touches (a belt's): curved in — a bridge between their circles, on its side
+    for (let i = 0; i < this.loops.length; i++) {
+      const l = this.loops[i];
+      if (l.kind !== "path") continue;
+      for (let j = 0; j < l.segs.length; j++) {
+        const g = l.segs[j], before = l.segs[(j + l.segs.length - 1) % l.segs.length], after = l.segs[(j + 1) % l.segs.length];
+        if (g.kind !== "line" || before.kind !== "arc" || after.kind !== "arc") continue;
+        const k1 = arcGeom(before), k2 = arcGeom(after), L = len(sub(g.b, g.a));
+        if (!k1 || !k2 || L < 1e-9) continue;
+        const u = mul(sub(g.b, g.a), 1 / L), t = Math.max(0, Math.min(L, dot(sub(q, g.a), u)));
+        if (dist(q, add(g.a, mul(u, t))) > tol) continue;
+        // (touching both: each circle's centre as far from the line as its radius)
+        const off = (c: P) => Math.abs(cross(u, sub(c, g.a)));
+        if (Math.abs(off(k1.c) - k1.r) > 1e-6 * Math.max(1, k1.r) || Math.abs(off(k2.c) - k2.r) > 1e-6 * Math.max(1, k2.r)) continue;
+        return { item: { kind: "loop", i }, at: [], q, side: { c1: k1.c, r1: k1.r, c2: k2.c, r2: k2.r, a: g.a, b: g.b } };
+      }
+    }
+    // A circle, or an arc of an outline: picked for a bridge (its whole circle)
     let near: { item: Item; c: P; r: number; d: number } | null = null;
     this.loops.forEach((l, i) => {
       const curves = l.kind === "circle" ? [{ c: l.c, r: l.r, on: true }] : l.segs.flatMap((g) => {
@@ -2110,25 +2273,61 @@ export class SketchTool implements Tool {
     return fit;
   }
 
-  /** Set the radius — too big for the picked corners: the largest that fits (to 0.001 mm). Whether it was cut down. */
+  /**
+   * Set the radius — too big for the picked corners: the largest that fits (to 0.001 mm); too small for a bridge
+   * between the picked circles: the smallest that reaches both (see bridgeLow). Whether it was cut down.
+   */
   private setRoundR(r: number): boolean {
-    roundR = r;
+    roundR = Math.max(r, this.bridgeLow());
     const fit = this.roundFit();
     if (roundR <= fit) return false;
     roundR = Math.floor(fit * 1000 + 1e-6) / 1000;
     return true;
   }
 
+  /** The smallest radius a bridge between the two picked circles can have (they're further apart than they reach), else 0. */
+  private bridgeLow(): number {
+    const [a, b] = this.bridge;
+    if (!a || !b) return 0;
+    const d = dist(a.c, b.c), min = (d - a.r - b.r) / 2;
+    if (min <= 0 || d <= Math.abs(a.r - b.r)) return 0;
+    // (to 0.01 mm, a hair over: exactly the smallest, the arc's centre is on the line between theirs — nothing between)
+    const up = Math.ceil(min * 100 - 1e-6) / 100;
+    return up > min + 1e-9 ? up : up + 0.01;
+  }
+
+  /** Two circles just picked (or a belt's side): a radius too small to reach both raised to the smallest that does, said so. */
+  private bridgeRaise(): void {
+    const low = this.bridgeLow();
+    if (roundR >= low) return;
+    const was = roundR;
+    roundR = low;
+    this.host.hint(`Bridge: R ${num(was)} can't reach both — R ${num(roundR)}, the smallest that does (type a bigger one for a shallower curve)`);
+  }
+
   /** Round corner click: the corners under the cursor picked (all of them picked already: unpicked); the radius cut down if they don't take it. */
   private roundPick(): void {
     const h = this.roundHover;
     if (!h) return this.host.hint("Round corner: click where two straight lines meet — or on an outline, for all its corners — or two circles, for a bridge between them");
+    if (h.side) {
+      const { c1, r1, c2, r2, a, b } = h.side;
+      this.bridge = [{ item: h.item, c: c1, r: r1 }, { item: h.item, c: c2, r: r2 }];
+      this.bridgeSide = this.sideOf(mul(add(a, b), 0.5));
+      this.bridgeFixed = true;
+      this.bridgeLine = [a, b];
+      this.bridgeRaise();
+      return this.update();
+    }
     if (h.circ) {
+      this.bridgeFixed = false;
       const { c, r } = h.circ, i = this.bridge.findIndex((b) => sameItem(b.item, h.item) && same(b.c, c) && Math.abs(b.r - r) < 1e-9);
       if (i >= 0) this.bridge.splice(i, 1);
       else if (this.nested().some((g) => g.holes.includes(h.item.i))) return this.host.hint("Bridge: that circle is a hole — pick outlines (circles or arcs) on the outside");
       else this.bridge = [...(this.bridge.length < 2 ? this.bridge : []), { item: h.item, c, r }];
-      if (this.bridge.length === 2) this.bridgeSide = this.sideOf(h.q);
+      if (this.bridge.length === 2) {
+        this.bridgeSide = this.sideOf(h.q);
+        this.bridgeRaise();
+      }
       return this.update();
     }
     const picked = (j: number) => this.roundPicks.some((p) => sameItem(p.item, h.item) && p.j === j);
@@ -2159,6 +2358,74 @@ export class SketchTool implements Tool {
     this.update();
   }
 
+  /** Guide: the straight line (a line of an outline / a path, or a guide) under the cursor, else null. */
+  private guideRefAt(e: PointerEvent): Guide | null {
+    const q = this.planeAt(e);
+    if (!q) return null;
+    const tol = PICK_PX * this.host.viewport.worldPerPixel(this.world(q));
+    let best: { g: Guide; d: number } | null = null;
+    const consider = (a: P, b: P, infinite: boolean) => {
+      const L = dist(a, b);
+      if (L < 1e-9) return;
+      const u = mul(sub(b, a), 1 / L), t = dot(sub(q, a), u), at = infinite ? t : Math.max(0, Math.min(L, t));
+      const d = dist(q, add(a, mul(u, at)));
+      if (d <= tol && (!best || d < best.d)) best = { g: { a, d: u }, d };
+    };
+    for (const l of this.loops) if (l.kind === "path") for (const g of l.segs) if (g.kind === "line") consider(g.a, g.b, false);
+    for (const o of this.opens) for (const g of o) if (g.kind === "line") consider(g.a, g.b, false);
+    for (const g of this.guides) consider(g.a, add(g.a, g.d), true);
+    // (the sketch's own X / Y axes, through its origin)
+    consider([0, 0], [1, 0], true);
+    consider([0, 0], [0, 1], true);
+    return best ? (best as { g: Guide }).g : null;
+  }
+
+  /** Select: the guide line under the cursor (its index), else -1. */
+  private guideIndexAt(e: PointerEvent | MouseEvent): number {
+    const q = this.planeAt(e as PointerEvent);
+    if (!q || !this.guides.length) return -1;
+    const tol = PICK_PX * this.host.viewport.worldPerPixel(this.world(q));
+    let best = -1, bestD = tol;
+    this.guides.forEach((g, i) => {
+      const d = Math.abs(cross(g.d, sub(q, g.a)));
+      if (d <= bestD) (bestD = d), (best = i);
+    });
+    return best;
+  }
+
+  /** How far `p` is from the picked line, across it (+: left of its direction). */
+  private guideOffset(p: P): number {
+    const g = this.guideFrom!;
+    return cross(g.d, sub(p, g.a));
+  }
+
+  /** Guide click: a straight line picked to slide a guide off, then where it goes (no move: on the line itself). */
+  private guideClick(e: PointerEvent): void {
+    if (!this.guideFrom) {
+      const g = this.guideRefAt(e);
+      if (!g) return this.host.hint("Guide: click a straight line — a guide goes along it, then move it off (or type how far + Enter)");
+      this.guideFrom = g;
+      this.cursor = this.pointAt(e);
+      return this.update();
+    }
+    const p = this.cursor ?? this.planeAt(e);
+    if (!p) return;
+    // (within 3 px of the line: on it — a small distance is typed)
+    const off = this.guideOffset(p);
+    this.addGuide(Math.abs(off) <= 3 * this.host.viewport.worldPerPixel(this.world(p)) ? 0 : off);
+  }
+
+  /** A guide `off` across from the picked line (one undo step); Guide stays on for more. */
+  private addGuide(off: number): void {
+    const g = this.guideFrom!;
+    this.pushUndo(JSON.stringify(this.state()));
+    this.version++;
+    this.guides = [...this.guides, { a: add(g.a, mul([-g.d[1], g.d[0]], Math.abs(off) < 1e-9 ? 0 : off)), d: g.d }];
+    this.guideFrom = null;
+    this.host.hint(`Guide line ${Math.abs(off) < 1e-9 ? "on the line" : `${num(Math.abs(off))} mm off it`} — lines snap where it crosses things · click another straight line for more`);
+    this.update();
+  }
+
   /** Which side of the line from the first picked circle's centre to the second's `q` is on (+1: left). */
   private sideOf(q: P): number {
     const [a, b] = this.bridge;
@@ -2172,7 +2439,8 @@ export class SketchTool implements Tool {
    */
   private bridgeResult(): { loops: Loop[]; members: number[] } | { err: string } {
     const [p1, p2] = this.bridge;
-    const key = `${this.version}:${p1.item.i}:${p1.c}:${p1.r}:${p2.item.i}:${p2.c}:${p2.r}:${this.bridgeSide}:${roundR}`;
+    const line = this.bridgeFixed ? this.bridgeLine : null;
+    const key = `${this.version}:${p1.item.i}:${p1.c}:${p1.r}:${p2.item.i}:${p2.c}:${p2.r}:${this.bridgeSide}:${roundR}:${line}`;
     if (this.bridgeCache?.key === key) return this.bridgeCache.res;
     const res = ((): { loops: Loop[]; members: number[] } | { err: string } => {
       const bc = bridgeCircle(p1.c, p1.r, p2.c, p2.r, roundR, this.bridgeSide);
@@ -2185,8 +2453,15 @@ export class SketchTool implements Tool {
         const face = (l: Loop) => sketchFaces(this.kernelLoop(l), [], n)[0];
         const web: Loop = { kind: "path", segs: [{ kind: "line", a: p1.c, b: bc.p }, { kind: "line", a: bc.p, b: p2.c }, { kind: "line", a: p2.c, b: p1.c }] };
         const joined = joinFlatFaces([...members.map((i) => face(this.loops[i])), face(web)], n);
-        const cut = face({ kind: "circle", c: bc.p, r: roundR });
-        const faces = joined.flatMap((f) => flatFaceBoolean("subtract", f as unknown as Shape, [cut as unknown as Shape]));
+        const cuts: Shape[] = [face({ kind: "circle", c: bc.p, r: roundR }) as unknown as Shape];
+        if (line) {
+          // A straight side curved in: the strip between it and the new arc goes too (outside the two circles — a
+          // rounded corner's circle reaches past the outline)
+          const t1 = add(p1.c, mul(sub(bc.p, p1.c), p1.r / (p1.r + roundR))), t2 = add(p2.c, mul(sub(bc.p, p2.c), p2.r / (p2.r + roundR)));
+          const strip = face({ kind: "path", segs: [{ kind: "line", a: line[0], b: line[1] }, { kind: "line", a: line[1], b: t2 }, { kind: "line", a: t2, b: t1 }, { kind: "line", a: t1, b: line[0] }] });
+          cuts.push(...(flatFaceBoolean("subtract", strip as unknown as Shape, [p1, p2].map((x) => face({ kind: "circle", c: x.c, r: x.r }) as unknown as Shape)) as unknown as Shape[]));
+        }
+        const faces = joined.flatMap((f) => flatFaceBoolean("subtract", f as unknown as Shape, cuts));
         const loops = faces.flatMap((f) => sketchOfShape(f as unknown as Shape, "Bridge").loops.map((l) => this.fromKernelLoop(l)));
         return loops.length ? { loops, members } : { err: "nothing left — the bridge circle covers it all" };
       } catch (e) {
@@ -2396,6 +2671,7 @@ export class SketchTool implements Tool {
 
   down(e: PointerEvent): void {
     if (e.button !== 0) return;
+    if (this.mode === "guide") return this.guideClick(e);
     if (this.mode === "scan") {
       const at = this.planeAt(e);
       if (!at) return;
@@ -2442,6 +2718,15 @@ export class SketchTool implements Tool {
         return this.update();
       }
       const it = this.itemAt(e);
+      const gi = it ? -1 : this.guideIndexAt(e);
+      if (gi >= 0) {
+        // A guide line (off the outlines): selected (Shift: added / taken off)
+        const had = this.selGuides.includes(gi);
+        if (e.shiftKey || e.ctrlKey || e.metaKey) this.selGuides = had ? this.selGuides.filter((x) => x !== gi) : [...this.selGuides, gi];
+        else (this.selGuides = [gi]), (this.selected = []);
+        return this.update();
+      }
+      if (!(e.shiftKey || e.ctrlKey || e.metaKey)) this.selGuides = [];
       if (!it) {
         // Empty space: a box (dragged) — or, just a click, nothing selected (Shift / Ctrl: as it was)
         const add = e.shiftKey || e.ctrlKey || e.metaKey;
@@ -2734,6 +3019,7 @@ export class SketchTool implements Tool {
     if (k === "Escape") {
       if (this.typed) this.typed = "";
       else if (this.roundPicks.length || this.bridge.length) (this.roundPicks = []), (this.bridge = []);
+      else if (this.guideFrom) this.guideFrom = null;
       else if (this.picPts.length) this.picPts = [];
       else if (this.arcR) this.arcR = null;
       else if (this.first || this.arcEnd || this.anchor) {
@@ -2745,7 +3031,7 @@ export class SketchTool implements Tool {
       } else if (this.mode !== "select") {
         this.setMode("select"); // nothing being drawn: Select
         return true;
-      } else if (this.selected.length) this.selected = [];
+      } else if (this.selected.length || this.selGuides.length) (this.selected = []), (this.selGuides = []);
       else this.host.hint("Sketch: click Exit Sketch to keep the closed outlines as faces");
       this.update();
       return true;
@@ -2755,6 +3041,16 @@ export class SketchTool implements Tool {
       return true;
     }
     if ((k === "d" || k === "D") && e.shiftKey) {
+      // A guide line selected (no outlines): a copy slid off it, as Guide does — move it, click / type how far
+      if (this.mode === "select" && this.selGuides.length && !this.selected.length) {
+        const g = this.guides[this.selGuides[this.selGuides.length - 1]];
+        this.setMode("guide");
+        this.guideFrom = g;
+        this.cursor = this.last && this.pointAt(this.last);
+        this.host.hint("Copy of the guide line: move it off and click — or type how far + Enter (Tab) · Esc: none");
+        this.update();
+        return true;
+      }
       this.duplicateSelected();
       return true;
     }
@@ -2768,7 +3064,25 @@ export class SketchTool implements Tool {
       this.setMode("select");
       return true;
     }
-    if ((k === "Delete" || k === "Backspace") && this.mode === "select" && this.selected.length) {
+    if ((k === "Delete" || k === "Backspace") && this.mode === "select" && (this.selected.length || this.selGuides.length)) {
+      if (this.selGuides.length) {
+        // (selected guide lines: gone, with any outlines selected too — one undo step)
+        this.pushUndo(JSON.stringify(this.state()));
+        this.version++;
+        const n = this.selGuides.length;
+        this.guides = this.guides.filter((_, i) => !this.selGuides.includes(i));
+        this.selGuides = [];
+        this.hoverGuide = -1;
+        if (this.selected.length) {
+          const gone = (kind: Item["kind"], i: number) => this.selected.some((x) => x.kind === kind && x.i === i);
+          this.loops = this.loops.filter((_, i) => !gone("loop", i));
+          this.opens = this.opens.filter((_, i) => !gone("open", i));
+          this.selected = [];
+        }
+        this.host.hint(`${n > 1 ? `${n} guide lines` : "Guide line"} removed`);
+        this.update();
+        return true;
+      }
       this.deleteSelected();
       return true;
     }
@@ -2798,6 +3112,10 @@ export class SketchTool implements Tool {
     }
     if (k === "Tab") {
       this.dialog();
+      return true;
+    }
+    if ((k === "L" || k === "l") && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      this.setMode("guide");
       return true;
     }
     // (Shift+A: the Spline's key, before the Curve took its place)
@@ -2832,6 +3150,9 @@ export class SketchTool implements Tool {
     this.roundPicks = [];
     this.bridge = [];
     this.roundGrip = { hover: false, drag: false };
+    this.guideFrom = this.guideHover = null;
+    this.selGuides = [];
+    this.hoverGuide = -1;
     this.picPts = [];
     this.picDrag = null;
     this.picGrip = { hover: null, drag: null };
@@ -2916,6 +3237,14 @@ export class SketchTool implements Tool {
       } else this.host.hint("Sketch: select outlines / paths, then type dx,dy + Enter to move them");
       return this.update();
     }
+    if (this.mode === "guide") {
+      // Guide: a typed distance from the picked line, on the cursor's side
+      if (this.guideFrom && vals.length && vals[0] >= 0) {
+        const off = this.cursor ? this.guideOffset(this.cursor) : 1;
+        this.addGuide(off < 0 ? -vals[0] : vals[0]);
+      } else if (!this.guideFrom) this.host.hint("Guide: click a straight line first, then type how far from it + Enter");
+      return this.update();
+    }
     if (this.mode === "round") {
       // Round corner: a typed number is the radius (then click the corners).
       if (vals[0] > 0 && this.setRoundR(vals[0])) this.host.toast(`Round corner: R ${num(vals[0])} is too big there — R ${num(roundR)}, the largest that fits`);
@@ -2952,7 +3281,7 @@ export class SketchTool implements Tool {
   }
 
   private state(): State {
-    return { loops: this.loops, opens: this.opens, path: this.path, first: this.first, arcEnd: this.arcEnd, anchor: this.anchor, thru: this.thru, mode: this.mode };
+    return { loops: this.loops, opens: this.opens, path: this.path, first: this.first, arcEnd: this.arcEnd, anchor: this.anchor, thru: this.thru, mode: this.mode, guides: this.guides };
   }
 
   /**
@@ -2963,7 +3292,7 @@ export class SketchTool implements Tool {
   private dialog(): void {
     const c = this.cursor, r4 = (n: number) => +n.toFixed(4);
     const deg = (d: P) => r4((Math.atan2(d[1], d[0]) * 180) / Math.PI);
-    const ask = (title: string, fields: { label: string; value: number; min?: number }[], ok: (v: number[]) => void) =>
+    const ask = (title: string, fields: { label: string; value: number; min?: number; more?: boolean; focus?: boolean }[], ok: (v: number[]) => void) =>
       this.host.propsDialog(title, fields.map((f) => ({ ...f, value: r4(f.value) })), ok, "OK");
     const scaleFields = (x: number, y: number) => [{ label: "Scale (%)", value: 100, min: 0 }, { label: "X (%)", value: x, min: 0 }, { label: "Y (%)", value: y, min: 0 }];
     const factors = ([s, x, y]: number[]): P | null => (s > 0 && x > 0 && y > 0 ? [(s * x) / 1e4, (s * y) / 1e4] : (this.host.toast("Scale must be greater than 0", "error"), null));
@@ -2989,7 +3318,9 @@ export class SketchTool implements Tool {
     if (this.moving) {
       // While moving: ΔX / ΔY from where it was when G was pressed.
       const mv = this.moving;
-      return ask("Move", [{ label: "ΔX (mm)", value: mv.d[0] }, { label: "ΔY (mm)", value: mv.d[1] }], ([dx, dy]) => {
+      // (after dragging an arrow: just its field — the other behind More…)
+      const k = mv.last === "x" ? 0 : mv.last === "y" ? 1 : -1;
+      return ask(k >= 0 ? `Move along ${"XY"[k]} (last drag)` : "Move", [{ label: "ΔX (mm)", value: mv.d[0], more: k === 1, focus: k === 0 }, { label: "ΔY (mm)", value: mv.d[1], more: k === 0, focus: k === 1 }], ([dx, dy]) => {
         if (!this.moving) return;
         this.moveTo([dx || 0, dy || 0]);
         this.endMove(true);
@@ -3011,6 +3342,15 @@ export class SketchTool implements Tool {
         }
         this.pushUndo(before); // (one undo step: the move, the scale and the turn)
         this.update();
+      });
+    }
+    if (this.mode === "guide") {
+      // Guide: how far from the picked line (on the cursor's side); nothing picked yet: say what to do
+      if (!this.guideFrom) return this.host.hint("Guide: click a straight line first — then Tab for how far from it");
+      const off = c ? this.guideOffset(c) : 0, side = off < 0 ? -1 : 1;
+      return ask("Guide line", [{ label: "Distance from the line (mm)", value: r4(Math.abs(off)), min: 0 }], ([d]) => {
+        if (!(d >= 0) || !this.guideFrom) return;
+        this.addGuide(side * d);
       });
     }
     if (this.mode === "round") {
@@ -3104,6 +3444,10 @@ export class SketchTool implements Tool {
   private restore(st: State): void {
     ({ loops: this.loops, opens: this.opens, path: this.path, first: this.first, arcEnd: this.arcEnd, anchor: this.anchor } = st);
     this.thru = st.thru ?? [];
+    this.guides = st.guides ?? [];
+    this.guideFrom = null;
+    this.selGuides = [];
+    this.hoverGuide = -1;
     // Back to something half drawn (e.g. lines a right click ended): the tool that was drawing it, to go on —
     // not Select, where its points would be left as loose dots.
     const drawing = !!(st.first || st.arcEnd || st.anchor);
@@ -3192,7 +3536,7 @@ export class SketchTool implements Tool {
       for (const g of new Set(this.loops.map((l) => l.g).filter((x): x is number => x !== undefined))) faces.push(...this.groupFaces(g, groups));
       // Open lines (also the ones still being drawn) become paths.
       const opens = this.path.length ? [...this.opens, this.path] : this.opens;
-      this.done(faces, opens.map((o) => sketchPath(o.map((g) => this.kernelSeg(g)))));
+      this.done(faces, opens.map((o) => sketchPath(o.map((g) => this.kernelSeg(g)))), this.guides3D());
     } catch (e) {
       this.host.toast(e instanceof Error ? e.message : String(e), "error");
     }
@@ -3536,6 +3880,48 @@ export class SketchTool implements Tool {
       dot(c);
       if (this.first && same(c, this.first) && from && !same(from, this.first)) hud = "Close the outline";
     }
+    // Guide lines: dashed, right across the view; the line picked (lit) and the guide sliding off it; the line under the cursor
+    if (this.guides.length || this.mode === "guide") {
+      const mid = this.world([0, 0]), reach = vp.worldPerPixel(mid) * Math.max(this.host.viewport.canvas.clientWidth, this.host.viewport.canvas.clientHeight) * 3;
+      const center = this.local(vp.ray(vp.canvas.clientWidth / 2 + vp.canvas.getBoundingClientRect().left, vp.canvas.clientHeight / 2 + vp.canvas.getBoundingClientRect().top).intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(this.frame.z, this.frame.origin), new THREE.Vector3()) ?? mid);
+      const w = vp.worldPerPixel(this.world(center));
+      for (const m of [this.mats.guideLine, this.mats.guideHover, this.mats.guideSel]) (m.dashSize = w * 8), (m.gapSize = w * 5);
+      const long = (g: Guide, mat: THREE.LineDashedMaterial | THREE.LineBasicMaterial) => {
+        // (through the point of it nearest the view's centre, far each way)
+        const t = (center[0] - g.a[0]) * g.d[0] + (center[1] - g.a[1]) * g.d[1]; // ("dot" is the marker here)
+        const at = add(g.a, mul(g.d, t));
+        const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([this.world(add(at, mul(g.d, -reach))), this.world(add(at, mul(g.d, reach)))]), mat);
+        if (mat instanceof THREE.LineDashedMaterial) l.computeLineDistances();
+        objs.push(l);
+      };
+      // (Select: the one under the cursor glows; selected ones: a wider solid line)
+      const ends = (g: Guide): [P, P] => {
+        const t = (center[0] - g.a[0]) * g.d[0] + (center[1] - g.a[1]) * g.d[1], at = add(g.a, mul(g.d, t));
+        return [add(at, mul(g.d, -reach)), add(at, mul(g.d, reach))];
+      };
+      this.guides.forEach((g, i) => {
+        const select = this.mode === "select", sel = select && this.selGuides.includes(i), hover = select && i === this.hoverGuide;
+        long(g, sel ? this.mats.guideSel : hover ? this.mats.guideHover : this.mats.guideLine);
+        if (sel || hover) {
+          // (soft halos under the dashed line, as the main view's selected guide; white for the one under the cursor)
+          const [p, q] = ends(g);
+          objs.push(vp.glowLine(this.world(p), this.world(q), sel ? 0xffd166 : 0xffffff, 2, sel ? 0.5 : 0.45));
+        }
+      });
+      if (this.mode === "guide") {
+        const f = this.guideFrom;
+        if (f && this.cursor) {
+          const raw = this.guideOffset(this.cursor), off = Math.abs(raw) <= 3 * vp.worldPerPixel(this.world(this.cursor)) ? 0 : raw;
+          long(f, this.mats.guideSel);
+          long({ a: add(f.a, mul([-f.d[1], f.d[0]], off)), d: f.d }, this.mats.guideLine);
+          dot(this.cursor);
+          hud = Math.abs(off) < 1e-9 ? "Guide on the line · click to put it there" : `Guide ${num(Math.abs(off))} mm off the line · click, or type how far + Enter`;
+        } else if (this.guideHover) {
+          long(this.guideHover, this.mats.guideHover);
+          hud = "Guide along this line · click, then move it off";
+        }
+      }
+    }
     // Round corner: the picked corners' outlines / paths as they'd be (rounded), the radius handle (yellow, on the
     // line into the last one picked; bigger under the cursor / dragged); dots on the corners under the cursor.
     const rh = this.mode === "round" ? this.roundHover : null;
@@ -3558,7 +3944,7 @@ export class SketchTool implements Tool {
         if ("err" in res) hud = `Bridge: ${res.err}`;
         else {
           for (const l of res.loops) lines(l.kind === "circle" ? Array.from({ length: 72 }, (_, i) => [l.c[0] + l.r * Math.cos((i * TAU) / 72), l.c[1] + l.r * Math.sin((i * TAU) / 72)] as P) : l.segs.flatMap(segPoints), this.mats.sel, true);
-          hud = `Bridge R ${num(roundR)} mm · the cursor's side: which way · Enter / Done: put it in`;
+          hud = this.bridgeFixed ? `Curved in, R ${num(roundR)} mm · type the radius · Enter / Done: put it in` : `Bridge R ${num(roundR)} mm · the cursor's side: which way · Enter / Done: put it in`;
         }
       }
       const gl = this.roundGripLine();
@@ -3574,7 +3960,9 @@ export class SketchTool implements Tool {
           gripAt = gl.at;
         }
       }
-      if (!gripAt && rh?.circ && this.bridge.length < 2) {
+      if (!gripAt && rh?.side) {
+        hud = `Curve this side in · R ${num(roundR)} mm, touching both arcs`;
+      } else if (!gripAt && rh?.circ && this.bridge.length < 2) {
         const picked = this.bridge.some((b) => sameItem(b.item, rh.item) && same(b.c, rh.circ!.c));
         hud = picked ? "Unpick this circle" : this.bridge.length ? `Pick the second circle · bridge R ${num(roundR)} mm` : `Pick this circle · then a second one: a bridge between them, R ${num(roundR)} mm`;
       } else if (!gripAt && rh && !rh.circ) {
@@ -3746,7 +4134,7 @@ export class SketchTool implements Tool {
     const html =
       group("Select", mode("select", "Select", "Esc", "Select outlines and paths")) +
       group("Draw", iconMode("line", "skLine", "Line", "L") + iconMode("arc", "skArc", "Arc", "A") + iconMode("curve", "skCurve", "Curve", "Shift+C") + iconMode("rect", "skRect", "Rectangle", "R") + iconMode("circle", "circle", "Circle", "C") +
-        mode("round", "Round corner", "F") + (this.pic ? mode("scan", "Scan", "drag over the picture", "Scan the picture into outlines / paths") : "")) +
+        mode("round", "Round corner", "F") + mode("guide", "Guide", "Shift+L", "Guide line: click a straight line, move it off — a long line to snap to") + (this.pic ? mode("scan", "Scan", "drag over the picture", "Scan the picture into outlines / paths") : "")) +
       group("Edit",
         b(`data-act="move"`, "Move", "Move the selection with the gizmo (G)", !!this.moving, !select || !nSel) +
         b(`data-act="scale"`, "Scale", "Scale or rotate the selection about its centre (S)", !!this.scaling, !select || !nSel) +
@@ -3772,7 +4160,7 @@ export class SketchTool implements Tool {
       select: this.mirroring ? "Mirror: point at a mark beyond a side (red ±X, green ±Y) to see the copy there, click to keep it · Esc / right click / a click elsewhere: cancel"
         : this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps, catches on points")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
         : this.scaling ? `Scale / rotate: drag the red square (X), green (Y), the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} or the blue ring (rotate) — ${this.host.viewport.stepTip("round steps, 15°")} · Tab: exact %, ° · Enter / click elsewhere: apply · Esc / right click: cancel`
-        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps, catches on points")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · M: mirror · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : "Click an outline or a path to select it · Shift+click to add more",
+        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps, catches on points")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · M: mirror · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : this.selGuides.length ? `${this.selGuides.length > 1 ? `${this.selGuides.length} guide lines` : "Guide line"} selected · Del: remove · Shift+D: a copy, slid off it · Shift+click: add / remove` : "Click an outline, a path or a guide line to select it · Shift+click to add more",
       line: this.first ? "Click the next point (near a circle / arc: where the line just touches it) · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`
@@ -3780,11 +4168,13 @@ export class SketchTool implements Tool {
       curve: this.first
         ? `Click the next control point — the curve is pulled towards each, starting and ending on the first and last · click the start point to close (after 2 more) · Enter / double-click: done (left open: a path) · Esc: drop it`
         : "Click where the curve starts · then click control points that pull it (later: Select it and drag its points)",
-      round: "Click the corners to round (where two straight lines meet; an outline / inside it: all its corners; again: unpick) — or two circles (or arcs): a bridge between them, on the cursor's side, the bridge circle cut out of what they're joined to · drag the yellow handle, or type the radius · Done (in the box, or Enter) — then pick more · Esc: unpick all",
+      round: "Click the corners to round (where two straight lines meet; an outline / inside it: all its corners; again: unpick) — or a straight side between two arcs (J on two circles makes a belt): curved in, touching both, cut into what it's joined to · drag the yellow handle, or type the radius · Done (in the box, or Enter) — then pick more · Esc: unpick all",
       scan: !this.pic ? "Scan: no picture — click the picture icon (bottom left) to load one"
         : this.scanFirst ? "Scan: click the area's other corner"
         : this.scanFound ? "Scan: blue = what was found — change the settings in the box to scan again · Enter / Add: into the sketch · drag again: another area · Esc: drop it"
         : "Scan: drag over the part of the picture to trace (or click 2 corners) · Faces: dark areas become outlines (Exit Sketch: faces) · Outlines: drawn lines become paths along their middle · Esc: back",
+      guide: this.guideFrom ? "Move the guide off the line (it catches on points) and click — or type how far + Enter · click without moving: on the line itself · Esc: drop it"
+        : "Click a straight line (of an outline, a path, another guide or the X / Y axis): a guide line along it, right across the view — lines snap where it crosses things · guides stay in the sketch, never a face · Ctrl+Z: undo",
       rect: this.anchor ? "Click the opposite corner · type width,height (or 23x30) + Enter" : "Click the first corner",
       circle: this.anchor ? `Click a point on the circle · type the ${circleSize.word} + Enter` : "Click the centre",
       picture: !this.pic ? "No picture — click the picture icon (bottom left) to load one"
