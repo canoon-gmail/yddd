@@ -82,3 +82,36 @@ export const ICONS: Record<string, string> = {
   lock: svg(`<rect x="5" y="10.5" width="14" height="10" rx="2" ${FILL}/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15.5" r="1.3" ${DOT}/>`),
   unlock: svg(`<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 7.6-1.7"/>`),
 };
+
+/**
+ * The Guide line tools' cursor (the main view's and Sketch's): a tape measure (a gold case, red centre, grey button; the grey tape running down left to its hook) — the
+ * point is the hook's tip, bottom left. Thin dark outlines: it shows on the dark view and on light faces.
+ */
+export const TAPE_CURSOR = (() => {
+  // (drawn on a 520 × 600 grid, as the design: a gold case, its round side up left, its corner right; red centre; grey
+  // button on its left side; the grey tape out of its bottom, down left to an L hook)
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="205 80 520 600">
+    <g stroke="#1b2633" stroke-width="13" stroke-linejoin="round">
+      <path d="M290 385 A180 180 0 1 1 588 176 L703 352 L412 532 L345 468 Z" fill="#c9a85c"/>
+      <path d="M384 516 L406 554 L251 639 L268 660 L255 670 L229 642 L229 601 Z" fill="#d0d3d6"/>
+      <path d="M272 395 L305 375 L357 465 L325 482 Z" fill="#d0d3d6"/>
+      <circle cx="460" cy="303" r="72" fill="#c23b3b"/>
+    </g>
+  </svg>`;
+  return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 5 31, crosshair`;
+})();
+
+/**
+ * Sketch Fillet's cursor: a crosshair (the point: its centre) with a belt beside it — a big and a small round end joined
+ * by straight lines, as F makes; dark, light outlines.
+ */
+export const FILLET_CURSOR = (() => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+    <path d="M19.95 5.85 L13.12 16.28 A2.6 2.6 0 0 0 16.72 19.88 L27.15 13.05 A5.2 5.2 0 1 0 19.95 5.85 Z" fill="#2b2c2e" stroke="#e1e4e7" stroke-width="1.5" stroke-linejoin="round"/>
+    <g stroke-linecap="square">
+      <path d="M8 16 V28 M2 22 H14" stroke="#1b1d20" stroke-width="3.2"/>
+      <path d="M8 16 V28 M2 22 H14" stroke="#e1e4e7" stroke-width="1.4"/>
+    </g>
+  </svg>`;
+  return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 8 22, crosshair`;
+})();

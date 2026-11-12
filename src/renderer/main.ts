@@ -171,7 +171,7 @@ import {
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type SnapKind } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
-import { ICONS } from "./icons";
+import { ICONS, TAPE_CURSOR } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
 import { write3mf } from "./threemf";
@@ -235,6 +235,15 @@ const PASTE_BUSY_BYTES = 300_000;
 const SLOW_PREVIEW_MS = 60;
 /** A Push/Pull's exact preview slower than this (a letter cut into a gear: ~1.2 s): typed values get the instant drag preview, the exact result on Apply. */
 const SLOW_PUSHPULL_MS = 250;
+/** The view a model was saved in: the camera's place, what it looks at, its up, its field of view (a flat view: its direction). */
+interface SavedView {
+  position: V3;
+  target: V3;
+  up: V3;
+  fov: number;
+  ortho?: V3;
+}
+
 /** Keys that apply an open Push/Pull, then start that command (a drag, then G: the result moved). */
 const PUSHPULL_THEN = ["xf.move", "xf.moveFrom", "xf.rotate", "xf.rotateFrom", "xf.scale"];
 
@@ -1448,6 +1457,19 @@ export class App implements ToolHost {
     });
     c.addEventListener("wheel", () => requestAnimationFrame(() => this.positionHud()), { passive: true });
     // Tools may consume the wheel (e.g. Shift+wheel = polygon sides) before the camera zooms.
+    // Sketching: face objects / paths dragged from the Bodies panel onto the view come into the sketch
+    c.parentElement!.addEventListener("dragover", (e) => {
+      if (!(this.tool instanceof SketchTool) || !this.olDragIds?.length) return;
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "move"; // (as the Bodies panel's drag allows)
+    });
+    c.parentElement!.addEventListener("drop", (e) => {
+      if (!(this.tool instanceof SketchTool) || !this.olDragIds?.length) return;
+      e.preventDefault();
+      const ids = this.olDragIds;
+      this.olDragIds = null;
+      this.dropIntoSketch(ids);
+    });
     c.parentElement!.addEventListener("wheel", (e) => {
       if (e.target === c && this.tool && !this.valueDialog() && this.tool.wheel?.(e)) {
         e.preventDefault();
@@ -1754,7 +1776,7 @@ export class App implements ToolHost {
     this.hover = null;
     this.viewport.setHighlight(this.selection, null);
     this.tool = tool;
-    this.viewport.canvas.style.cursor = "crosshair";
+    this.viewport.canvas.style.cursor = tool instanceof GuideTool ? TAPE_CURSOR : "crosshair";
     this.renderToolbarState();
     if (tool instanceof SketchTool) this.renderOutliner(); // (just its face objects and paths meanwhile)
   }
@@ -5017,11 +5039,12 @@ export class App implements ToolHost {
     this.endInteractions();
     this.setSelection([]); // (the face's selection colour would cover the sketch)
     const tool: SketchTool = new SketchTool(this, frame, center, what, (faces, paths, guides) => {
-      this.endTool();
+      const taken = new Set(tool.taken); // (objects dragged in from the Bodies panel: replaced)
+      this.endSketch();
       const nextGuides = this.sketchGuides(tool, guides);
-      if (!faces.length && !paths.length && !nextGuides) return this.toast("Sketch closed — nothing drawn to keep");
+      if (!faces.length && !paths.length && !nextGuides && !taken.size) return this.toast("Sketch closed — nothing drawn to keep");
       const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))];
-      this.doc.commit([...this.doc.bodies, ...made], "Sketch", nextGuides ?? this.doc.guides);
+      this.doc.commit([...this.doc.bodies.filter((b) => !taken.has(b.id)), ...made], "Sketch", nextGuides ?? this.doc.guides);
       if (nextGuides) this.showGuides();
       if (!made.length) return this.toast(`Sketch closed — its guide lines kept (${guides.length})`);
       this.setMode("body");
@@ -5029,11 +5052,11 @@ export class App implements ToolHost {
       const n = (k: number, what: string) => (k ? `${k} ${what}${k > 1 ? "s" : ""}` : "");
       this.toast(`${[n(faces.length, "face"), n(paths.length, "path")].filter(Boolean).join(" and ")} from the sketch${faces.length ? " — press P to push/pull a face" : ""}`);
     }, () => {
-      this.endTool();
+      this.endSketch();
       this.toast("Sketch cancelled");
     });
     tool.viewRadius = viewRadius * 1.25;
-    this.startTool(tool.loadGuides(this.doc.guides).start());
+    this.openSketch(tool.loadGuides(this.doc.guides));
     if (curved) this.toast("Curved face: the sketch is on the flat plane touching it at that point — what you draw stays flat, it doesn't follow the curve");
   }
 
@@ -5087,21 +5110,23 @@ export class App implements ToolHost {
     this.endInteractions();
     this.setSelection([]);
     const tool: SketchTool = new SketchTool(this, frame, box.getCenter(new THREE.Vector3()), names, (faces, paths, guides) => {
-      this.endTool();
+      const taken = new Set(tool.taken); // (the objects edited — and any dragged in meanwhile)
+      this.endSketch();
       const nextGuides = this.sketchGuides(tool, guides);
       const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))].map((m) => (group ? { ...m, group } : m));
-      this.doc.commit([...this.doc.bodies.filter((b) => !ids.has(b.id)), ...made], "Edit in sketch", nextGuides ?? this.doc.guides);
+      this.doc.commit([...this.doc.bodies.filter((b) => !taken.has(b.id)), ...made], "Edit in sketch", nextGuides ?? this.doc.guides);
       if (nextGuides) this.showGuides();
       this.setMode("body");
       this.setSelection(made.map((m) => ({ kind: "body", body: m.id, id: 0 })));
       const n = (k: number, what: string) => (k ? `${k} ${what}${k > 1 ? "s" : ""}` : "");
       this.toast(made.length ? `${names} replaced by ${[n(faces.length, "face"), n(paths.length, "path")].filter(Boolean).join(" and ")} from the sketch` : `${names} removed — the sketch was left empty`);
     }, () => {
-      this.endTool();
+      this.endSketch();
       this.toast(`Sketch cancelled — ${names} unchanged`);
     });
     tool.viewRadius = box.getBoundingSphere(new THREE.Sphere()).radius * 1.25; // (the outlines and a little round them)
-    this.startTool(tool.load(loops, opens).loadGuides(this.doc.guides).start());
+    tool.taken = [...ids];
+    this.openSketch(tool.load(loops, opens).loadGuides(this.doc.guides));
   }
 
   /**
@@ -5356,7 +5381,66 @@ export class App implements ToolHost {
     const inGroups = (names: { has(g: string): boolean }) => new Set(this.doc.guides.flatMap((g, i) => (g.group !== undefined && names.has(g.group) ? [i] : [])));
     if (this.selGuideGroup !== null && !this.doc.guides.some((g) => g.group === this.selGuideGroup)) this.selGuideGroup = null;
     const sel = this.selGuideGroup !== null ? inGroups(new Set([this.selGuideGroup])) : this.selGuide;
-    this.viewport.setGuides(this.doc.guides, sel, this.hoverGuide, inGroups(this.hiddenGuideGroups));
+    // (an open sketch's own copies: the model's guides it took in left out, so one it deletes goes from view)
+    const hidden = inGroups(this.hiddenGuideGroups);
+    for (const i of this.sketchTaken) hidden.add(i);
+    this.viewport.setGuides(this.doc.guides, sel, this.hoverGuide, hidden);
+  }
+
+  /** The model's guide lines an open sketch took in (it draws them itself — see SketchTool.loadGuides). */
+  private sketchTaken = new Set<number>();
+
+  /** Start a sketch tool: the model's guides it took in hidden while it's open, and the objects it edits. */
+  private openSketch(tool: SketchTool): void {
+    this.startTool(tool.start());
+    this.sketchTaken = new Set(tool.loadedGuides);
+    if (this.sketchTaken.size) this.showGuides();
+    if (tool.taken.length) this.sketchTakenChanged(tool.taken);
+  }
+
+  /** A sketch closed (Exit or Cancel): the model's guides shown again (as they are now), and the objects it had. */
+  private endSketch(): void {
+    this.endTool();
+    if (this.sketchBodies.size) {
+      this.sketchBodies = new Set();
+      this.viewport.setHidden(this.hidden);
+    }
+    if (!this.sketchTaken.size) return;
+    this.sketchTaken = new Set();
+    this.showGuides();
+  }
+
+  /** The face objects / paths an open sketch edits (hidden meanwhile: it draws them itself). */
+  private sketchBodies = new Set<number>();
+
+  sketchTakenChanged(ids: readonly number[]): void {
+    this.sketchBodies = new Set(ids);
+    this.viewport.setHidden(new Set([...this.hidden, ...ids]));
+    this.renderOutliner();
+  }
+
+  /** Face objects / paths dragged from the Bodies panel onto the sketch: taken in to edit (on its plane only). */
+  private dropIntoSketch(ids: number[]): void {
+    const tool = this.tool;
+    if (!(tool instanceof SketchTool)) return;
+    const took: string[] = [], refused: string[] = [];
+    for (const id of ids) {
+      const b = this.doc.get(id);
+      if (!b || (b.kind !== "face" && b.kind !== "path") || tool.taken.includes(id)) continue;
+      if (!tool.onPlane(b.shape as Shape | Wire)) {
+        refused.push(b.name);
+        continue;
+      }
+      try {
+        const got = sketchOfShape(b.shape as Shape | Wire, b.name);
+        tool.takeIn(id, got.loops, got.opens);
+        took.push(b.name);
+      } catch (e) {
+        this.toast(errorMessage(e), "error");
+      }
+    }
+    if (refused.length) this.toast(`Sketch: ${refused.map((n) => `"${n}"`).join(", ")} ${refused.length > 1 ? "aren't" : "isn't"} on the sketch's plane — only objects lying in it come in`, "error");
+    if (took.length) this.toast(`${took.map((n) => `"${n}"`).join(", ")} in the sketch to edit — Exit Sketch replaces ${took.length > 1 ? "them" : "it"} with what's drawn (Ctrl+Z: back out)`);
   }
 
   /** Drop the Bodies panel's guide group selection (another click took over). */
@@ -8116,7 +8200,7 @@ export class App implements ToolHost {
       ["B B · B C · B S · B O", "Draw solid Box · Cylinder · Sphere · Cone (B O: base, then height — a sharp tip; Tab or height,top size + Enter: a flat top) (B alone starts a box; type numbers + Enter for exact sizes)"],
       ["A · A C · A P", "Draw flat Rectangle · Circle · Polygon face (A alone starts a rectangle; then P to push/pull into a solid)"],
       ["T · A T", "Text: click where it starts (on the ground or a flat face), type it in the panel (Shift+Enter: a new line) with its font (built in: Noto Sans, Noto Serif, Noto Sans Thai — Regular / Bold; on Linux also any TrueType / OpenType font on the system; remembered; letters a font hasn't got, e.g. Thai or ♥, come from the built-in ones, Noto Sans Symbols / Symbols 2 too), height (a capital letter, mm), symbols (the ☺▾ button by the text: ♥ ☺ ★ ✿ ♪ ✓… — a click puts one in, its Recent row remembers the last 8; typed / pasted ones work in any font), alignment, letter spacing (extra mm between letters) and line spacing — click elsewhere to move it · Enter / Create adds a flat face per letter, as one group: P pushes them all into raised letters (or into a solid, then Subtract, for engraved ones); S scales a text evenly only (the ring: its letters keep their shape) · the pencil by a Text group in the Bodies panel edits its text (flat or pushed) — the panel as it was made, the text where it is now (moved, turned, scaled, mirrored); Done replaces its letters, pushed ones pushed as far again (not after Subtract / fillet)"],
-      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+C curve (Shift+A too; pulled towards each control point clicked, starting and ending on the first and last — click the start point to close; in Select, its control lines show and its blue points drag) · R rectangle · C circle · F round corner (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
+      ["K", `Sketch on the selected flat face (a curved face: on the flat plane touching it under the cursor — the sketch stays flat; or the ground) — with face objects / paths selected: edit them in the sketch, on their plane (however they were moved or rotated; Exit Sketch replaces them): the view turns square to it with a 3D view in the corner · Tab: exact values (first point X,Y · line length, angle · arc radius, angle · rectangle width, height · circle radius · selection ΔX, ΔY, scale %) · L line · A arc · Shift+C curve (Shift+A too; pulled towards each control point clicked, starting and ending on the first and last — click the start point to close; in Select, its control lines show and its blue points drag) · R rectangle · C circle · F fillet (click the corners where two straight lines meet — an outline: all its corners; again: unpick — then the radius in the panel's box, typed, or dragged with the yellow handle along the line, too big: the largest that fits; Done / Enter rounds them, then pick more) · click the start point to close (Enter or double-click: done — the lines stay open, a path) · typed length / w,h / radius + Enter (arc: its radius, then click where it ends) · Esc drops the outline being drawn · Ctrl+Z undo · Esc again (nothing being drawn) or a right click (keeps what is being drawn): Select — click / Shift+click outlines and paths, drag to move (or type dx,dy), G the move gizmo (red arrow X, green Y, yellow square free; Enter / click elsewhere: done, Esc: back), S scales about the centre — a gizmo: red square X, green Y, yellow ring both (X / Y unevenly: arcs / circles become freeform curves), ${this.viewport.stepTip("round steps")}, Tab: Scale / X / Y %, Enter applies (or type a % + Enter), J joins (outlines into one face, paths end to end), Del deletes · Exit Sketch keeps the closed outlines as flat faces (inside ones become holes) and open lines as paths · bottom-left icons: turn the view a quarter · a picture to trace (only shown while sketching, remembered for the same face): drag moves it, a % + Enter scales it, Match: click 2 points on it, then where they belong on the model · Del removes it`],
       ["Tab (while drawing)", "Property dialog: type exact size, then Create"],
       [". (Box / Rectangle)", "The first click is the centre instead of a corner — press again for a corner (remembered while YDDD runs); while typing a size it's the decimal point"],
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
@@ -8315,6 +8399,8 @@ export class App implements ToolHost {
         .filter((r) => r.sources.every((i) => i >= 0)),
       // Undo / redo: bodies keep their ids here (the steps refer to each other by id).
       history: { ids: cur.map((b) => b.id), dims: this.doc.dimensions, arrays: this.doc.arrays, bodies: pool, shapes, undo, redo, counters: h.counters, nextId: h.nextId },
+      // The view it was saved in (Open shows it again)
+      view: this.savedView(),
     });
   }
 
@@ -8358,6 +8444,7 @@ export class App implements ToolHost {
       dimensions?: Dimension[];
       arrays?: ArrayRecord[];
       history?: SavedHistory;
+      view?: SavedView;
     };
     if (json.format !== "yddd" && json.format !== "y3d") throw new Error("not a YDDD file");
     this.justLoaded = true; // (cleared by the change it makes — see onDocChange)
@@ -8397,7 +8484,7 @@ export class App implements ToolHost {
           { undo, redo, counters: h.counters ?? [], nextId: h.nextId ?? 1 },
           filePath,
         );
-        this.viewport.fit();
+        this.showSavedView(json.view);
         return;
       } catch (e) {
         console.warn("undo history not readable", e);
@@ -8405,7 +8492,22 @@ export class App implements ToolHost {
       }
     }
     this.doc.reset(bodies, filePath, json.guides ?? [], json.dimensions ?? [], json.arrays ?? [], looks);
-    this.viewport.fit();
+    this.showSavedView(json.view);
+  }
+
+  /** The view a file was saved with (older files: none — everything fitted in). */
+  private showSavedView(v: SavedView | undefined): void {
+    const ok = (a: unknown): a is V3 => Array.isArray(a) && a.length === 3 && a.every((x) => Number.isFinite(x));
+    if (!v || !ok(v.position) || !ok(v.target) || !ok(v.up) || !(v.fov > 0)) return this.viewport.fit();
+    const vec = (a: V3) => new THREE.Vector3(...a);
+    this.viewport.restoreCamera({ position: vec(v.position), target: vec(v.target), up: vec(v.up), fov: v.fov, orthoDir: v.ortho && ok(v.ortho) ? vec(v.ortho) : null });
+    this.viewport.requestRender();
+  }
+
+  /** The camera as saved in a file (see SavedView). */
+  private savedView(): SavedView {
+    const c = this.viewport.cameraState(), arr = (v: THREE.Vector3): V3 => v.toArray().map((x) => +x.toFixed(6)) as V3;
+    return { position: arr(c.position), target: arr(c.target), up: arr(c.up), fov: c.fov, ...(c.orthoDir ? { ortho: arr(c.orthoDir) } : {}) };
   }
 
   private async fileSave(saveAs: boolean): Promise<void> {

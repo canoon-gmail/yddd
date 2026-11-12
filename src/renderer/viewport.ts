@@ -44,6 +44,11 @@ export type TransformResult =
 const EDGE_PICK_PX = 8;
 /** The camera's field of view (degrees). */
 const FOV = 35;
+/** The view of an empty model (the app's start, File → New) — as set up and saved in startView.yddd, 2026-11-12. */
+const START_VIEW = { position: [171.591038, -266.739418, 144.598214] as V3, target: [43.731779, 17.044253, 25.128623] as V3 };
+/** The Iso view's direction (from what it looks at to the camera): 30° down from a corner — higher than the start view, so
+ *  an open box's inside shows (the cable box steps click on its floor). */
+const ISO_DIR: V3 = [1, -1.2, 0.9];
 /** Top / Front / Right: so narrow (the camera that much further back) the view looks orthographic — the rest stays perspective maths. */
 const ORTHO_FOV = 2;
 
@@ -131,6 +136,8 @@ const KEEP_TRIANGLES = 3_000_000;
 const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xc0c4c8, selected: 0xf0d78c };
 /** Flat faces: a light see-through fill (the grid shows through) under a blue outline; drawn without depth, so two on one plane blend, not flicker. */
 const REGION_OPACITY = 0.5;
+/** While sketching: how much of their usual opacity the model's bodies and edges keep (they can't be edited there). */
+const DIM = 0.35;
 
 /**
  * An angle dimension's lines: an arc of radius r round `vertex` from the arm towards `a` to the arm
@@ -265,7 +272,7 @@ export class Viewport {
 
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 100000);
     this.camera.up.set(0, 0, 1);
-    this.camera.position.set(140, -190, 130);
+    this.camera.position.set(...START_VIEW.position);
     this.scene.add(this.camera);
 
     // Lights follow the camera so shading is consistent from every angle. Their targets ride with
@@ -1159,7 +1166,7 @@ export class Viewport {
 
   /** A look's material's opacity: its own times the Settings' (flat faces: times their usual see-through). */
   private applyLookOpacity({ mat, kind, op }: { mat: THREE.MeshStandardMaterial; kind: "solid" | "face"; op: number }): void {
-    const opacity = (kind === "face" ? REGION_OPACITY : this.xray ? this.xrayOpacity : this.solidOpacity) * op;
+    const opacity = (kind === "face" ? REGION_OPACITY : this.xray ? this.xrayOpacity : this.solidOpacity) * op * (this.dimmed ? DIM : 1);
     mat.transparent = kind === "face" || this.xray || opacity < 1;
     mat.opacity = opacity;
     mat.depthWrite = kind === "solid" && !this.xray;
@@ -2966,6 +2973,16 @@ export class Viewport {
       if (ids && ids.length && !ids.includes(id)) continue;
       box.expandByObject(v.mesh);
     }
+    if (box.isEmpty() && !(ids && ids.length)) {
+      // An empty model: the start view (its own place and angle, the Iso one)
+      this.camera.fov = FOV;
+      this.camera.updateProjectionMatrix();
+      this.orthoDir = null;
+      this.controls.target.set(...START_VIEW.target);
+      this.camera.position.set(...START_VIEW.position);
+      this.controls.update();
+      return;
+    }
     if (box.isEmpty()) box.set(new THREE.Vector3(-60, -60, 0), new THREE.Vector3(60, 60, 40));
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
@@ -3012,17 +3029,33 @@ export class Viewport {
     this.xray = on;
     this.applyOpacity();
   }
+  /** While sketching: the model's bodies and edges faded right back (only the sketch can be worked on there). */
+  dimmed = false;
+  setDimmed(on: boolean): void {
+    this.dimmed = on;
+    this.applyOpacity();
+  }
   setOpacity(solid: number, xray: number): void {
     this.solidOpacity = solid;
     this.xrayOpacity = xray;
     this.applyOpacity();
   }
   private applyOpacity(): void {
-    const opacity = this.xray ? this.xrayOpacity : this.solidOpacity;
+    const k = this.dimmed ? DIM : 1, opacity = (this.xray ? this.xrayOpacity : this.solidOpacity) * k;
     for (const m of [this.batchMats.solid, ...this.mats.faces]) {
       m.transparent = this.xray || opacity < 1;
       m.opacity = opacity;
       m.depthWrite = !this.xray; // out of x-ray, hidden faces stay hidden however see-through the solids are
+      m.needsUpdate = true;
+    }
+    // (flat face objects and the edges: faded with them while sketching)
+    for (const m of [this.batchMats.region, this.mats.regionFaces[0]]) {
+      m.opacity = REGION_OPACITY * k;
+      m.needsUpdate = true;
+    }
+    for (const m of [this.mats.edge, this.mats.regionEdge, this.mats.pathEdge]) {
+      m.transparent = k < 1;
+      m.opacity = k;
       m.needsUpdate = true;
     }
     for (const m of this.lookMats.values()) this.applyLookOpacity(m);
@@ -3058,7 +3091,7 @@ export class Viewport {
   setView(name: "top" | "front" | "right" | "iso", about: THREE.Vector3 | null = null): void {
     if (about) this.targetToDepthOf(about);
     const before = this.camera.quaternion.clone(), was = about?.clone().project(this.camera);
-    const dirs: Record<string, V3> = { top: [0, -1e-4, 1], front: [0, -1, 0], right: [1, 0, 0], iso: [1, -1.2, 0.9] };
+    const dirs: Record<string, V3> = { top: [0, -1e-4, 1], front: [0, -1, 0], right: [1, 0, 0], iso: ISO_DIR };
     const dist = this.camera.position.distanceTo(this.controls.target) / this.depthScale;
     const dir = new THREE.Vector3(...dirs[name]).normalize();
     this.camera.fov = name === "iso" ? FOV : ORTHO_FOV;

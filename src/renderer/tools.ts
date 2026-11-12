@@ -37,6 +37,8 @@ import { circleSize, parseLen, typedUnit } from "./format";
 
 export interface ToolHost {
   viewport: Viewport;
+  /** Sketch: the objects it has taken in to edit changed (an undo too) — hide those, show the rest. */
+  sketchTakenChanged?(ids: readonly number[]): void;
   /** Grid step for snapping; 0 when not snapping (see Viewport.snapping) or when the step is Off. */
   snapStep(e: { ctrlKey: boolean } | null): number;
   hint(text: string): void;
