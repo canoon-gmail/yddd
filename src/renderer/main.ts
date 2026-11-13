@@ -2990,13 +2990,13 @@ export class App implements ToolHost {
     // (what's put on stays lit while the tool waits for a click — the face clicked lights up besides it)
     const lit = this.selection.filter((s) => logoIds.has(s.body));
     let target: { bodyId: number; faceId: number; at: V3 } | null = null;
-    const todo = "Click the face to put it on — a cup's side (it wraps round it) or a flat face";
+    const todo = "Click the face to put it on — a cup's or a glass's side (it wraps round it) or a flat face";
     const targetAt = (e: PointerEvent): { bodyId: number; faceId: number; at: V3 } | "bad" | null => {
       const hit = this.viewport.pick(e.clientX, e.clientY, "face");
       const b = hit && this.doc.get(hit.body);
       if (!hit || !b) return null;
       const t = hit.kind === "face" && b.kind === "solid" && isBrep(b) && !logoIds.has(b.id) ? findFace(b.shape, hit.id)?.geomType : undefined;
-      return t === "PLANE" || t === "CYLINDRE" ? { bodyId: b.id, faceId: hit.id, at: hit.point.toArray() as V3 } : "bad";
+      return t && t !== "EXTRUSION_SURFACE" ? { bodyId: b.id, faceId: hit.id, at: hit.point.toArray() as V3 } : "bad";
     };
     const note = (text: string) => {
       const el = this.opPanel.querySelector(".op-note");
@@ -3033,9 +3033,9 @@ export class App implements ToolHost {
       pick: (e) => {
         const t = targetAt(e);
         if (!t) return;
-        if (t === "bad") return this.toast("Curve face: click a solid's flat face or a cylinder's side (a cup, a bottle)", "error");
+        if (t === "bad") return this.toast("Curve face: click a solid's flat face or a round side (a cup, a glass, a bottle)", "error");
         target = t;
-        const host = this.doc.get(t.bodyId)!, kind = findFace(host.shape as Shape, t.faceId)?.geomType === "CYLINDRE" ? "round" : "flat on";
+        const host = this.doc.get(t.bodyId)!, kind = findFace(host.shape as Shape, t.faceId)?.geomType !== "PLANE" ? "round" : "flat on";
         note(`On: "${host.name}" — ${kind === "round" ? "wrapped round its side" : "flat on its face"} · click again to move it`);
         if (this.op) this.op.key = "";
         this.previewOp();

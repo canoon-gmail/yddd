@@ -71,7 +71,7 @@ export const COMMANDS: Command[] = [
     ["op.fillet", "Fillet"],
     ["op.chamfer", "Chamfer"],
     ["op.shell", "Shell"],
-    ["op.curveFace", "Curve face: flat faces (a scanned logo) onto a cup's side or a flat face, pushed out"],
+    ["op.curveFace", "Curve face: flat faces (a scanned logo, text) onto a round side (a cup, a tapered glass) or a flat face, pushed out"],
     ["op.close", "Close: fill a face's flat openings into a solid"],
     ["op.offset", "Offset"],
     ["op.revolve", "Revolve"],

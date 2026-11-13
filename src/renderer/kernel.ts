@@ -7604,16 +7604,17 @@ function upRightOn(n: V3): { up: V3; right: V3 } {
 
 /**
  * Curve face: flat face(s) — a scanned logo — laid onto a solid's face where it was clicked, and pushed out of it by
- * `length` (one solid per face, not joined to it). Onto a cylinder's side (a cup): wrapped round it, each outline
- * drawn on the cylinder — across the logo round it, up the logo along it, at their true lengths (letters keep their
- * width). Onto a flat face: just laid flat on it. The logo's middle goes to the click; its up (the world Z along its
- * plane — lying flat: the world Y) to the up along the clicked face (the same rule). Throws for other faces.
+ * `length` (one solid per face, not joined to it). Onto a curved face (a cup, a tapered glass, a vase): wrapped
+ * round it, each outline drawn on the face — across the logo round it, up the logo along it, at their true lengths
+ * from the click (letters keep their width; on a cylinder or a cone exactly, elsewhere as near the click's sizes as the
+ * face allows). Onto a flat face: just laid flat on it. The logo's middle goes to the click; its up (the world Z along
+ * its plane — lying flat: the world Y) to the up along the clicked face (the same rule). Throws for an extrusion's face.
  */
 export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: number, at: V3, length: number): Solid[] {
   if (!(length > 0)) throw new Error("Curve face: the length must be more than 0");
   const tf = findFace(target, targetFaceId);
   if (!tf) throw new Error("Curve face: the face isn't there any more");
-  if (tf.geomType !== "PLANE" && tf.geomType !== "CYLINDRE") throw new Error("Curve face: click a cylinder's side (a cup, a bottle) or a flat face");
+  if (tf.geomType === "EXTRUSION_SURFACE") throw new Error("Curve face: that face can't take it — click a round side (a cup, a glass, a bottle) or a flat face");
   // The logo's frame: its plane, up, right, and its middle
   const n0 = norm3(faces[0].normalAt().toTuple() as V3), p0 = faces[0].center.toTuple() as V3;
   for (const f of faces)
@@ -7645,36 +7646,105 @@ export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: numbe
       trsf.delete();
     }
   }
-  // A cylinder's side: each outline's curves drawn on the cylinder (their control points mapped: exact), pushed out
+  // A curved face: each outline's curves drawn on the face's surface, pushed out. The logo laid out by its true
+  // distances along the surface from the click — across it round the face (along the u lines), up it along the v lines.
+  // A cylinder or a cone: those are even (control points mapped: exact); else (a lofted glass, a vase) each curve is
+  // given more control points first, then mapped (as close as makes no difference).
   const tmp: { delete(): void }[] = [];
   const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
   try {
-    const ad = keep(new oc.BRepAdaptor_Surface(tf.wrapped, true));
-    const cyl = keep(ad.Cylinder()), ax = keep(cyl.Position()), R = cyl.Radius();
     const v3 = (d: { X(): number; Y(): number; Z(): number }): V3 => [d.X(), d.Y(), d.Z()];
-    const O = v3(keep(ax.Location())), D = v3(keep(ax.Direction())), X = v3(keep(ax.XDirection())), Y = v3(keep(ax.YDirection()));
-    const surf = new oc.Geom_CylindricalSurface(ax, R); // (not freed: the new edges and faces use it)
-    // (u, v) of the click: the angle round the axis (from X towards Y), the height along it
-    const q = sub3(hit.p, O), u0 = Math.atan2(dot3(q, Y), dot3(q, X)), v0 = dot3(q, D);
-    // The logo's right and up on the cup, as arc length round it (along the u direction) and height along it
-    const Tu: V3 = [0, 1, 2].map((k) => -Math.sin(u0) * X[k] + Math.cos(u0) * Y[k]) as V3;
-    const a1 = dot3(rightT, Tu), a2 = dot3(rightT, D), b1 = dot3(upT, Tu), b2 = dot3(upT, D);
-    const uv = (p: V3): [number, number] => {
-      const [s, t] = st(p);
-      return [u0 + (s * a1 + t * b1) / R, v0 + s * a2 + t * b2];
+    // (not freed: the new edges and faces use it) — a closed B-spline not marked periodic (a loft's side) made so: the
+    // logo can run over its seam
+    let surf = oc.BRep_Tool.Surface(tf.wrapped) as any;
+    if (tf.geomType === "BSPLINE_SURFACE" && ((surf.IsUClosed() && !surf.IsUPeriodic()) || (surf.IsVClosed() && !surf.IsVPeriodic()))) {
+      try {
+        const bs = oc.GeomConvert.SurfaceToBSplineSurface(surf) as any;
+        if (bs.IsUClosed() && !bs.IsUPeriodic()) bs.SetUPeriodic();
+        if (bs.IsVClosed() && !bs.IsVPeriodic()) bs.SetVPeriodic();
+        surf = bs;
+      } catch {
+        // kept as it was: a logo over the seam is refused below
+      }
+    }
+    const b = surf.Bounds(0, 0, 0, 0) as { U1: number; U2: number; V1: number; V2: number };
+    const pu = surf.IsUPeriodic() as boolean, pv = surf.IsVPeriodic() as boolean;
+    // (u0, v0): the click on the surface
+    const proj = keep(new oc.GeomAPI_ProjectPointOnSurf(keep(new oc.gp_Pnt(...hit.p)), surf, oc.Extrema_ExtAlgo.Extrema_ExtAlgo_Grad));
+    if (!proj.IsDone() || proj.NbPoints() < 1) throw new Error("Curve face: the click couldn't be found on that face");
+    const { U: u0, V: v0 } = proj.LowerDistanceParameters(0, 0) as { U: number; V: number };
+    const P = keep(new oc.gp_Pnt()), DU = keep(new oc.gp_Vec()), DV = keep(new oc.gp_Vec());
+    const d1 = (u: number, v: number): [V3, V3] => (surf.D1(u, v, P, DU, DV), [v3(DU), v3(DV)]);
+    const [Su, Sv] = d1(u0, v0), lu = Math.hypot(...Su), lv = Math.hypot(...Sv);
+    if (!(lu > 1e-9 && lv > 1e-9)) throw new Error("Curve face: that point of the face is a tip — click elsewhere on it");
+    // The logo's right and up on the face, as distances along the u line (α) and the v line (β) through the click
+    const eu = Su.map((x) => x / lu) as V3, ev = Sv.map((x) => x / lv) as V3, g = dot3(eu, ev), det = 1 - g * g;
+    if (!(det > 1e-6)) throw new Error("Curve face: that face is folded at the click — click elsewhere on it");
+    const split = (d: V3): [number, number] => {
+      const x = dot3(d, eu), y = dot3(d, ev);
+      return [(x - g * y) / det, (y - g * x) / det];
     };
-    const [s0, s1] = [Math.min(...sr), Math.max(...sr)];
-    if ((s1 - s0) / R > 1.9 * Math.PI) throw new Error("Curve face: the logo goes almost all the way round the cup — make it smaller (S)");
-    const edgeOnCyl = (e: Edge): unknown => {
+    const [ar, br] = split(rightT), [au, bu] = split(upT);
+    const ab = (p: V3): [number, number] => {
+      const [s, t] = st(p);
+      return [s * ar + t * au, s * br + t * bu];
+    };
+    // Distance along a parameter line → the parameter: even (its speed the same all along: a cylinder, a cone) a
+    // straight line; else a table of the distance run, both ways, as far as the logo needs
+    const lengths = pts.map(ab), need = (k: 0 | 1) => [Math.min(...lengths.map((l) => l[k])), Math.max(...lengths.map((l) => l[k]))];
+    const along = (k: 0 | 1): [(d: number) => number, boolean] => {
+      const p0 = k ? v0 : u0, sp0 = k ? lv : lu, [lo, hi] = need(k), [first, last] = k ? [b.V1, b.V2] : [b.U1, b.U2], periodic = k ? pv : pu;
+      const speed = (q: number) => Math.hypot(...d1(k ? u0 : q, k ? q : v0)[k]);
+      const reach = Math.max(-lo, hi) * 1.05 + 1e-6, h0 = Math.min(0.25, reach / 64) / sp0;
+      if ([-1, -0.5, 0.5, 1].every((f) => Math.abs(speed(p0 + f * reach / sp0) - sp0) < 1e-9 * sp0)) return [(d) => p0 + d / sp0, true];
+      const side = (dir: 1 | -1): { d: number[]; q: number[] } => {
+        const d = [0], q = [p0];
+        let s = sp0;
+        while (d[d.length - 1] < reach) {
+          const a = q[q.length - 1], z = a + dir * h0;
+          if (!periodic && (z < first - 1e-9 || z > last + 1e-9)) throw new Error("Curve face: the logo runs over the edge of that face — move it or make it smaller (S)");
+          if (q.length > 20000) throw new Error("Curve face: that face is too pinched there — click elsewhere on it");
+          const sm = speed((a + z) / 2), sz = speed(z); // (Simpson's rule)
+          d.push(d[d.length - 1] + (h0 / 6) * (s + 4 * sm + sz));
+          q.push(z);
+          s = sz;
+        }
+        return { d, q };
+      };
+      const fw = side(1), bw = side(-1);
+      const at = (x: number) => {
+        const { d, q } = x >= 0 ? fw : bw, a = Math.abs(x);
+        let i = 1;
+        while (i < d.length - 1 && d[i] < a) i++;
+        return q[i - 1] + ((a - d[i - 1]) / (d[i] - d[i - 1] || 1)) * (q[i] - q[i - 1]);
+      };
+      return [at, false];
+    };
+    const [U, evenU] = along(0), [V, evenV] = along(1), linear = evenU && evenV;
+    const uv = (p: V3): [number, number] => {
+      const [a, c] = ab(p);
+      return [U(a), V(c)];
+    };
+    const us = lengths.map(([a]) => U(a));
+    if (pu && Math.max(...us) - Math.min(...us) > 0.95 * surf.UPeriod()) throw new Error("Curve face: the logo goes almost all the way round — make it smaller (S)");
+    const edgeOn = (e: Edge): unknown => {
       const cv = oc.BRep_Tool.Curve(e.wrapped, 0, 0) as unknown as { returnValue: unknown; First: number; Last: number };
       const bs = keep(oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(cv.returnValue as never, cv.First, cv.Last, true, true)) as never));
       if (bs.IsPeriodic()) bs.SetNotPeriodic();
+      if (!linear) {
+        // (more control points, about one a millimetre along its control polygon — mapped one by one they follow the curve)
+        if (bs.Degree() < 3) bs.IncreaseDegree(3);
+        let len = 0;
+        for (let i = 2; i <= bs.NbPoles(); i++) len += bs.Pole(i).Distance(bs.Pole(i - 1));
+        const n = Math.min(64, Math.ceil(len)), f0 = bs.FirstParameter(), f1 = bs.LastParameter();
+        for (let i = 1; i < n; i++) bs.InsertKnot(f0 + ((f1 - f0) * i) / n, 1, 1e-9, true);
+      }
       const n = bs.NbPoles(), nk = bs.NbKnots();
       const poles = keep(new oc.NCollection_Array1_gp_Pnt2d(1, n)), w = keep(new oc.NCollection_Array1_double(1, n));
       for (let i = 1; i <= n; i++) {
         const p = keep(bs.Pole(i));
-        const [pu, pv] = uv([p.X(), p.Y(), p.Z()]);
-        poles.SetValue(i, keep(new oc.gp_Pnt2d(pu, pv)));
+        const [qu, qv] = uv([p.X(), p.Y(), p.Z()]);
+        poles.SetValue(i, keep(new oc.gp_Pnt2d(qu, qv)));
         w.SetValue(i, bs.Weight(i));
       }
       const kn = keep(new oc.NCollection_Array1_double(1, nk)), km = keep(new oc.NCollection_Array1_int(1, nk));
@@ -7684,54 +7754,58 @@ export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: numbe
       }
       const c2 = new oc.Geom2d_BSplineCurve(poles, w, kn, km, bs.Degree(), false);
       const mk = keep(new oc.BRepBuilderAPI_MakeEdge(c2 as never, surf as never));
-      if (!mk.IsDone()) throw new Error("Curve face: an outline couldn't be drawn on the cylinder");
+      if (!mk.IsDone()) throw new Error("Curve face: an outline couldn't be drawn on the face");
       const edge = mk.Edge();
       return (e.wrapped as unknown as { Orientation(): unknown }).Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? oc.TopoDS.Edge(edge.Reversed()) : edge;
     };
-    const wireOnCyl = (w: unknown): unknown => {
+    const wireOn = (w: unknown): unknown => {
       const mk = keep(new oc.BRepBuilderAPI_MakeWire());
       const ex = keep(new oc.TopExp_Explorer(w as never, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
-      for (; ex.More(); ex.Next()) mk.Add(edgeOnCyl(new Edge(oc.TopoDS.Edge(ex.Current()))) as never);
-      if (!mk.IsDone()) throw new Error("Curve face: an outline didn't close on the cylinder");
+      for (; ex.More(); ex.Next()) mk.Add(edgeOn(new Edge(oc.TopoDS.Edge(ex.Current()))) as never);
+      if (!mk.IsDone()) throw new Error("Curve face: an outline didn't close on the face");
       const wire = mk.Wire();
       oc.BRepLib.BuildCurves3d(wire);
       return wire;
     };
-    /** Away from the axis at a face's middle. */
-    const radialOut = (f: Face): V3 => {
-      const r = sub3(f.center.toTuple() as V3, O), k = dot3(r, D);
-      return norm3(sub3(r, D.map((x) => x * k) as V3));
+    // Out of the face: along the clicked face's outward normal (the outside of a cup, or the inside of a bowl-like one)
+    const outAt = (p: V3): V3 => {
+      const pr = keep(new oc.GeomAPI_ProjectPointOnSurf(keep(new oc.gp_Pnt(...p)), surf, oc.Extrema_ExtAlgo.Extrema_ExtAlgo_Grad));
+      const { U: a, V: c } = pr.LowerDistanceParameters(0, 0) as { U: number; V: number };
+      const [x, y] = d1(a, c), n = cross3(x, y), n0 = cross3(Su, Sv);
+      // (the same side as the click's outward normal)
+      return dot3(n0, nT) < 0 ? (n.map((k) => -k) as V3) : n;
     };
-    // Out of the cup: along the clicked face's outward normal (the outside of a cup, or the inside of a bowl-like one)
     return faces.map((f) => {
       const fwd = oc.TopoDS.Face((f.wrapped as unknown as { Oriented(o: unknown): unknown }).Oriented(oc.TopAbs_Orientation.TopAbs_FORWARD) as never);
       const outer = oc.BRepTools.OuterWire(fwd);
       const holes: unknown[] = [];
       const ex = keep(new oc.TopExp_Explorer(fwd, oc.TopAbs_ShapeEnum.TopAbs_WIRE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
       for (; ex.More(); ex.Next()) if (!(ex.Current() as unknown as { IsSame(o: unknown): boolean }).IsSame(outer)) holes.push(oc.TopoDS.Wire(ex.Current()));
-      // Its holes (an "e", an "o"): laid on the cup the outline is turned to run the right way round by MakeFace, the holes
-      // not — when the laying turns them all over, they come out the same way as the outline (an invalid face). Wrapped
-      // round a cylinder nothing stretches: the right face has the flat one's area; else the holes are turned over.
+      // Its holes (an "e", an "o"): laid on the face the outline is turned to run the right way round by MakeFace, the
+      // holes not — when the laying turns them all over, they come out the same way as the outline (an invalid face, or
+      // one the holes' size too big). The right face has about the flat one's area (exactly, round a cylinder): of
+      // the two ways, the valid one nearer it
       const build = (flipHoles: boolean) => {
-        const mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, wireOnCyl(outer) as never, true));
+        const mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, wireOn(outer) as never, true));
         for (const h of holes) {
-          const w = wireOnCyl(h) as { Reversed(): unknown };
+          const w = wireOn(h) as { Reversed(): unknown };
           mk.Add((flipHoles ? oc.TopoDS.Wire(w.Reversed() as never) : w) as never);
         }
-        if (!mk.IsDone()) throw new Error("Curve face: the face couldn't be made on the cylinder");
+        if (!mk.IsDone()) throw new Error("Curve face: the face couldn't be made on the face clicked");
         const fix = keep(new oc.ShapeFix_Face(mk.Face()));
         fix.Perform();
         return new Face(fix.Face());
       };
       const flatArea = measureArea(f);
-      const right = (w: Face) => isValidShape(w) && Math.abs(measureArea(w) - flatArea) < 1e-3 * flatArea;
+      const off = (w: Face) => (isValidShape(w) ? Math.abs(measureArea(w) - flatArea) / flatArea : Infinity);
       let wrapped = build(false);
-      if (holes.length && !right(wrapped)) {
+      if (holes.length && !(off(wrapped) < 1e-3)) {
         const other = build(true);
-        if (right(other)) wrapped = other;
+        if (off(other) < off(wrapped)) wrapped = other;
       }
       if (!isValidShape(wrapped)) throw new Error("Curve face: the wrapped face isn't valid");
-      if (dot3(normalAtUV(wrapped, 0.5, 0.5), radialOut(wrapped)) * dot3(nT, sub3(hit.p, add3(O, D.map((x) => x * v0) as V3))) < 0) wrapped = wrapped.flipOrientation();
+      const mid = wrapped.center.toTuple() as V3;
+      if (dot3(normalAtUV(wrapped, 0.5, 0.5), outAt(mid)) < 0) wrapped = wrapped.flipOrientation();
       const thick = keep(new oc.BRepOffsetAPI_MakeThickSolid());
       thick.MakeThickSolidBySimple(wrapped.wrapped, length);
       let solid = cast(thick.Shape()) as Solid;
