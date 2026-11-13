@@ -1895,12 +1895,13 @@ export class GuideTool implements Tool {
       "Guide line",
       [
         { label: "Distance", value: +this.dist.toFixed(3), step: 1 },
-        { label: "% of face width (0 = use distance)", value: 0, step: 5 },
+        { label: "Or divide % of face (100 = all)", value: 0, step: 5, min: 0 },
         { label: "Count", value: this.count, step: 1, min: 1 },
       ],
       ([d, pct, c]) => {
         this.count = Math.max(1, Math.round(c || 1));
-        this.dist = pct > 0 && Number.isFinite(r.width) ? (r.width * pct) / 100 : d;
+        // (a %: that part of the face divided by Count guides into Count + 1 equal strips — 100 %, 5: at 1/6 … 5/6)
+        this.dist = pct > 0 && Number.isFinite(r.width) ? (r.width * pct) / 100 / (this.count + 1) : d;
         this.draw();
         this.apply();
       },

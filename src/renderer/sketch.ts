@@ -663,7 +663,8 @@ function nest(loops: Loop[]): { outer: number; holes: number[] }[] {
   };
   const joined = (i: number, j: number) => loops[i].g !== undefined && loops[i].g === loops[j].g;
   const parents = loops.map((_, i) => loops.map((_, j) => j).filter((j) => j !== i && !joined(i, j) && areas[j] > areas[i] && within(i, j)));
-  const depth = parents.map((p) => p.length);
+  // (a joined group counts once: a circle inside two of its overlapping outlines is still one level in — a hole)
+  const depth = parents.map((p) => new Set(p.map((j) => (loops[j].g !== undefined ? `g${loops[j].g}` : j))).size);
   // An outline in nothing, with nothing in it, inside a group (also of outlines in nothing) as a whole: its hole
   const inGroup = new Map<number, number>(); // (outline → the group's outline it's listed with)
   const groups = new Map<number, number[]>();
@@ -777,8 +778,10 @@ export class SketchTool implements Tool {
   /** Radius typed for the next arc (the mouse then picks where it ends). */
   private arcR: number | null = null;
   private cursor: P | null = null;
-  /** Line lock: 0 = horizontal, 1 = vertical, -1 = none. */
+  /** Line lock: 0 = horizontal, 1 = vertical, 2 = straight on (along the last line: lockDir), -1 = none. */
   private lock = -1;
+  /** The straight-on lock's direction (unit). */
+  private lockDir: P = [1, 0];
   /** The cursor is on a point where the line just touches a circle / arc (see tangentPoints). */
   private touching = false;
   /** The sketch points the cursor is lined up with (same X: k = 0, same Y: k = 1), drawn as dashed guides. */
@@ -1521,7 +1524,17 @@ export class SketchTool implements Tool {
     const locks = !(vp.autoSnap && e.ctrlKey) && (this.mode === "line" || (this.mode === "arc" && !this.path.length && !this.arcEnd));
     if (from && locks) {
       const d = sub(p, from), l = len(d);
-      if (l > 1e-9 && Math.abs(d[1]) / l < LOCK_SIN) {
+      // Straight on: a line drawn on from a line, near its direction — the same direction exactly (past a circle it
+      // just touches, on past a corner); nearer that than level / upright
+      const last = this.mode === "line" && !this.thru.length ? this.path[this.path.length - 1] : undefined;
+      let u = last?.kind === "line" && same(last.b, from) ? mul(sub(last.b, last.a), 1 / len(sub(last.b, last.a))) : null;
+      if (u && Math.min(Math.abs(u[0]), Math.abs(u[1])) < 1e-9) u = null; // (a level / upright line: those locks go straight on already)
+      const off = u && l > 1e-9 && dot(d, u) > 0 ? Math.abs(cross(u, d)) / l : Infinity;
+      if (off < LOCK_SIN && off <= Math.min(Math.abs(d[1]), Math.abs(d[0])) / l) {
+        p = add(from, mul(u!, dot(d, u!)));
+        this.lock = 2;
+        this.lockDir = u!;
+      } else if (l > 1e-9 && Math.abs(d[1]) / l < LOCK_SIN) {
         p = [p[0], from[1]];
         this.lock = 0;
       } else if (l > 1e-9 && Math.abs(d[0]) / l < LOCK_SIN) {
@@ -1535,7 +1548,7 @@ export class SketchTool implements Tool {
     // straight above the line it bends on from: a half circle).
     const tol = ALIGN_PX * vp.worldPerPixel(this.world(p));
     for (const k of [0, 1] as const) {
-      if ((this.lock === 0 && k === 1) || (this.lock === 1 && k === 0)) continue; // already level / upright
+      if (this.lock === 2 || (this.lock === 0 && k === 1) || (this.lock === 1 && k === 0)) continue; // already level / upright / straight on
       let ref: P | null = null;
       for (const { p: q } of this.ownPoints()) if (Math.abs(q[k] - p[k]) < tol && (!ref || Math.abs(q[k] - p[k]) < Math.abs(ref[k] - p[k]))) ref = q;
       if (!ref) continue;
@@ -1554,7 +1567,7 @@ export class SketchTool implements Tool {
       let q: P = sub(p, mul([-g.d[1], g.d[0]], off));
       if (from && this.lock >= 0) {
         // (along the locked direction from `from` to the guide)
-        const u: P = this.lock === 0 ? [1, 0] : [0, 1], den = cross(g.d, u);
+        const u: P = this.lock === 0 ? [1, 0] : this.lock === 1 ? [0, 1] : this.lockDir, den = cross(g.d, u);
         if (Math.abs(den) < 1e-9) continue;
         q = add(from, mul(u, -cross(g.d, sub(from, g.a)) / den));
       }
@@ -1786,6 +1799,8 @@ export class SketchTool implements Tool {
     // Two separate circles: a belt round them — straight lines just touching both, one outline (same sizes: a capsule)
     const [ca, cb] = loopIdx.map((i) => this.loops[i]);
     if (loopIdx.length === 2 && !openIdx.length && ca.kind === "circle" && cb.kind === "circle" && dist(ca.c, cb.c) > ca.r + cb.r + 1e-9) return this.belt(loopIdx[0], loopIdx[1]);
+    // Three or more circles: a belt round them all (those inside it kept, joined to it, for their centres)
+    if (loopIdx.length >= 3 && !openIdx.length && loopIdx.every((i) => this.loops[i].kind === "circle") && this.beltAll(loopIdx)) return;
     // Paths: chain them end to end (turning a path round where needed).
     let chain: Seg[] | null = null;
     if (openIdx.length >= 2) {
@@ -1827,6 +1842,54 @@ export class SketchTool implements Tool {
     this.hoverItem = null;
     this.host.toast(chain && same(chain[0].a, chain[chain.length - 1].b) ? "Joined: the paths close into an outline" : "Joined");
     this.update();
+  }
+
+  /**
+   * J on three or more circles: a belt round them all — straight lines just touching each pair of outer circles in turn
+   * (as round pulleys), one outline; the circles inside it stay, joined to it (nothing to the face, their centres snap
+   * — a hole drawn there again). Selected; one undo step. False (nothing done): no belt to make (one circle round all).
+   */
+  private beltAll(idx: number[]): boolean {
+    const cs = idx.map((i) => this.loops[i] as Extract<Loop, { kind: "circle" }>);
+    // Outer pairs: the tangent on the right of a → b with every other circle on its left (inside)
+    const next = new Map<number, { j: number; t: [P, P] }>();
+    cs.forEach((a, i) => cs.forEach((b, j) => {
+      if (i === j || next.has(i)) return;
+      const t = outerTangent(a.c, a.r, b.c, b.r, -1);
+      if (!t) return;
+      const u = norm(sub(t[1], t[0])), tol = 1e-7 * Math.max(1, a.r, b.r);
+      if (cs.every((k, m) => m === i || m === j || cross(u, sub(k.c, t[0])) >= k.r - tol)) next.set(i, { j, t });
+    }));
+    if (next.size < 2) return false;
+    // (in turn round the outside, from one of them)
+    const ring: number[] = [];
+    for (let i = next.keys().next().value!; !ring.includes(i) && next.has(i); i = next.get(i)!.j) ring.push(i);
+    if (ring.length < 2 || ring.some((i) => !next.has(i)) || next.get(ring[ring.length - 1])!.j !== ring[0]) return false;
+    const n = this.frame.z.toArray() as V3, face = (l: Loop) => sketchFaces(this.kernelLoop(l), [], n)[0];
+    const quad = (a: P, [p, q]: [P, P], b: P): Loop => ({ kind: "path", segs: [{ kind: "line", a, b: p }, { kind: "line", a: p, b: q }, { kind: "line", a: q, b }, { kind: "line", a: b, b: a }] });
+    const parts = ring.flatMap((i) => [face(cs[i]), face(quad(cs[i].c, next.get(i)!.t, cs[next.get(i)!.j].c))]);
+    // (the middle, between the outer circles' centres)
+    const mid = ring.map((i) => cs[i].c);
+    if (mid.length >= 3 && Math.abs(mid.reduce((t, p, k) => t + cross(p, mid[(k + 1) % mid.length]), 0)) > 1e-9)
+      parts.push(face({ kind: "path", segs: mid.map((p, k) => ({ kind: "line", a: p, b: mid[(k + 1) % mid.length] })) }));
+    let loops: Loop[];
+    try {
+      loops = joinFlatFaces(parts, n).flatMap((f) => sketchOfShape(f as unknown as Shape, "Belt").loops.map((l) => this.fromKernelLoop(l)));
+    } catch (e) {
+      this.host.toast(`Join: ${e instanceof Error ? e.message : String(e)}`, "error");
+      return true;
+    }
+    const inner = cs.filter((_, i) => !ring.includes(i));
+    this.pushUndo(JSON.stringify(this.state()));
+    this.version++;
+    const g = inner.length ? Math.max(-1, ...this.loops.map((l) => l.g ?? -1)) + 1 : undefined;
+    const made: Loop[] = [...loops, ...inner].map((l) => (g === undefined ? l : { ...l, g }));
+    this.loops = [...this.loops.filter((_, k) => !idx.includes(k)), ...made];
+    this.selected = made.map((_, k) => ({ kind: "loop" as const, i: this.loops.length - made.length + k }));
+    this.hoverItem = null;
+    this.host.toast(`Joined: a belt round ${ring.length} circles${inner.length ? ` — ${inner.length} inside it kept for ${inner.length > 1 ? "their centres" : "its centre"}` : ""} · F on a straight side curves it in`);
+    this.update();
+    return true;
   }
 
   /** J on two separate circles: the belt round them (see join) in their place, selected; one undo step. */
@@ -2952,6 +3015,15 @@ export class SketchTool implements Tool {
     if (!g) return false;
     const closes = same(g.b, this.first!);
     if (closes && this.path.length === 0 && g.kind === "line") return false; // straight back to the start
+    // A line straight on from the last one (the straight-on lock): one longer line, no point in between
+    const last = this.path[this.path.length - 1];
+    if (g.kind === "line" && last?.kind === "line" && same(last.b, g.a)) {
+      const u = sub(last.b, last.a), v = sub(g.b, g.a);
+      if (dot(u, v) > 0 && Math.abs(cross(u, v)) <= 1e-9 * len(u) * len(v)) {
+        this.path.pop();
+        g = { kind: "line", a: last.a, b: g.b };
+      }
+    }
     this.path.push(g);
     if (closes) {
       this.loops.push({ kind: "path", segs: this.path });
@@ -3896,7 +3968,7 @@ export class SketchTool implements Tool {
         lines([from, c], this.mats.rubber);
         hudAway = from;
         const d = sub(c, from);
-        hud = `${num(len(d))} mm${this.lock === 0 ? " · horizontal" : this.lock === 1 ? " · vertical" : ` · ${num((Math.atan2(d[1], d[0]) * 180) / Math.PI)}°`}${this.touching ? " · touching the circle" : ""}`;
+        hud = `${num(len(d))} mm${this.lock === 0 ? " · horizontal" : this.lock === 1 ? " · vertical" : this.lock === 2 ? ` · straight on · ${num((Math.atan2(d[1], d[0]) * 180) / Math.PI)}°` : ` · ${num((Math.atan2(d[1], d[0]) * 180) / Math.PI)}°`}${this.touching ? " · touching the circle" : ""}`;
       } else if (from && this.mode === "arc") {
         const g = this.path.length || this.arcEnd ? this.arcAt(from, c) : null;
         const fixed = this.arcR ? ` · R ${num(this.arcR)} (typed)` : "";

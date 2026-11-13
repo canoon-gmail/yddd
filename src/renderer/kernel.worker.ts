@@ -8,6 +8,7 @@ import {
   loadTextFont,
   textFontReady,
   booleanOp,
+  punchHoles,
   deserialize,
   errorMessage,
   exportStep,
@@ -45,6 +46,8 @@ export type KernelJob =
   /** Offset of several flat faces on one plane (see offsetFaces): the faces as BREP text. */
   | { op: "offsetFaces"; faces: string[]; distance: number; round: boolean; fill: boolean; ring: boolean; join: boolean }
   | { op: "boolean"; kind: BooleanOp; target: string; tools: string[] }
+  /** Punch (see punchHoles): the solid and the flat faces drawn on it, as BREP text. */
+  | { op: "punch"; target: string; flats: string[] }
   | { op: "exportStep"; items: { brep: string; name: string }[] }
   | { op: "exportStl"; items: JobShape[]; quality: StlQuality }
   | { op: "export3mf"; items: (JobShape & { name: string })[]; quality: StlQuality }
@@ -63,6 +66,7 @@ export type KernelJobResult =
   | ({ op: "shell" } & JobSolid)
   | { op: "offsetFaces"; faces: JobSolid[] }
   | ({ op: "boolean" } & JobSolid)
+  | ({ op: "punch" } & JobSolid)
   | { op: "file"; data: Uint8Array }
   | { op: "importStep"; solids: JobSolid[] }
   | ({ op: "gridfinity" } & JobSolid)
@@ -106,6 +110,8 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
     }
     case "boolean":
       return { op: "boolean", ...made(booleanOp(job.kind, solidOf(job.target), job.tools.map(solidOf))) };
+    case "punch":
+      return { op: "punch", ...made(punchHoles(solidOf(job.target), job.flats.map(deserialize))) };
     case "exportStep":
       return { op: "file", data: new Uint8Array(await exportStep(job.items.map((i) => ({ shape: solidOf(i.brep), name: i.name })))) };
     case "exportStl":

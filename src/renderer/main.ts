@@ -77,6 +77,7 @@ import {
   sideWallFaceIds,
   closeShapes,
   liesOnSolid,
+  punchHoles,
   walkPath,
   type PathWalk,
   planarFaceFrame,
@@ -954,6 +955,7 @@ export class App implements ToolHost {
         return this.doc.setGuides([], "Clear guides");
 
       case "op.bump": return this.opBump();
+      case "op.punch": return this.opPunch();
       case "bool.union": return this.boolean("union");
       case "bool.subtract": return this.boolean("subtract");
       case "bool.intersect": return this.boolean("intersect");
@@ -1117,7 +1119,7 @@ export class App implements ToolHost {
     }
     if (g >= 0) {
       this.setSelection([]);
-      this.hint("Guide line selected · G moves it · Shift+D copies it · P divides the faces it runs across · Del removes it");
+      this.hint("Guide line selected · G moves it · Shift+D copies it · Shift+P divides the faces it runs across · Del removes it");
       return;
     }
     // Moving solids (G): a click on a round / slanted edge turns the gizmo to it — slide along its axis / the edge.
@@ -2343,7 +2345,7 @@ export class App implements ToolHost {
   }
 
   private opPushPull(): void {
-    if (this.selGuide >= 0 && !this.selection.length) return this.divideByGuide();
+    if (this.selGuide >= 0 && !this.selection.length) return this.toast("Guide line: Shift+P divides the faces it runs across");
     if (this.pushedLettersSelected()) return void this.pushTextAgain();
     // Target: one selected face, or one selected flat-face body (it has a single face).
     let target: { bodyId: number; faceId: number } | null = null;
@@ -2456,7 +2458,7 @@ export class App implements ToolHost {
         title: "Drag to push / pull · double-click: push through to the face behind (takes that part off)",
         dblclick: () => {
           const k = throughDepth(body.shape, faceId);
-          return k === null ? "Push through: no flat face straight behind this one (divide the face behind too — a guide line, P)" : -k;
+          return k === null ? "Push through: no flat face straight behind this one (divide the face behind too — a guide line, Shift+P)" : -k;
         },
       },
     };
@@ -2516,6 +2518,56 @@ export class App implements ToolHost {
         const b = p && this.doc.get(p.body);
         this.viewport.canvas.style.cursor = b?.kind === "face" && b.id !== flat.id ? "pointer" : "";
       },
+    });
+  }
+
+  /**
+   * Punch (Shift+P): the selected face objects drawn on solids' flat faces (a screw hole's circle on a plate) each cut
+   * straight in until it comes out the other side of that wall (see punchHoles) — no dialog; one undo step, the face
+   * objects used up. A solid cut in two: one body per piece, the largest keeping its id. A guide line selected instead:
+   * the faces it runs across divided along it (divideByGuide).
+   */
+  private opPunch(): void {
+    if (this.selGuide >= 0 && !this.selection.length) return this.divideByGuide(); // (a guide line selected: divide along it)
+    const picked = [...new Set(this.selection.map((s) => s.body))].map((id) => this.doc.get(id));
+    if (!picked.length || picked.some((b) => b?.kind !== "face" || !isBrep(b)))
+      return this.toast("Punch: select flat faces drawn on a solid's flat face (e.g. a circle for a screw hole)", "error");
+    const byHost = new Map<number, ShapeBody[]>();
+    for (const flat of picked as ShapeBody[]) {
+      const host = this.doc.bodies.find((b): b is ShapeBody => b.kind === "solid" && !this.hidden.has(b.id) && !b.locked && liesOnSolid(flat.shape, b.shape));
+      if (!host) return this.toast(`Punch: "${flat.name}" isn't on a solid's flat face — draw it on one`, "error");
+      byHost.set(host.id, [...(byHost.get(host.id) ?? []), flat]);
+    }
+    const hosts = [...byHost.keys()].map((id) => this.doc.get(id) as ShapeBody);
+    const heavy = this.heavy(hosts);
+    this.runBusy(heavy, "Punching…", async () => {
+      try {
+        const made = new Map<number, Solid[]>();
+        for (const host of hosts) {
+          const flats = byHost.get(host.id)!;
+          const solid = this.solidOf(host.id, "Punch");
+          const result = heavy && this.bgKernel.ready
+            ? solidFrom(await this.bgKernel.run({ op: "punch", target: serializeShape(solid), flats: flats.map((f) => serializeShape(f.shape)) }))
+            : punchHoles(solid, flats.map((f) => f.shape));
+          if (!isValidShape(result)) throw new Error(`OpenCascade couldn't punch "${host.name}" exactly (the result came out broken) — nothing changed`);
+          made.set(host.id, solidPieces(result).map((p) => ({ p, v: solidVolume(p) })).sort((a, b) => b.v - a.v).map(({ p }) => p));
+        }
+        if (picked.some((b) => !this.doc.get(b!.id)) || hosts.some((h) => this.doc.get(h.id) !== h)) return; // (changed meanwhile)
+        const used = new Set(picked.map((b) => b!.id));
+        const extra: number[] = [];
+        this.doc.commit(this.doc.bodies.filter((b) => !used.has(b.id)).flatMap((b) => {
+          const parts = made.get(b.id);
+          if (!parts) return [b];
+          const more = parts.slice(1).map((p) => inGroupOf(this.doc.makeBody(p, b.name), b));
+          extra.push(...more.map((m) => m.id));
+          return [withShape(b, parts[0]), ...more];
+        }), "Punch");
+        this.setMode("body");
+        this.setSelection([...hosts.map((h) => h.id), ...extra].map((id): SelItem => ({ kind: "body", body: id, id: 0 })));
+        this.toast(`Punched ${used.size} hole${used.size > 1 ? "s" : ""}${extra.length ? ` — cut into ${extra.length + hosts.length} pieces` : ""}`);
+      } catch (e) {
+        if (!(e instanceof JobCancelled)) this.toast(errorMessage(e), "error");
+      }
     });
   }
 
@@ -4683,7 +4735,7 @@ export class App implements ToolHost {
   }
 
   /**
-   * A guide line selected, P / Space: the flat faces of the solids it runs across divided along it, and the faces on their
+   * A guide line selected, Shift+P: the flat faces of the solids it runs across divided along it, and the faces on their
    * other side (facing the other way: the same line moved straight through — a profile's back) — one undo step; shown,
    * unlocked solids; the new edges left selected (G lifts them).
    */
@@ -4740,7 +4792,7 @@ export class App implements ToolHost {
       }
       if (shape !== body.shape) changed.set(body.id, shape);
     }
-    if (!changed.size) return this.toast(why || "P on a guide line divides the flat faces of solids it runs across — this one runs across none (draw it on a face)", "error");
+    if (!changed.size) return this.toast(why || "Shift+P on a guide line divides the flat faces of solids it runs across — this one runs across none (draw it on a face)", "error");
     this.doc.replaceShapes(changed, "Divide face by guide");
     this.selGuide = -1;
     this.showGuides();
@@ -8286,6 +8338,7 @@ export class App implements ToolHost {
       this.viewport.autoSnap
         ? ["Hold Ctrl", "Free: no snapping while held (Auto snap is on — tools snap to object points: corners, midpoints, centres, edges, guide lines, axes, or the grid; 5° while rotating). File → Settings → Snap: Hold Ctrl turns it off: then hold Ctrl to snap"]
         : ["Hold Ctrl", "Snap: object points (corners, midpoints, centres, edges, guide lines, axes) or grid while drawing / moving / dragging Push/Pull or Offset; 5° while rotating (File → Settings → Snap: Auto to snap without Ctrl)"],
+      ["Shift+P / Shift+Space", "Punch: select flat faces drawn on a solid's flat face (a circle for a screw hole) — each cut straight through the wall it's on, out the other side whatever its shape (curved, sloped), and no further (a hollow box's far wall stays); no dialog, the faces are used up · a guide line selected instead: divides the flat faces it runs across along it"],
       ["Shift+B", "Bump: select a flat face drawn on a solid's flat face (a window on a wall) — Length and Out (pushed out, joined to the solid) or In (pushed in, cut out of it); the face is used up · with the dialog open, click the next face: this one applied, the same on that one"],
       ["P / Space", "Push/Pull: flat face → new solid (Scale profile %: the far end smaller / larger — a circle → a cone with a flat top); solid face → modify (or tick “New solid”); Shift-click several faces to push them together"],
       ["Dot · G", "Pull to a point: select a flat circle, rectangle or polygon face (or its face object) — a dot shows in its middle; click the dot, G, drag or type the height: a cone / pyramid (out of a solid: added to it; a minus height into it: cut out of it) · Top size %: a flat top instead of a point"],

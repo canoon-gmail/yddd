@@ -67,6 +67,7 @@ export const COMMANDS: Command[] = [
   ...grp("Modify", [
     ["op.pushpull", "Push/Pull"],
     ["op.bump", "Bump: a face drawn on a solid out of it / into it"],
+    ["op.punch", "Punch: faces drawn on a solid cut through its wall · a guide line: divide the faces along it"],
     ["op.fillet", "Fillet"],
     ["op.chamfer", "Chamfer"],
     ["op.shell", "Shell"],
@@ -174,6 +175,7 @@ export const DEFAULT_KEYS: Record<string, string[]> = {
   "tool.sketch": ["K"],
   "op.pushpull": ["P", "Space"],
   "op.bump": ["Shift+B"],
+  "op.punch": ["Shift+P", "Shift+Space"],
   "op.fillet": ["F"],
   "op.chamfer": ["Shift+F"],
   "op.shell": ["H"],

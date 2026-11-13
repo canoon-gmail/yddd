@@ -1714,6 +1714,26 @@ export function liesOnSolid(flat: Shape, solid: Shape): boolean {
   });
 }
 
+/**
+ * Punch (Shift+P): flat faces lying on flat faces of `solid` (see liesOnSolid) cut straight in until each comes out the
+ * other side of the wall it is on — however that side is shaped (curved, sloped) — and no further: a hollow box's far
+ * wall stays. A long cutter both ways through the face, what of the solid it holds kept only where it touches the face.
+ */
+export function punchHoles(solid: Solid, flats: Shape[]): Solid {
+  const [lo, hi] = roughBounds(solid);
+  const len = 2 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + 10;
+  const cuts: Solid[] = [];
+  for (const flat of flats) {
+    const faceId = flat.faces[0].hashCode;
+    for (const d of [-len, len]) {
+      const inside = booleanOp("intersect", solid, [extrudeFace(flat, faceId, d)]);
+      if (inside.faces.length) cuts.push(...solidPieces(inside).filter((p) => liesOnSolid(flat, p)));
+    }
+  }
+  if (!cuts.length) throw new Error("Punch: nothing of the solid behind these faces to cut");
+  return booleanOp("subtract", solid, cuts);
+}
+
 /** The point of edge `edgeId` of `shape` nearest `p` (exact B-rep curve), or null. */
 /**
  * Where the line through `origin` along world axis k (0 = X, 1 = Y, 2 = Z) meets an edge: the
