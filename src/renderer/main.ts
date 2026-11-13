@@ -171,7 +171,7 @@ import {
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type SnapKind } from "./viewport";
 import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
-import { ICONS, TAPE_CURSOR } from "./icons";
+import { ICONS, KNIFE_CURSOR, MEASURE_CURSOR, TAPE_CURSOR } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
 import { write3mf } from "./threemf";
@@ -1845,7 +1845,7 @@ export class App implements ToolHost {
     this.hover = null;
     this.viewport.setHighlight(this.selection, null);
     this.tool = tool;
-    this.viewport.canvas.style.cursor = tool instanceof GuideTool ? TAPE_CURSOR : "crosshair";
+    this.viewport.canvas.style.cursor = tool instanceof GuideTool ? TAPE_CURSOR : tool instanceof MeasureTool ? MEASURE_CURSOR : tool instanceof DivideFaceTool ? KNIFE_CURSOR : "crosshair";
     this.renderToolbarState();
     if (tool instanceof SketchTool) this.renderOutliner(); // (just its face objects and paths meanwhile)
   }

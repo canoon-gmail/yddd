@@ -115,3 +115,47 @@ export const FILLET_CURSOR = (() => {
   </svg>`;
   return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 8 22, crosshair`;
 })();
+
+/**
+ * The Measure tool's cursor: a crosshair (the point: its centre, a dark dot) with a tilted ruler beside it, up right —
+ * gold, light edge, dark tick marks (every 5th long); dark outlines so it shows on the dark view and on light faces.
+ */
+export const MEASURE_CURSOR = (() => {
+  const ticks = Array.from({ length: 8 }, (_, i) => {
+    const x = 2.5 + i * 2;
+    return `M${x} -8 V${i % 4 === 3 ? -3 : -5.3}`;
+  }).join(" ");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+    <g transform="translate(11.5 17) rotate(-22)">
+      <rect x="0" y="-8" width="19" height="8" fill="#c9a85c" stroke="#1b1d20" stroke-width="3" stroke-linejoin="round"/>
+      <rect x="0" y="-8" width="19" height="8" fill="none" stroke="#e1e4e7" stroke-width="1.2" stroke-linejoin="round"/>
+      <path d="${ticks}" stroke="#2b2c2e" stroke-width="1.1"/>
+    </g>
+    <g stroke-linecap="square">
+      <path d="M8 16 V28 M2 22 H14" stroke="#1b1d20" stroke-width="3.2"/>
+      <path d="M8 16 V28 M2 22 H14" stroke="#e1e4e7" stroke-width="1.4"/>
+    </g>
+    <rect x="7" y="21" width="2" height="2" fill="#1b1d20"/>
+  </svg>`;
+  return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 8 22, crosshair`;
+})();
+
+/**
+ * The Divide face tool's cursor: a craft knife — a light triangular blade, its tip the point (bottom left), a short
+ * ferrule, a brown round handle up right; dark outlines.
+ */
+export const KNIFE_CURSOR = (() => {
+  // (drawn along the knife, tip at 0 0, then turned up right)
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+    <defs><linearGradient id="h" x1="0" y1="-3.6" x2="0" y2="3.6" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5a3a24"/><stop offset="0.35" stop-color="#9a6b48"/><stop offset="1" stop-color="#4a2f1d"/>
+    </linearGradient></defs>
+    <g transform="translate(2.5 28.5) rotate(-38)" stroke="#1b1d20" stroke-width="1" stroke-linejoin="round">
+      <path d="M0 0 L13 -4.5 L14.5 4.2 Z" fill="#dfe2e6"/>
+      <rect x="13" y="-1.4" width="3.5" height="2.8" fill="#6e4a30"/>
+      <path d="M16 -3.6 H27.6 A1.5 3.6 0 0 1 27.6 3.6 H16 A1.5 3.6 0 0 1 16 -3.6 Z" fill="url(#h)"/>
+      <ellipse cx="27.6" cy="0" rx="1.5" ry="3.6" fill="#6e4a30"/>
+    </g>
+  </svg>`;
+  return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 2 28, crosshair`;
+})();
