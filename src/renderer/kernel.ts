@@ -5874,6 +5874,9 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   }
   // (a failed try changes the solids it was given — even non-destructive —, so a retry needs copies made before it)
   const spheres = [target, ...tools].some((x) => sphereCenter(x)) ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
+  // Union / intersect come out the same whichever solid goes first, but OpenCascade can fail one way round and not the
+  // other ("Courbes non jointives": two solids sharing round edges — a slot's plate and its rim) — copies for the swap
+  const swap = (op === "union" || op === "intersect") && tools.length ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
   let first: Solid | null = null, failed: unknown = null;
   try {
     first = booleanOpOnce(op, target, tools);
@@ -5892,6 +5895,15 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       };
       const inTools = spheres.tools.some((x) => sphereCenter(x));
       const r = booleanOpOnce(op, inTools ? spheres.target : turn(spheres.target), inTools ? spheres.tools.map(turn) : spheres.tools);
+      if (isValidShape(r)) return r;
+    } catch {
+      // (the first try's result / error below)
+    }
+  }
+  // Again the other way round (the first tool as the target)
+  if (swap) {
+    try {
+      const r = booleanOpOnce(op, swap.tools[0], [swap.target, ...swap.tools.slice(1)]);
       if (isValidShape(r)) return r;
     } catch {
       // (the first try's result / error below)

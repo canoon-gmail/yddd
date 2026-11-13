@@ -37,6 +37,9 @@ html, body { margin: 0; height: 100%; overflow: hidden; user-select: none; }
 .mb-item.lit .mb-key { color: var(--accent-2); }
 .mb-item.off { opacity: 0.4; }
 .mb-item.off.lit { background: transparent; color: inherit; }
+/* Right-click on one of several selected objects: the booleans (main.ts booleanMenu) */
+.bool-menu { min-width: 200px; }
+.bool-menu-title { padding: 4px 10px 6px; color: var(--muted); font-size: 0.9em; border-bottom: 1px solid var(--border); margin-bottom: 4px; white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .mb-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 #toolbar {
   display: flex;

@@ -1402,6 +1402,9 @@ export class SketchTool implements Tool {
     const seg = (g: Seg) => {
       pts.push({ p: g.a, kind: "vertex" }, { p: g.b, kind: "vertex" });
       pts.push({ p: segMid(g), kind: "midpoint" });
+      // (an arc: its circle's centre too — a capsule / belt's two ends, a rounded corner)
+      const k = g.kind === "arc" ? arcGeom(g) : null;
+      if (k) pts.push({ p: k.c, kind: "center" });
     };
     for (const l of this.loops) {
       if (l.kind === "circle") pts.push({ p: l.c, kind: "center" });
@@ -2406,6 +2409,20 @@ export class SketchTool implements Tool {
     consider([0, 0], [1, 0], true);
     consider([0, 0], [0, 1], true);
     return best ? (best as { g: Guide }).g : null;
+  }
+
+  /** Edit → Clear All Guides while sketching: the sketch's guide lines gone (one undo step; on Exit, from the model too). */
+  clearGuides(): void {
+    const n = this.guides.length;
+    if (!n) return this.host.hint("Sketch: no guide lines here");
+    this.pushUndo(JSON.stringify(this.state()));
+    this.version++;
+    this.guides = [];
+    this.selGuides = [];
+    this.hoverGuide = -1;
+    this.guideFrom = null;
+    this.host.toast(`${n > 1 ? `${n} guide lines` : "Guide line"} cleared — Ctrl+Z brings ${n > 1 ? "them" : "it"} back`);
+    this.update();
   }
 
   /** Select: the guide line under the cursor (its index), else -1. */

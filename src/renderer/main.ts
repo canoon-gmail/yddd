@@ -745,6 +745,7 @@ export class App implements ToolHost {
     if (this.tool instanceof SketchTool && !SKETCH_COMMANDS.has(cmd)) {
       if (cmd === "edit.undo") return this.tool.undo();
       if (cmd === "edit.redo") return this.tool.redo();
+      if (cmd === "edit.clearGuides") return this.tool.clearGuides(); // (the sketch's own — on its plane)
       return this.toast("Sketch: click Exit Sketch first (keeps the outlines as faces)", "error");
     }
     try {
@@ -1273,6 +1274,11 @@ export class App implements ToolHost {
       this.setSelection([]);
       return;
     }
+    // Two or more selected, right-clicked on one of them: the booleans, that one the target (the selection stays)
+    if (!e.shiftKey && !e.ctrlKey && this.selection.length >= 2) {
+      const ids = this.selectedBodyIds();
+      if (ids.length >= 2 && ids.includes(pick.body) && this.selection.every((s) => s.kind === "body")) return this.booleanMenu(e, pick.body, ids);
+    }
     const item: SelItem = { kind: "body", body: pick.body, id: 0 };
     this.setMode("body");
     if (e.shiftKey || e.ctrlKey) {
@@ -1281,6 +1287,69 @@ export class App implements ToolHost {
     } else {
       this.setSelection([item]);
     }
+  }
+
+  /**
+   * Right-click on one of several selected objects: Union / Subtract / Intersect with that one as the target (Subtract:
+   * the others taken from it; Union / Intersect: it keeps its name). All solids or all flat faces — else greyed, saying so.
+   */
+  private booleanMenu(e: PointerEvent, target: number, ids: number[]): void {
+    this.closeBooleanMenu();
+    const name = this.doc.get(target)?.name ?? "";
+    const flat = this.faceBodiesIn(ids), mixed = flat.length > 0 && flat.length < ids.length;
+    const what = flat.length ? "faces" : "solids";
+    const menu = document.createElement("div");
+    menu.className = "mb-drop bool-menu";
+    const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
+    const items: [BooleanOp, string, string, string][] = [
+      ["union", "Union", "bool.union", `Join the ${ids.length} ${what} into "${name}"`],
+      ["subtract", "Subtract from this", "bool.subtract", `Take the other ${what} away from "${name}"`],
+      ["intersect", "Intersect", "bool.intersect", `Keep only where the ${what} overlap (as "${name}")`],
+    ];
+    menu.innerHTML = `<div class="bool-menu-title">${ids.length} ${what} · target: ${esc(name)}</div>` + items.map(([op, label, cmd, tip]) =>
+      `<div class="mb-item${mixed ? " off" : ""}" data-op="${op}" title="${esc(mixed ? `Booleans: all solids or all flat faces — "${flat[0].name}" is a flat face` : tip)}"><span class="mb-label">${label}</span><span class="mb-key">${esc((this.keys[cmd] ?? []).find((k) => !/Mouse\d|Drag$/.test(k)) ?? "")}</span></div>`).join("");
+    document.body.appendChild(menu);
+    // (by the cursor, kept inside the window)
+    const w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = `${Math.max(4, Math.min(e.clientX, window.innerWidth - w - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(e.clientY, window.innerHeight - h - 4))}px`;
+    menu.addEventListener("pointerover", (ev) => {
+      for (const x of menu.querySelectorAll(".mb-item")) x.classList.toggle("lit", x === (ev.target as HTMLElement).closest(".mb-item"));
+    });
+    menu.addEventListener("click", (ev) => {
+      const row = (ev.target as HTMLElement).closest<HTMLElement>(".mb-item");
+      if (!row || row.classList.contains("off")) return;
+      this.closeBooleanMenu();
+      this.boolean(row.dataset.op as BooleanOp, target);
+    });
+    // (Esc, a click / right-click elsewhere, the view turning, the window losing focus: closed)
+    const away = (ev: Event) => {
+      if (ev instanceof KeyboardEvent ? ev.key === "Escape" : !menu.contains(ev.target as Node)) {
+        if (ev instanceof KeyboardEvent) ev.stopPropagation();
+        this.closeBooleanMenu();
+      }
+    };
+    setTimeout(() => {
+      if (this.boolMenu?.el !== menu) return;
+      window.addEventListener("pointerdown", away, true);
+      window.addEventListener("keydown", away, true);
+      window.addEventListener("blur", away);
+      window.addEventListener("wheel", away, true);
+    });
+    this.boolMenu = { el: menu, away };
+  }
+
+  private boolMenu: { el: HTMLElement; away: (ev: Event) => void } | null = null;
+
+  private closeBooleanMenu(): void {
+    const m = this.boolMenu;
+    if (!m) return;
+    this.boolMenu = null;
+    m.el.remove();
+    window.removeEventListener("pointerdown", m.away, true);
+    window.removeEventListener("keydown", m.away, true);
+    window.removeEventListener("blur", m.away);
+    window.removeEventListener("wheel", m.away, true);
   }
 
   /** In Face mode: the edge near the cursor (generous tolerance) if it bounds one of the selected faces. */
@@ -2104,7 +2173,9 @@ export class App implements ToolHost {
           i.dispatchEvent(new Event("input", { bubbles: true }));
         }
       };
-      if (act?.auto) setTimeout(() => this.op === op && put(act.set)); // (after this preview has been taken in)
+      // (after this preview has been taken in — and only if the panel still holds the values it was worked out for: a value
+      // typed meanwhile, e.g. while the background kernel worked on the last size used, isn't overruled)
+      if (act?.auto) setTimeout(() => this.op === op && this.opValues().key === key && put(act.set));
       else if (act) {
         const b = document.createElement("button");
         b.type = "button";
@@ -4072,9 +4143,10 @@ export class App implements ToolHost {
 
   // ================================================================ booleans
 
-  private boolean(op: BooleanOp): void {
+  /** `target`: the solid that's kept (the others joined to / taken from it) — the right-clicked one; else the first selected. */
+  private boolean(op: BooleanOp, target?: number): void {
     this.endInteractions();
-    const ids = this.selectedBodyIds();
+    const sel = this.selectedBodyIds(), ids = target !== undefined && sel.includes(target) ? [target, ...sel.filter((id) => id !== target)] : sel;
     const label = { union: "Union", subtract: "Subtract", intersect: "Intersect" }[op];
     if (ids.length === 1) return this.pickBooleanTool(op, ids[0], label);
     if (ids.length < 2) {
@@ -8024,7 +8096,7 @@ export class App implements ToolHost {
           : `${job("xf.move", "G", "move")} · ${job("xf.rotate", "R", "rotate")} · ${job("xf.scale", "S", "scale")} · ${job("op.cut", "C", "cut by guide")} · ${job("op.fillet", "F", "fillet all edges")} · ${job("edit.duplicate", "Shift+D", "duplicate")}`;
         if (b?.group) hints += `<br>Double-click it: its whole group (${escapeHtml(b.group)})`;
       } else {
-        hints = `${job("bool.union", "Shift+U", "union")} · ${job("bool.subtract", "−", "subtract")} · ${job("bool.intersect", "Shift+I", "intersect")}<br>(first selected = target)`;
+        hints = `${job("bool.union", "Shift+U", "union")} · ${job("bool.subtract", "−", "subtract")} · ${job("bool.intersect", "Shift+I", "intersect")}<br>(first selected = target — or right-click one: a menu, that one the target)`;
         // A whole array group (changed with its icon in the Bodies panel): what it is, or why it can't be changed now.
         const rec = this.arrayToChange(sel.map((s) => s.body));
         if (rec) rows.unshift(typeof rec !== "string" && rec.circular
@@ -8230,7 +8302,7 @@ export class App implements ToolHost {
       ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; End size % makes the far end smaller / larger, evenly on the way — a spout along a curved path; a straight path: Twist ° turns it evenly on the way — a propeller blade); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
       ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
       ["Toolbar → Guide line", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
-      ["Shift+U · − · Shift+I  (also Num+ · Shift+S)", "Union · Subtract · Intersect (first selected = target)"],
+      ["Shift+U · − · Shift+I  (also Num+ · Shift+S)", "Union · Subtract · Intersect (first selected = target) — or right-click one of the selected: a menu with them, that one the target (Subtract takes the others away from it)"],
       ["+ (Shift+=)", "Label: click the point the arrow points at, then where its text goes — it reads \"Label\"; double-click the text to type your own (Enter done, Esc keeps the old) · click its text + Del removes it"],
             ["=", "Measure: click 2 points for the length (ΔX ΔY ΔZ, slope; off a corner or edge the 2nd point locks onto X / Y / Z when moved nearly along it), a 3rd for the angle at the 2nd — shown in the corner panel; Esc clears a result, Esc again (or Cancel) exits · Tab: add a dimension — of the angle (3 points clicked; move to size its arc), of the length between the 2 clicked points, or (none clicked) of the straight edge under the cursor, or the radius of the circle / arc under it (move to set its distance, or where a radius points, click to place; click its text + Del removes it) · hover a point (corner / midpoint / centre: X Y Z), an edge (length; circle / arc: radius, Ø, angle) or a face (area; rectangle sides, cylinder radius / height, sphere radius...) · Esc done"],
       ["G · R", "Move · Rotate gizmo — while moving, click a round edge (circle / arc): slide along its axis (a dashed line) — or a slanted straight edge: slide along it, the blue arrow in mm steps, Tab: the distance along it"],
