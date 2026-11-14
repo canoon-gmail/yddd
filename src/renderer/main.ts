@@ -4737,7 +4737,7 @@ export class App implements ToolHost {
   /**
    * A guide line selected, Shift+P: the flat faces of the solids it runs across divided along it, and the faces on their
    * other side (facing the other way: the same line moved straight through — a profile's back) — one undo step; shown,
-   * unlocked solids; the new edges left selected (G lifts them).
+   * unlocked solids; the guide stays selected (G moves it out of the way).
    */
   private divideByGuide(): void {
     const guide = this.doc.guides[this.selGuide];
@@ -4794,15 +4794,11 @@ export class App implements ToolHost {
     }
     if (!changed.size) return this.toast(why || "Shift+P on a guide line divides the flat faces of solids it runs across — this one runs across none (draw it on a face)", "error");
     this.doc.replaceShapes(changed, "Divide face by guide");
-    this.selGuide = -1;
+    // (the guide stays selected: G moves it out of the way)
+    this.setSelection([]);
     this.showGuides();
-    const edges = made.flatMap(({ body, a, b }) => {
-      const it = this.doc.get(body);
-      return it && isBrep(it) ? edgesOnSegment(it.shape, a, b, 1e-3).map((id): SelItem => ({ kind: "edge", body, id })) : [];
-    }).filter((x, i, all) => all.findIndex((y) => y.body === x.body && y.id === x.id) === i);
-    this.setMode("edge");
-    this.setSelection(edges);
-    this.toast(`Face${made.length > 1 ? "s" : ""} divided along the guide${why ? ` (not all: ${why})` : ""} — G moves the new edge${edges.length > 1 ? "s" : ""}`);
+    this.hint("Guide line selected · G moves it · Shift+D copies it · Shift+P divides the faces it runs across · Del removes it");
+    this.toast(`Face${made.length > 1 ? "s" : ""} divided along the guide${why ? ` (not all: ${why})` : ""} — G moves the guide line`);
   }
 
   /** Divide face: split the face under the line a–b (one undo step); false (said why) if it can't. */

@@ -4254,7 +4254,7 @@ export class SketchTool implements Tool {
     const html =
       group("Select", mode("select", "Select", "Esc", "Select outlines and paths")) +
       group("Draw", iconMode("line", "skLine", "Line", "L") + iconMode("arc", "skArc", "Arc", "A") + iconMode("curve", "skCurve", "Curve", "Shift+C") + iconMode("rect", "skRect", "Rectangle", "R") + iconMode("circle", "circle", "Circle", "C") +
-        mode("round", "Fillet", "F") + mode("guide", "Guide", "Shift+L", "Guide line: click a straight line, move it off — a long line to snap to") + (this.pic ? mode("scan", "Scan", "drag over the picture", "Scan the picture into outlines / paths") : "")) +
+        mode("round", "Fillet", "F") + b(`data-mode="guide" aria-label="Guide line"`, ICONS.guide, "Guide line: click a straight line, move it off — a long line to snap to (Shift+L)", this.mode === "guide", false, " sk-icon") + (this.pic ? mode("scan", "Scan", "drag over the picture", "Scan the picture into outlines / paths") : "")) +
       group("Edit",
         b(`data-act="move"`, "Move", "Move the selection with the gizmo (G)", !!this.moving, !select || !nSel) +
         b(`data-act="scale"`, "Scale", "Scale or rotate the selection about its centre (S)", !!this.scaling, !select || !nSel) +

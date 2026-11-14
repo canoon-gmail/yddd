@@ -33,7 +33,8 @@ export const ICONS: Record<string, string> = {
   sketch: svg(`<path d="M3 16l9-4 9 4-9 5z" ${SOFT}/><path d="M7.5 15.5l4.5-2 4.5 2-4.5 2.2z" ${FILL}/><path d="M14 11l4.5-7 2.5 2.5-7 4.5z" ${FILL}/><circle cx="12" cy="13.5" r="1.3" ${DOT}/>`),
   turnView: svg(`<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 3v4h-4"/><rect x="9" y="9" width="6" height="6" rx="0.8" ${FILL}/>`),
   picture: svg(`<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6" ${FILL}/><path d="M3 16.5l5-4.5 4 3.5 3-2.5 6 4.5V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" ${FILL}/>`),
-  pencil: svg(`<rect x="4" y="5" width="16" height="14" rx="1.5" ${FILL}/><path d="M3 15.5L21 8.5" stroke-width="2"/><circle cx="4" cy="15.1" r="1.8" ${DOT}/><circle cx="20" cy="8.9" r="1.8" ${DOT}/>`),
+  // Divide face: a craft knife (as its cursor) finishing a cut across a face
+  knife: svg(`<rect x="2" y="11" width="12" height="10" rx="1.5" ${FILL}/><path d="M2 18.6L10 15.2" stroke-width="2"/><circle cx="2" cy="18.6" r="1.7" ${DOT}/><g transform="translate(10 15.2) rotate(-42)"><path d="M0 0L7.2 -3V2.2Z" stroke-width="1.4"/><path d="M9.4 0H13.4" stroke-width="3.6"/></g>`),
 
   // Modelling operations.
   pushpull: svg(`<path d="M4 13.5l8-3.2 8 3.2-8 3.2z" ${FILL}/><path d="M4 13.5v4.3L12 21l8-3.2v-4.3"/><path d="M12 16.7V21" ${SOFT}/><path d="M12 10V2.5M8.8 5.7L12 2.5l3.2 3.2" stroke-width="1.9"/>`),
@@ -46,7 +47,8 @@ export const ICONS: Record<string, string> = {
   sweep: svg(`<path d="M4 19c0-7.5 5.5-12 14-12" ${DASH}/><path d="M1.5 19C1.5 9.5 8 4 18 4M6.5 19c0-5.5 4.2-9 11.5-9" ${SOFT}/><ellipse cx="4" cy="19" rx="2.8" ry="1.6" ${FILL}/><ellipse cx="18" cy="7" rx="1.6" ry="3" ${FILL}/>`),
   cut: svg(`<path d="M3.5 14v5a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1v-8z" ${FILL}/><path d="M3.5 11.2V6a1 1 0 0 1 1-1h15a1 1 0 0 1 1 1v2.2" ${SOFT}/><path d="M2 13L22 9.5" stroke-width="2" ${DASH}/>`),
   splitFace: svg(`<rect x="4" y="5" width="16" height="14" rx="1.5" ${SOFT}/><path d="M4 14.5L20 9.5V17.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z" ${FILL}/><path d="M2 15.1L22 8.9" stroke-width="1.9" ${DASH}/>`),
-  guide: svg(`<rect x="4" y="6" width="16" height="12" rx="1" ${SOFT}/><path d="M2 18.5L22 5.5" stroke-width="2" stroke-dasharray="3 2.5"/><circle cx="7" cy="15.2" r="1.7" ${DOT}/><circle cx="17" cy="8.8" r="1.7" ${DOT}/>`),
+  // Guide line: a tape measure (as its cursor), its tape pulled out as the dashed guide, the hook at its end
+  guide: svg(`<rect x="12" y="8" width="9.5" height="10.5" rx="2.8" ${FILL}/><circle cx="16.75" cy="13.25" r="1.7" ${DOT}/><path d="M11.6 17.2H4.4" stroke-width="1.8" stroke-dasharray="1.8 1.8"/><path d="M2.6 14.8v4.8" stroke-width="2"/>`),
 
   // Booleans.
   union: svg(`<path d="M12 6.8A6 6 0 1 0 12 17.2A6 6 0 1 0 12 6.8z" ${FILL}/>`),

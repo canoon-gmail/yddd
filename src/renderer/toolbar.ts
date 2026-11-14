@@ -47,12 +47,7 @@ export const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[
       { cmd: "op.shell", icon: "shell", label: "Shell" },
       { cmd: "op.curveFace", icon: "curveFace", label: "Curve face" },
       { cmd: "op.offset", icon: "offset", label: "Offset" },
-      { cmd: "op.revolve", icon: "revolve", label: "Revolve" },
-      { cmd: "edit.circular", icon: "circular", label: "Circular copy" },
-      { cmd: "edit.mirror", icon: "mirror", label: "Mirror" },
-      { cmd: "op.sweep", icon: "sweep", label: "Sweep" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis" },
-      { cmd: "op.splitFace", icon: "splitFace", label: "Split face by guide" },
     ],
   },
   {
@@ -81,7 +76,7 @@ export const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[
     title: "Measure",
     items: [
       { cmd: "tool.measure", icon: "measure", label: "Measure" },
-      { cmd: "tool.divideFace", icon: "pencil", label: "Divide face" },
+      { cmd: "tool.divideFace", icon: "knife", label: "Divide face" },
       { cmd: "tool.guide", icon: "guide", label: "Guide line" },
     ],
   },
