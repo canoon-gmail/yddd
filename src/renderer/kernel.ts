@@ -3005,6 +3005,51 @@ export interface FaceInfo {
   halfAngle?: number;
 }
 
+/**
+ * A face's or edge's description — its kind, middle, size (area / length) and, flat, its direction — to find the same
+ * one in another OpenCascade's copy of the shape (the background kernel's: ids differ there, so it's sent by its place
+ * in the list, and this checks the place still holds it).
+ */
+export interface ShapePrint {
+  type: string;
+  at: V3;
+  size: number;
+  dir?: V3;
+}
+
+export function facePrint(f: Face): ShapePrint {
+  return { type: f.geomType, at: f.center.toTuple() as V3, size: measureArea(f), ...(f.geomType === "PLANE" ? { dir: norm3(f.normalAt().toTuple() as V3) } : {}) };
+}
+
+export function edgePrint(e: Edge): ShapePrint {
+  return { type: e.geomType, at: e.pointAt(0.5).toTuple() as V3, size: measureLength(e) };
+}
+
+/** Does this face / edge fit the description (to a hair: the BREP text round trip)? */
+function fitsPrint(x: Face | Edge, p: ShapePrint): boolean {
+  if (x.geomType !== p.type) return false;
+  const q = x instanceof Face ? facePrint(x) : edgePrint(x as Edge);
+  const tol = 1e-5 * Math.max(1, p.size, Math.hypot(...p.at));
+  return Math.hypot(q.at[0] - p.at[0], q.at[1] - p.at[1], q.at[2] - p.at[2]) < tol && Math.abs(q.size - p.size) < tol &&
+    (!p.dir || (!!q.dir && dot3(q.dir, p.dir) > 1 - 1e-9));
+}
+
+/**
+ * The face / edge at `place` in `list` — checked against its description; if the place holds another one, the one that
+ * fits (the only one); none: an error, rather than working on the wrong face (nothing changes).
+ */
+export function placeOf<T extends Face | Edge>(list: T[], place: number, print: ShapePrint | undefined, what: string): T {
+  const x = list[place];
+  if (!print) {
+    if (!x) throw new Error(`the ${what} isn't there any more`);
+    return x;
+  }
+  if (x && fitsPrint(x, print)) return x;
+  const fits = list.filter((y) => fitsPrint(y, print));
+  if (fits.length === 1) return fits[0];
+  throw new Error(`the background kernel couldn't find the same ${what} (its list came out in another order) — nothing changed`);
+}
+
 export function faceInfo(shape: Shape, faceId: number): FaceInfo | null {
   const f = findFace(shape, faceId);
   if (!f) return null;
@@ -3160,7 +3205,15 @@ function pushPullFaces(shape: Solid, picked: { face: Face; n: V3 }[], distance: 
     const r = stretchPushPull(shape, withChains.map(({ face }) => face), faces[0].n, distance);
     if (r) return r; // (its cut walls merged already)
   }
-  if (withChains.length > faces.length) {
+  // A free-form rim (not round fillets) moved less than its own height lands nearly on itself: OpenCascade then takes
+  // minutes and fails (0.2 mm on a shell's top: 103 s) — the flat faces only, at once (a step that small hardly shows)
+  const rims = withChains.filter(({ face }) => !selected.has(face.hashCode));
+  const rimHeight = () => Math.max(...rims.map(({ face, n }) => {
+    const hs = face.edges.flatMap((e) => [0, 0.5, 1].map((t) => dot3(e.pointAt(t).toTuple() as V3, n)));
+    return Math.max(...hs) - Math.min(...hs);
+  }));
+  const tinyForRim = rim === "auto" && rims.some(({ face }) => !ANALYTIC.has(face.geomType)) && Math.abs(distance) < rimHeight();
+  if (withChains.length > faces.length && !tinyForRim) {
     try {
       const r = sweepFaces(shape, withChains, distance);
       if (isValidShape(r)) return mergeCoincidentFaces(r);
@@ -5696,6 +5749,185 @@ function twistedSweep(outer: Wire, holes: Wire[], a: V3, b: V3, twistDeg: number
 }
 
 /** A straight path from `a` to `b` (e.g. a guide line to sweep along). */
+/** Points along a closed outline in its own order and direction (its start first), its middle and which way round it runs. */
+function outlineSamples(w: Wire, n = 96): { pts: V3[]; centre: V3; normal: V3 } {
+  const cc = new oc.BRepAdaptor_CompCurve(w.wrapped, true), pts: V3[] = [];
+  try {
+    const u0 = cc.FirstParameter(), u1 = cc.LastParameter();
+    for (let i = 0; i < n; i++) {
+      const p = cc.Value(u0 + ((u1 - u0) * i) / n);
+      pts.push([p.X(), p.Y(), p.Z()]);
+      p.delete();
+    }
+  } finally {
+    cc.delete();
+  }
+  const centre = [0, 1, 2].map((k) => pts.reduce((a, p) => a + p[k], 0) / n) as V3;
+  // (Newell: the outline's area vector — its direction says which way round it runs)
+  const nv: V3 = [0, 0, 0];
+  pts.forEach((p, i) => {
+    const q = pts[(i + 1) % n];
+    nv[0] += (p[1] - q[1]) * (p[2] + q[2]);
+    nv[1] += (p[2] - q[2]) * (p[0] + q[0]);
+    nv[2] += (p[0] - q[0]) * (p[1] + q[1]);
+  });
+  return { pts, centre, normal: norm3(nv) };
+}
+
+/**
+ * The outlines made ready to loft without a twist: each running the same way round as the one with the most edges
+ * (the reference), and a one-curve outline (a circle, an ellipse, a closed curve) starting where its direction from
+ * its middle is the reference's start's — the loft joins start to start (a circle's seam on its +X side against a
+ * slot's corner: the sides folded over). An outline of several edges keeps its start.
+ */
+function alignedOutlines(wires: Wire[]): Wire[] {
+  const ref = wires.reduce((a, w) => (w.edges.length > a.edges.length ? w : a), wires[0]);
+  const R = outlineSamples(ref);
+  const dirIn = (v: V3, n: V3) => { const d = sub3(v, [n[0] * dot3(v, n), n[1] * dot3(v, n), n[2] * dot3(v, n)]); return norm3(d); };
+  const refDir = dirIn(sub3(R.pts[0], R.centre), R.normal);
+  return wires.map((w) => {
+    if (w === ref) return w;
+    let S = outlineSamples(w);
+    let out = w;
+    if (dot3(S.normal, R.normal) < 0) {
+      out = cast(w.wrapped.Reversed()) as Wire;
+      S = outlineSamples(out);
+    }
+    // (directions measured in its own plane — a tilted outline: the reference's start direction laid onto it)
+    const xS = dirIn(refDir, S.normal);
+    const angleOf = (q: V3) => { const d = dirIn(sub3(q, S.centre), S.normal), y = cross3(S.normal, xS); return Math.atan2(dot3(d, y), dot3(d, xS)); };
+    if (out.edges.length > 1) {
+      // Several edges (a slot, a rectangle): it starts at its corner facing the reference's start — two slots drawn
+      // apart start at different corners: the part between them came out twisted
+      const chain = chainEdges(out.edges), pt = (p: { toTuple(): number[] }) => p.toTuple() as V3;
+      const corners = chain.map((e) => pt(e.startPoint)).concat(chain.map((e) => pt(e.endPoint)));
+      const start = corners.reduce((best, p) => (Math.abs(angleOf(p)) < Math.abs(angleOf(best)) ? p : best), corners[0]);
+      const at = (e: Edge, p: V3) => Math.hypot(...sub3(pt(e.startPoint), p)) < 1e-6 ? "start" : Math.hypot(...sub3(pt(e.endPoint), p)) < 1e-6 ? "end" : null;
+      const k = chain.findIndex((e) => at(e, start) !== null && at(chain[(chain.indexOf(e) + chain.length - 1) % chain.length], start) !== null);
+      if (k < 0) return out;
+      const first = at(chain[k], start) === "start" ? chain[k] : (cast(chain[k].wrapped.Reversed()) as Edge);
+      let seated = assembleWire([first, ...chain.slice(k + 1), ...chain.slice(0, k)]);
+      if (dot3(outlineSamples(seated).normal, R.normal) < 0) seated = cast(seated.wrapped.Reversed()) as Wire; // (closed: still starts there)
+      return seated;
+    }
+    // Cut where it faces the reference's corners (seen from each one's middle), starting at its start's: as many edges,
+    // each meeting its own one — a circle under a slot: the front arc under the front side, an end arc under each end
+    const angle = (v: V3, n: V3, x: V3) => { const d = dirIn(v, n), y = cross3(n, x); return Math.atan2(dot3(d, y), dot3(d, x)); };
+    const turn = (a: number) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    const corners = [...new Map(ref.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]).map((p) => [p.map((x) => x.toFixed(6)).join(), p])).values()]
+      .map((p) => turn(angle(sub3(p, R.centre), R.normal, refDir))).sort((x, y) => x - y);
+    const facing = (a: number) => S.pts.reduce((best, p) => {
+      const d = (q: V3) => Math.abs(Math.atan2(Math.sin(angleOf(q) - a), Math.cos(angleOf(q) - a)));
+      return d(p) < d(best) ? p : best;
+    }, S.pts[0]);
+    const targets = corners.map(facing);
+    const e = out.edges[0], reversed = e.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED;
+    const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0), curve = c.returnValue, u0 = c.First as number, u1 = c.Last as number;
+    const paramAt = (q: V3) => {
+      let u = u0, best = Infinity;
+      for (let i = 0; i <= 1440; i++) {
+        const t = u0 + ((u1 - u0) * i) / 1440, p = curve.Value(t), d = Math.hypot(p.X() - q[0], p.Y() - q[1], p.Z() - q[2]);
+        p.delete();
+        if (d < best) [best, u] = [d, t];
+      }
+      return best < 1e-2 * Math.max(1, measureLength(e)) ? u : NaN;
+    };
+    const us = targets.map(paramAt);
+    if (us.some((u) => !Number.isFinite(u))) return out;
+    // (along the curve's own parameter: in the outline's direction unless its edge is reversed)
+    const order = us.map((u, i) => ({ u, i })).sort((x, y) => x.u - y.u);
+    const period = u1 - u0;
+    const piece = (a: number, b: number) => { const mk = new oc.BRepBuilderAPI_MakeEdge(curve as never, a as never, b as never); try { return cast(mk.Edge()) as Edge; } finally { mk.delete(); } };
+    if (!curve.IsPeriodic()) return out; // (a closed curve that isn't periodic: left to OpenCascade)
+    const edges = order.map(({ u }, k) => piece(u, k + 1 < order.length ? order[k + 1].u : order[0].u + period));
+    // Start at the piece beginning where the reference starts (its first corner, angle 0) — in the outline's direction
+    const startIdx = order.findIndex(({ i }) => i === 0);
+    // (closed: it ends where it starts — reversed afterwards, it still starts there)
+    const seated = assembleWire([...edges.slice(startIdx), ...edges.slice(0, startIdx)]);
+    return reversed ? (cast(seated.wrapped.Reversed()) as Wire) : seated;
+  });
+}
+
+/**
+ * Loft: the solid through closed outlines (paths, or flat faces' outer outlines), in that order — e.g. a circle to a
+ * slot above it. `smooth`: one smooth surface through them all (with 3 or more); else straight between each two.
+ */
+export function loftOutlines(outlines: (Wire | Face)[], smooth = false): Solid {
+  const shape = loftThrough(outlines, smooth, true);
+  const solids = [...iterTopo(shape.wrapped, "solid")];
+  if (solids.length !== 1) throw new Error("Loft: OpenCascade couldn't make one solid through these outlines");
+  let solid = cast(solids[0]) as Solid;
+  // (the outlines' direction decides which way the faces point: inside out — a negative volume — turned round)
+  if (solidVolume(solid) < 0) solid = cast(solid.wrapped.Reversed()) as Solid;
+  if (!isValidShape(solid) || !(solidVolume(solid) > 0)) throw new Error("Loft: the result came out broken (outlines crossing each other, or twisted?)");
+  return solid;
+}
+
+/** The loft through the outlines (lined up: alignedOutlines) — a solid, or (`solid` false) just its sides. */
+function loftThrough(outlines: (Wire | Face)[], smooth: boolean, solid: boolean): Shape3D {
+  if (outlines.length < 2) throw new Error("Loft: pick two or more closed outlines (paths or flat faces)");
+  const wires = outlines.map((o) => (o instanceof Face ? o.clone().outerWire() : o));
+  if (wires.some((w) => !w.isClosed)) throw new Error("Loft: every outline must be closed (a path that ends where it starts, or a flat face)");
+  const builder = new oc.BRepOffsetAPI_ThruSections(solid, !smooth, 1e-6);
+  let shape: Shape3D;
+  try {
+    builder.CheckCompatibility(true); // (on matching edges, see alignedOutlines: off, a circle to a slot came out wrong)
+    for (const w of alignedOutlines(wires)) builder.AddWire(w.wrapped);
+    builder.Build(new oc.Message_ProgressRange());
+    shape = cast(builder.Shape()) as Shape3D;
+  } finally {
+    builder.delete();
+  }
+  return shape;
+}
+
+/**
+ * Loft as a pipe: the outlines each shrunk by `wall` (a flat 2D offset — exact, a sharp corner stays sharp), lofted the
+ * same way, and that taken out of the loft — open at both ends, the outside where the outlines are; on a sloping part
+ * the wall's a little thinner (measured across, not square to the slope). `wall` 0: the solid loft. (Thickening the
+ * loft's sides instead — OpenCascade's simple offset — makes garbage at a corner's crease: a circle to a rectangle.)
+ */
+export function loftPipe(outlines: (Wire | Face)[], wall: number): Solid {
+  if (!(wall > 0)) return loftOutlines(outlines);
+  // (outerWire uses up its face: copies' — see loftThrough)
+  const inner = outlines.map((o) => {
+    // (its edges made again where they are: an outline moved carries a placement, which the offset applied a second time —
+    // a duplicated circle path's shrunk copy landed 34 mm off its plane; see edgeLoopFace)
+    const w = o instanceof Face ? o.clone().outerWire() : o;
+    const f = edgeLoopFace(w as unknown as Shape, w.edges.map((e) => e.hashCode));
+    // (which way the offset goes follows the face's side — a face made from a path can be either: grown, the other way)
+    const area = measureArea(f);
+    let shrunk: Face | null = null;
+    for (const d of [-wall, wall]) {
+      try {
+        const r = offsetFace(f, f.hashCode, d);
+        if (measureArea(r) < area) {
+          shrunk = r;
+          break;
+        }
+      } catch {
+        // (too thick for it this way)
+      }
+    }
+    if (!shrunk) throw new Error(`Loft: a ${wall} mm wall doesn't fit inside every outline — try a thinner wall`);
+    return shrunk;
+  });
+  // The inner loft run on a little past both ends (each end outline again, moved straight out): its ends then lie past
+  // the outer loft's, not on them — lying on them, OpenCascade's cut left a slot pipe in 2 pieces, half filled
+  const ext = 2 * wall + 1;
+  const past = (f: Face, other: Face) => {
+    const S = outlineSamples(f.clone().outerWire()), O = outlineSamples(other.clone().outerWire());
+    const out: V3 = dot3(sub3(S.centre, O.centre), S.normal) > 0 ? S.normal : [-S.normal[0], -S.normal[1], -S.normal[2]];
+    return translateShape(f, [out[0] * ext, out[1] * ext, out[2] * ext]) as Face;
+  };
+  const n = inner.length;
+  const outer = loftOutlines(outlines), core = loftOutlines([past(inner[0], inner[1]), ...inner, past(inner[n - 1], inner[n - 2])]);
+  const pieces = solidPieces(booleanOp("subtract", outer, [core]));
+  if (pieces.length !== 1 || !isValidShape(pieces[0]) || !(solidVolume(pieces[0]) < solidVolume(outer))) throw new Error("Loft: the wall came out broken (try a thinner wall)");
+  return pieces[0];
+}
+
+
 export function lineWire(a: V3, b: V3): Wire {
   return assembleWire([makeLine(a, b)]);
 }

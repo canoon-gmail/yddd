@@ -29,7 +29,17 @@ contextBridge.exposeInMainWorld("yddd", {
   setDirty: (dirty: boolean) => ipcRenderer.send("set-dirty", dirty),
   closeNow: () => ipcRenderer.send("close-now"),
   setMenuKeys: (keys: Record<string, string>) => ipcRenderer.send("menu-keys", keys),
+  /** A (fresh) background kernel process: its channel comes as a "yddd-kernel-port" window message (see kernelWorker.ts). */
+  kernelStart: () => ipcRenderer.send("kernel-start"),
+  /** The background kernel process died on its own (not ended on purpose). */
+  onKernelGone: (cb: (reason: string) => void) => {
+    ipcRenderer.on("kernel-gone", (_e, reason: string) => cb(reason));
+  },
   onMenu: (cb: (cmd: string) => void) => {
     ipcRenderer.on("menu", (_e, cmd: string) => cb(cmd));
   },
 });
+
+// The background kernel's channel (kernelHost.ts), handed on to the page — a MessagePort can't cross contextBridge,
+// a window message can carry it (the app window's end, or the hidden kernel window's)
+ipcRenderer.on("kernel-port", (e) => window.postMessage("yddd-kernel-port", "*", e.ports));

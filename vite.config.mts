@@ -12,6 +12,8 @@ export default defineConfig({
     emptyOutDir: true,
     target: "esnext",
     chunkSizeWarningLimit: 4000,
+    // (the app, and the hidden window the background kernel runs in — its own process: see src/main/kernelHost.ts)
+    rollupOptions: { input: { index: resolve(__dirname, "src/renderer/index.html"), "kernel-host": resolve(__dirname, "src/renderer/kernel-host.html") } },
   },
   // The background kernel (kernel.worker.ts) is a module worker: it imports the OpenCascade build.
   worker: { format: "es" },

@@ -168,6 +168,11 @@ import {
   probePoints,
   movedIds,
   parseStl,
+  facePrint,
+  edgePrint,
+  loftOutlines,
+  loftPipe,
+  type ShapePrint,
 } from "./kernel";
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type SnapKind } from "./viewport";
@@ -391,7 +396,7 @@ export class App implements ToolHost {
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   nutBoltDefaults = { size: 2, length: 30, thread: 20, clearance: 0.3 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1, loftWall: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -769,6 +774,7 @@ export class App implements ToolHost {
       ["edit.mirror", "mirror", "Mirror: a mirrored copy of the selection across a plane (M)"],
       ["edit.circular", "circular", "Circular copy: copies round an axis — the X / Y / Z axis, a guide line or a circle edge"],
       ["op.sweep", "sweep", "Sweep a flat face along a path or guide line"],
+      ["op.loft", "loft", "Loft: a solid through two or more closed outlines — paths or flat faces (a circle to a slot above it)"],
       ["edit.array", "array", "Array copy: several copies in a row — copies, gap between them, direction (to change an array later: its icon in the Bodies panel); with a path selected too (or click a path in its panel): copies along the path"],
     ];
     for (const [cmd, icon, title] of items) {
@@ -947,6 +953,7 @@ export class App implements ToolHost {
       case "op.offset": return this.opOffset();
       case "op.revolve": return this.opRevolve();
       case "op.sweep": return this.opSweep();
+      case "op.loft": return this.opLoft();
       case "op.cut": return this.startCut();
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
@@ -2042,7 +2049,9 @@ export class App implements ToolHost {
     input.value = fmt(v);
     const units = drag.units ?? (drag.unit ? "%" : "mm");
     this.hud(sp ? `${fmt(v)} ${units} · ${sp.kind}` : `${fmt(v)} ${units}`, O.clone().addScaledVector(D, v * unit));
-    if ((op.previewMs ?? 0) > SLOW_PREVIEW_MS) {
+    // (worked out in the background kernel, with an instant preview — Push/Pull on a free-form solid: that one while
+    // dragging too, however quick the background is — its answers would come a frame or more behind the arrow)
+    if ((op.previewMs ?? 0) > SLOW_PREVIEW_MS || (!!op.spec.computeAsync && !!op.spec.fastDrag && this.bgKernel.ready)) {
       // Heavy geometry: recomputing every frame would keep the CPU pegged. Show the instant
       // approximate preview if the op has one, and the real one once the drag pauses.
       if (op.spec.fastDrag?.(this.opValues().values)) op.key = ""; // the real preview must redraw
@@ -2801,10 +2810,10 @@ export class App implements ToolHost {
   private async pushPullInBackground(perBody: Map<number, number[]>, d: number): Promise<Map<number, Solid> | null> {
     const before = [...perBody.keys()].map((id) => [id, this.doc.get(id)] as const);
     const made = await Promise.all([...perBody].map(async ([id, faces]) => {
-      const solid = this.solidOf(id, "Push/Pull"), all = solid.faces.map((f) => f.hashCode);
-      const places = faces.map((h) => all.indexOf(h));
-      if (places.some((i) => i < 0)) throw new Error("Push/Pull: the face isn't there any more");
-      return [id, solidFrom(await this.bgKernel.run({ op: "pushpull", brep: serializeShape(solid), faces: places, d }))] as const;
+      const solid = this.solidOf(id, "Push/Pull");
+      const { places, prints } = this.placesFor(solid.faces, faces);
+      if (places.length !== faces.length) throw new Error("Push/Pull: the face isn't there any more");
+      return [id, solidFrom(await this.bgKernel.run({ op: "pushpull", brep: this.brepFor(solid).brep, faces: places, prints, d }))] as const;
     }));
     return before.some(([id, b]) => this.doc.get(id) !== b) ? null : new Map(made);
   }
@@ -2971,10 +2980,10 @@ export class App implements ToolHost {
         try {
           for (const [id, picked] of perBody) {
             const { shape, edges } = checked(id, picked, which);
-            const all = shape.edges.map((e) => e.hashCode);
             let brep = breps.get(shape);
             if (brep === undefined) breps.set(shape, (brep = serializeShape(shape)));
-            const res = await this.bgKernel.run({ op: "round", kind, brep, edges: edges ? [...edges].map((h) => all.indexOf(h)).filter((i) => i >= 0) : null, size: r });
+            const sent = edges ? this.placesFor(shape.edges, edges) : null;
+            const res = await this.bgKernel.run({ op: "round", kind, brep, edges: sent?.places ?? null, prints: sent?.prints, size: r });
             got.set(id, { shape: solidFrom(res), skipped: res.skipped.length, asked: res.asked, largest: res.largest }); // (meshed there too)
           }
         } catch (e) {
@@ -3022,9 +3031,10 @@ export class App implements ToolHost {
       // In the background kernel: the solid as BREP text (once), the open faces by place in its face list
       computeAsync: async ({ t }) => {
         if (t <= 0) throw new Error("thickness must be greater than 0");
-        const shape = this.solidOf(bodyId, "Shell"), all = shape.faces.map((f) => f.hashCode);
+        const shape = this.solidOf(bodyId, "Shell");
         brep ??= serializeShape(shape);
-        const res = await this.bgKernel.run({ op: "shell", brep, faces: [...ids].map((h) => all.indexOf(h)).filter((i) => i >= 0), thickness: t });
+        const { places, prints } = this.placesFor(shape.faces, ids);
+        const res = await this.bgKernel.run({ op: "shell", brep, faces: places, prints, thickness: t });
         return this.replaceOutcome(new Map([[bodyId, solidFrom(res)]]), "Shell");
       },
       remember: ({ t }) => (this.defaults.shell = t),
@@ -3321,12 +3331,29 @@ export class App implements ToolHost {
   }
 
   /** A body's shape as BREP text for the background kernel (made once per shape) and a face's place in its face list. */
-  brepFor(shape: Shape | Wire, faceId?: number): { brep: string; face: number } {
+  brepFor(shape: Shape | Wire, faceId?: number): { brep: string; face: number; print?: ShapePrint } {
     let brep = this.breps.get(shape);
     if (brep === undefined) this.breps.set(shape, (brep = serializeShape(shape)));
-    const face = faceId === undefined ? -1 : (shape as Shape).faces.findIndex((f) => f.hashCode === faceId);
-    if (faceId !== undefined && face < 0) throw new Error("the face isn't there any more");
-    return { brep, face };
+    if (faceId === undefined) return { brep, face: -1 };
+    const { places, prints } = this.placesFor((shape as Shape).faces, [faceId]);
+    if (!places.length) throw new Error("the face isn't there any more");
+    return { brep, face: places[0], print: prints[0] };
+  }
+
+  /**
+   * Faces / edges (by id) for the background kernel: their places in the list and their descriptions, which it checks
+   * the places against (placeOf) — the ids differ there. Ones not in the list are left out.
+   */
+  private placesFor(list: Shape["faces"] | Shape["edges"], ids: Iterable<number>): { places: number[]; prints: ShapePrint[] } {
+    const places: number[] = [], prints: ShapePrint[] = [];
+    const faces = list.length > 0 && "normalAt" in list[0]; // (a face list, else edges)
+    for (const id of ids) {
+      const i = (list as { hashCode: number }[]).findIndex((x) => x.hashCode === id);
+      if (i < 0) continue;
+      places.push(i);
+      prints.push(faces ? facePrint((list as Shape["faces"])[i]) : edgePrint((list as Shape["edges"])[i]));
+    }
+    return { places, prints };
   }
   private breps = new WeakMap<object, string>();
 
@@ -3599,6 +3626,57 @@ export class App implements ToolHost {
     this.viewport.setGuides(this.doc.guides, pickedGuide, -1);
   }
 
+  /**
+   * Loft: a solid through two or more closed outlines — paths, flat face objects or a solid's flat faces, selected
+   * (Shift+click to add) — e.g. a circle to a slot above it; lined up first so it isn't twisted (see loftOutlines), in
+   * order along the way from the first to the last. Apply: a new solid "Loft N", the outlines left as they are; one undo step.
+   */
+  private opLoft(): void {
+    type Outline = Wire | Shape["faces"][number];
+    const picked: Outline[] = [];
+    const seen = new Set<number>();
+    for (const s of this.selection) {
+      const b = this.doc.get(s.body);
+      if (!b) continue;
+      if (b.kind === "path" || b.kind === "face") {
+        if (seen.has(b.id)) continue;
+        seen.add(b.id);
+        picked.push(b.kind === "path" ? (b.shape as Wire) : (b.shape as Shape).faces[0]);
+      } else if (s.kind === "face" && isBrep(b)) {
+        const f = findFace(b.shape, s.id);
+        if (f?.geomType === "PLANE") picked.push(f);
+      }
+    }
+    if (picked.length < 2) return this.toast("Loft: select two or more closed outlines — paths or flat faces (Shift+click to add), e.g. a circle and a slot above it", "error");
+    // In order: as clicked, or sorted along the way from the first picked to the farthest — whichever runs the shorter
+    // way through their middles (a bend picked in turn: as clicked; a stack in a box selection: sorted)
+    const mid = (o: Outline) => { const [lo, hi] = o.boundingBox.bounds; return new THREE.Vector3(lo[0] + hi[0], lo[1] + hi[1], lo[2] + hi[2]).multiplyScalar(0.5); };
+    const c0 = mid(picked[0]), far = picked.map(mid).reduce((a, c) => (c.distanceTo(c0) > a.distanceTo(c0) ? c : a), c0);
+    const along = far.clone().sub(c0).normalize();
+    const sorted = picked.map((o) => ({ o, k: mid(o).dot(along) })).sort((a, b) => a.k - b.k).map(({ o }) => o);
+    const runLength = (os: Outline[]) => os.slice(1).reduce((n, o, i) => n + mid(o).distanceTo(mid(os[i])), 0);
+    const outlines = runLength(picked) < runLength(sorted) - 1e-6 ? picked : sorted;
+    const outcome = (solid: Solid): OpOutcome => ({
+      ghost: new Map([[-1, solid]]),
+      commit: () => {
+        const nb = this.doc.makeBody(solid, "Loft");
+        this.doc.commit([...this.doc.bodies, nb], "Loft");
+        return { select: [nb.id], solidMode: true };
+      },
+    });
+    this.startOp({
+      title: "Loft",
+      label: "Loft",
+      note: `${outlines.length} outlines — straight between each two`,
+      // (0: a solid; more: a pipe — that thick inward, the outside where the outlines are, open at both ends)
+      fields: [{ key: "wall", label: "Wall thickness (mm, 0 = solid)", value: this.defaults.loftWall, step: 0.5, min: 0 }],
+      compute: ({ wall }) => outcome(loftPipe(outlines, wall)),
+      // (in the background kernel: a loft through detailed outlines can take a while)
+      computeAsync: async ({ wall }) => outcome(solidFrom(await this.bgKernel.run({ op: "loft", outlines: outlines.map((o) => this.brepFor(o).brep), wall }))),
+      remember: ({ wall }) => (this.defaults.loftWall = wall),
+    });
+  }
+
   /** Scale the selected objects about the bottom centre of their bounding box (they stay on the ground). */
   private opScale(): void {
     const rims = this.selectedRims();
@@ -3833,6 +3911,11 @@ export class App implements ToolHost {
       return b !== null && this.straightPath(b) ? { path: b } : null;
     };
     const lineName = (l: CutLine) => (typeof l === "number" ? `guide line ${l + 1}` : "axis" in l ? `${"XYZ"[l.axis]} axis` : (this.doc.get(l.path)?.name ?? "path"));
+    // ← / →: the cut plane turned about the line (each line its own turn, in degrees) — the one it picks isn't always the one wanted
+    const turns = new Map<string, number>();
+    const turnOf = (l: CutLine | null) => (l === null ? 0 : (turns.get(JSON.stringify(l)) ?? 0));
+    const turnText = (l: CutLine | null) => (turnOf(l) ? ` — plane turned ${turnOf(l)}°` : "");
+    let lastHover: [CutLine | null, number[]] = [null, []];
     const panel = this.toolPanel("Cut", { label: "Cancel" }, () => this.endTool());
     const showPanel = () => {
       const names = ids.map((id) => this.doc.get(id)?.name ?? "").join(", ");
@@ -3840,8 +3923,9 @@ export class App implements ToolHost {
       const pro = isPro();
       panel.set(
         `<div>Cutting: ${ids.length ? `<b>${escapeHtml(names)}</b>` : pro ? "—" : "<i>click a solid or flat face (or a row in the Bodies panel)</i>"}</div>` +
-          `<div>Along: ${line !== null ? `<b>${lineName(line)}</b>` : pro ? "—" : "<i>click a guide line (pink dashed), an axis line (red X / green Y / blue Z) or a straight path</i>"}</div>` +
+          `<div>Along: ${line !== null ? `<b>${lineName(line)}</b>${turnText(line)}` : pro ? "—" : "<i>click a guide line (pink dashed), an axis line (red X / green Y / blue Z) or a straight path</i>"}</div>` +
           (pro ? "" : `<div class="tp-tip">${line !== null ? "Click a solid to cut it — Shift+click picks more first, Enter cuts." : "Hover a line to see its cut plane, click it to cut."}</div>` +
+            `<div class="tp-tip">Not the plane you want? Mouse over the line, ← / → turn it 90° (Shift: 15°).</div>` +
             `<div class="tp-tip">Cancel or Esc exits.</div>`),
       );
       this.viewport.setHighlight(ids.map((id) => ({ kind: "body", body: id, id: 0 }) as SelItem), null);
@@ -3849,7 +3933,8 @@ export class App implements ToolHost {
     let hovered = "";
     /** Show the cut plane of `l` across `on` (the hovered line over the picked solids, or the picked line over the hovered solid). */
     const hover = (l: CutLine | null, on: number[]) => {
-      const key = JSON.stringify([l, on]);
+      lastHover = [l, on];
+      const key = JSON.stringify([l, on, turnOf(l)]);
       if (key === hovered) return;
       hovered = key;
       this.hoverGuide = typeof l === "number" ? l : -1;
@@ -3857,7 +3942,7 @@ export class App implements ToolHost {
       this.viewport.canvas.style.cursor = l !== null || on.length ? "pointer" : "crosshair";
       let plane: ReturnType<App["cutPlane"]> | null = null;
       try {
-        plane = l !== null && on.length ? this.cutPlane(l, on) : null;
+        plane = l !== null && on.length ? this.cutPlane(l, on, turnOf(l)) : null;
       } catch {
         plane = null;
       }
@@ -3865,9 +3950,9 @@ export class App implements ToolHost {
     };
     const cut = () => {
       if (!ids.length || line === null) return;
-      const [what, along] = [ids, line];
+      const [what, along, turn] = [ids, line, turnOf(line)];
       this.endTool();
-      this.opCut(what, along);
+      this.opCut(what, along, turn);
     };
     const setLine = (l: CutLine) => {
       line = l;
@@ -3906,6 +3991,18 @@ export class App implements ToolHost {
       key: (e) => {
         if (e.key === "Enter" && ids.length && line !== null) {
           cut();
+          return true;
+        }
+        // ← / →: the plane of the line under the mouse (else the one picked) turned about it, 90° (Shift: 15°)
+        if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && !e.ctrlKey && !e.altKey && !e.metaKey) {
+          const l = lastHover[0] ?? line;
+          if (l === null) return false;
+          const step = (e.shiftKey ? 15 : 90) * (e.key === "ArrowRight" ? 1 : -1);
+          const t = (((turnOf(l) + step) % 360) + 540) % 360 - 180; // (−180 … 180)
+          turns.set(JSON.stringify(l), t === -180 ? 180 : t);
+          hover(lastHover[0], lastHover[1].length ? lastHover[1] : ids);
+          showPanel();
+          this.hint(`Cut: the ${lineName(l)}'s plane turned ${turnOf(l)}° — ← / → 90° more (Shift: 15°)`);
           return true;
         }
         return false;
@@ -4065,7 +4162,16 @@ export class App implements ToolHost {
    * (unless its stored direction already is), else its stored direction, else (older files) the view;
    * off a face, guides along X / Y / Z snap to the nearest world plane.
    */
-  private cutPlane(line: CutLine, ids: number[]): { point: V3; normal: V3; along: V3 } {
+  /** The cut plane through `line`, turned `turn`° about it (← / → in the Cut tool: the plane it picked wasn't the one wanted). */
+  private cutPlane(line: CutLine, ids: number[], turn = 0): { point: V3; normal: V3; along: V3 } {
+    const p = this.cutPlaneAsPicked(line, ids);
+    if (!turn) return p;
+    const n = new THREE.Vector3(...p.normal).applyAxisAngle(new THREE.Vector3(...p.along).normalize(), (turn * Math.PI) / 180);
+    // (float noise dropped: a quarter turn of a level plane exactly upright)
+    return { ...p, normal: n.toArray().map((k) => (Math.abs(k) < 1e-12 ? 0 : k)) as V3 };
+  }
+
+  private cutPlaneAsPicked(line: CutLine, ids: number[]): { point: V3; normal: V3; along: V3 } {
     if (typeof line === "object" && "path" in line) {
       // A straight path (e.g. a sketch line): the upright plane through it; standing upright itself, the one facing you.
       const { a, b } = this.straightPath(line.path) ?? (() => { throw new Error("Cut: the path is gone"); })();
@@ -4168,14 +4274,14 @@ export class App implements ToolHost {
    * Cut the solids by the plane through a guide line; each one becomes two objects (one undo step).
    * Flat faces (a drawn rectangle, circle...) are cut into separate faces the same way.
    */
-  private opCut(ids: number[], line: CutLine): void {
+  private opCut(ids: number[], line: CutLine, turn = 0): void {
     const bodies = ids.map((id) => this.doc.get(id)!);
     const many = (n: number, what: string) => `${n} ${what}${n === 1 ? "" : "s"}`;
     // (many or heavy solids, e.g. a circular copy's 17 sweeps: ~3 s, behind the busy dialog counting them)
-    this.runBusy(this.heavy(bodies.filter((b) => b.kind !== "face")), `Cutting ${many(ids.length, "object")}…`, (say) => this.cutBodies(ids, line, say));
+    this.runBusy(this.heavy(bodies.filter((b) => b.kind !== "face")), `Cutting ${many(ids.length, "object")}…`, (say) => this.cutBodies(ids, line, say, turn));
   }
 
-  private async cutBodies(ids: number[], line: CutLine, say: ((text: string) => Promise<void>) | null): Promise<void> {
+  private async cutBodies(ids: number[], line: CutLine, say: ((text: string) => Promise<void>) | null, turn = 0): Promise<void> {
     const kept = new Map<number, Shape>();
     const cutOff: Body[] = [];
     const facePieces: number[] = [];
@@ -4183,7 +4289,7 @@ export class App implements ToolHost {
     const upperExtra: Body[] = [], lowerExtra = new Map<number, Body[]>(); // more pieces on a side (not joined to the first)
     let arrays = this.doc.arrays, newGroup: string | null = null;
     try {
-      const { point, normal } = this.cutPlane(line, ids);
+      const { point, normal } = this.cutPlane(line, ids, turn);
       // Copies the plane cuts just like their source (a ring round Z cut level, a row cut along it):
       // its pieces turned / moved into place — one cut, and the display reuses their triangles.
       const { like, recs } = this.cutLikeSource(ids, point, normal);
@@ -9286,7 +9392,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, extrudeFaceScaled, edgeLoopFace, offsetFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { loftOutlines, loftPipe, guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, extrudeFaceScaled, edgeLoopFace, offsetFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));

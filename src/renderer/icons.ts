@@ -45,6 +45,8 @@ export const ICONS: Record<string, string> = {
   offset: svg(`<rect x="3.5" y="5" width="17" height="14" rx="1.5" ${DASH} ${SOFT}/><rect x="7.5" y="8.5" width="9" height="7" rx="0.8" ${FILL}/><path d="M16.5 12h4M19 10.3l1.7 1.7-1.7 1.7"/>`),
   revolve: svg(`<path d="M6 2.5v19" ${DASH} ${SOFT}/><rect x="10.5" y="5" width="6.5" height="8.5" rx="0.8" ${FILL}/><path d="M19.5 15c0 2.2-4 3.8-9 3.8-2.2 0-4.2-.3-5.6-.8"/><path d="M6.8 16l-2.2 1.8 1.8 2.2"/>`),
   sweep: svg(`<path d="M4 19c0-7.5 5.5-12 14-12" ${DASH}/><path d="M1.5 19C1.5 9.5 8 4 18 4M6.5 19c0-5.5 4.2-9 11.5-9" ${SOFT}/><ellipse cx="4" cy="19" rx="2.8" ry="1.6" ${FILL}/><ellipse cx="18" cy="7" rx="1.6" ry="3" ${FILL}/>`),
+  // Loft: a circle below turning into a slot above, the sides between
+  loft: svg(`<ellipse cx="12" cy="18.5" rx="8" ry="2.6" ${FILL}/><rect x="6.5" y="3.4" width="11" height="3.2" rx="1.6" ${FILL}/><path d="M4 18.5L6.8 5M20 18.5L17.2 5"/><path d="M8.5 20.8L10.2 6.6M15.5 20.8L13.8 6.6" ${SOFT}/>`),
   cut: svg(`<path d="M3.5 14v5a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1v-8z" ${FILL}/><path d="M3.5 11.2V6a1 1 0 0 1 1-1h15a1 1 0 0 1 1 1v2.2" ${SOFT}/><path d="M2 13L22 9.5" stroke-width="2" ${DASH}/>`),
   splitFace: svg(`<rect x="4" y="5" width="16" height="14" rx="1.5" ${SOFT}/><path d="M4 14.5L20 9.5V17.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z" ${FILL}/><path d="M2 15.1L22 8.9" stroke-width="1.9" ${DASH}/>`),
   // Guide line: a tape measure (as its cursor), its tape pulled out as the dashed guide, the hook at its end

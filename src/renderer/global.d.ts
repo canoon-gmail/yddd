@@ -33,6 +33,10 @@ interface YDDDApi {
   /** The menu's shortcuts as shown (command → Electron accelerator, "" = none); the renderer handles the keys. */
   setMenuKeys?(keys: Record<string, string>): void;
   closeNow(): void;
+  /** A (fresh) background kernel process: its channel comes as a "yddd-kernel-port" window message. */
+  kernelStart(): void;
+  /** The background kernel process died on its own. */
+  onKernelGone(cb: (reason: string) => void): void;
   onMenu(cb: (cmd: string) => void): void;
   /** Open Recent → Clear Recent (YDDD's own menu bar). */
   clearRecent(): Promise<void>;

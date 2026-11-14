@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { registerKernelHost } from "./kernelHost";
 
 const RENDERER_DIR = path.join(__dirname, "..", "renderer");
 // Test runs keep their own settings / storage: they can run next to the user's open YDDD and leave its settings alone.
@@ -476,6 +477,8 @@ app.whenReady().then(async () => {
   // A test run starts clean (a leftover recovery file would stop it with the Recover question).
   if (process.env.YDDD_TEST) for (const f of await leftoverRecoveries()) await unlink(f).catch(() => {});
   registerAppProtocol();
+  // (the background kernel's own process, one per window: see kernelHost.ts)
+  registerKernelHost(DEV_URL ?? "app://y3d/");
   registerIpc();
   loadRecent();
   buildMenu();

@@ -76,6 +76,7 @@ export const COMMANDS: Command[] = [
     ["op.offset", "Offset"],
     ["op.revolve", "Revolve"],
     ["op.sweep", "Sweep"],
+    ["op.loft", "Loft: a solid through closed outlines (a circle to a slot)"],
     ["op.cut", "Cut by guide or axis"],
     ["op.splitFace", "Split face by guide"],
     ["tool.divideFace", "Divide face"],
