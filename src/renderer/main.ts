@@ -171,7 +171,7 @@ import {
 } from "./kernel";
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type SnapKind } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type Tool, type ToolHost, type PropField } from "./tools";
+import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type TextJob, type Tool, type ToolHost, type PropField } from "./tools";
 import { ICONS, KNIFE_CURSOR, MEASURE_CURSOR, TAPE_CURSOR } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
@@ -236,6 +236,8 @@ const PASTE_BUSY_BYTES = 300_000;
 const SLOW_PREVIEW_MS = 60;
 /** A Push/Pull's exact preview slower than this (a letter cut into a gear: ~1.2 s): typed values get the instant drag preview, the exact result on Apply. */
 const SLOW_PUSHPULL_MS = 250;
+/** Push/Pull's Apply in the background kernel (behind the busy dialog, Stop / Esc) for a solid this many faces or more — or one slow to preview. */
+const BG_PUSHPULL_FACES = 100;
 /** The view a model was saved in: the camera's place, what it looks at, its up, its field of view (a flat view: its direction). */
 interface SavedView {
   position: V3;
@@ -339,6 +341,8 @@ export class App implements ToolHost {
     /** Its background job (computeAsync) under way, for the values `key`; `wanted`: the values changed meanwhile. */
     job?: { key: string; done: Promise<void>; started: number };
     wanted?: boolean;
+    /** The values its last background job failed for (Apply then stops there — not asking again and again). */
+    failedKey?: string;
     /** Waiting for the background kernel to load again (after a stopped job). */
     waitingKernel?: boolean;
   } | null = null;
@@ -2143,6 +2147,7 @@ export class App implements ToolHost {
         },
         (e) => {
           if (e instanceof JobCancelled || this.op !== op) return;
+          op.failedKey = key;
           this.showOpError(op, e, err);
           op.previewMs = performance.now() - t0; // (a slow failure is slow too: dragging then waits for a pause)
         },
@@ -2251,6 +2256,7 @@ export class App implements ToolHost {
     while (op.spec.computeAsync && this.bgKernel.ready && this.op === op) {
       const { key } = this.opValues();
       if (op.key === key && op.result) break;
+      if (op.failedKey === key && !op.job) return; // (its error is in the panel)
       if (!op.job) {
         this.previewOp();
         if (!op.job) break; // (an error, shown in the panel)
@@ -2261,16 +2267,19 @@ export class App implements ToolHost {
     const result = this.previewOp();
     if (!result) return;
     op.spec.remember?.(this.opValues().values);
-    let done: { select: number[]; solidMode?: boolean; then?: () => void };
+    let done: { select: number[]; solidMode?: boolean; then?: () => void } | null;
     try {
-      done = result.commit(); // a transform preview builds the exact result only now
+      // (a transform preview builds the exact result only now — in the background kernel if it can: Stop / Esc ends it)
+      done = result.commitAsync && this.bgKernel.ready ? await this.whileBusy(`${op.spec.label}…`, () => result.commitAsync!()) : result.commit();
     } catch (e) {
+      if (e instanceof JobCancelled) return void (this.op === op && this.toast("Stopped — nothing changed"));
       const err = this.opPanel.querySelector(".op-error");
-      if (err) err.textContent = errorMessage(e);
+      if (err && this.op === op) err.textContent = errorMessage(e);
       this.toast(errorMessage(e), "error");
       return;
     }
-    this.closeOpPanel();
+    if (!done) return void this.toast(`${op.spec.label}: the model changed meanwhile — nothing changed`, "error");
+    if (this.op === op) this.closeOpPanel();
     const { select, solidMode, then } = done;
     this.opApplied = select;
     if (solidMode) this.setMode("body");
@@ -2404,6 +2413,10 @@ export class App implements ToolHost {
     // Face of a solid → modify that solid, or (checkbox) create a separate new solid.
     let exactMs = 0; // (the last exact preview's time: slow → typed values get the instant one too)
     let opened = false;
+    // A free-form solid (B-spline faces: a lofted or curved shape): its exact result can take very long — 0.2 mm on a
+    // shell's top with a rounded rim: 103 s, the rim's move failing (OpenCascade on nearly coinciding faces) — so it's
+    // worked out in the background kernel, the instant preview drawn meanwhile; Apply then uses it as it is
+    const freeForm = body.shape.faces.some((f) => !["PLANE", "CYLINDRE", "CONE", "SPHERE", "TORUS"].includes(f.geomType));
     const spec: OpSpec = {
       title: "Push / Pull",
       panelOnTab: true,
@@ -2413,6 +2426,21 @@ export class App implements ToolHost {
         { key: "d", label: "Distance (mm)", value: 0.2, step: 1 },
         { key: "newBody", label: "New solid", value: this.defaults.pushpullNew ? 1 : 0, type: "checkbox" },
       ],
+      computeAsync: freeForm ? async (values) => {
+        const { d, newBody } = values;
+        if (newBody) return spec.compute(values);
+        this.pushPullDims(new Map([[bodyId, [faceId]]]), d);
+        this.dragPushPull(new Map([[bodyId, [faceId]]]), d); // (the instant preview while it's worked out)
+        const made = await this.pushPullInBackground(new Map([[bodyId, [faceId]]]), d);
+        if (!made) throw new Error("Push/Pull: the model changed meanwhile");
+        return {
+          ghost: new Map([[bodyId, made.get(bodyId)!]]),
+          commit: () => {
+            this.doc.replaceShapes(made, "Push/Pull");
+            return { select: [bodyId] };
+          },
+        };
+      } : undefined,
       compute: ({ d, newBody }) => {
         if (newBody) this.setDimMove(null);
         else this.pushPullDims(new Map([[bodyId, [faceId]]]), d);
@@ -2430,7 +2458,16 @@ export class App implements ToolHost {
         // Fast preview; the exact result is computed on Apply (see asPreview).
         const solid = this.solidOf(bodyId, "Push/Pull");
         const commit = () => this.replaceOutcome(new Map([[bodyId, pushPull(solid, faceId, d)]]), "Push/Pull").commit();
-        if (exactMs > SLOW_PUSHPULL_MS && this.dragPushPull(new Map([[bodyId, [faceId]]]), d)) return { ghost: new Map(), drawn: true, commit };
+        // (a heavy one in the background kernel when it can: Apply on a free-form solid takes ~1.7 s — a small one stays instant)
+        const heavy = () => exactMs > SLOW_PUSHPULL_MS || solid.faces.length >= BG_PUSHPULL_FACES;
+        const inBackground = async () => {
+          const made = await this.pushPullInBackground(new Map([[bodyId, [faceId]]]), d);
+          if (!made) return null;
+          this.doc.replaceShapes(made, "Push/Pull");
+          return { select: [bodyId] };
+        };
+        const commitAsync = heavy() ? inBackground : undefined;
+        if (exactMs > SLOW_PUSHPULL_MS && this.dragPushPull(new Map([[bodyId, [faceId]]]), d)) return { ghost: new Map(), drawn: true, commit, commitAsync };
         // Opening: the gizmo and the instant preview first (a free-form solid's exact one can take ~0.5 s), the exact one once painted
         if (!opened && (opened = true) && this.dragPushPull(new Map([[bodyId, [faceId]]]), d)) {
           requestAnimationFrame(() => setTimeout(() => {
@@ -2438,12 +2475,12 @@ export class App implements ToolHost {
             this.op.key = "";
             this.previewOp();
           }, 0));
-          return { ghost: new Map(), drawn: true, commit };
+          return { ghost: new Map(), drawn: true, commit, commitAsync };
         }
         const t0 = performance.now();
         const ghost = new Map([[bodyId, asPreview(() => pushPull(solid, faceId, d))]]);
         exactMs = performance.now() - t0;
-        return { ghost, commit };
+        return { ghost, commit, commitAsync: heavy() ? inBackground : undefined };
       },
       remember: ({ d, newBody }) => {
         this.defaults.pushpullNew = !!newBody;
@@ -2727,17 +2764,24 @@ export class App implements ToolHost {
         const preview = instant ? new Map<number, Shape>() : asPreview(pushed);
         if (!instant) exactMs = performance.now() - t0;
         const extrude = () => new Map<number, Shape>(flats.map((b) => [b.id, extrudeFace(b.shape, b.shape.faces[0].hashCode, d)]));
+        /** The pushed solids and the face objects' prisms put in the model (one undo step). */
+        const put = (solids: Map<number, Shape>) => {
+          const extruded = extrude();
+          const made = new Map(flats.map((b) => [b.id, extrudedFrom(this.doc.makeBody(extruded.get(b.id)!, "Solid"), b)]));
+          this.doc.commit(
+            this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? withShape(b, solids.get(b.id)!) : b)),
+            "Push/Pull",
+          );
+          return { select: [...solids.keys(), ...[...made.values()].map((b) => b.id)], solidMode: made.size > 0 && !solids.size };
+        };
         return {
           ghost: instant ? new Map() : new Map([...preview, ...extrude()]),
           drawn: instant,
-          commit: () => {
-            const solids = pushed(), extruded = extrude();
-            const made = new Map(flats.map((b) => [b.id, extrudedFrom(this.doc.makeBody(extruded.get(b.id)!, "Solid"), b)]));
-            this.doc.commit(
-              this.doc.bodies.map((b) => made.get(b.id) ?? (solids.has(b.id) ? withShape(b, solids.get(b.id)!) : b)),
-              "Push/Pull",
-            );
-            return { select: [...solids.keys(), ...[...made.values()].map((b) => b.id)], solidMode: made.size > 0 && !solids.size };
+          commit: () => put(pushed()),
+          // (heavy solids' exact results in the background kernel when it can — the face objects' prisms are quick)
+          commitAsync: !(exactMs > SLOW_PUSHPULL_MS || [...perSolid.keys()].some((id) => this.solidOf(id, "Push/Pull").faces.length >= BG_PUSHPULL_FACES)) ? undefined : async () => {
+            const solids = perSolid.size ? await this.pushPullInBackground(perSolid, d) : new Map<number, Solid>();
+            return solids && flats.every((b) => this.doc.get(b.id) === b) ? put(solids) : null;
           },
         };
       },
@@ -2748,6 +2792,21 @@ export class App implements ToolHost {
       },
       drag,
     });
+  }
+
+  /**
+   * Push/Pull's exact results (each solid's faces `d` mm along their normals) made in the background kernel — the
+   * solids sent as BREP text, the faces by place; null if one of them changed meanwhile.
+   */
+  private async pushPullInBackground(perBody: Map<number, number[]>, d: number): Promise<Map<number, Solid> | null> {
+    const before = [...perBody.keys()].map((id) => [id, this.doc.get(id)] as const);
+    const made = await Promise.all([...perBody].map(async ([id, faces]) => {
+      const solid = this.solidOf(id, "Push/Pull"), all = solid.faces.map((f) => f.hashCode);
+      const places = faces.map((h) => all.indexOf(h));
+      if (places.some((i) => i < 0)) throw new Error("Push/Pull: the face isn't there any more");
+      return [id, solidFrom(await this.bgKernel.run({ op: "pushpull", brep: serializeShape(solid), faces: places, d }))] as const;
+    }));
+    return before.some(([id, b]) => this.doc.get(id) !== b) ? null : new Map(made);
   }
 
   /** Faces moved by a push/pull, per body (cached per op: the document doesn't change while it is open). */
@@ -3246,9 +3305,10 @@ export class App implements ToolHost {
    * Outcome for a solid made from a profile face (Revolve, Sweep): a flat face object turns into it
    * (like Push/Pull); made from a solid's face it joins that solid, or with `newBody` stays separate.
    */
-  private profileOutcome(body: ShapeBody, solid: Solid, newBody: boolean, label: string): OpOutcome {
+  /** `joined`: `solid` is already joined to the body's solid (made in the background kernel). */
+  private profileOutcome(body: ShapeBody, solid: Solid, newBody: boolean, label: string, joined = false): OpOutcome {
     if (body.kind === "solid" && !newBody) {
-      return this.replaceOutcome(new Map([[body.id, booleanOp("union", this.solidOf(body.id, label), [solid])]]), label);
+      return this.replaceOutcome(new Map([[body.id, joined ? solid : booleanOp("union", this.solidOf(body.id, label), [solid])]]), label);
     }
     return {
       ghost: new Map([[body.kind === "face" ? body.id : -1, solid]]),
@@ -3259,6 +3319,16 @@ export class App implements ToolHost {
       },
     };
   }
+
+  /** A body's shape as BREP text for the background kernel (made once per shape) and a face's place in its face list. */
+  brepFor(shape: Shape | Wire, faceId?: number): { brep: string; face: number } {
+    let brep = this.breps.get(shape);
+    if (brep === undefined) this.breps.set(shape, (brep = serializeShape(shape)));
+    const face = faceId === undefined ? -1 : (shape as Shape).faces.findIndex((f) => f.hashCode === faceId);
+    if (faceId !== undefined && face < 0) throw new Error("the face isn't there any more");
+    return { brep, face };
+  }
+  private breps = new WeakMap<object, string>();
 
   /** Revolve: turn a flat face about an axis (a guide line, one of its straight edges or a world axis) into a solid. */
   private opRevolve(): void {
@@ -3372,6 +3442,15 @@ export class App implements ToolHost {
         if (!a) throw new Error("pick an axis");
         return this.profileOutcome(body, revolveFace(body.shape, faceId, a.axis, angle), !!newBody, "Revolve");
       },
+      // (in the background kernel: a revolved scanned outline joined to a solid can take seconds)
+      computeAsync: async ({ axis, angle, newBody }) => {
+        const a = axes[axis];
+        this.viewport.setGuides(this.doc.guides, a?.guide ?? -1, -1);
+        if (!a) throw new Error("pick an axis");
+        const join = body.kind === "solid" && !newBody;
+        const res = await this.bgKernel.run({ op: "revolve", ...this.brepFor(body.shape, faceId), axis: a.axis, angle, join });
+        return this.profileOutcome(body, solidFrom(res), !!newBody, "Revolve", join);
+      },
       remember: ({ angle, newBody }) => {
         this.defaults.revolveAngle = angle;
         if (newBody !== undefined) this.defaults.joinNew = !!newBody;
@@ -3476,6 +3555,16 @@ export class App implements ToolHost {
         if (!body || !wire) throw new OpWaiting(todo);
         const from = ends.length === 2 ? ends[begin] : undefined;
         return this.profileOutcome(body, sweepFace(body.shape, profile!.faceId, wire, !onPath || !!toPath, !!round, turn, size / 100, straight ? twist || 0 : 0, (endSize ?? 100) / 100, from), !!newBody, "Sweep");
+      },
+      // (in the background kernel: a long path, a twist or a join to a solid can take seconds)
+      computeAsync: async ({ round, toPath, turn, size, twist, endSize, newBody }) => {
+        if (!body || !wire) throw new OpWaiting(todo);
+        const from = ends.length === 2 ? ends[begin] : undefined, join = body.kind === "solid" && !newBody;
+        const res = await this.bgKernel.run({
+          op: "sweep", ...this.brepFor(body.shape, profile!.faceId), path: this.brepFor(wire).brep, toPath: !onPath || !!toPath, round: !!round,
+          turn, scale: size / 100, twist: straight ? twist || 0 : 0, endScale: (endSize ?? 100) / 100, start: from, join,
+        });
+        return this.profileOutcome(body, solidFrom(res), !!newBody, "Sweep", join);
       },
       choices: ends.length === 2 ? ends.map((at, i) => ({
         at, key: "", value: i, on: i === begin, label: i === begin ? "Begin" : "End", color: "#f4a259",
@@ -4267,6 +4356,17 @@ export class App implements ToolHost {
     });
   }
 
+  /** `work` (a background kernel job) behind the busy dialog, painted first; its Stop / Esc ends the job (it rejects with JobCancelled). */
+  private async whileBusy<T>(text: string, work: () => Promise<T>): Promise<T> {
+    const busy = this.showBusy(text, () => this.bgKernel.cancel());
+    try {
+      await new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)));
+      return await work();
+    } finally {
+      busy.close();
+    }
+  }
+
   /**
    * The busy dialog (spinner, fading in after a moment) until `close`; with `stop`, its Stop button and Esc call it —
    * else it says it can't be stopped part-way. Keys and clicks wait meanwhile (busyNow).
@@ -4881,6 +4981,22 @@ export class App implements ToolHost {
   private textFonts: Promise<{ family: string; style: string; file: string }[]> | null = null;
 
   /** Load a Text font (the built-in ones first; a system font's file once); false if it can't be read or used. */
+  /** The Text tool's letters made in the background kernel (ToolHost): the font file sent along the first time it's used there. */
+  textInBackground(job: TextJob): Promise<Shape[]> | null {
+    if (!this.bgKernel.ready) return null;
+    return (async () => {
+      const font = job.o.font ?? "";
+      const send = !!font && !font.startsWith("builtin:") && !this.bgKernel.fonts.has(font);
+      const fontData = send ? ((await window.yddd.readFont(font)) ?? undefined) : undefined;
+      const res = await this.bgKernel.run({
+        op: "text", text: job.text, o: job.o, fontData,
+        ...(job.curved ? { wrap: { ...this.brepFor(job.curved.shape, job.curved.faceId), at: job.curved.at } } : { frame: job.frame, anchor: job.anchor }),
+      });
+      if (send) this.bgKernel.fonts.add(font);
+      return res.faces.map((f) => solidFrom(f) as unknown as Shape);
+    })();
+  }
+
   private async useTextFont(file: string): Promise<boolean> {
     try {
       if (!textFontReady()) await loadTextFont();
@@ -4999,6 +5115,7 @@ export class App implements ToolHost {
           (isPro() ? "" : `<div class="tp-tip">Height: a capital letter. Shift+Enter: a new line. Click elsewhere to move the text.</div>`),
       );
       const body = panel.body, err = body.querySelector<HTMLElement>(".tp-error")!;
+      tool.changed = () => (err.textContent = tool.problem); // (letters made in the background: their problem, if any, once they come)
       const update = () => {
         const v = (k: string) => body.querySelector<HTMLInputElement>(`[data-k="${k}"]`)!.value;
         const num = (k: string, d: number) => (Number.isFinite(parseFloat(v(k))) ? parseFloat(v(k)) : d);

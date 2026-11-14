@@ -3134,7 +3134,11 @@ function cornerFills(faces: { face: Face; n: V3 }[], distance: number): Shape3D[
  * Push/pull faces with their tangent fillet chains; if that fails or gives an
  * invalid solid, fall back to moving just the faces themselves.
  */
-function pushPullFaces(shape: Solid, picked: { face: Face; n: V3 }[], distance: number): Solid {
+/**
+ * `rim`: the faces' rim fillets (flat faces carry them along) — "auto": moved with them if that works, else left;
+ * "must": moved with them, else it throws; "none": left where they are (the plain push/pull).
+ */
+function pushPullFaces(shape: Solid, picked: { face: Face; n: V3 }[], distance: number, rim: "auto" | "must" | "none" = "auto"): Solid {
   // A curved wall split in pieces (a stretched cylinder's side) moves as a whole.
   const walls = picked.flatMap(({ face, n }) => sameWallFaces(shape, face).map((g) => ({ face: g, n })));
   const extra = walls.filter((w, i) => !picked.some((p) => p.face.isSame(w.face)) && walls.findIndex((x) => x.face.isSame(w.face)) === i);
@@ -3149,7 +3153,7 @@ function pushPullFaces(shape: Solid, picked: { face: Face; n: V3 }[], distance: 
     for (const g of chain) owner.set(g.hashCode, owner.has(g.hashCode) && owner.get(g.hashCode) !== i ? -1 : i);
     return chain;
   });
-  const withChains = faces.flatMap((f, i) => [f, ...chains[i].filter((g) => owner.get(g.hashCode) === i).map((g) => ({ face: g, n: f.n }))]);
+  const withChains = rim === "none" ? faces : faces.flatMap((f, i) => [f, ...chains[i].filter((g) => owner.get(g.hashCode) === i).map((g) => ({ face: g, n: f.n }))]);
   // Flat faces all moving one way on a solid with free-form faces (where sweeping them makes the
   // boolean slow): try it as a stretch first.
   if (shape.faces.some((f) => !ANALYTIC.has(f.geomType)) && faces.every(({ face, n }) => face.geomType === "PLANE" && dot3(n, faces[0].n) > 1 - 1e-9)) {
@@ -3163,6 +3167,7 @@ function pushPullFaces(shape: Solid, picked: { face: Face; n: V3 }[], distance: 
     } catch {
       // fall through to the plain push/pull
     }
+    if (rim === "must") throw new Error("Push/Pull: the face's rounded rim couldn't move with it");
   }
   return mergeCoincidentFaces(sweepFaces(shape, faces, distance));
 }
@@ -3367,7 +3372,7 @@ export function pushPullPointMoves(shape: Solid, faceIds: number[], pts: V3[]): 
 export function pushPull(shape: Solid, faceId: number, distance: number): Solid {
   const f = faceWithNormal(shape, faceId);
   if (distance === 0) return shape;
-  return pushPullFaces(shape, [f], distance);
+  return pushPullOrSplit(shape, [f], distance);
 }
 
 /** Push/pull several faces of one solid by the same distance (each along its own normal). */
@@ -3375,7 +3380,88 @@ export function pushPullMany(shape: Solid, faceIds: number[], distance: number):
   // Faces are all looked up on the original shape so face ids stay valid.
   const faces = faceIds.map((id) => faceWithNormal(shape, id));
   if (distance === 0) return shape;
-  return pushPullFaces(shape, faces, distance);
+  return pushPullOrSplit(shape, faces, distance);
+}
+
+/**
+ * Push/pull, checked (checkedPushPull); if OpenCascade gets it wrong or fails, flat faces all facing one way are tried
+ * again on the solid cut in 4 (splitPushPull) — a shell's inside face pulled out: 2 pieces and less volume at once,
+ * right this way (9 s). Throws the first error if that doesn't work either.
+ */
+function pushPullOrSplit(shape: Solid, picked: { face: Face; n: V3 }[], distance: number): Solid {
+  let first: unknown;
+  try {
+    return checkedPushPull(shape, pushPullFaces(shape, picked, distance), distance);
+  } catch (e) {
+    first = e;
+  }
+  const r = splitPushPull(shape, picked, distance);
+  if (r) return r;
+  throw first;
+}
+
+/**
+ * Push/pull on the solid cut in 4 — two cuts through the middle of the faces, both along their normal — each piece's
+ * parts of the faces pushed (a quarter of a hollow, rounded solid is a much simpler job for OpenCascade), the pieces
+ * joined again and the cut lines merged away on free-form faces. Flat faces facing one way only; null if it can't.
+ */
+function splitPushPull(shape: Solid, picked: { face: Face; n: V3 }[], distance: number): Solid | null {
+  const n = picked[0].n;
+  if (!picked.every(({ face, n: m }) => face.geomType === "PLANE" && dot3(m, n) > 1 - 1e-9)) return null;
+  try {
+    // Where the faces are: their box (a part of one after the cuts lies inside it, on its plane)
+    const boxes = picked.map(({ face }) => face.boundingBox.bounds as [V3, V3]);
+    const lo = [0, 1, 2].map((k) => Math.min(...boxes.map((b) => b[0][k]))), hi = [0, 1, 2].map((k) => Math.max(...boxes.map((b) => b[1][k])));
+    const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    const levels = picked.map(({ face }) => dot3(face.center.toTuple() as V3, n));
+    const a1 = norm3(cross3(Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0], n)), a2 = norm3(cross3(n, a1));
+    const cut = (s: Solid, a: V3) => Object.values(splitByPlane(s, c, a)).flatMap((h) => (h ? solidPieces(h) : []));
+    const pieces = cut(shape, a1).flatMap((h) => cut(h, a2));
+    if (pieces.length < 2) return null;
+    const tol = 1e-4;
+    const part = (f: Face) => {
+      if (f.geomType !== "PLANE" || dot3(norm3(f.normalAt().toTuple() as V3), n) < 1 - 1e-9) return false;
+      const p = f.center.toTuple() as V3;
+      return levels.some((l) => Math.abs(dot3(p, n) - l) < tol) && [0, 1, 2].every((k) => p[k] > lo[k] - tol && p[k] < hi[k] + tol);
+    };
+    if (!pieces.some((q) => q.faces.some(part))) return null;
+    // Every piece the same way, else they don't match (a step, a sharp corner beside a rounded one): the rim moved with
+    // the faces on all of them — or, if one can't, on none (square edges; fillet them afterwards)
+    const pushAll = (rim: "must" | "none") => pieces.map((q) => {
+      const parts = q.faces.filter(part);
+      return parts.length ? checkedPushPull(q, pushPullFaces(q, parts.map((face) => ({ face, n })), distance, rim), distance) : q;
+    });
+    let pushed: Solid[];
+    try {
+      pushed = pushAll("must");
+    } catch {
+      pushed = pushAll("none");
+    }
+    const joined = booleanOp("union", pushed[0], pushed.slice(1));
+    // The cut lines left on free-form faces (an analytic face is whole again already): merged
+    const h = (p: V3, a: V3) => Math.abs(dot3(sub3(p, c), a));
+    const onCut = (e: Edge) => [0, 0.5, 1].every((t) => { const p = e.pointAt(t).toTuple() as V3; return h(p, a1) < tol || h(p, a2) < tol; });
+    return checkedPushPull(shape, mergeCoincidentFaces(joined, onCut), distance);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A push/pull's result, refused if it's plainly wrong — OpenCascade sometimes gives a solid its check calls valid that
+ * isn't the push/pull at all (a shell's inside face pulled out: two pieces, less volume; others: nothing left).
+ * Pulled out (+) it must have more volume and no more pieces; pushed in (−) less volume (it may come apart: a slot
+ * cut right across a plate).
+ */
+function checkedPushPull(before: Solid, after: Solid, distance: number): Solid {
+  const n0 = solidPieces(before).length, n1 = solidPieces(after).length;
+  const dv = solidVolume(after) - solidVolume(before), tiny = 1e-9 * Math.max(1, Math.abs(solidVolume(before)));
+  const why = !n1 ? "nothing was left"
+    : distance > 0 && n1 > n0 ? "it came apart in pieces"
+    : distance > 0 ? (dv > tiny ? "" : "it lost volume instead of gaining it")
+    : dv < -tiny ? "" : "it gained volume instead of losing it";
+  if (why) throw new Error(`Push/Pull: OpenCascade got this one wrong (${why}) — nothing changed; try a smaller distance, or divide the face first`);
+  return after;
 }
 
 // ---------------------------------------------------------------- split face

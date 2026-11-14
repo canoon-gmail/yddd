@@ -88,6 +88,18 @@ export function openBoxFromFace(app: App, target: { bodyId: number; faceId: numb
   const picked: SelItem[] = body ? [body.kind === "face" ? { kind: "body", body: body.id, id: 0 } : { kind: "face", body: body.id, id: faceId }] : [];
   const todo = "click a flat face: it's the box's inside (floor and inner outline)";
   const d = app.boxDefaults;
+  const outcome = (solid: Solid): OpOutcome => {
+    // A face object becomes the box; on a solid's face it's a new solid
+    const replace = body!.kind === "face";
+    return {
+      ghost: new Map([[replace ? body!.id : -1, solid]]),
+      commit: () => {
+        const nb = inGroupOf(app.doc.makeBody(solid, "Box"), body!);
+        app.doc.commit(replace ? app.doc.bodies.map((b) => (b.id === body!.id ? nb : b)) : [...app.doc.bodies, nb], "Box from Face");
+        return { select: [nb.id], solidMode: true };
+      },
+    };
+  };
   const spec: OpSpec = {
     title: "Box from Face",
     label: "Box from Face",
@@ -102,17 +114,12 @@ export function openBoxFromFace(app: App, target: { bodyId: number; faceId: numb
     ],
     compute: ({ wall, bottom, height, round, radius }) => {
       if (!body) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
-      const solid = boxFromFace(body.shape, faceId, { wall, bottom, height, radius: round ? radius : 0 });
-      // A face object becomes the box; on a solid's face it's a new solid
-      const replace = body.kind === "face";
-      return {
-        ghost: new Map([[replace ? body.id : -1, solid]]),
-        commit: () => {
-          const nb = inGroupOf(app.doc.makeBody(solid, "Box"), body);
-          app.doc.commit(replace ? app.doc.bodies.map((b) => (b.id === body.id ? nb : b)) : [...app.doc.bodies, nb], "Box from Face");
-          return { select: [nb.id], solidMode: true };
-        },
-      };
+      return outcome(boxFromFace(body.shape, faceId, { wall, bottom, height, radius: round ? radius : 0 }));
+    },
+    // (in the background kernel: a scanned outline's box can take seconds)
+    computeAsync: async ({ wall, bottom, height, round, radius }) => {
+      if (!body) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+      return outcome(solidFrom(await app.bgKernel.run({ op: "boxFromFace", ...app.brepFor(body.shape, faceId), o: { wall, bottom, height, radius: round ? radius : 0 } })));
     },
     remember: ({ wall, bottom, height, round, radius }) => (app.boxDefaults = { wall, bottom, height, round, radius }),
     pick: (e) => take(targetAt(e)),
@@ -158,6 +165,14 @@ export function openBoxLid(app: App, over: boolean, boxId: number | null): void 
   const d = over ? app.lidDefaults.over : app.lidDefaults.in;
   const part = over ? "Skirt" : "Lip";
   const todo = "click the open-top box to make it for";
+  const outcome = (lid: Solid): OpOutcome => ({
+    ghost: new Map([[-1, lid]]),
+    commit: () => {
+      const nb = inGroupOf(app.doc.makeBody(lid, "Lid"), box!);
+      app.doc.commit([...app.doc.bodies, nb], kind);
+      return { select: [nb.id], solidMode: true };
+    },
+  });
   const spec: OpSpec = {
     title: over ? "Box Lid — over the box" : "Box Lid — inside lip",
     label: kind,
@@ -171,15 +186,12 @@ export function openBoxLid(app: App, over: boolean, boxId: number | null): void 
     ],
     compute: ({ thickness, depth, wall, clearance }) => {
       if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
-      const lid = boxLid(box.shape as Solid, { over, thickness, lipDepth: depth, lipWall: wall, clearance });
-      return {
-        ghost: new Map([[-1, lid]]),
-        commit: () => {
-          const nb = inGroupOf(app.doc.makeBody(lid, "Lid"), box);
-          app.doc.commit([...app.doc.bodies, nb], kind);
-          return { select: [nb.id], solidMode: true };
-        },
-      };
+      return outcome(boxLid(box.shape as Solid, { over, thickness, lipDepth: depth, lipWall: wall, clearance }));
+    },
+    // (in the background kernel)
+    computeAsync: async ({ thickness, depth, wall, clearance }) => {
+      if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+      return outcome(solidFrom(await app.bgKernel.run({ op: "boxLid", brep: app.brepFor(box.shape).brep, o: { over, thickness, lipDepth: depth, lipWall: wall, clearance } })));
     },
     remember: ({ thickness, depth, wall, clearance }) => (app.lidDefaults[over ? "over" : "in"] = { thickness, depth, wall, clearance }),
     pick: (e) => take(at(e)),
@@ -216,6 +228,13 @@ export function openDividers(app: App, boxId: number | null): void {
   const at = (e: PointerEvent) => targetOf(app.viewport.pick(e.clientX, e.clientY, "body")?.body);
   const d = app.dividerDefaults;
   const todo = "click the open-top box to divide";
+  const outcome = (solid: Solid): OpOutcome => ({
+    ghost: new Map([[box!.id, solid]]),
+    commit: () => {
+      app.doc.commit(app.doc.bodies.map((b) => (b.id === box!.id ? withShape(b, solid) : b)), "Dividers");
+      return { select: [box!.id], solidMode: true };
+    },
+  });
   const spec: OpSpec = {
     title: "Dividers",
     label: "Dividers",
@@ -229,14 +248,12 @@ export function openDividers(app: App, boxId: number | null): void {
     ],
     compute: ({ columns, rows, wall, topGap }) => {
       if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
-      const solid = boxDividers(box.shape as Solid, { columns, rows, wall, topGap });
-      return {
-        ghost: new Map([[box.id, solid]]),
-        commit: () => {
-          app.doc.commit(app.doc.bodies.map((b) => (b.id === box.id ? withShape(b, solid) : b)), "Dividers");
-          return { select: [box.id], solidMode: true };
-        },
-      };
+      return outcome(boxDividers(box.shape as Solid, { columns, rows, wall, topGap }));
+    },
+    // (in the background kernel: many walls fused into the box can take seconds)
+    computeAsync: async ({ columns, rows, wall, topGap }) => {
+      if (!box) throw new OpWaiting(todo[0].toUpperCase() + todo.slice(1));
+      return outcome(solidFrom(await app.bgKernel.run({ op: "boxDividers", brep: app.brepFor(box.shape).brep, o: { columns, rows, wall, topGap } })));
     },
     remember: ({ columns, rows, wall, topGap }) => (app.dividerDefaults = { columns, rows, wall, topGap }),
     pick: (e) => take(at(e)),

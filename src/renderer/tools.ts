@@ -35,8 +35,19 @@ import {
 } from "./kernel";
 import { circleSize, parseLen, typedUnit } from "./format";
 
+/** The Text tool's letters to make: flat in `frame` at `anchor`, or round a curved face (`curved`). */
+export interface TextJob {
+  text: string;
+  o: TextOptions;
+  frame: Frame;
+  anchor: V3;
+  curved: { shape: Shape; faceId: number; at: V3 } | null;
+}
+
 export interface ToolHost {
   viewport: Viewport;
+  /** The Text tool's letters made in the background kernel (the window stays live as it's typed); null: it isn't ready — made here. */
+  textInBackground?(job: TextJob): Promise<Shape[]> | null;
   /** Sketch: the objects it has taken in to edit changed (an undo too) — hide those, show the rest. */
   sketchTakenChanged?(ids: readonly number[]): void;
   /** Grid step for snapping; 0 when not snapping (see Viewport.snapping) or when the step is Off. */
@@ -1090,6 +1101,18 @@ export class TextTool extends DrawTool {
   }
   private faces: Shape[] = [];
   private error = "";
+  /** The letters being made in the background (see redraw); `again`: the text changed meanwhile — made next. */
+  private making = false;
+  private again = false;
+  /** Create waits for the letters being made. */
+  private createWhenMade = false;
+  private gone = false;
+  /** Letters being made in the background (tests wait for them). */
+  get makingLetters(): boolean {
+    return this.making;
+  }
+  /** The letters came in from the background (the panel shows `problem` again). */
+  changed: (() => void) | null = null;
 
   constructor(host: ToolHost, private readonly onPlaced: () => void, private readonly done: (faces: Shape[], s: TextSettings) => void) {
     super(host);
@@ -1164,6 +1187,7 @@ export class TextTool extends DrawTool {
   /** Add the text (one face per letter outline). */
   create(): void {
     if (this.stage !== 1) return this.host.hint("Text: click where it starts first");
+    if (this.making) return void (this.createWhenMade = true);
     if (this.error) return this.host.fail(this.error);
     if (!this.faces.length) return this.host.toast("Text: type some letters first", "error");
     const faces = this.faces;
@@ -1171,9 +1195,44 @@ export class TextTool extends DrawTool {
     this.done(faces, TextTool.settings);
   }
 
+  dispose(): void {
+    this.gone = true;
+    super.dispose();
+  }
+
   private redraw(): void {
-    const vp = this.host.viewport;
     const s = TextTool.settings;
+    if (this.making) return void (this.again = true); // (the newest text next, not every one typed meanwhile)
+    const job: TextJob = {
+      text: s.text,
+      o: { height: s.height, align: s.align, lineSpacing: s.lineSpacing, letterSpacing: s.letterSpacing, font: s.font },
+      frame: this.frame.toKernel(),
+      anchor: [this.at.x, this.at.y, this.at.z],
+      curved: this.curved,
+    };
+    const bg = this.host.textInBackground?.(job);
+    if (bg) {
+      // In the background kernel: the letters shown so far stay until these come
+      this.making = true;
+      void bg.then(
+        (faces) => ((this.faces = faces), (this.error = "")),
+        (err) => ((this.faces = []), (this.error = err instanceof Error ? err.message : String(err))),
+      ).then(() => {
+        this.making = false;
+        if (this.gone) return;
+        if (this.again) {
+          this.again = false;
+          return this.redraw();
+        }
+        this.show();
+        this.changed?.();
+        if (this.createWhenMade) {
+          this.createWhenMade = false;
+          this.create();
+        }
+      });
+      return;
+    }
     try {
       this.faces = this.curved
         ? wrappedTextFaces(this.curved.shape, this.curved.faceId, this.curved.at, s.text, s)
@@ -1183,6 +1242,12 @@ export class TextTool extends DrawTool {
       this.faces = [];
       this.error = err instanceof Error ? err.message : String(err);
     }
+    this.show();
+  }
+
+  /** The letters on screen. */
+  private show(): void {
+    const vp = this.host.viewport;
     const pos: number[] = [], idx: number[] = [], seg: number[] = [];
     for (const f of this.faces) {
       const t = tessellate(f, true), o = pos.length / 3;

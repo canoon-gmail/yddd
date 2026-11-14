@@ -60,6 +60,12 @@ export interface OpOutcome {
   warn?: { text: string; action?: { label: string; set: Record<string, number>; auto?: boolean } };
   /** Apply to the document. Returns the body ids to select afterwards (`then`: run once the panel has closed). */
   commit(): { select: number[]; solidMode?: boolean; then?: () => void };
+  /**
+   * The same, its exact result built in the background kernel (Push/Pull: the preview is quicker than the real solid) —
+   * used on Apply once that kernel has loaded: behind the busy dialog, its Stop / Esc ends it (nothing changes, the panel
+   * stays open). null: not applied (the model changed meanwhile). (No `then`: a result with one would be awaited as a promise.)
+   */
+  commitAsync?(): Promise<{ select: number[]; solidMode?: boolean } | null>;
 }
 
 /**

@@ -29,6 +29,21 @@ import {
   offsetFaces,
   serializeShape,
   shellSolid,
+  pushPullMany,
+  revolveFace,
+  sweepFace,
+  boxFromFace,
+  boxLid,
+  boxDividers,
+  makeTextFaces,
+  wrappedTextFaces,
+  type Axis,
+  type BoxFromFace,
+  type BoxLid,
+  type BoxDividers,
+  type Frame,
+  type Shape,
+  type TextOptions,
   TriMesh,
   type BooleanOp,
   type Solid,
@@ -54,6 +69,19 @@ export type KernelJob =
   | { op: "importStep"; data: Uint8Array }
   | { op: "gridfinity"; bin?: GridfinityBin; baseplate?: GridfinityBaseplate; at: V3 }
   | { op: "nutbolt"; o: NutBolt; at: V3[] }
+  /** Push/Pull's exact result on Apply: faces by place in `shape.faces`, each pushed `d` mm along its normal. */
+  | { op: "pushpull"; brep: string; faces: number[]; d: number }
+  /** Revolve / Sweep of a flat face (by place in the shape's faces); `join`: the result joined to that shape (a solid's face). */
+  | { op: "revolve"; brep: string; face: number; axis: Axis; angle: number; join: boolean }
+  | { op: "sweep"; brep: string; face: number; path: string; toPath: boolean; round: boolean; turn: number; scale: number; twist: number; endScale: number; start?: V3; join: boolean }
+  | { op: "boxFromFace"; brep: string; face: number; o: BoxFromFace }
+  | { op: "boxLid"; brep: string; o: BoxLid }
+  | { op: "boxDividers"; brep: string; o: BoxDividers }
+  /**
+   * The Text tool's letters (one face per outline): flat in `frame` at `anchor`, or (`wrap`) round a curved face. `fontData`:
+   * a font file's bytes, sent the first time that font is used here (it's kept loaded).
+   */
+  | { op: "text"; text: string; o: TextOptions; frame?: Frame; anchor?: V3; wrap?: { brep: string; face: number; at: V3 }; fontData?: Uint8Array }
   /** A shape's display mesh (faces / edges by place: see meshByPlace) — a heavy one read from a file, meshed here so the window stays live. */
   | { op: "mesh"; brep: string };
 
@@ -67,6 +95,13 @@ export type KernelJobResult =
   | { op: "offsetFaces"; faces: JobSolid[] }
   | ({ op: "boolean" } & JobSolid)
   | ({ op: "punch" } & JobSolid)
+  | ({ op: "pushpull" } & JobSolid)
+  | ({ op: "revolve" } & JobSolid)
+  | ({ op: "sweep" } & JobSolid)
+  | ({ op: "boxFromFace" } & JobSolid)
+  | ({ op: "boxLid" } & JobSolid)
+  | ({ op: "boxDividers" } & JobSolid)
+  | { op: "text"; faces: JobSolid[] }
   | { op: "file"; data: Uint8Array }
   | { op: "importStep"; solids: JobSolid[] }
   | ({ op: "gridfinity" } & JobSolid)
@@ -112,6 +147,34 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
       return { op: "boolean", ...made(booleanOp(job.kind, solidOf(job.target), job.tools.map(solidOf))) };
     case "punch":
       return { op: "punch", ...made(punchHoles(solidOf(job.target), job.flats.map(deserialize))) };
+    case "pushpull": {
+      const shape = solidOf(job.brep), all = shape.faces.map((f) => f.hashCode);
+      return { op: "pushpull", ...made(pushPullMany(shape, job.faces.map((i) => all[i]), job.d)) };
+    }
+    case "revolve": {
+      const shape = deserialize(job.brep);
+      const solid = revolveFace(shape, faceAt(shape, job.face), job.axis, job.angle);
+      return { op: "revolve", ...made(job.join ? booleanOp("union", shape as Solid, [solid]) : solid) };
+    }
+    case "sweep": {
+      const shape = deserialize(job.brep), path = deserialize(job.path) as unknown as Parameters<typeof sweepFace>[2];
+      const solid = sweepFace(shape, faceAt(shape, job.face), path, job.toPath, job.round, job.turn, job.scale, job.twist, job.endScale, job.start);
+      return { op: "sweep", ...made(job.join ? booleanOp("union", shape as Solid, [solid]) : solid) };
+    }
+    case "boxFromFace": {
+      const shape = deserialize(job.brep);
+      return { op: "boxFromFace", ...made(boxFromFace(shape, faceAt(shape, job.face), job.o)) };
+    }
+    case "boxLid":
+      return { op: "boxLid", ...made(boxLid(solidOf(job.brep), job.o)) };
+    case "boxDividers":
+      return { op: "boxDividers", ...made(boxDividers(solidOf(job.brep), job.o)) };
+    case "text": {
+      if (!textFontReady() || (job.o.font && job.fontData && !textFontReady(job.o.font))) await loadTextFont(job.o.font, job.fontData);
+      const on = job.wrap && deserialize(job.wrap.brep);
+      const faces = job.wrap && on ? wrappedTextFaces(on, faceAt(on, job.wrap.face), job.wrap.at, job.text, job.o) : makeTextFaces(job.frame!, job.anchor!, job.text, job.o);
+      return { op: "text", faces: faces.map((f) => made(f as unknown as Solid)) };
+    }
     case "exportStep":
       return { op: "file", data: new Uint8Array(await exportStep(job.items.map((i) => ({ shape: solidOf(i.brep), name: i.name })))) };
     case "exportStl":
@@ -128,6 +191,13 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
       if (!textFontReady()) await loadTextFont(); // (the thread cutter's size label)
       return { op: "nutbolt", solids: nutBoltParts(job.o, job.at).map(made) };
   }
+}
+
+/** The face at `place` in the shape's face list, by its id here. */
+function faceAt(shape: Shape, place: number): number {
+  const f = shape.faces[place];
+  if (!f) throw new Error("the face isn't there any more");
+  return f.hashCode;
 }
 
 /** A shape made here, as BREP text and its display mesh — made from the shape read back from that text, as the app will have it. */

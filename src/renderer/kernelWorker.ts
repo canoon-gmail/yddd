@@ -35,6 +35,8 @@ export class KernelWorker {
   private readyWaiters: (() => void)[] = [];
   /** OpenCascade threads it works with (1: just its own — see kernel.ts initKernel). */
   threads = 1;
+  /** Font files this worker has been sent (the Text tool's job): sent again after a restart. */
+  readonly fonts = new Set<string>();
 
   constructor() {
     this.spawn();
@@ -42,6 +44,7 @@ export class KernelWorker {
 
   private spawn(): void {
     this.ready = false;
+    this.fonts.clear();
     // (the page's thread count handed on in the worker's name: it starts its threads as it loads)
     const threads = new URLSearchParams(location.search).get("threads");
     // (a plain options object: Vite reads its "type" when building)
