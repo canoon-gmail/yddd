@@ -766,12 +766,11 @@ export class App implements ToolHost {
     }
   }
 
-  /** Rarely used tools (Revolve / Mirror / Circular copy / Sweep / Array copy) as small buttons in the viewport's bottom-left corner. */
+  /** Rarely used tools (Revolve / Circular copy / Sweep / Loft / Array copy) as small buttons in the viewport's bottom-left corner. */
   private buildCornerTools(): void {
     const box = $("corner-tools");
     const items: [string, string, string][] = [
       ["op.revolve", "revolve", "Revolve a flat face about a line or axis"],
-      ["edit.mirror", "mirror", "Mirror: a mirrored copy of the selection across a plane (M)"],
       ["edit.circular", "circular", "Circular copy: copies round an axis — the X / Y / Z axis, a guide line or a circle edge"],
       ["op.sweep", "sweep", "Sweep a flat face along a path or guide line"],
       ["op.loft", "loft", "Loft: a solid through two or more closed outlines — paths or flat faces (a circle to a slot above it)"],
@@ -4766,7 +4765,7 @@ export class App implements ToolHost {
     };
     this.viewport.startTransform(mode, ids, this.snap, (r) => this.applyTransform(r), pivot, frame ? (d) => this.hint(turnedHint(d)) : undefined, frame);
     this.renderToolbarState();
-    this.hint(frame ? turnedHint([0, 0, 0]) : `${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")})${mode === "translate" ? " · click a round or slanted edge: slide along its axis / the edge" : ""} · Tab: type exact values · Enter/Esc: done`);
+    this.hint(frame ? turnedHint([0, 0, 0]) : `${mode === "translate" ? "Move" : "Rotate"}: drag the gizmo handles (${this.viewport.snapTip("grid / 5° / points")})${mode === "translate" ? " · click a round or slanted edge: slide along its axis / the edge" : " · Shift: turn finely"} · Tab: type exact values · Enter/Esc: done`);
   }
 
   /** G with edges selected: drag them with the gizmo, reshaping their (flat-faced) solids. */
@@ -5351,7 +5350,9 @@ export class App implements ToolHost {
   private startSketch(): void {
     // Face objects / paths selected (whole objects): edit them in the sketch.
     const objs = this.selection.map((x) => (x.kind === "body" ? this.doc.get(x.body) : undefined));
-    if (objs.length && objs.every((b) => b?.kind === "face" || b?.kind === "path")) return this.editInSketch([...new Set(objs as Body[])]);
+    // (a picture isn't edited — Exit Sketch would replace it, its image lost: a picture alone, sketched on, kept)
+    const editable = objs.filter((b) => !b?.picture);
+    if (editable.length && objs.every((b) => b?.kind === "face" || b?.kind === "path")) return this.editInSketch([...new Set(editable as Body[])]);
     let frame = { origin: new THREE.Vector3(), x: new THREE.Vector3(1, 0, 0), y: new THREE.Vector3(0, 1, 0), z: new THREE.Vector3(0, 0, 1) };
     let center = new THREE.Vector3(), what = "the ground";
     const s = this.selection.length === 1 ? this.selection[0] : null;
@@ -5770,6 +5771,10 @@ export class App implements ToolHost {
     for (const id of ids) {
       const b = this.doc.get(id);
       if (!b || (b.kind !== "face" && b.kind !== "path") || tool.taken.includes(id)) continue;
+      if (b.picture) { // (Exit Sketch would replace it: its image lost)
+        this.toast(`Sketch: "${b.name}" is a picture — it stays as it is (draw over it)`, "error");
+        continue;
+      }
       if (!tool.onPlane(b.shape as Shape | Wire)) {
         refused.push(b.name);
         continue;
@@ -5879,7 +5884,7 @@ export class App implements ToolHost {
       this.endTool();
       this.setSelection(ids.map((id) => ({ kind: "body", body: id, id: 0 })));
       this.startTransform("rotate", false, p);
-      this.hint(`Rotate about the picked point: drag a ring (${this.viewport.snapTip("5° steps")}) · Tab: type the angles · Enter/Esc: done`);
+      this.hint(`Rotate about the picked point: drag a ring (${this.viewport.snapTip("5° steps")}; Shift: finely) · Tab: type the angles · Enter/Esc: done`);
     };
     this.startTool(
       new PointMoveTool(this, ids, () => {}, pick, (e) => {
@@ -6200,6 +6205,8 @@ export class App implements ToolHost {
   }
 
   private deleteSelected(): void {
+    // Sketching: Delete is the sketch's (its lines) — the model's objects (picked in the Bodies panel) stay till Exit Sketch
+    if (this.tool instanceof SketchTool) return this.toast("Sketch: Delete only deletes the sketch's lines — Exit Sketch to delete objects", "error");
     this.endInteractions();
     if (this.selDim >= 0) {
       const i = this.selDim;
@@ -7965,7 +7972,7 @@ export class App implements ToolHost {
         const kind = { solid: "Solid", face: "Flat face", mesh: "Mesh (STL)", path: "Path (open lines from a sketch)" }[b.kind];
         // (a path's lines keep their colour: no look)
         const swatch = b.picture
-          ? `<span class="ol-swatch pic" title="Picture">${ICONS.picture}</span>`
+          ? `<span class="ol-swatch pic ol-look" title="Picture · click: opacity" style="opacity:${Math.max(0.3, look.opacity ?? 1)}">${ICONS.picture}</span>`
           : b.kind === "path"
           ? `<span class="ol-swatch path" title="${kind}"></span>`
           : `<span class="ol-swatch ol-look${b.kind === "solid" ? "" : " " + b.kind}" title="${kind} · click: colour and opacity" style="${swatchStyle(look)}"></span>`;
@@ -8187,7 +8194,11 @@ export class App implements ToolHost {
     pop.className = "popup-menu look-pop";
     const title = group ? `Group: ${group}` : ids.length > 1 ? `${ids.length} objects` : body!.name;
     const op = Math.round((shown.opacity ?? 1) * 100);
-    pop.innerHTML = `<h5>${escapeHtml(title)}</h5>` +
+    // A picture: its image's colours — only how see-through it is
+    const pictures = !group && ids.every((id) => this.doc.get(id)?.picture);
+    pop.innerHTML = pictures
+      ? `<h5>${escapeHtml(title)}</h5><label class="look-field">Opacity <input type="range" class="look-op" min="10" max="100" step="5" value="${op}"><span class="look-pct">${op} %</span></label><input type="color" class="look-color" hidden><button class="look-reset">Full opacity</button>`
+      : `<h5>${escapeHtml(title)}</h5>` +
       `<div class="look-presets">${LOOK_PRESETS.map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` +
       (recentColors().length ? `<div class="look-sub">Recent</div><div class="look-presets look-recent">${recentColors().map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` : "") +
       `<label class="look-field">Colour <input type="color" class="look-color" value="${shown.color ?? plain}"></label>` +
@@ -8549,6 +8560,7 @@ export class App implements ToolHost {
       ["Enter (Move G / Rotate R)", "Done — finish the move and hide the gizmo"],
       ["Shift+R", "Rotate from point: show marks — click one (or a round edge: its centre) → the rotate gizmo there, turning about it"],
       ["Ctrl+Shift+R", "Repeat last move/rotate (after Shift+D: copy again → array)"],
+      ["Shift while dragging a ring (Rotate R)", "Turn finely: 1/10 as fast, for a little turn (press or let go mid-drag — it carries on from where it is)"],
       ["Tab (Move G / Rotate R)", "Type exact ΔX,ΔY,ΔZ or X/Y/Z angles"],
       ["Toolbar → Divide face", "Divide face: click two points on the edges of a solid's flat face to split it (corners / midpoints snap; move the end along X / Y / Z and it locks parallel to that axis, the line in the axis colour); the new edge is selected"],
       ["G with a guide line selected", `Move the guide with the gizmo (${this.viewport.snapTip("points / other guides")}) · Tab: exact ΔX,ΔY,ΔZ · Enter done`],
@@ -8564,7 +8576,7 @@ export class App implements ToolHost {
       ["Tip dot · F", "Round tip: a selected solid shows a dot on each sharp tip (a cone's point, a pyramid's — not box corners); click the dot, F, the radius (mm): the point becomes a ball — on a cone it blends smoothly into the side, on a pyramid into its edges (a slight crease on the flat sides); the panel says the largest radius the tip takes"],
       ["F · Shift+F", "Fillet · Chamfer selected edges, or the edges of selected solids — all, just the vertical ones (box corners) or just the horizontal ones (Edges list); edges it can't do at that size are left sharp — the panel says how many (orange), Apply keeps the rest, and a button sets the largest size that does them all"],
       ["H", "Shell / hollow (opens the selected faces)"],
-      ["Shift+H", "Close: a face object that leaves openings (a cylinder's side copied off it, an open box — or several face objects meeting edge to edge) becomes a solid, each flat opening filled"],
+      ["Shift+H", "Close: a face object that leaves openings (a cylinder's side copied off it, an open box — or several face objects meeting edge to edge) becomes a solid, each flat opening filled — a hole in a curved face (a sphere with a hole) filled with that face's own surface"],
       ["Macro → Box Lid → Inside Lip / Over the Box", "A lid for an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits), made closed on it: Inside Lip — a plate on the rim, a lip under it fitting in the opening (Lip depth 0: a flat lid; Lip wall 0: a solid plug); Over the Box — a cap, bigger, its skirt round the box's outside. Clearance: the gap to the box (0: an exact fit)"],
       ["Macro → Dividers", "Walls in an open-top box (Box from Face, Shell... — selected first, or click it while the panel waits): equal compartments, Columns along its long side and Rows across it (1: no walls that way), the walls following the inside (round corners, an oval) from the floor up; Below the rim: their tops that far under it (room for an Inside Lip lid's lip). Fused into the box: one solid to print"],
       ["Macro → Box from Face", "An open-top box round a flat face — selected first, or click one while the panel waits (a face object, or a flat face of a solid; another click changes it): the face is the box's inside, floor and inner outline (a rectangle: a tray, a circle: a cup), so the inside keeps its size — Wall grows out from it, Bottom down under it, Inside depth up from it; Round vertical edges: the inside corners get the radius, the outside ones radius + wall"],

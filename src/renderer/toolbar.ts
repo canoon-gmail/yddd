@@ -47,6 +47,7 @@ export const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[
       { cmd: "op.shell", icon: "shell", label: "Shell" },
       { cmd: "op.curveFace", icon: "curveFace", label: "Curve face" },
       { cmd: "op.offset", icon: "offset", label: "Offset" },
+      { cmd: "edit.mirror", icon: "mirror", label: "Mirror" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis" },
     ],
   },
@@ -115,10 +116,10 @@ export const TOOLBAR_ITEMS = new Map(TOOLBAR.flatMap((g) => g.items.map((it) => 
 /** Toolbar commands that go into the recent strip (mode switches, undo/redo, views, X-ray and Delete have their own keys / buttons). */
 export const NOT_RECENT = new Set(["Select", "History", "View", "X-ray"]);
 /**
- * Single commands kept off the strip too: Move (G) is used all the time and has its key; Revolve, Mirror, Circular copy,
- * Sweep and Array copy have their own buttons in the viewport's corner.
+ * Single commands kept off the strip too: Move (G) is used all the time and has its key; Revolve, Circular copy, Sweep,
+ * Loft and Array copy have their own buttons in the viewport's corner.
  */
-export const NOT_RECENT_CMDS = new Set(["xf.move", "op.revolve", "edit.mirror", "edit.circular", "op.sweep", "op.loft", "edit.array"]);
+export const NOT_RECENT_CMDS = new Set(["xf.move", "op.revolve", "edit.circular", "op.sweep", "op.loft", "edit.array"]);
 export const RECENT_ITEMS = new Map(
   TOOLBAR.filter((g) => !NOT_RECENT.has(g.title)).flatMap((g) => g.items.filter((it) => !NOT_RECENT_CMDS.has(it.cmd)).map((it) => [it.cmd, it] as const)),
 );

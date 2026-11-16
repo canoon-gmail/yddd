@@ -320,8 +320,9 @@ export class Viewport {
       this.controls.enableRotate = !this.viewLocked;
       this.controls.enablePan = true;
       this.controls.enableZoom = true;
-      // A left-button view drag works over the move / rotate gizmo too.
-      if (e.button === 0 && act) this.tc.enabled = false;
+      // A left-button view drag works over the move / rotate gizmo too — but Shift on a rotate ring turns it finely.
+      if (e.button === 0 && act && e.shiftKey && this.xfMode === "rotate" && this.tc.object && this.tc.axis) this.controls.enabled = false;
+      else if (e.button === 0 && act) this.tc.enabled = false;
     }, { capture: true });
     // The wheel zooms only with the keys set for it.
     this.canvas.addEventListener("wheel", (e) => {
@@ -387,6 +388,7 @@ export class Viewport {
     this.tc.addEventListener("dragging-changed", (e) => {
       const dragging = (e as unknown as { value: boolean }).value;
       this.controls.enabled = !dragging;
+      if (dragging) Object.assign(this.xfFine, { base: 0, ref: 0, last: 0, lastRaw: 0, q0: this.pivot.quaternion.clone() });
       if (!dragging) {
         this.showSnapMarker(null);
         if (this.hoverKey) this.showPivotDots(null);
@@ -394,6 +396,7 @@ export class Viewport {
       }
     });
     this.tc.addEventListener("objectChange", () => {
+      this.fineTurn();
       this.gridSteps();
       this.snapPivot();
       this.applyPivotToBodies();
@@ -406,9 +409,11 @@ export class Viewport {
     window.addEventListener("pointermove", (e) => {
       this.xfPointer = { x: e.clientX, y: e.clientY, ctrl: e.ctrlKey };
       this.updateXfSnap(e.ctrlKey);
+      this.setFineTurn(e.shiftKey);
     }, { capture: true });
-    window.addEventListener("pointerdown", (e) => this.updateXfSnap(e.ctrlKey), { capture: true });
+    window.addEventListener("pointerdown", (e) => { this.updateXfSnap(e.ctrlKey); this.setFineTurn(e.shiftKey); }, { capture: true });
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Shift") this.setFineTurn(e.type === "keydown");
       if (e.key !== "Control") return;
       this.setCtrl(e.type === "keydown");
       if (this.xfPointer) this.xfPointer.ctrl = e.type === "keydown";
@@ -782,7 +787,7 @@ export class Viewport {
     });
     const uv = this.pictureUVs(body, faces.vertices);
     if (uv) geom.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
-    const mesh = new THREE.Mesh(geom, uv && body.picture ? this.pictureMats(body.picture.img) : this.viewMats(body));
+    const mesh = new THREE.Mesh(geom, uv && body.picture ? this.pictureMats(body.picture.img, this.opacityOf(body.id)) : this.viewMats(body));
 
     const edgePos = Float32Array.from(edges.lines);
     let lines: LineSegments2 | null = null;
@@ -840,16 +845,22 @@ export class Viewport {
     return out;
   }
 
-  /** A picture's materials (normal, hover, selected: tinted), by image id; the texture drawn once it has loaded. */
+  /** A picture's materials (normal, hover, selected: tinted), by image id and opacity; the texture drawn once it has loaded. */
   private picMats = new Map<string, THREE.Material[]>();
-  private pictureMats(img: string): THREE.Material[] {
-    let m = this.picMats.get(img);
+  private picTex = new Map<string, THREE.Texture | null>();
+  private pictureMats(img: string, op = 1): THREE.Material[] {
+    let m = this.picMats.get(`${img}:${op}`);
     if (!m) {
-      const url = imageUrl(img);
-      const tex = url ? new THREE.TextureLoader().load(url, () => this.requestRender()) : null;
-      if (tex) tex.colorSpace = THREE.SRGBColorSpace;
-      m = [0xffffff, 0xcfe0ff, 0xffd98a].map((color) => new THREE.MeshBasicMaterial({ map: tex, color, side: THREE.DoubleSide, transparent: true }));
-      this.picMats.set(img, m);
+      let tex = this.picTex.get(img);
+      if (tex === undefined) {
+        const url = imageUrl(img);
+        tex = url ? new THREE.TextureLoader().load(url, () => this.requestRender()) : null;
+        if (tex) tex.colorSpace = THREE.SRGBColorSpace;
+        this.picTex.set(img, tex);
+      }
+      // (see-through: what's behind it shows — it doesn't hide it in the depth buffer)
+      m = [0xffffff, 0xcfe0ff, 0xffd98a].map((color) => new THREE.MeshBasicMaterial({ map: tex, color, side: THREE.DoubleSide, transparent: true, opacity: op, depthWrite: op >= 1 }));
+      this.picMats.set(`${img}:${op}`, m);
     }
     return m;
   }
@@ -1128,7 +1139,8 @@ export class Viewport {
       const v = this.views.get(id);
       if (!v) continue;
       this.markDirty(id);
-      v.mesh.material = this.viewMats(v.body);
+      // (a picture: its image, just its opacity — no colour)
+      v.mesh.material = this.isPicture(v) && v.body.picture ? this.pictureMats(v.body.picture.img, this.opacityOf(id)) : this.viewMats(v.body);
     }
     if (changed) this.requestRender();
   }
@@ -3312,6 +3324,25 @@ export class Viewport {
     const on = ctrl !== this.autoSnap && this.xfSnapStep > 0;
     this.tc.setTranslationSnap(on ? this.xfSnapStep : null);
     this.tc.setRotationSnap(on ? THREE.MathUtils.degToRad(5) : null);
+  }
+
+  /** A rotate drag with Shift held turns 1/10 as fast (a little turn); pressed / let go mid-drag it carries on from where it is. */
+  private xfFine = { on: false, base: 0, ref: 0, last: 0, lastRaw: 0, q0: new THREE.Quaternion() };
+  private setFineTurn(on: boolean): void {
+    const f = this.xfFine;
+    if (f.on === on) return;
+    f.base = f.last;
+    f.ref = f.lastRaw;
+    f.on = on;
+  }
+  private fineTurn(): void {
+    const f = this.xfFine, axis = this.tc.axis;
+    if (this.xfMode !== "rotate" || !this.tc.dragging || !(axis === "X" || axis === "Y" || axis === "Z" || axis === "E")) return;
+    const tc = this.tc as unknown as { rotationAngle: number; rotationAxis: THREE.Vector3 };
+    const raw = tc.rotationAngle;
+    f.lastRaw = raw;
+    f.last = f.base + (raw - f.ref) * (f.on ? 0.1 : 1);
+    if (f.last !== raw) this.pivot.quaternion.setFromAxisAngle(tc.rotationAxis, f.last).multiply(f.q0);
   }
 
   /**

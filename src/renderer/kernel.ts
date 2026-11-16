@@ -3735,8 +3735,9 @@ export function edgeLoopFace(shape: Shape, edgeIds: number[]): Face {
 
 /**
  * Close (Shift+H): faces that leave openings — a cylinder's side copied off it (a tube), an open box, several face
- * objects together — sewn, each opening (a loop of edges only one face has) filled with a flat face, made a solid,
- * outside out. Throws (a message) if an opening isn't flat, the faces don't sew into one piece, or there's no inside.
+ * objects together — sewn, each opening (a loop of edges only one face has) filled: a hole in a face with that face's
+ * own surface (a sphere with a hole: whole again), any other with a flat face; made a solid, outside out. Throws (a
+ * message) if such an opening isn't flat, the faces don't sew into one piece, or there's no inside.
  */
 export function closeShapes(shapes: Shape[]): Solid {
   const tmp: { delete(): void }[] = [];
@@ -3749,8 +3750,56 @@ export function closeShapes(shapes: Shape[]): Solid {
     const free: Edge[] = [];
     for (let i = 1; i <= sew.NbFreeEdges(); i++) free.push(cast(sew.FreeEdge(i)) as Edge);
     if (!free.length) throw new Error("Close: it has no openings — it's closed already");
+    // A hole in a face (all its edges free) is filled with the face's own surface — a sphere's, a cylinder's, curved
+    // or flat: the face rebuilt without that loop
+    const isFree = (e: unknown) => free.some((f) => f.wrapped.IsSame(e as never));
+    const faces: unknown[] = [];
+    let left = [...free];
+    const fx = keep(new oc.TopExp_Explorer(keep(sew.SewedShape()), oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+    for (; fx.More(); fx.Next()) {
+      const face = oc.TopoDS.Face(fx.Current());
+      const fwd = oc.TopoDS.Face((face as unknown as { Oriented(o: unknown): unknown }).Oriented(oc.TopAbs_Orientation.TopAbs_FORWARD) as never);
+      // A sphere / torus whose only edges are openings, its seam and poles (a hole running over the seam: OpenCascade
+      // makes it part of the outline) — filled, it's the whole surface
+      const kind = new Face(face).geomType;
+      if (kind === "SPHERE" || kind === "TORUS") {
+        const own: unknown[] = [];
+        const ex = keep(new oc.TopExp_Explorer(face, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+        for (; ex.More(); ex.Next()) own.push(ex.Current());
+        const edge = (e: unknown) => oc.TopoDS.Edge(e as never);
+        const open = own.filter((e) => isFree(e));
+        if (open.length && own.every((e) => isFree(e) || oc.BRep_Tool.Degenerated(edge(e)) || oc.BRep_Tool.IsClosed(edge(e), face))) {
+          const v = kind === "SPHERE" ? Math.PI / 2 : Math.PI;
+          const mk = keep(new oc.BRepBuilderAPI_MakeFace(keep(oc.BRep_Tool.Surface(face)) as never, 0, 2 * Math.PI, kind === "SPHERE" ? -v : 0, kind === "SPHERE" ? v : 2 * Math.PI, 1e-7));
+          const whole = mk.IsDone() ? mk.Face() : null;
+          if (whole && isValidShape(new Face(whole))) {
+            faces.push(face.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? oc.TopoDS.Face(whole.Reversed()) : whole);
+            left = left.filter((e) => !open.some((m) => (m as { IsSame(o: unknown): boolean }).IsSame(e.wrapped)));
+            continue;
+          }
+        }
+      }
+      const outer = oc.BRepTools.OuterWire(fwd);
+      const wires: { w: unknown; edges: unknown[]; filled: boolean }[] = [];
+      const wx = keep(new oc.TopExp_Explorer(fwd, oc.TopAbs_ShapeEnum.TopAbs_WIRE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+      for (; wx.More(); wx.Next()) {
+        const w = oc.TopoDS.Wire(wx.Current());
+        const edges: unknown[] = [];
+        const ex = keep(new oc.TopExp_Explorer(w, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+        for (; ex.More(); ex.Next()) edges.push(ex.Current());
+        wires.push({ w, edges, filled: !w.IsSame(outer) && edges.length > 0 && edges.every(isFree) });
+      }
+      if (!wires.some((x) => x.filled)) { faces.push(face); continue; }
+      const nf = fwd.EmptyCopied();
+      const b = keep(new oc.TopoDS_Builder());
+      for (const x of wires) if (!x.filled) b.Add(nf, x.w as never);
+      const made = oc.TopoDS.Face((nf as unknown as { Oriented(o: unknown): unknown }).Oriented(face.Orientation()) as never);
+      if (!isValidShape(new Face(made))) { faces.push(face); continue; } // (left open: tried as a flat opening below)
+      faces.push(made);
+      const filled = wires.filter((x) => x.filled).flatMap((x) => x.edges) as { IsSame(o: unknown): boolean }[];
+      left = left.filter((e) => !filled.some((m) => m.IsSame(e.wrapped)));
+    }
     const loops: Edge[][] = [];
-    const left = [...free];
     while (left.length) {
       const loop = [left.shift()!];
       const keys = new Set(loop.flatMap((e) => [ptKey(e.startPoint.toTuple() as V3), ptKey(e.endPoint.toTuple() as V3)]));
@@ -3772,16 +3821,26 @@ export function closeShapes(shapes: Shape[]): Solid {
       try {
         face = makeFace(assembleWire(chainEdges(loop)));
       } catch {
-        throw new Error("Close: an opening isn't a flat, closed loop — only flat openings can be filled");
+        throw new Error("Close: an opening isn't a flat, closed loop — only flat openings and holes in a face can be filled");
       }
-      if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error("Close: an opening isn't flat — only flat openings can be filled");
+      if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error("Close: an opening isn't flat — only flat openings and holes in a face can be filled");
       return face;
     });
     const sew2 = keep(new oc.BRepBuilderAPI_Sewing(1e-4, true, true, true, false));
-    sew2.Add(keep(sew.SewedShape()));
+    for (const f of faces) sew2.Add(f as never);
     for (const c of caps) sew2.Add(c.wrapped);
     sew2.Perform(keep(new oc.Message_ProgressRange()));
-    const shells = [...iterTopo(keep(sew2.SewedShape()), "shell")];
+    const sewn = keep(sew2.SewedShape());
+    const shells: unknown[] = [...iterTopo(sewn, "shell")];
+    // (one face — a sphere with its hole filled — comes back from the sewing as just the face: put in a shell)
+    const lone = [...iterTopo(sewn, "face")];
+    if (!shells.length && lone.length === 1) {
+      const sb = keep(new oc.TopoDS_Builder());
+      const sh = keep(new oc.TopoDS_Shell());
+      sb.MakeShell(sh);
+      sb.Add(sh, lone[0] as never);
+      shells.push(sh);
+    }
     if (shells.length !== 1) throw new Error("Close: the faces don't join into one piece — select faces that meet edge to edge");
     const shell = keep(oc.TopoDS.Shell(shells[0] as never));
     if (!oc.BRep_Tool.IsClosed(shell)) throw new Error("Close: some openings are left — the faces don't meet edge to edge");
@@ -6360,7 +6419,7 @@ function slicedUnion(first: Solid, rest: Solid[]): Shape3D | null {
  */
 function gluedUnion(a: Solid, b: Solid): Shape3D | null {
   const fa = a.faces, fb = b.faces;
-  if (fa.length + fb.length > 60) return null;
+  if (fa.length + fb.length > 200) return null;
   // (its corners too: the same area and centre isn't the same face — a prism and a copy turned about its middle)
   const facts = (f: Face) => ({ type: f.geomType, area: measureArea(f), c: f.center.toTuple() as V3, vs: f.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]) });
   const sameCorners = (p: V3[], q: V3[], tol: number) => p.every((u) => q.some((w) => Math.hypot(...sub3(u, w)) <= tol)) && q.every((u) => p.some((w) => Math.hypot(...sub3(u, w)) <= tol));
@@ -6386,14 +6445,42 @@ function gluedUnion(a: Solid, b: Solid): Shape3D | null {
   }
   if (!sharedA.size) return null;
   try {
-    const r = booleanOnce("fuse", a, [b], "full");
-    if (!isValidShape(r as Shape)) return null;
+    let r: Shape3D | null = booleanOnce("fuse", a, [b], "full");
+    // Broken (a head's mirrored halves, small faces meeting at the mirror plane: every fuse left a sliver of the
+    // shared face): the two sewn together without the shared faces instead — the same solid
+    if (!isValidShape(r as Shape)) r = sewnUnion(a, sharedA, b, sharedB);
+    if (!r) return null;
     // (touching only on the shared faces: the volumes add up — else they overlap somewhere glue can't see)
     const want = solidVolume(a) + solidVolume(b);
     if (Math.abs(solidVolume(r as Solid) - want) > 1e-4 * Math.max(1, want)) return null;
     return pointsOutside(a, sharedA, b) && pointsOutside(b, sharedB, a) ? r : null;
   } catch {
     return null;
+  }
+}
+
+/** `a` and `b` joined on the faces they share whole (`skipA` / `skipB`): their other faces sewn into one closed solid; null if they don't close up. */
+function sewnUnion(a: Solid, skipA: Set<number>, b: Solid, skipB: Set<number>): Shape3D | null {
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const sew = keep(new oc.BRepBuilderAPI_Sewing(1e-4, true, true, true, false));
+    for (const f of a.faces) if (!skipA.has(f.hashCode)) sew.Add(f.wrapped);
+    for (const f of b.faces) if (!skipB.has(f.hashCode)) sew.Add(f.wrapped);
+    sew.Perform(keep(new oc.Message_ProgressRange()));
+    if (sew.NbFreeEdges() || sew.NbMultipleEdges()) return null;
+    const shells = [...iterTopo(keep(sew.SewedShape()), "shell")];
+    if (shells.length !== 1) return null;
+    const shell = keep(oc.TopoDS.Shell(shells[0] as never));
+    if (!oc.BRep_Tool.IsClosed(shell)) return null;
+    const made = keep(new oc.BRepBuilderAPI_MakeSolid(shell)).Solid();
+    oc.BRepLib.OrientClosedSolid(made);
+    const r = cast(made) as Shape3D;
+    return isValidShape(r as Shape) ? r : null;
+  } catch {
+    return null;
+  } finally {
+    for (const o of tmp) o.delete();
   }
 }
 
