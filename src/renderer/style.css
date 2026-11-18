@@ -562,6 +562,8 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
 #look-pop .look-preset:hover { outline: 2px solid var(--accent-2); }
 .look-field { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }
 .look-field input[type="color"] { width: 40px; height: 22px; padding: 0; border: 1px solid var(--border); background: none; margin-left: auto; }
+.look-hex { width: 72px; margin-left: auto; padding: 2px 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+.look-hex + input[type="color"] { margin-left: 0 !important; }
 .look-field input[type="range"] { flex: 1; min-width: 0; }
 .look-pct { width: 38px; text-align: right; color: var(--muted); }
 #look-pop .look-reset { margin-top: 4px; color: var(--muted); font-size: 12px; }

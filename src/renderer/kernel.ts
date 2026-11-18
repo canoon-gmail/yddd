@@ -6158,6 +6158,13 @@ export function splitByPlane(shape: Solid, point: V3, normal: V3): { above: Soli
   // 17 sweeps cut at once took ~2 s); the booleans if the split fails.
   const fast = splitByPlaneOnce(shape, point, normal);
   if (fast) return fast;
+  // A plane a hair off a revolve's axis (1.3e-7 mm: just over the tolerance) comes back uncut and invalid;
+  // 0.001 mm to either side it splits cleanly (cutting a revolve through the world axis it was turned about).
+  const n = norm3(normal);
+  for (const d of [1e-3, -1e-3]) {
+    const nudged = splitByPlaneOnce(shape, [point[0] + d * n[0], point[1] + d * n[1], point[2] + d * n[2]], normal);
+    if (nudged) return nudged;
+  }
   const [lo, hi] = shape.boundingBox.bounds;
   const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const R = 2 * (Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + Math.hypot(...sub3(c, point))) + 10;
@@ -6911,6 +6918,32 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
       if (!ax.Direct()) ax3.YReverse();
       return new oc.Geom_CylindricalSurface(ax3, cyl.Radius() * k); // (not freed: the new face uses it)
     };
+    type Outline = NonNullable<ReturnType<typeof wireOf>>;
+    /** A curved face on `surf` with these outlines, its trimming curves made on the new surface. */
+    const curvedFace = (surf: unknown, outer: Outline, holes: Outline[]) => {
+      let mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, outer, true));
+      for (const h of holes) mk.Add(h);
+      if (!mk.IsDone()) throw fail("a face could not be rebuilt");
+      // Trimming curves on the new surface, pole edges, connections — per outline. (ShapeFix_Face
+      // would also "fix" outline directions, which are already right here, and flips some wrongly.)
+      const raw = mk.Face();
+      const fixed = explore(raw, "TopAbs_WIRE").map((w) => {
+        const sfw = keep(new oc.ShapeFix_Wire(oc.TopoDS.Wire(w as never), raw, 1e-6));
+        sfw.Perform();
+        // Perform() skips these when the outline looks unordered in (u, v) — which a missing
+        // pole edge makes it — so run them explicitly: shift trimming curves across the seam,
+        // add degenerate pole edges, close the remaining gaps.
+        sfw.FixShifted();
+        sfw.FixDegenerated();
+        sfw.FixLacking(true);
+        sfw.FixClosed();
+        return sfw.Wire();
+      });
+      mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, fixed[0], true));
+      for (const w of fixed.slice(1)) mk.Add(w);
+      if (!mk.IsDone()) throw fail("a face could not be rebuilt");
+      return mk.Face();
+    };
     const sewing = keep(new oc.BRepBuilderAPI_Sewing(1e-4, true, true, true, false));
     let lastSurface: unknown = null;
     for (const face of shape.faces) {
@@ -6943,30 +6976,22 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
             continue;
           }
         }
-        mk = keep(new oc.BRepBuilderAPI_MakeFace(surf as never, outer, true));
+        // Checked before the face is made (making it raises the shared edges' tolerances for good): a surface away from
+        // the stretched outline (the wrong part — a torus across its seam once lost half: edges 2.8 mm off, the solid
+        // "valid" but no longer cut) is swapped for one fitted through points of the old surface, stretched;
+        // still off: refused, nothing changed.
+        let use = surf;
+        if (outlineGap(surf, [outer, ...holes]) > STRETCH_GAP) {
+          const fit = fittedStretchedSurface(face, keep, map);
+          if (!fit || outlineGap(fit, [outer, ...holes]) > STRETCH_GAP) throw fail(`a ${face.geomType.toLowerCase().replace(/_/g, " ")} face came out away from its edges`);
+          use = lastSurface = fit;
+        }
+        const nf = curvedFace(use, outer, holes);
+        sewing.Add(flipped ? oc.TopoDS.Face(nf.Reversed()) : nf);
+        continue;
       }
       for (const h of holes) mk.Add(h);
       if (!mk.IsDone()) throw fail("a face could not be rebuilt");
-      if (face.geomType !== "PLANE") {
-        // Trimming curves on the new surface, pole edges, connections — per outline. (ShapeFix_Face
-        // would also "fix" outline directions, which are already right here, and flips some wrongly.)
-        const raw = mk.Face();
-        const fixed = explore(raw, "TopAbs_WIRE").map((w) => {
-          const sfw = keep(new oc.ShapeFix_Wire(oc.TopoDS.Wire(w as never), raw, 1e-6));
-          sfw.Perform();
-          // Perform() skips these when the outline looks unordered in (u, v) — which a missing
-          // pole edge makes it — so run them explicitly: shift trimming curves across the seam,
-          // add degenerate pole edges, close the remaining gaps.
-          sfw.FixShifted();
-          sfw.FixDegenerated();
-          sfw.FixLacking(true);
-          sfw.FixClosed();
-          return sfw.Wire();
-        });
-        mk = keep(new oc.BRepBuilderAPI_MakeFace(lastSurface as never, fixed[0], true));
-        for (const w of fixed.slice(1)) mk.Add(w);
-        if (!mk.IsDone()) throw fail("a face could not be rebuilt");
-      }
       const nf = mk.Face();
       sewing.Add(flipped ? oc.TopoDS.Face(nf.Reversed()) : nf);
     }
@@ -6984,6 +7009,8 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
       result = cast(solid) as Shape;
     }
     if (!isValidShape(result)) throw fail("the stretched result is not a valid shape");
+    // ("valid" also when an edge's tolerance grew to cover a face that missed it: not cut / joined right afterwards)
+    if (maxEdgeTolerance(result) > Math.max(STRETCH_GAP, 2 * maxEdgeTolerance(shape))) throw fail("an edge came out away from its faces");
     return result;
   } finally {
     for (const o of tmp) {
@@ -6993,6 +7020,53 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
         // already owned by OpenCascade
       }
     }
+  }
+}
+
+/** A stretched face this far (mm) from its own edges, or an edge with this tolerance, is wrong (sound ones: ~1e-7). */
+const STRETCH_GAP = 0.01;
+
+/** How far a surface lies from outlines meant to be on it (mm, sampled along each edge): ~0 when they fit. */
+function outlineGap(surf: unknown, wires: unknown[]): number {
+  let gap = 0;
+  for (const e of wires.flatMap((w) => (cast(w as never) as Wire).edges)) {
+    if (oc.BRep_Tool.Degenerated(e.wrapped)) continue;
+    for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+      const [x, y, z] = e.pointAt(t).toTuple();
+      const p = new oc.gp_Pnt(x, y, z), pr = new oc.GeomAPI_ProjectPointOnSurf(p, surf as never);
+      try {
+        if (pr.NbPoints() > 0) gap = Math.max(gap, pr.LowerDistance());
+      } finally {
+        pr.delete();
+        p.delete();
+      }
+    }
+  }
+  return gap;
+}
+
+/** The largest edge tolerance of a shape (mm): OpenCascade grows it to cover a gap between an edge and its faces. */
+function maxEdgeTolerance(shape: Shape): number {
+  return Math.max(0, ...shape.edges.map((e) => oc.BRep_Tool.Tolerance(oc.TopoDS.Edge(e.wrapped))));
+}
+
+/**
+ * A face's surface stretched, the other way: a 25 × 25 grid of its points (over the part the face covers) stretched
+ * and a B-spline fitted through them (to 1e-4 mm). Null if the fit fails (e.g. a pole folds a row of the grid).
+ */
+function fittedStretchedSurface(face: Face, keep: <T>(o: T) => T, map: (p: { X(): number; Y(): number; Z(): number }) => unknown): unknown {
+  const ad = keep(new oc.BRepAdaptor_Surface(face.wrapped, true));
+  const u0 = ad.FirstUParameter(), u1 = ad.LastUParameter(), v0 = ad.FirstVParameter(), v1 = ad.LastVParameter();
+  if (![u0, u1, v0, v1].every(Number.isFinite)) return null;
+  const N = 24;
+  const pts = keep(new oc.NCollection_Array2_gp_Pnt(1, N + 1, 1, N + 1));
+  for (let i = 0; i <= N; i++)
+    for (let j = 0; j <= N; j++) pts.SetValue(i + 1, j + 1, map(keep(ad.Value(u0 + ((u1 - u0) * i) / N, v0 + ((v1 - v0) * j) / N))) as never);
+  try {
+    const fit = new oc.GeomAPI_PointsToBSplineSurface(pts, 3, 8, oc.GeomAbs_Shape.GeomAbs_C2, 1e-4); // (not freed: the new face uses its surface)
+    return fit.IsDone() ? fit.Surface() : null;
+  } catch {
+    return null;
   }
 }
 
@@ -7050,19 +7124,33 @@ function stretchedSurface(face: Face, keep: <T>(o: T) => T, map: (p: { X(): numb
   } else if (face.geomType === "EXTRUSION_SURFACE") {
     bs = extrudedSurface(face, keep);
   } else {
-    try {
-      bs = oc.GeomConvert.SurfaceToBSplineSurface(oc.BRep_Tool.Surface(face.wrapped));
-    } catch {
-      return null;
-    }
     // Only the part the face covers: no wrap-around, so edges on the old seam are unambiguous.
     // (A lone closed face — a whole sphere / torus — keeps its whole, closed surface.)
+    // Trimmed first, then converted: a torus / sphere / revolve as a B-spline isn't parametrised by angle,
+    // so cutting the converted one at the face's angles took the wrong part (a torus face across its seam
+    // lost its lower half — edges left 2.8 mm off it, a thigh scaled along Y could no longer be cut).
+    const surface = oc.BRep_Tool.Surface(face.wrapped);
     const ad = keep(new oc.BRepAdaptor_Surface(face.wrapped, true));
     if (!whole) {
       try {
-        bs.Segment(ad.FirstUParameter(), ad.LastUParameter(), ad.FirstVParameter(), ad.LastVParameter());
+        const trimmed = keep(new oc.Geom_RectangularTrimmedSurface(surface, ad.FirstUParameter(), ad.LastUParameter(), ad.FirstVParameter(), ad.LastVParameter(), true, true));
+        bs = oc.GeomConvert.SurfaceToBSplineSurface(trimmed as never);
       } catch {
-        // keep the whole surface
+        bs = undefined;
+      }
+    }
+    if (!bs) {
+      try {
+        bs = oc.GeomConvert.SurfaceToBSplineSurface(surface);
+      } catch {
+        return null;
+      }
+      if (!whole) {
+        try {
+          bs.Segment(ad.FirstUParameter(), ad.LastUParameter(), ad.FirstVParameter(), ad.LastVParameter());
+        } catch {
+          // keep the whole surface
+        }
       }
     }
   }

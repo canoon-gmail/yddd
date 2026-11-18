@@ -8201,7 +8201,7 @@ export class App implements ToolHost {
       : `<h5>${escapeHtml(title)}</h5>` +
       `<div class="look-presets">${LOOK_PRESETS.map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` +
       (recentColors().length ? `<div class="look-sub">Recent</div><div class="look-presets look-recent">${recentColors().map((c) => `<button class="look-preset" data-c="${c}" style="background:${c}" title="${c}"></button>`).join("")}</div>` : "") +
-      `<label class="look-field">Colour <input type="color" class="look-color" value="${shown.color ?? plain}"></label>` +
+      `<label class="look-field">Colour <input class="look-hex" value="${shown.color ?? plain}" maxlength="7" spellcheck="false" title="Hex colour code (#rrggbb) — type one, Enter applies"><input type="color" class="look-color" value="${shown.color ?? plain}"></label>` +
       `<label class="look-field">Opacity <input type="range" class="look-op" min="10" max="100" step="5" value="${op}"><span class="look-pct">${op} %</span></label>` +
       `<button class="look-reset">${group ? "No group colour (members: their own / default)" : body!.group ? "Use the group's colour" : "Default colour"}</button>`;
     document.body.appendChild(pop);
@@ -8209,6 +8209,25 @@ export class App implements ToolHost {
     pop.style.left = `${Math.max(4, Math.min(r.left - pr.width - 8, innerWidth - pr.width - 4))}px`;
     pop.style.top = `${Math.min(r.top - 8, innerHeight - pr.height - 4)}px`;
     const colorIn = pop.querySelector<HTMLInputElement>(".look-color")!, opIn = pop.querySelector<HTMLInputElement>(".look-op")!;
+    // The hex code beside the picker: follows the colour as it's dragged, a swatch's under the mouse, takes a typed one
+    const hexIn = pop.querySelector<HTMLInputElement>(".look-hex");
+    const hexOf = (v: string): string | null => {
+      const m = /^#?([0-9a-f]{6}|[0-9a-f]{3})$/i.exec(v.trim());
+      if (!m) return null;
+      const h = m[1].length === 3 ? [...m[1]].map((c) => c + c).join("") : m[1];
+      return `#${h.toLowerCase()}`;
+    };
+    const showHex = (v: string) => {
+      if (hexIn && document.activeElement !== hexIn) hexIn.value = v;
+    };
+    pop.addEventListener("pointerover", (e) => {
+      const c = (e.target as HTMLElement).closest<HTMLElement>(".look-preset")?.dataset.c;
+      showHex(c ?? colorIn.value);
+    });
+    hexIn?.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== "Escape") e.stopPropagation(); // typing isn't a shortcut
+    });
+    hexIn?.addEventListener("blur", () => (hexIn.value = colorIn.value));
     /** The bodies and group looks with `look` applied (`all`: also to the group's members with their own). */
     const result = (all: boolean) => {
       const clean = (l: Look): Look | undefined => {
@@ -8241,12 +8260,18 @@ export class App implements ToolHost {
       const { bodies, looks } = result(true);
       this.viewport.setLooks(new Map(bodies.map((b) => [b.id, lookOf(b, looks)])));
       colorIn.value = look.color ?? inherited.color ?? plain;
+      showHex(colorIn.value);
       const pct = Math.round((look.opacity ?? inherited.opacity ?? 1) * 100);
       opIn.value = String(pct);
       pop.querySelector(".look-pct")!.textContent = `${pct} %`;
     };
     pop.addEventListener("input", (e) => {
       if (e.target === colorIn) look = { ...look, color: colorIn.value };
+      if (hexIn && e.target === hexIn) {
+        const c = hexOf(hexIn.value);
+        if (!c) return; // (half typed)
+        look = { ...look, color: c };
+      }
       if (e.target === opIn) look = { ...look, opacity: Number(opIn.value) / 100 };
       preview();
     });
