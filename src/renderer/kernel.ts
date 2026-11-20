@@ -6623,6 +6623,38 @@ export function boundsOf(shape: Geom): [V3, V3] {
   return box;
 }
 
+/**
+ * How far `shape` really reaches along axis `k` — side 1: its largest coordinate, -1: its smallest. The box's side (boundsOf)
+ * can stand off a trimmed free-form face (its surface's extent before trimming: Solid 100 of ~/body.yddd, 0.023 mm past
+ * its flat side — a mirrored copy left that gap): measured to a plate just outside the box instead. Else the box's side.
+ */
+export function exactSide(shape: Geom, k: number, side: 1 | -1): number {
+  const [lo, hi] = boundsOf(shape);
+  const boxSide = side > 0 ? hi[k] : lo[k];
+  if (isMesh(shape) || shape instanceof Wire) return boxSide;
+  const size = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  const pos = boxSide + side * (1 + size * 0.01);
+  const center: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  center[k] = pos;
+  const z: V3 = [0, 0, 0], x: V3 = [0, 0, 0], y: V3 = [0, 0, 0];
+  z[k] = 1;
+  x[(k + 1) % 3] = 1;
+  y[(k + 2) % 3] = 1;
+  const plate = makeRectFace({ origin: center, x, y, z }, center, size * 3 + 10, size * 3 + 10);
+  const d = new oc.BRepExtrema_DistShapeShape(plate.wrapped, (shape as Shape).wrapped);
+  try {
+    if (!d.IsDone() || d.NbSolution() < 1) return boxSide;
+    const at = pos - side * d.Value();
+    // (inside the box, a hair's tolerance aside — else something went wrong: the box)
+    return at >= lo[k] - 1e-7 && at <= hi[k] + 1e-7 ? at : boxSide;
+  } catch {
+    return boxSide;
+  } finally {
+    d.delete();
+    plate.delete();
+  }
+}
+
 /** Faces' and edges' ids of `from` → those of `to`, a moved copy of it (same order); null if they don't line up. */
 export function movedIds(from: Geom, to: Geom): { faces: Map<number, number>; edges: Map<number, number> } | null {
   if (isMesh(from) || isMesh(to)) return null;

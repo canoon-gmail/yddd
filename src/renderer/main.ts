@@ -147,6 +147,7 @@ import {
   tipRadiusMax,
   noteMoved,
   boundsOf,
+  exactSide,
   type Tip,
   makeCircleFace,
   makeRectFace,
@@ -568,6 +569,16 @@ export class App implements ToolHost {
         h.classList.add("dragging");
         this.op.anchor = undefined;
         this.op.active = i;
+        const sets = dragsOf(this.op.spec)[i]?.sets;
+        let changed = false;
+        for (const [k, v] of Object.entries(sets ?? {})) {
+          const input = this.op.inputs.find((x) => x.dataset.key === k);
+          if (input && input.value !== String(v)) {
+            input.value = String(v);
+            changed = true;
+          }
+        }
+        if (changed) this.scheduleOpPreview();
         this.opDrag(e);
       });
       h.addEventListener("pointermove", (e) => {
@@ -600,12 +611,21 @@ export class App implements ToolHost {
     }
   }
 
+  /** Grip handles (look "grip") behind a solid: hidden — worked out a moment after the view / values settle (raycasts). */
+  private gripHidden: { op: unknown; key: string; hidden: boolean[]; timer: number } = { op: null, key: "", hidden: [], timer: 0 };
+
   /** Place each op drag handle at origin + dir * value, rotated to the axis' screen direction. */
   private positionHandle(): void {
     const drags = this.op ? dragsOf(this.op.spec) : [];
     if (this.handlesEl.childElementCount !== drags.length) this.buildHandles(drags.length);
     const r = $("viewport").getBoundingClientRect();
     let lines = "";
+    const values = this.op && (drags.some((d) => d.at) || this.op.spec.outline) ? this.opValues().values : {};
+    for (const [a, b] of (this.op?.spec.outline?.(values) ?? [])) {
+      const sa = this.viewport.toScreen(new THREE.Vector3(...a)), sb = this.viewport.toScreen(new THREE.Vector3(...b));
+      lines += `<line x1="${sa.x - r.left}" y1="${sa.y - r.top}" x2="${sb.x - r.left}" y2="${sb.y - r.top}" stroke="#ffd84a" stroke-width="1.5" stroke-opacity="0.8"/>`;
+    }
+    const grips: { i: number; P: THREE.Vector3 }[] = [], gh = this.gripHidden;
     drags.forEach((drag, i) => {
       const el = this.handlesEl.children[i] as HTMLElement;
       const input = this.op!.inputs.find((inp) => inp.dataset.key === drag.key);
@@ -614,7 +634,8 @@ export class App implements ToolHost {
         return;
       }
       const O = new THREE.Vector3(...this.dragOrigin(drag)), D = new THREE.Vector3(...this.dragDir(drag)).normalize();
-      const P = O.clone().addScaledVector(D, (this.opNum(input) || 0) * this.dragUnit(drag));
+      const P = drag.at ? new THREE.Vector3(...drag.at(values)) : O.clone().addScaledVector(D, (this.opNum(input) || 0) * this.dragUnit(drag));
+      if (drag.look === "grip") grips.push({ i, P });
       const s = this.viewport.toScreen(P), s1 = this.viewport.toScreen(P.clone().add(D));
       const look = drag.look ?? "arrow";
       const ang = Math.atan2(s1.y - s.y, s1.x - s.x) * (180 / Math.PI) + 90;
@@ -625,7 +646,7 @@ export class App implements ToolHost {
       el.style.left = `${s.x - r.left}px`;
       el.style.top = `${s.y - r.top}px`;
       el.style.transform = look === "arrow" ? `rotate(${ang}deg)` : "";
-      el.hidden = false;
+      el.hidden = drag.look === "grip" && gh.op === this.op && !!gh.hidden[i] && !el.classList.contains("dragging");
       if (drag.line) {
         const o = this.viewport.toScreen(O);
         lines += `<line x1="${o.x - r.left}" y1="${o.y - r.top}" x2="${s.x - r.left}" y2="${s.y - r.top}" stroke="${drag.color ?? "#1e88ff"}" stroke-width="2" stroke-opacity="0.85"/>`;
@@ -633,6 +654,27 @@ export class App implements ToolHost {
     });
     lines += this.positionChoices(r);
     this.linesEl.innerHTML = lines;
+    if (grips.length) {
+      const key = `${this.viewport.camera.matrixWorld.elements.map((k) => k.toFixed(4)).join()}|${this.viewport.xray}|${grips.map((g) => g.P.toArray().map((k) => k.toFixed(4)).join()).join("|")}`;
+      if (gh.op !== this.op || gh.key !== key) {
+        const op = this.op;
+        const work = () => {
+          const hidden = this.viewport.hiddenPoints(grips.map((g) => g.P));
+          this.gripHidden = { op, key, hidden: [], timer: 0 };
+          grips.forEach((g, k) => (this.gripHidden.hidden[g.i] = hidden[k]));
+        };
+        clearTimeout(gh.timer);
+        // (a new op: at once, no flash of the back grips; then once the view / values pause)
+        if (gh.op !== op) {
+          work();
+          for (const g of grips) (this.handlesEl.children[g.i] as HTMLElement).hidden = this.gripHidden.hidden[g.i];
+        } else gh.timer = window.setTimeout(() => {
+          if (this.op !== op) return;
+          work();
+          this.positionHandle();
+        }, 80);
+      }
+    }
   }
 
   /** Place the op's choice marks (built once per op); returns their lines (SVG) from `from`. */
@@ -1927,7 +1969,14 @@ export class App implements ToolHost {
         if (f.min !== undefined) input.min = String(f.min);
         // (a field that can't go below 0 — a thickness, a wall: no minus sign typed; the other way is a checkbox)
         if (f.min !== undefined && f.min >= 0) input.addEventListener("keydown", (e) => e.key === "-" && e.preventDefault());
-        input.value = String(f.value);
+        // (NaN: empty, "—" shown until it gets a value — e.g. Mirror's plane before a side or guide is picked)
+        input.value = Number.isNaN(f.value) ? "" : String(f.value);
+        if (Number.isNaN(f.value)) input.placeholder = "—";
+        // (state the op keeps with its values, e.g. Scale's fixed point — not shown)
+        if (f.type === "hidden") {
+          input.type = "hidden";
+          label.hidden = true;
+        }
       }
       input.dataset.key = f.key;
       label.appendChild(input);
@@ -2044,10 +2093,12 @@ export class App implements ToolHost {
     }
     if (drag.min !== undefined) v = Math.max(drag.min, v);
     op.exact = sp ? { key: drag.key, shown: fmt(v), value: v } : undefined;
-    if (fmt(v) === input.value) return;
+    const also = (drag.also ?? []).map((k) => op.inputs.find((i) => i.dataset.key === k)).filter((i): i is OpInput => !!i);
+    if (fmt(v) === input.value && also.every((i) => i.value === input.value)) return;
     input.value = fmt(v);
+    for (const i of also) i.value = input.value;
     const units = drag.units ?? (drag.unit ? "%" : "mm");
-    this.hud(sp ? `${fmt(v)} ${units} · ${sp.kind}` : `${fmt(v)} ${units}`, O.clone().addScaledVector(D, v * unit));
+    this.hud(sp ? `${fmt(v)} ${units} · ${sp.kind}` : `${fmt(v)} ${units}`, drag.at ? new THREE.Vector3(...drag.at(this.opValues().values)) : O.clone().addScaledVector(D, v * unit));
     // (worked out in the background kernel, with an instant preview — Push/Pull on a free-form solid: that one while
     // dragging too, however quick the background is — its answers would come a frame or more behind the arrow)
     if ((op.previewMs ?? 0) > SLOW_PREVIEW_MS || (!!op.spec.computeAsync && !!op.spec.fastDrag && this.bgKernel.ready)) {
@@ -3698,29 +3749,56 @@ export class App implements ToolHost {
     const size = [0, 1, 2].map((i) => hi[i] - lo[i]);
     // Text (its letters, flat or pushed) keeps its shape: only the ring, scaling evenly
     const text = ids.every((id) => !!this.doc.get(id)!.text);
-    // About the bottom centre (the base stays put); "From the centre" (Shift while dragging the ring): about the middle.
-    const base: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]];
+    // Typed values: about the bottom centre (the base stays put). The grips (as in SketchUp) on the outline box: a corner
+    // scales evenly, an edge's middle along its two axes, a face's middle along one — the grip opposite stays put;
+    // Shift while dragging (or "From the centre"): about the middle. Fixed point per axis: px / py / pz, -1 low side · 0 middle · 1 high side.
     const centre: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
-    // Gizmo: X / Y / Z boxes on axis lines from the base set the per-axis %; the ring on the
-    // top corner (dragged along the diagonal) sets the overall Scale % — with Shift, from the centre.
-    const corner: V3 = [hi[0], hi[1], hi[2]];
-    const diag: V3 = [corner[0] - base[0], corner[1] - base[1], corner[2] - base[2]];
-    const half: V3 = [corner[0] - centre[0], corner[1] - centre[1], corner[2] - centre[2]];
-    const len = Math.hypot(...diag);
+    const side = (i: number, g: number) => (g < 0 ? lo[i] : g > 0 ? hi[i] : centre[i]);
+    const pk = ["px", "py", "pz"] as const;
+    const factors = (v: Record<string, number>): V3 => [v.s * (v.x ?? 100) / 1e4, v.s * (v.y ?? 100) / 1e4, v.s * (v.z ?? 100) / 1e4];
+    const pivotOf = (v: Record<string, number>): V3 => (v.center ? centre : [0, 1, 2].map((i) => side(i, v[pk[i]])) as V3);
+    /** Where box point `p` goes for these values. */
+    const moved = (v: Record<string, number>, p: V3): V3 => {
+      const f = factors(v), o = pivotOf(v);
+      return [0, 1, 2].map((i) => o[i] + f[i] * (p[i] - o[i])) as V3;
+    };
+    const flat = [0, 1, 2].map((i) => size[i] < 1e-9);
+    const live = [0, 1, 2].filter((i) => !flat[i]);
     const drags: OpDrag[] = [];
-    const axes = [["x", "#e5484d"], ["y", "#30a46c"], ["z", "#3e8bff"]] as const;
-    if (!text) axes.forEach(([key, color], i) => {
-      const ext = hi[i] - base[i];
-      if (ext < 1e-9) return; // flat along this axis
-      const dir: V3 = [0, 0, 0];
-      dir[i] = 1;
-      drags.push({ origin: base, dir, key, unit: ext / 100, mul: "s", look: "box", color, line: true, title: `Drag to scale along ${key.toUpperCase()}` });
-    });
-    if (len > 1e-9) {
-      drags.push({ origin: base, dir: diag, key: "s", unit: len / 100, look: "ring", color: "#ffd84a", line: true, title: "Drag to scale in all directions (Shift: about the centre)",
-        shift: { key: "center", origin: centre, dir: half, unit: Math.hypot(...half) / 100 } });
+    const axisColor = ["#e5484d", "#30a46c", "#3e8bff"];
+    const keyOf = ["x", "y", "z"];
+    for (const gx of [-1, 0, 1]) for (const gy of [-1, 0, 1]) for (const gz of [-1, 0, 1]) {
+      const g = [gx, gy, gz];
+      const on = [0, 1, 2].filter((i) => g[i] !== 0);
+      // (none on a flat side: the middle one stands for it; not the box's middle)
+      if (!on.length || on.some((i) => flat[i])) continue;
+      const even = on.length === live.length; // a corner (of a flat box: its corners in its plane)
+      if (text && !even) continue; // text scales evenly
+      const rest = g.map((k, i) => side(i, k)) as V3, from = g.map((k, i) => side(i, -k)) as V3;
+      const dir = [0, 1, 2].map((i) => rest[i] - from[i]) as V3, half = [0, 1, 2].map((i) => rest[i] - centre[i]) as V3;
+      const len = Math.hypot(...dir);
+      const keys = on.map((i) => keyOf[i]);
+      drags.push({
+        origin: from, dir, unit: len / 100, look: "grip", color: even ? "#ffd84a" : on.length === 1 ? axisColor[on[0]] : "#e8e8e8",
+        ...(even ? { key: "s" } : { key: keys[0], also: keys.slice(1), mul: "s" }),
+        sets: Object.fromEntries(on.map((i) => [pk[i], -g[i]])),
+        at: (v) => moved(v, rest),
+        title: `Drag to scale ${even ? "evenly" : `along ${keys.join(" + ").toUpperCase()}`} — the opposite side stays put (Shift: about the centre)`,
+        shift: { key: "center", origin: centre, dir, unit: Math.hypot(...half) / 100 },
+      });
     }
-    const pct = (k: number) => k / 100;
+    const outline = (v: Record<string, number>): [V3, V3][] => {
+      const segs: [V3, V3][] = [];
+      for (const i of [0, 1, 2]) {
+        const j = (i + 1) % 3, k = (i + 2) % 3;
+        for (const a of [lo[j], hi[j]]) for (const b of [lo[k], hi[k]]) {
+          const p: V3 = [0, 0, 0], q: V3 = [0, 0, 0];
+          p[i] = lo[i]; q[i] = hi[i]; p[j] = q[j] = a; p[k] = q[k] = b;
+          segs.push([moved(v, p), moved(v, q)]);
+        }
+      }
+      return segs;
+    };
     this.startOp({
       title: "Scale",
       label: "Scale",
@@ -3733,11 +3811,13 @@ export class App implements ToolHost {
           { key: "y", label: "Y (% or ±mm)", value: 100, step: 5, min: 0, mm: size[1] },
           { key: "z", label: "Z (% or ±mm)", value: 100, step: 5, min: 0, mm: size[2] },
         ]),
-        { key: "center", label: "From the centre (Shift while dragging the ring)", value: 0, type: "checkbox" },
+        { key: "center", label: "From the centre (Shift while dragging a grip)", value: 0, type: "checkbox" },
+        { key: "px", label: "", value: 0, type: "hidden" },
+        { key: "py", label: "", value: 0, type: "hidden" },
+        { key: "pz", label: "", value: -1, type: "hidden" },
       ],
-      compute: ({ s, x = 100, y = 100, z = 100, center }) => {
-        const pivot = center ? centre : base;
-        const f: V3 = [pct(s) * pct(x), pct(s) * pct(y), pct(s) * pct(z)];
+      compute: (v) => {
+        const pivot = pivotOf(v), f = factors(v);
         if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
         // Preview: the current meshes stretched on the GPU (instant); the exact solids are built on Apply.
         const matrix = new THREE.Matrix4()
@@ -3752,8 +3832,9 @@ export class App implements ToolHost {
         };
       },
       drag: drags.length ? drags : undefined,
+      outline,
       then: ["xf.move", "xf.moveFrom", "xf.scale", "xf.rotate"],
-      hint: "Scale: drag the ring / boxes or type % or ±mm · Enter apply · G / Shift+G / S / R: apply, then move / move from point / scale / rotate · Esc cancel",
+      hint: "Scale: drag a grip (corner: evenly · edge: two axes · face: one axis; the opposite side stays put, Shift: about the centre) or type % or ±mm · Enter apply · G / Shift+G / S / R: apply, then move / move from point / scale / rotate · Esc cancel",
     });
   }
 
@@ -6655,9 +6736,11 @@ export class App implements ToolHost {
 
   /**
    * Mirror (M): a mirrored copy of the selected objects beyond one side of their box — click a
-   * ±X / ±Y / ±Z mark; the mirror plane is that side, so the copy touches the original. Join: each
-   * solid and its copy become one where they touch (a half dome on its flat side, −Z: a ball). One
-   * undo step; a whole group's copies go in a new group (as Duplicate). To flip: delete the original.
+   * ±X / ±Y / ±Z mark; the mirror plane is that side, so the copy touches the original. Then (or
+   * instead) a click on a guide line moves the plane to it, square to that axis — the right leg
+   * mirrored about the body's middle guide: the left leg (no mark clicked: the axis the guide lies
+   * across, the one the objects are furthest from it along). The copies stay apart (Union joins
+   * them). One undo step; a whole group's copies go in a new group (as Duplicate). To flip: delete the original.
    */
   private mirrorCopy(): void {
     const ids = this.selectedBodyIds();
@@ -6669,29 +6752,71 @@ export class App implements ToolHost {
       for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], q[k]); }
     }
     const c = [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2) as V3, ext = [0, 1, 2].map((k) => hi[k] - lo[k]);
-    /** Side `dir` (index into DIRS): the mirror plane (that side of the box). */
-    const plane = (dir: number): { point: V3; normal: V3 } => {
-      const axis = dir >> 1, point = [...c] as V3, normal: V3 = [0, 0, 0];
+    /** Side `dir` (index into DIRS) of the box: where its mark's line starts; the plane there unless moved (`at`). */
+    const sideAt = (dir: number): V3 => {
+      const axis = dir >> 1, point = [...c] as V3;
       point[axis] = dir & 1 ? lo[axis] : hi[axis];
+      return point;
+    };
+    /** Where side `dir` really is (exactSide: the box can stand off a free-form face — the copy would leave a gap). */
+    const touching = new Map<number, number>();
+    const sidePlane = (dir: number): number => {
+      let at = touching.get(dir);
+      if (at === undefined) {
+        const axis = dir >> 1, s = dir & 1 ? -1 : 1;
+        const all = ids.map((id) => exactSide(this.doc.get(id)!.shape, axis, s));
+        touching.set(dir, (at = s > 0 ? Math.max(...all) : Math.min(...all)));
+      }
+      return at;
+    };
+    /** The mirror plane: square to side `dir`'s axis, at `at` along it. */
+    const plane = (dir: number, at: number): { point: V3; normal: V3 } => {
+      const axis = dir >> 1, point = [...c] as V3, normal: V3 = [0, 0, 0];
+      point[axis] = at;
       normal[axis] = 1;
       return { point, normal };
     };
+    const input = (k: string) => this.op?.inputs.find((i) => i.dataset.key === k);
+    /** Sets the side (and the plane's place) and previews. */
+    const setSide = (dir: number, at: number) => {
+      const d = input("dir"), a = input("at");
+      if (!d || !a) return;
+      d.value = String(dir + 1);
+      a.value = fmt(at);
+      sideSet = dir + 1;
+      // (the exact place, not the rounded one shown: 0.0001 mm off is a gap)
+      if (this.op) this.op.exact = { key: "at", shown: a.value, value: at };
+      a.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    /** The guide line under the cursor and where the plane goes there (side `dir`), or why not; null: no guide. */
+    const guidePlane = (e: PointerEvent): { guide: number; dir: number; at: number } | { guide: number; error: string } | null => {
+      const g = this.viewport.guideAt(e.clientX, e.clientY);
+      if (g < 0) return null;
+      const { a, b } = this.doc.guides[g];
+      const d = [0, 1, 2].map((k) => b[k] - a[k]), len = Math.hypot(...d) || 1;
+      const mid = [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
+      const across = (k: number) => Math.abs(d[k]) / len < 0.05; // (within ~3° of square to axis k)
+      const cur = Number(input("dir")?.value ?? 0);
+      let axis = cur >= 1 ? (cur - 1) >> 1 : -1;
+      if (axis >= 0 && !across(axis)) return { guide: g, error: `That guide runs along ${"XYZ"[axis]} — click one across it (or another ±X / ±Y / ±Z mark)` };
+      if (axis < 0) {
+        const ks = [0, 1, 2].filter(across);
+        if (!ks.length) return { guide: g, error: "That guide is slanted — click a ±X / ±Y / ±Z mark first, then a guide square to it" };
+        axis = ks.reduce((best, k) => (Math.abs(c[k] - mid[k]) > Math.abs(c[best] - mid[best]) ? k : best), ks[0]);
+      }
+      // (the side of the objects facing the guide)
+      return { guide: g, dir: axis * 2 + (mid[axis] >= c[axis] ? 0 : 1), at: mid[axis] };
+    };
+    let pickedGuide = -1;
+    /** The side setSide last set: picked in the Side list instead, the plane goes to that side of the box. */
+    let sideSet = 0;
     const copyName = (b: Body) => b.name.replace(/\s+\d+$/, "");
-    /** Each object's mirror image; with `join`, a solid's is unioned with it (null: they don't touch / the union failed). */
-    const results = (dir: number, join: boolean) => {
-      const { point, normal } = plane(dir);
+    /** Each object's mirror image. */
+    const results = (dir: number, at: number) => {
+      const { point, normal } = plane(dir, at);
       return ids.map((id) => {
-        const b = this.doc.get(id)!, image = mirrorShape(b.shape, point, normal);
-        let joined: Shape | null = null;
-        if (join && b.kind === "solid") {
-          try {
-            const u = booleanOp("union", b.shape as Solid, [image as Solid]);
-            joined = solidPieces(u).length === 1 ? u : null;
-          } catch {
-            joined = null;
-          }
-        }
-        return { b, image, joined };
+        const b = this.doc.get(id)!;
+        return { b, image: mirrorShape(b.shape, point, normal) };
       });
     };
     this.startOp({
@@ -6700,45 +6825,71 @@ export class App implements ToolHost {
       applyLabel: "Done",
       fields: [
         { key: "dir", label: "Side", type: "select", options: ["— click a mark —", ...DIRS], value: 0 },
-        { key: "join", label: "Join (a solid and its copy become one where they touch)", value: 0, type: "checkbox" },
+        { key: "at", label: "Mirror plane at (mm along that axis — click a guide line)", value: NaN, step: 1, off: (v) => !(v.dir >= 1) },
       ],
-      hint: "Mirror: click a ±X / ±Y / ±Z mark — the copy appears beyond that side, touching it · Join: one solid · Enter or Done apply · Esc cancel",
+      hint: "Mirror: click a ±X / ±Y / ±Z mark — the copy appears beyond that side, touching it · then a guide line: the mirror plane there (e.g. the body's middle: the other leg) · Enter or Done apply · Esc cancel",
+      pick: (e) => {
+        const t = guidePlane(e);
+        if (!t) return;
+        if ("error" in t) return this.toast(t.error, "error");
+        pickedGuide = t.guide;
+        setSide(t.dir, t.at);
+      },
+      hover: (e) => {
+        const t = guidePlane(e);
+        this.viewport.setGuides(this.doc.guides, pickedGuide, t ? t.guide : -1);
+        this.viewport.canvas.style.cursor = t ? ("error" in t ? "not-allowed" : "pointer") : "crosshair";
+      },
       // ±X / ±Y / ±Z marks just outside the objects' sides (axis colours)
       choices: (() => {
         const out = Math.max(...ext) * 0.2 + 4;
         const AXIS_COLORS = ["#d9534f", "#5cb85c", "#4a90e2"]; // (as the world axes)
         return DIRS.map((label, dir) => {
-          const axis = dir >> 1, from = plane(dir).point, at = [...from] as V3;
+          const axis = dir >> 1, from = sideAt(dir), at = [...from] as V3;
           at[axis] += (dir & 1 ? -1 : 1) * out;
-          return { at, from, key: "dir", value: dir + 1, label, color: AXIS_COLORS[axis], title: `Mirror across the ${label} side` };
+          return {
+            at, from, key: "dir", value: dir + 1, label, color: AXIS_COLORS[axis], title: `Mirror across the ${label} side`,
+            pick: () => {
+              pickedGuide = -1;
+              this.viewport.setGuides(this.doc.guides, -1, -1);
+              setSide(dir, sidePlane(dir));
+            },
+            get on() { return Number(input("dir")?.value) === dir + 1; },
+          };
         });
       })(),
-      compute: ({ dir: d, join }) => {
-        if (!(d >= 1)) throw new OpWaiting("Click a ±X / ±Y / ±Z mark: the side to mirror across");
-        const dir = d - 1, got = results(dir, !!join);
+      compute: ({ dir: d, at }) => {
+        if (!(d >= 1)) throw new OpWaiting("Click a ±X / ±Y / ±Z mark (the side to mirror across) or a guide line (the mirror plane)");
+        const dir = d - 1;
+        if (d !== sideSet) {
+          sideSet = d;
+          pickedGuide = -1;
+          at = sidePlane(dir);
+          const a = input("at");
+          if (a) {
+            a.value = fmt(at);
+            if (this.op) this.op.exact = { key: "at", shown: a.value, value: at };
+          }
+        }
+        const got = results(dir, at);
         const ghost = new Map<number, Shape>();
-        got.forEach(({ b, image, joined }, j) => {
-          if (joined) ghost.set(b.id, joined);
-          else if (b.kind === "solid" || b.kind === "face") ghost.set(-(j + 1), image as Shape);
+        got.forEach(({ b, image }, j) => {
+          if (b.kind === "solid" || b.kind === "face") ghost.set(-(j + 1), image as Shape);
         });
         return {
           ghost,
           commit: () => {
             const groups = this.copyGroupNames(ids);
-            const joinedShapes = new Map(got.filter((g) => g.joined).map((g) => [g.b.id, g.joined!]));
-            const copies = got.filter((g) => !g.joined).map(({ b, image }) => {
+            const copies = got.map(({ b, image }) => {
               const m = withTextOf(this.doc.makeBody(image, copyName(b), b.kind), b), g = groups.get(b.group ?? "");
               return g ? { ...m, group: g } : m;
             });
-            this.doc.commit([...this.doc.bodies.map((b) => (joinedShapes.has(b.id) ? withShape(b, joinedShapes.get(b.id)!) : b)), ...copies], `Mirror ${DIRS[dir]}`, this.doc.guides, this.doc.dimensions, this.doc.arrays, this.copiedLooks(groups));
-            const n = joinedShapes.size, apart = join ? got.filter((g) => !g.joined && g.b.kind === "solid").length : 0;
+            this.doc.commit([...this.doc.bodies, ...copies], `Mirror ${DIRS[dir]}`, this.doc.guides, this.doc.dimensions, this.doc.arrays, this.copiedLooks(groups));
             return {
               select: [...ids, ...copies.map((b) => b.id)],
               solidMode: true,
               then: () => this.toast(
-                `Mirrored across the ${DIRS[dir]} side` +
-                  (n ? ` — ${n} joined into one` : "") +
-                  (apart ? ` (${apart} not joined: ${apart > 1 ? "they don't" : "it doesn't"} touch its copy)` : "") +
+                (pickedGuide >= 0 ? `Mirrored about the guide line (${"XYZ"[dir >> 1]} ${fmt(at)})` : Math.abs(at - sidePlane(dir)) < 1e-9 ? `Mirrored across the ${DIRS[dir]} side` : `Mirrored at ${"XYZ"[dir >> 1]} ${fmt(at)}`) +
                   (groups.size ? ` · copies in ${[...groups.values()].join(", ")}` : ""),
               ),
             };

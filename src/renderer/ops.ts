@@ -11,7 +11,7 @@ export interface OpField {
   step?: number;
   min?: number;
   /** "select": `value` is the index into `options`. */
-  type?: "number" | "checkbox" | "select";
+  type?: "number" | "checkbox" | "select" | "hidden";
   /** Greyed out (can't be changed) while this is true of the panel's values — e.g. a field another one overrides. */
   off?: (values: Record<string, number>) => boolean;
   options?: string[];
@@ -84,7 +84,7 @@ export interface OpDrag {
   /** Shown with the value while dragging (default: % with a `unit`, else mm). */
   units?: string;
   mul?: string;
-  look?: "arrow" | "box" | "ring";
+  look?: "arrow" | "box" | "ring" | "grip";
   color?: string;
   line?: boolean;
   title?: string;
@@ -93,6 +93,12 @@ export interface OpDrag {
    * handle runs from `origin` along `dir` with `unit` instead (e.g. Scale about the centre, not the base).
    */
   shift?: { key: string; origin: V3; dir: V3; unit: number };
+  /** Other fields set to the same value while dragging (e.g. Scale's edge grip: X and Y together). */
+  also?: string[];
+  /** Fields set when the handle is grabbed (e.g. Scale: the grip opposite stays put). */
+  sets?: Record<string, number>;
+  /** Where the handle is shown for these values (default: origin + dir × value) — e.g. a Scale grip on the scaled box. */
+  at?: (values: Record<string, number>) => V3;
   /** Double-click on the handle: the value to set and apply at once (e.g. Push/Pull through to the face behind), or why not. */
   dblclick?: () => number | string;
 }
@@ -134,6 +140,8 @@ export interface OpSpec {
   slow?: boolean;
   /** The op picks objects: a click on a row in the Bodies panel goes here (not to selection). */
   pickBody?(id: number): void;
+  /** Lines drawn in the view for these values (e.g. Scale: the scaled outline box). */
+  outline?(values: Record<string, number>): [V3, V3][];
   /** Labelled marks in the view to click (e.g. Array copy's ±X / ±Y / ±Z): see OpChoice. */
   choices?: OpChoice[];
   /** Caption of the apply button (default "Apply ⏎"). */

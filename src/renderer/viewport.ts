@@ -2016,7 +2016,8 @@ export class Viewport {
       const mat = new THREE.LineDashedMaterial({ color: isSel(i) ? 0xffd166 : i === hover ? 0xffffff : 0xff6fb5, dashSize: 1.5, gapSize: 1, depthTest: false, transparent: true });
       const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints([g.a, g.b]), mat);
       l.computeLineDistances();
-      l.renderOrder = 15;
+      // (lit / selected over the rest: a copy of a guide in the same place, drawn later, would hide it)
+      l.renderOrder = isSel(i) || i === hover ? 16 : 15;
       if (isSel(i)) {
         // Soft halos under the dashed line (no solid core, so it still reads as a guide).
         const glow = this.glowLine(g.a, g.b, 0xffd166, 2, 0.5);
@@ -2283,6 +2284,31 @@ export class Viewport {
       this.raycaster.far = Infinity;
       return !hit;
     });
+  }
+
+  /**
+   * Which of `pts` are hidden behind a solid as drawn now — a transformed preview (showGhostTransformed) where it is,
+   * not the body it stands for; points on a face are not hidden; in X-ray none are.
+   */
+  hiddenPoints(pts: THREE.Vector3[]): boolean[] {
+    if (this.xray || !pts.length) return pts.map(() => false);
+    const meshes: THREE.Object3D[] = [];
+    for (const v of this.views.values()) if (v.group.visible) meshes.push(v.mesh);
+    this.ghostRoot.updateMatrixWorld(true);
+    // (its fat edge lines are meshes too — not solid)
+    this.ghostRoot.traverse((o) => (o as THREE.Mesh).isMesh && !(o as LineSegments2).isLineSegments2 && o.visible && meshes.push(o));
+    if (!meshes.length) return pts.map(() => false);
+    const eye = this.camera.position;
+    const tol = Math.max(0.05, (eye.distanceTo(this.controls.target) * 2e-3) / this.depthScale);
+    const out = pts.map((p) => {
+      const dir = p.clone().sub(eye), dist = dir.length();
+      if (dist <= tol) return false;
+      this.raycaster.set(eye, dir.divideScalar(dist));
+      this.raycaster.far = dist - tol;
+      return this.raycaster.intersectObjects(meshes, false).length > 0;
+    });
+    this.raycaster.far = Infinity;
+    return out;
   }
 
   /** Marks at least `px` screen pixels apart: of marks closer than that only one is kept (corners, then centres, then midpoints, then points inside a solid). */
