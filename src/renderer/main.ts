@@ -2,6 +2,7 @@
  * YDDD application controller: wires the document, viewport, tools,
  * operation panel, outliner, file I/O, keyboard shortcuts and native menu.
  */
+import ClipperLib from "clipper-lib";
 import "./migrate";
 import "./style.css";
 import * as THREE from "three";
@@ -128,6 +129,8 @@ import {
   offsetEdges,
   offsetEdgesAxis,
   edgeOffsetFaces,
+  edgesMakeLoops,
+  loopOutlines,
   faceLineEdges,
   revolveFace,
   revolveRefusal,
@@ -335,7 +338,7 @@ export class App implements ToolHost {
     result: OpOutcome | null;
     key: string;
     /** Drag reference: line parameter and field value when the mouse first moved. */
-    anchor?: { x: number; y: number; v: number };
+    anchor?: { x: number; y: number; v: number; /** where along the drag axis the cursor was (see opDrag) */ s?: number | null };
     /** Full-precision value of a snapped drag; used while the field still shows its rounded text. */
     exact?: { key: string; shown: string; value: number };
     dragQueued?: boolean;
@@ -639,14 +642,19 @@ export class App implements ToolHost {
       const s = this.viewport.toScreen(P), s1 = this.viewport.toScreen(P.clone().add(D));
       const look = drag.look ?? "arrow";
       const ang = Math.atan2(s1.y - s.y, s1.x - s.x) * (180 / Math.PI) + 90;
-      el.className = `op-handle ${look}${el.classList.contains("dragging") ? " dragging" : ""}`;
+      // Off the viewport (the edge's middle out of sight): held just inside its edge, towards where it is — the drag
+      // works by how far the mouse moves, not from where; behind the camera: hidden (unless being dragged)
+      const M = 18, x = s.x - r.left, y = s.y - r.top;
+      const hx = Math.min(Math.max(x, M), r.width - M), hy = Math.min(Math.max(y, M), r.height - M);
+      const behind = P.clone().project(this.viewport.camera).z > 1, dragging = el.classList.contains("dragging");
+      el.className = `op-handle ${look}${dragging ? " dragging" : ""}${hx !== x || hy !== y ? " pinned" : ""}`;
       el.textContent = look === "arrow" ? "\u21D5" : "";
       el.title = drag.title ?? "Drag to change the value";
       el.style.setProperty("--c", drag.color ?? "#1e88ff");
-      el.style.left = `${s.x - r.left}px`;
-      el.style.top = `${s.y - r.top}px`;
+      el.style.left = `${hx}px`;
+      el.style.top = `${hy}px`;
       el.style.transform = look === "arrow" ? `rotate(${ang}deg)` : "";
-      el.hidden = drag.look === "grip" && gh.op === this.op && !!gh.hidden[i] && !el.classList.contains("dragging");
+      el.hidden = (behind && !dragging) || (drag.look === "grip" && gh.op === this.op && !!gh.hidden[i] && !dragging);
       if (drag.line) {
         const o = this.viewport.toScreen(O);
         lines += `<line x1="${o.x - r.left}" y1="${o.y - r.top}" x2="${s.x - r.left}" y2="${s.y - r.top}" stroke="${drag.color ?? "#1e88ff"}" stroke-width="2" stroke-opacity="0.85"/>`;
@@ -2075,12 +2083,23 @@ export class App implements ToolHost {
     const ax = s1.x - s0.x, ay = s1.y - s0.y;
     const pxPer10 = Math.hypot(ax, ay);
     if (pxPer10 < 5) return; // looking straight down the axis
+    // Where along the axis the cursor is: the axis' point nearest the line through the cursor into the scene — the
+    // pixels' rate at the handle alone ran ahead of the cursor under perspective (Offset dragged far out away from the
+    // camera: too big); null looking almost down the axis (then that rate)
+    const along = (cx: number, cy: number): number | null => {
+      const ray = this.viewport.ray(cx, cy), w = O.clone().sub(ray.origin);
+      const b = D.dot(ray.direction), den = 1 - b * b;
+      if (den < 0.05) return null;
+      const sAxis = (b * ray.direction.dot(w) - D.dot(w)) / den, tRay = (ray.direction.dot(w) - b * D.dot(w)) / den;
+      return tRay > 0 ? sAxis : null;
+    };
     if (!op.anchor) {
-      op.anchor = { x: e.clientX, y: e.clientY, v: this.opNum(input) || 0 };
+      op.anchor = { x: e.clientX, y: e.clientY, v: this.opNum(input) || 0, s: along(e.clientX, e.clientY) };
       return;
     }
     const unit = this.dragUnit(drag);
-    const t = (((e.clientX - op.anchor.x) * ax + (e.clientY - op.anchor.y) * ay) / pxPer10) * (10 / pxPer10);
+    const sNow = op.anchor.s === null || op.anchor.s === undefined ? null : along(e.clientX, e.clientY);
+    const t = sNow !== null ? sNow - op.anchor.s! : (((e.clientX - op.anchor.x) * ax + (e.clientY - op.anchor.y) * ay) / pxPer10) * (10 / pxPer10);
     let v = op.anchor.v + t / unit;
     // Snapping (see Viewport.snapping): level with the object point under the cursor (corner, midpoint, centre, edge, guide), else grid.
     // The world X / Y / Z lines cross the whole view, so a drag would keep catching them: only with Ctrl.
@@ -3309,7 +3328,7 @@ export class App implements ToolHost {
     });
   }
 
-  /** Offset edges: new flat strip(s) centred on the selected straight edges, in the plane of an adjacent flat face. */
+  /** Offset edges: new flat strip(s) centred on the selected straight edges (closed loops, circles too: a ring outside / inside each), in the plane of an adjacent flat face. */
   private opOffsetEdges(): void {
     const bodyId = this.selection[0].body;
     if (this.selection.some((s) => s.body !== bodyId)) {
@@ -3333,32 +3352,111 @@ export class App implements ToolHost {
       return;
     }
     const faceOf = (other: number) => faceIds[other && faceIds.length > 1 ? 1 : 0];
-    const fields: OpField[] = [{ key: "d", label: "Each side (mm)", value: Math.abs(this.defaults.offset) || 5, step: 1, min: 0 }];
+    // Closed loops (a circle, a whole outline): a ring outside (+) or inside (−) each, 3 mm out to start with
+    const loops = edgesMakeLoops(body.shape, edgeIds, faceIds[0]);
+    const fields: OpField[] = loops
+      ? [{ key: "d", label: "Distance (mm): + outside, − inside", value: 3, step: 1 }]
+      : [{ key: "d", label: "Each side (mm)", value: Math.abs(this.defaults.offset) || 5, step: 1, min: 0 }];
     if (faceIds.length > 1) fields.push({ key: "other", label: "Other face", value: 0, type: "checkbox" });
     const dragFor = (faceId: number) => {
+      if (loopHandle && faceId === faceIds[0]) return { origin: loopHandle.origin, dir: loopHandle.dir, key: "d" };
       const axis = offsetEdgesAxis(body.shape, edgeIds, faceId);
       return axis ? { origin: axis.origin, dir: axis.dir, key: "d" } : undefined;
     };
+    const outcome = (faces: Shape[]): OpOutcome => ({
+      ghost: new Map(faces.map((f, i) => [-1 - i, f] as [number, Shape])),
+      commit: () => {
+        const made = faces.map((f) => this.doc.makeBody(f, "Face", "face"));
+        this.doc.commit([...this.doc.bodies, ...made], "Offset edges");
+        return { select: made.map((b) => b.id), solidMode: true };
+      },
+    });
+    // Closed loops: while dragging, a quick ring (the loops as polygons grown / shrunk flat) — the exact one follows
+    // when the drag pauses (an inward offset of a curved loop takes a while)
+    const quick = loops ? loopOutlines(body.shape, edgeIds, faceIds[0]) : null;
+    // Closed loops: the handle where the loops' outward direction shows longest on screen (most pixels a mm: the side
+    // towards the camera) — at the first edge's middle it could sit at the back, its arrow pointing away: a few pixels
+    // there grew the ring a lot at the front
+    const loopHandle = (() => {
+      if (!quick) return null;
+      const P = (a: number, b: number) => new THREE.Vector3(quick.o[0] + a * quick.x[0] + b * quick.y[0], quick.o[1] + a * quick.x[1] + b * quick.y[1], quick.o[2] + a * quick.x[2] + b * quick.y[2]);
+      let best: { origin: V3; dir: V3; px: number } | null = null;
+      for (const loop of quick.loops) {
+        const area = loop.reduce((t, [x0, y0], i) => { const [x1, y1] = loop[(i + 1) % loop.length]; return t + x0 * y1 - x1 * y0; }, 0);
+        const step = Math.max(1, Math.floor(loop.length / 48));
+        for (let i = 0; i < loop.length; i += step) {
+          const [x0, y0] = loop[i], [x1, y1] = loop[(i + 1) % loop.length];
+          const len = Math.hypot(x1 - x0, y1 - y0);
+          if (len < 1e-9) continue;
+          // (outward: right of the way round for a loop running anticlockwise)
+          const sgn = area > 0 ? 1 : -1, nx = (sgn * (y1 - y0)) / len, ny = (-sgn * (x1 - x0)) / len;
+          const at = P((x0 + x1) / 2, (y0 + y1) / 2), tip = P((x0 + x1) / 2 + nx * 10, (y0 + y1) / 2 + ny * 10);
+          if (!this.viewport.inView(at)) continue;
+          const a = this.viewport.toScreen(at), b = this.viewport.toScreen(tip), px = Math.hypot(b.x - a.x, b.y - a.y);
+          if (!best || px > best.px) best = { origin: at.toArray() as V3, dir: tip.sub(at).normalize().toArray() as V3, px };
+        }
+      }
+      return best;
+    })();
     const spec: OpSpec = {
       title: "Offset edges",
       label: "Offset",
       fields,
+      fastDrag: quick ? ({ d, other }) => !other && this.quickOffsetRing(quick, d) : undefined,
       compute: ({ d, other }) => {
         spec.drag = dragFor(faceOf(other)); // "Other face" flips the drag direction too
-        const faces = offsetEdges(body.shape, edgeIds, faceOf(other), d);
-        return {
-          ghost: new Map(faces.map((f, i) => [-1 - i, f] as [number, Shape])),
-          commit: () => {
-            const made = faces.map((f) => this.doc.makeBody(f, "Face", "face"));
-            this.doc.commit([...this.doc.bodies, ...made], "Offset edges");
-            return { select: made.map((b) => b.id), solidMode: true };
-          },
-        };
+        return outcome(offsetEdges(body.shape, edgeIds, faceOf(other), d));
       },
-      remember: ({ d }) => (this.defaults.offset = d),
+      // In the background kernel: an inward offset of a curved loop (the big oval at −3 mm) held the app up each time the
+      // drag paused — the solid as BREP text (once), the edges and the face by place in its lists
+      computeAsync: async ({ d, other }) => {
+        spec.drag = dragFor(faceOf(other));
+        const { brep } = this.brepFor(body.shape), e = this.placesFor(body.shape.edges, edgeIds), f = this.placesFor(body.shape.faces, [faceOf(other)]);
+        const res = await this.bgKernel.run({ op: "offsetEdges", brep, edges: e.places, prints: e.prints, face: f.places[0], facePrint: f.prints[0], distance: d });
+        return outcome(res.faces.map((m) => solidFrom(m) as unknown as Shape));
+      },
+      remember: ({ d }) => {
+        if (!loops) this.defaults.offset = d;
+      },
       drag: dragFor(faceIds[0]),
     };
     this.startOp(spec);
+  }
+
+  /** The see-through fill of Offset's quick ring while dragging. */
+  private quickRingMat = new THREE.MeshBasicMaterial({ color: 0x6f9bd1, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+
+  /**
+   * Offset's quick ring while dragging: each loop (a polygon in its face's plane, see loopOutlines) grown — or shrunk
+   * — by `d` with Clipper, the band between drawn in place of the preview. False if a loop vanishes at `d`.
+   */
+  private quickOffsetRing(q: { o: V3; x: V3; y: V3; loops: [number, number][][] }, d: number): boolean {
+    if (!(Math.abs(d) > 1e-9)) return false;
+    const S = 1000; // (Clipper works in integers: µm)
+    const meshes: THREE.Mesh[] = [];
+    for (const loop of q.loops) {
+      let path = loop.map(([x, y]) => ({ X: Math.round(x * S), Y: Math.round(y * S) }));
+      if (!ClipperLib.Clipper.Orientation(path)) path = path.reverse(); // (outward = growing what the loop holds)
+      // (sharp corners, as the exact offset — Intersection joins; a curve's points are near enough in line)
+      const co = new ClipperLib.ClipperOffset(1000, 0.01 * S), sol: { X: number; Y: number }[][] = [];
+      co.AddPath(path, ClipperLib.JoinType.jtMiter, ClipperLib.EndType.etClosedPolygon);
+      co.Execute(sol, d * S);
+      if (!sol.length) return false;
+      const off = sol.reduce((a: { X: number; Y: number }[], b: { X: number; Y: number }[]) => (Math.abs(ClipperLib.Clipper.Area(b)) > Math.abs(ClipperLib.Clipper.Area(a)) ? b : a));
+      const v2 = (p: { X: number; Y: number }) => new THREE.Vector2(p.X / S, p.Y / S);
+      const [outer, hole] = d > 0 ? [off.map(v2), path.map(v2)] : [path.map(v2), off.map(v2)];
+      const shape = new THREE.Shape(outer);
+      shape.holes.push(new THREE.Path(hole));
+      const geo = new THREE.ShapeGeometry(shape, 1), pos = geo.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        const a = pos.getX(i), b = pos.getY(i);
+        pos.setXYZ(i, q.o[0] + a * q.x[0] + b * q.y[0], q.o[1] + a * q.x[1] + b * q.y[1], q.o[2] + a * q.x[2] + b * q.y[2]);
+      }
+      geo.computeBoundingSphere();
+      meshes.push(new THREE.Mesh(geo, this.quickRingMat));
+    }
+    this.viewport.showGhostObjects(meshes);
+    return true;
   }
 
   /**
@@ -8760,7 +8858,7 @@ export class App implements ToolHost {
       ["O", "Offset: new flat face on the selected face's plane, larger by the distance (negative = smaller), optionally with round corners, or Make ring for just the band between the two outlines; then P to push/pull · several flat faces on one plane (a text's letters, a logo): each grown, the outlines joined where they meet — Fill holes keeps only the outer outlines (a name keychain's plate), One plate bridges letters standing apart (the margin kept)"],
       ["Modify menu", "Revolve: turn the selected flat face (or flat face object) about an axis into a solid (nothing selected: the panel waits — click the face, or a face object's row) — a guide line (draw one with Guide line for an exact axis), one of the face's straight edges or the world X / Y / Z axis (pick it in the panel or just click it in the view); 360° = all the way round (a circle beside the axis → a donut)"],
       ["Modify menu", "Sweep: a flat face (the profile) runs along a path or guide line into a solid — a flat ring (Offset → Make ring) makes a tube. Uses what is selected (a face, a path, a guide line); the panel then waits: click the profile face and the path / guide line (what a click would pick lights up). The profile moves onto the nearest end of the path, square to it (Turn profile: its angle round the path; Profile size %: sweep it smaller or larger, the face itself stays; End size % makes the far end smaller / larger, evenly on the way — a spout along a curved path; a straight path: Twist ° turns it evenly on the way — a propeller blade); one already sitting on the path end stays put (tick Centre to centre it). Corners: sharp or round where a path turns."],
-      ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); a closed loop of edges gives a ring"],
+      ["O with edges selected", "Offset edges: new flat strip centred on the selected straight edges, the distance to each side, in the plane of the adjacent face (tick “Other face” for the other plane); closed loops of edges (a circle, a whole outline with arcs) give a ring on each: Distance + outside the loop, − inside (3 mm to start; curved edges: closed loops only)"],
       ["Toolbar → Guide line", `Guide line: click a reference edge, slide across a face (type / Tab: distance, %, count), Enter adds — or click two points (corners / midpoints / centres; Ctrl: edges, guides, axes) for a guide between them (in Top / Front / Right view: click anywhere — on a face, or on the grid) — near an X / Y / Z direction it locks on (red / green / blue) · click a guide + Del removes · more than 4 at once (Count): one group in the Bodies panel — click it to select them all (Del removes), the eye hides them · ${this.viewport.autoSnap ? "tools snap to guides" : "Ctrl snaps to guides"}`],
       ["Shift+U · − · Shift+I  (also Num+ · Shift+S)", "Union · Subtract · Intersect (first selected = target) — or right-click one of the selected: a menu with them, that one the target (Subtract takes the others away from it)"],
       ["+ (Shift+=)", "Label: click the point the arrow points at, then where its text goes — it reads \"Label\"; double-click the text to type your own (Enter done, Esc keeps the old) · click its text + Del removes it"],

@@ -27,6 +27,7 @@ import {
   meshForExport,
   roundSome,
   offsetFaces,
+  offsetEdges,
   serializeShape,
   shellSolid,
   pushPullMany,
@@ -64,6 +65,8 @@ export type KernelJob =
   | { op: "shell"; brep: string; /** open faces, by place in `shape.faces` */ faces: number[]; prints?: ShapePrint[]; thickness: number }
   /** Offset of several flat faces on one plane (see offsetFaces): the faces as BREP text. */
   | { op: "offsetFaces"; faces: string[]; distance: number; round: boolean; fill: boolean; ring: boolean; join: boolean }
+  /** Offset of selected edges (see offsetEdges): by place in `shape.edges`, on the face at place `face` in `shape.faces`. */
+  | { op: "offsetEdges"; brep: string; edges: number[]; prints?: ShapePrint[]; face: number; facePrint?: ShapePrint; distance: number }
   | { op: "boolean"; kind: BooleanOp; target: string; tools: string[] }
   /** Punch (see punchHoles): the solid and the flat faces drawn on it, as BREP text. */
   | { op: "punch"; target: string; flats: string[] }
@@ -102,6 +105,7 @@ export type KernelJobResult =
   | ({ op: "round"; skipped: number[]; asked: number; largest: number | null } & JobSolid)
   | ({ op: "shell" } & JobSolid)
   | { op: "offsetFaces"; faces: JobSolid[] }
+  | { op: "offsetEdges"; faces: JobSolid[] }
   | ({ op: "boolean" } & JobSolid)
   | ({ op: "punch" } & JobSolid)
   | ({ op: "pushpull" } & JobSolid)
@@ -136,6 +140,7 @@ self.onmessage = async (e: MessageEvent<{ id: number; job: KernelJob }>) => {
 };
 
 const solidOf = (brep: string) => deserialize(brep) as Solid;
+let lastEdgesBrep = "", lastEdgesShape: Solid | null = null;
 const shapeOf = (s: JobShape): Solid | TriMesh => ("brep" in s ? solidOf(s.brep) : new TriMesh(s.mesh));
 
 async function run(job: KernelJob): Promise<KernelJobResult> {
@@ -148,6 +153,15 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
     case "shell": {
       const shape = solidOf(job.brep);
       return { op: "shell", ...made(shellSolid(shape, new Set(job.faces.map((i, k) => placeOf(shape.faces, i, job.prints?.[k], "face").hashCode)), job.thickness)) };
+    }
+    case "offsetEdges": {
+      // (the solid kept from the last job while it is the same: dragging sends one per value — the loop's face, made
+      // once on it, is remembered with it: see edgeLoopFace)
+      if (job.brep !== lastEdgesBrep) [lastEdgesBrep, lastEdgesShape] = [job.brep, solidOf(job.brep)];
+      const shape = lastEdgesShape!;
+      const edges = job.edges.map((i, k) => placeOf(shape.edges, i, job.prints?.[k], "edge").hashCode);
+      const face = placeOf(shape.faces, job.face, job.facePrint, "face").hashCode;
+      return { op: "offsetEdges", faces: offsetEdges(shape, edges, face, job.distance).map((f) => made(f as unknown as Solid)) };
     }
     case "offsetFaces": {
       const faces = job.faces.map((b) => deserialize(b) as unknown as Parameters<typeof offsetFaces>[0][number]);

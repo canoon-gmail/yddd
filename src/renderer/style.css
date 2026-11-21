@@ -202,7 +202,7 @@ kbd {
   border: 1px solid rgba(255, 255, 255, 0.12); color: var(--accent-2); font-variant-numeric: tabular-nums; white-space: pre; line-height: 1.4;
   text-shadow: 0 0 3px #000, 0 1px 2px #000; /* (readable on a light face through the lighter box) */
 }
-#op-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+#op-lines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; } /* (clipped to the viewport: not drawn over the panels) */
 .op-handle {
   --c: #1e88ff;
   position: absolute; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%; box-sizing: border-box;
@@ -211,6 +211,7 @@ kbd {
   cursor: grab; user-select: none; touch-action: none;
 }
 .op-handle[hidden] { display: none; }
+.op-handle.pinned { opacity: 0.7; } /* (its place is off the viewport: held at the edge, still draggable) */
 .op-handle:hover { filter: brightness(1.25); }
 .op-handle.box { width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 3px; }
 .op-handle.grip { width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 2px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55); }

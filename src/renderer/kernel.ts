@@ -3705,7 +3705,29 @@ export function isEdgeLoop(shape: Shape, edgeIds: number[]): boolean {
 }
 
 /** A flat face filling a closed loop of a shape's edges (see isEdgeLoop); throws if the loop isn't flat. */
-export function edgeLoopFace(shape: Shape, edgeIds: number[]): Face {
+/** edgeLoopFace's faces (or its refusal) by solid and loop, for Offset: it asks again for each value while dragging. */
+const loopFaces = new WeakMap<object, Map<string, Face | Error>>();
+
+export function edgeLoopFace(shape: Shape, edgeIds: number[], onFace?: number, seamless = false): Face {
+  // (remembered only for Offset — it passes `onFace` and only reads the face; Duplicate makes an object of it: its own)
+  if (onFace === undefined) return edgeLoopFaceOnce(shape, edgeIds, onFace, seamless);
+  const key = `${onFace}|${seamless}|${[...edgeIds].sort((a, b) => a - b).join(",")}`;
+  let known = loopFaces.get(shape.wrapped);
+  if (!known) loopFaces.set(shape.wrapped, (known = new Map()));
+  let got = known.get(key);
+  if (got === undefined) {
+    try {
+      got = edgeLoopFaceOnce(shape, edgeIds, onFace, seamless);
+    } catch (e) {
+      got = e instanceof Error ? e : new Error(String(e));
+    }
+    known.set(key, got);
+  }
+  if (got instanceof Error) throw got;
+  return got;
+}
+
+function edgeLoopFaceOnce(shape: Shape, edgeIds: number[], onFace?: number, seamless = false): Face {
   // Each edge made again from its curve where it is (a solid's edges can carry a placement — e.g. a part moved — which
   // Offset would apply a second time, the grown face landing off its plane), keeping its kind (a circle stays one).
   const edges = chainEdges(shape.edges.filter((e) => edgeIds.includes(e.hashCode))).map((e) => {
@@ -3719,15 +3741,46 @@ export function edgeLoopFace(shape: Shape, edgeIds: number[]): Face {
     }
   });
   const notFlat = "Duplicate: the loop isn't flat — only a flat loop becomes a face";
-  let face: Face;
+  const host = onFace === undefined ? undefined : findFace(shape, onFace);
+  const build = (w: Wire): Face => {
+    try {
+      const f = makeFace(w);
+      if (f.geomType === "PLANE" && isValidShape(f)) return f;
+    } catch {
+      // (on the face it lies on, below)
+    }
+    if (!host || host.geomType !== "PLANE") throw new Error(notFlat);
+    // With `onFace`: on the plane of the flat face the loop lies on — an outline fitted by an older Scale stands a hair
+    // off a plane of its own (Offset on the top oval of a stretched cylinder pushed up: refused as not flat)
+    const mk = new oc.BRepBuilderAPI_MakeFace(oc.BRep_Tool.Surface(host.wrapped) as never, w.wrapped, true);
+    try {
+      if (!mk.IsDone()) throw new Error(notFlat);
+      const f = mended(cast(mk.Face()) as unknown as Shape3D) as unknown as Face;
+      if (!isValidShape(f)) throw new Error(notFlat);
+      return f;
+    } finally {
+      mk.delete();
+    }
+  };
+  let wire = assembleWire(edges);
+  if (seamless) {
+    // (`seamless`: the loop as one periodic curve — see seamlessEdge)
+    const tmp: { delete(): void }[] = [];
+    try {
+      const plane = host?.geomType === "PLANE" ? { o: host.center.toTuple() as V3, n: norm3(host.normalAt(host.center).toTuple() as V3) } : undefined;
+      const one = seamlessEdge(wire, <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o), plane);
+      if (one) wire = assembleWire([one]);
+    } finally {
+      for (const o of tmp) o.delete();
+    }
+  }
+  let face = build(wire);
+  // A hole's edges run the other way round: its face would shrink when Offset grows it — then the wire turned round
   try {
-    const wire = assembleWire(edges);
-    face = makeFace(wire);
-    // A hole's edges run the other way round: its face would shrink when Offset grows it — then the wire turned round
     const area = measureArea(face), grown = measureArea(offsetPlanar(face, 1e-3 * Math.sqrt(area), true));
-    if (grown < area) face = makeFace(cast(wire.wrapped.Reversed()) as Wire);
+    if (grown < area) face = build(cast(wire.wrapped.Reversed()) as Wire);
   } catch {
-    throw new Error(notFlat);
+    // (no grown copy to tell by: as it is)
   }
   if (face.geomType !== "PLANE" || !isValidShape(face)) throw new Error(notFlat);
   return face;
@@ -5002,10 +5055,13 @@ function offsetLoose(face: Face, distance: number, round: boolean, noHoles = fal
 
 function offsetPlanar(face: Face, distance: number, round: boolean): Face {
   const join = round ? oc.GeomAbs_JoinType.GeomAbs_Arc : oc.GeomAbs_JoinType.GeomAbs_Intersection;
-  const mk = new oc.BRepOffsetAPI_MakeOffset(face.wrapped, join, false);
+  // A face moved by a location (a solid placed with a shift, e.g. a cylinder from a saved file): offset where it sits
+  // unmoved, then moved back — given the moved face, the outline came out moved twice (29.59 mm above the face)
+  const loc = face.wrapped.Location(), moved = !loc.IsIdentity();
+  const mk = new oc.BRepOffsetAPI_MakeOffset(moved ? oc.TopoDS.Face(face.wrapped.Located(new oc.TopLoc_Location(), false)) : face.wrapped, join, false);
   mk.Perform(distance, 0);
   const done = mk.IsDone();
-  const result = done ? mk.Shape() : null;
+  const result = done ? (moved ? mk.Shape().Located(loc, false) : mk.Shape()) : null;
   mk.delete();
   const wires = result ? [...iterTopo(result, "wire")].map((w) => cast(w) as Wire) : [];
   if (!wires.length) throw new Error("Offset: the face vanishes at this distance");
@@ -5086,11 +5142,20 @@ function edgeChains(shape: Shape, edgeIds: number[], faceId: number): EdgeChain[
 /**
  * New flat strips in the plane of `faceId`, centred on the selected straight edges and
  * reaching `distance` to each side. Connected edges give one strip with mitred corners;
- * a closed loop gives a ring (a face with a hole).
+ * edges that all make closed loops (circles, rounded outlines too) give a ring on each loop
+ * instead: `distance` outside it (negative: inside). Curved edges: closed loops only.
  */
 export function offsetEdges(shape: Shape, edgeIds: number[], faceId: number, distance: number): Face[] {
-  if (distance <= 1e-9) throw new Error("distance must be greater than 0");
   const n = norm3(findFace(shape, faceId)!.normalAt().toTuple() as V3);
+  const loops = closedLoops(shape, edgeIds, faceId);
+  if (loops) {
+    if (Math.abs(distance) <= 1e-9) throw new Error("distance must not be 0");
+    return loops.map((loop) => loopRing(shape, faceId, loop, n, distance));
+  }
+  if (curvedEdgesOn(shape, edgeIds, faceId)) {
+    throw new Error("Offset: with curved edges, select closed loops (a circle, a whole outline) — or straight edges only");
+  }
+  if (distance <= 1e-9) throw new Error("distance must be greater than 0");
   return edgeChains(shape, edgeIds, faceId).map(({ pts, outs, closed }) => {
     const shift = (d: number) => pts.map((p, k) => {
       let m: V3;
@@ -5123,9 +5188,153 @@ export function offsetEdges(shape: Shape, edgeIds: number[], faceId: number, dis
   });
 }
 
+/** The selected edges of the flat face `faceId`, true if any of them is curved (a circle, an arc). */
+function curvedEdgesOn(shape: Shape, edgeIds: number[], faceId: number): boolean {
+  const face = findFace(shape, faceId);
+  return !!face && face.edges.some((e) => edgeIds.includes(e.hashCode) && e.geomType !== "LINE");
+}
+
+/**
+ * The selected edges of a flat face as closed loops (a circle alone, or edges joined end to end back to the start),
+ * each in order round the loop; null if they don't all make closed loops (an open chain, a branch).
+ */
+function closedLoops(shape: Shape, edgeIds: number[], faceId: number): Edge[][] | null {
+  const face = findFace(shape, faceId);
+  if (!face || face.geomType !== "PLANE") throw new Error("Offset: the edges must lie on a flat face");
+  const edges = face.edges.filter((e) => edgeIds.includes(e.hashCode));
+  if (edges.length !== edgeIds.length) throw new Error("Offset: the edges must lie on one flat face");
+  const ends = (e: Edge) => [ptKey(e.startPoint.toTuple() as V3), ptKey(e.endPoint.toTuple() as V3)];
+  const count = new Map<string, number>();
+  for (const e of edges) for (const k of ends(e)) count.set(k, (count.get(k) ?? 0) + 1);
+  if ([...count.values()].some((c) => c !== 2)) return null;
+  const left = [...edges], loops: Edge[][] = [];
+  while (left.length) {
+    const first = left.shift()!;
+    const loop = [first];
+    let [start, end] = ends(first);
+    while (end !== start) {
+      const i = left.findIndex((e) => ends(e).includes(end));
+      if (i < 0) break;
+      const e = left.splice(i, 1)[0];
+      const [a, b] = ends(e);
+      end = a === end ? b : a;
+      loop.push(e);
+    }
+    loops.push(loop);
+  }
+  return loops;
+}
+
+/**
+ * The closed loops among the selected edges of a flat face as polygons in its plane (points along each curve), for
+ * Offset's quick ring while dragging: the plane's frame (`o` on it, `x`, `y` across it) and each loop's points in it.
+ * Null unless the edges all make closed loops.
+ */
+export function loopOutlines(shape: Shape, edgeIds: number[], faceId: number): { o: V3; x: V3; y: V3; loops: [number, number][][] } | null {
+  const loops = closedLoops(shape, edgeIds, faceId);
+  const face = findFace(shape, faceId);
+  if (!loops || !face) return null;
+  const o = face.center.toTuple() as V3, n = norm3(face.normalAt(face.center).toTuple() as V3);
+  const x = norm3(cross3(Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0], n)), y = cross3(n, x);
+  const near = (a: V3, b: V3) => Math.hypot(...sub3(a, b)) < 1e-4;
+  return {
+    o, x, y,
+    loops: loops.map((loop) => {
+      const pts: V3[] = [];
+      for (const e of loop) {
+        const N = e.geomType === "LINE" ? 1 : 64;
+        let run = Array.from({ length: N + 1 }, (_, i) => e.pointAt(i / N).toTuple() as V3);
+        // (each piece the way round that starts where the last one ended)
+        if (pts.length && !near(run[0], pts[pts.length - 1])) run = run.reverse();
+        else if (!pts.length && loop.length > 1 && !near(run[run.length - 1], loop[1].startPoint.toTuple() as V3) && !near(run[run.length - 1], loop[1].endPoint.toTuple() as V3)) run = run.reverse();
+        pts.push(...(pts.length ? run.slice(1) : run));
+      }
+      if (pts.length > 1 && near(pts[0], pts[pts.length - 1])) pts.pop();
+      return pts.map((p) => { const d = sub3(p, o); return [dot3(d, x), dot3(d, y)] as [number, number]; });
+    }),
+  };
+}
+
+/** True if the selected edges of the flat face all make closed loops (Offset: a ring outside / inside each, see loopRing). */
+export function edgesMakeLoops(shape: Shape, edgeIds: number[], faceId: number): boolean {
+  try {
+    return closedLoops(shape, edgeIds, faceId) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** A flat ring on a closed loop of edges: between the loop and the loop grown by `distance` (negative: shrunk, a ring inside). */
+/** Per solid and loop: true if Offset last needed the loop as one periodic curve (see loopRing) — tried first next time. */
+const loopSeamless = new WeakMap<object, Map<string, boolean>>();
+
+function loopRing(shape: Shape, faceId: number, loop: Edge[], n: V3, distance: number): Face {
+  const vanish = "Offset: the distance is too large — the inside vanishes";
+  const ids = loop.map((e) => e.hashCode), key = `${faceId}|${[...ids].sort((a, b) => a - b).join(",")}`;
+  let seamKnown = loopSeamless.get(shape.wrapped);
+  if (!seamKnown) loopSeamless.set(shape.wrapped, (seamKnown = new Map()));
+  const known = seamKnown.get(key);
+  // (its edges made again where they are: see edgeLoopFace — remembered, as which way worked: dragging asks each frame)
+  const attempt = (seamless: boolean) => {
+    const inside = edgeLoopFace(shape, ids, faceId, seamless);
+    return { inside, off: offsetPlanar(inside, distance, false) };
+  };
+  // Plain and as one periodic curve (a stretched cylinder's top oval: OpenCascade's offset failed on its seam) — each
+  // works at some distances only (that oval: plain inward and a little out, periodic far out): the one that worked last
+  // first, then the other
+  let r: { inside: Face; off: Face } | null = null;
+  for (const seamless of known ? [true, false] : [false, true]) {
+    try {
+      r = attempt(seamless);
+      seamKnown.set(key, seamless);
+      break;
+    } catch {
+      // (the other way, else too large)
+    }
+  }
+  if (!r) throw new Error(vanish);
+  const { inside, off } = r;
+  const size = (f: Face) => Math.max(f.boundingBox.width, f.boundingBox.height, f.boundingBox.depth);
+  if (distance < 0 && size(off) >= size(inside)) throw new Error(vanish);
+  const [big, small] = distance > 0 ? [off, inside] : [inside, off];
+  // The ring: the larger outline with the smaller as its hole (a boolean per drag frame was slow); a boolean if that
+  // doesn't come out right (its area the difference of the two)
+  let f: Face | null = null;
+  const want = measureArea(big) - measureArea(small);
+  const hole = small.clone().outerWire(), rim = big.clone().outerWire(); // (outerWire deletes the face it's called on)
+  for (const h of [hole, cast(hole.wrapped.Reversed()) as Wire]) {
+    try {
+      const c = makeFace(rim, [h]);
+      if (isValidShape(c) && Math.abs(measureArea(c) - want) <= 1e-6 * Math.max(1, want)) {
+        f = c;
+        break;
+      }
+    } catch {
+      // (the other way round, else the boolean)
+    }
+  }
+  if (!f) {
+    const faces = boolean("cut", big as unknown as Shape3D, deepCopy(small as unknown as Shape3D)).faces; // (a copy: the remembered face stays as it is)
+    if (faces.length !== 1 || !isValidShape(faces[0])) throw new Error("Offset: the result is not a valid face (distance too large?)");
+    f = faces[0];
+  }
+  if (dot3(f.normalAt().toTuple() as V3, n) < 0) f = f.flipOrientation();
+  return f;
+}
+
 /** Drag axis for an edge offset: from the middle of the first selected edge, outward. */
 export function offsetEdgesAxis(shape: Shape, edgeIds: number[], faceId: number): { origin: V3; dir: V3 } | null {
   try {
+    const loops = closedLoops(shape, edgeIds, faceId);
+    if (loops) {
+      // (closed loops: square to the first edge at its middle, out of the loop — + grows it)
+      const face = findFace(shape, faceId)!, edge = loops[0][0], inside = edgeLoopFace(shape, loops[0].map((e) => e.hashCode), faceId);
+      const n = norm3(face.normalAt(face.center).toTuple() as V3);
+      const p = edge.pointAt(0.5).toTuple() as V3, o = norm3(cross3(edge.tangentAt(0.5).toTuple() as V3, n));
+      const bb = inside.boundingBox, eps = 1e-3 * Math.max(bb.width, bb.height, bb.depth, 1);
+      const within = measureDistanceBetween(inside, makeVertex(add3(p, [o[0] * eps, o[1] * eps, o[2] * eps]))) < eps / 10;
+      return { origin: p, dir: within ? [-o[0], -o[1], -o[2]] : o };
+    }
     const { pts, outs } = edgeChains(shape, edgeIds, faceId)[0];
     const [a, b] = pts;
     return { origin: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2], dir: outs[0] };
@@ -6276,6 +6485,12 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
     const all = [target, ...tools].flatMap((x) => solidPieces(x));
     if (all.length > tools.length + 1) [target, tools] = [all[0], all.slice(1)];
   }
+  // Prisms made again (see below) first: made before the first try (it changes the solids) and before the copies (a
+  // broken Offset ring copied, its copy made again came out failing), the others copied for it
+  const prisms = [target, ...tools].map((x) => periodicPrism(x));
+  // (copied by writing out and reading back: a sphere copied with deepCopy failed against the prism, read back it didn't)
+  const readBack = (i: number) => deserialize(serializeShape(i ? tools[i - 1] : target)) as Solid;
+  const plain = prisms.some((x) => x) ? prisms.map((x, i) => x ? null : readBack(i)) : null;
   // (a failed try changes the solids it was given — even non-destructive —, so a retry needs copies made before it)
   const spheres = [target, ...tools].some((x) => sphereCenter(x)) ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
   // Union / intersect come out the same whichever solid goes first, but OpenCascade can fail one way round and not the
@@ -6313,8 +6528,217 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       // (the first try's result / error below)
     }
   }
+  // A prism with a stretched cylinder's side (one closed B-spline swept, start and end at a seam): made again with the
+  // curve periodic, and the whole boolean again with it — its other ways too (a sphere turned...): nothing in it to make
+  // again now, so it doesn't come back here. Where the other solid crossed the seam OpenCascade failed
+  // ("Geom_RectangularTrimmedSurface::U parameters out of range": a box cut by an oval post, a sphere by an oval ring)
+  // (in steps: the tool's pieces all taken away / joined / kept in common one after the other; the target's joined first)
+  if (plain) {
+    try {
+      const [t0, ...rest] = prisms.map((x, i) => x ?? [plain[i]!]);
+      const t = t0.length === 1 ? t0[0] : booleanOp("union", t0[0], t0.slice(1));
+      let r: Solid;
+      if (op === "intersect") {
+        r = t;
+        for (const pcs of rest) r = booleanOp("intersect", r, [pcs.length === 1 ? pcs[0] : booleanOp("union", pcs[0], pcs.slice(1))]);
+      } else r = booleanOp(op, t, rest.flat());
+      if (isValidShape(r)) return r;
+    } catch {
+      // (the first try's result / error below)
+    }
+  }
   if (first) return first;
   throw failed;
+}
+
+/**
+ * A closed loop of curves (one closed B-spline, or curves in pieces with no corner) as one periodic curve — no seam
+ * where a boolean or an offset trips over a start and end ("Geom_RectangularTrimmedSurface::U parameters out of range").
+ * Null for a loop with straight edges or corners, or nothing to change (already periodic, a circle). `keep`: frees what
+ * it makes with the caller's.
+ */
+function seamlessEdge(w: Wire, keep: <T>(o: T) => T, plane?: { o: V3; n: V3 }): Edge | null {
+  // (`plane`: the points put onto it — an outline fitted by an older Scale wanders a few µm off its plane, and
+  // OpenCascade's flat offset gave up on it)
+  const onPlane = (p: V3): V3 => {
+    if (!plane) return p;
+    const d = dot3(sub3(p, plane.o), plane.n);
+    return [p[0] - d * plane.n[0], p[1] - d * plane.n[1], p[2] - d * plane.n[2]];
+  };
+  const T = oc.GeomAbs_CurveType;
+  const plainKind = (k: unknown) => k === T.GeomAbs_Line || k === T.GeomAbs_Circle || k === T.GeomAbs_Ellipse || k === T.GeomAbs_BSplineCurve;
+  // A smooth closed loop of curves in pieces (an Offset ring's inside, a stretched cylinder's outline in pieces): one
+  // periodic curve through it all — offset curves fitted piece by piece met with gaps the boolean failed on; kept, the
+  // result broke once written out
+  const smoothLoop = (w: Wire): Edge | null => {
+    const ads = w.edges.map((e) => keep(new oc.BRepAdaptor_Curve(e.wrapped)));
+    if (ads.some((ad) => ad.GetType() === T.GeomAbs_Line)) return null;
+    const N = w.edges.length === 1 ? 192 : 96;
+    let runs = w.edges.map((e, k) => {
+      const ad = ads[k], u0 = ad.FirstParameter(), u1 = ad.LastParameter(), pts: V3[] = [];
+      for (let i = 0; i <= N; i++) {
+        const p = keep(ad.Value(u0 + ((u1 - u0) * i) / N));
+        pts.push(onPlane([p.X(), p.Y(), p.Z()]));
+      }
+      return e.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? pts.reverse() : pts;
+    });
+    // In order round the loop, end to start
+    const near = (a: V3, b: V3) => Math.hypot(...sub3(a, b)) < 1e-4;
+    const loop: V3[] = [...runs[0]];
+    runs = runs.slice(1);
+    while (runs.length) {
+      const end = loop[loop.length - 1];
+      let i = runs.findIndex((r) => near(r[0], end));
+      if (i < 0) {
+        i = runs.findIndex((r) => near(r[r.length - 1], end));
+        if (i < 0) return null;
+        runs[i].reverse();
+      }
+      const dir0 = sub3(end, loop[loop.length - 2]), dir1 = sub3(runs[i][1], runs[i][0]);
+      if (dot3(norm3(dir0), norm3(dir1)) < Math.cos((2 * Math.PI) / 180)) return null; // (a corner: not one smooth curve)
+      loop.push(...runs.splice(i, 1)[0].slice(1));
+    }
+    if (loop.length < 8 || !near(loop[0], loop[loop.length - 1])) return null;
+    loop.pop();
+    const arr = keep(new oc.NCollection_Array1_gp_Pnt(1, loop.length));
+    loop.forEach((p, i) => arr.SetValue(i + 1, keep(new oc.gp_Pnt(p[0], p[1], p[2]))));
+    // (the points' handle array not freed here: OpenCascade counts its own references to it — freed by hand as well,
+    // memory came out corrupted and a later boolean failed)
+    const ip = keep(new oc.GeomAPI_Interpolate(new oc.NCollection_HArray1_gp_Pnt(arr), true, 1e-7));
+    ip.Perform();
+    if (!ip.IsDone()) return null;
+    return cast(keep(new oc.BRepBuilderAPI_MakeEdge(ip.Curve() as never)).Edge()) as Edge;
+  };
+  // One closed B-spline made periodic as it is (exact — a stretched circle), if that left it in place: on others
+  // (an Offset outline) it moved the curve (0.16 % of the volume) — then a periodic curve through it
+  const periodicCopy = (w: Wire): Edge | null => {
+    if (w.edges.length !== 1) return null;
+    const ad = keep(new oc.BRepAdaptor_Curve(w.edges[0].wrapped));
+    if (ad.GetType() !== T.GeomAbs_BSplineCurve) return null;
+    const c = new oc.Geom_BSplineCurve(keep(ad.BSpline())); // (a copy where the edge sits: never edit the shape's own curve)
+    if (!c.IsClosed() || c.IsPeriodic()) return null;
+    const u0 = ad.FirstParameter(), u1 = ad.LastParameter(), before: V3[] = [];
+    for (let i = 0; i < 24; i++) {
+      const p = keep(ad.Value(u0 + ((u1 - u0) * i) / 24));
+      before.push([p.X(), p.Y(), p.Z()]);
+    }
+    c.SetPeriodic();
+    const moved = before.some((q, i) => {
+      const p = keep(c.Value(u0 + ((u1 - u0) * i) / 24));
+      return Math.hypot(p.X() - q[0], p.Y() - q[1], p.Z() - q[2]) > 1e-6;
+    });
+    return moved ? null : (cast(keep(new oc.BRepBuilderAPI_MakeEdge(c as never)).Edge()) as Edge);
+  };
+  function isClosedBSpline(w: Wire): boolean {
+    if (w.edges.length !== 1) return false;
+    const ad = keep(new oc.BRepAdaptor_Curve(w.edges[0].wrapped));
+    if (ad.GetType() !== T.GeomAbs_BSplineCurve) return false;
+    const c = keep(ad.BSpline());
+    return c.IsClosed() && !c.IsPeriodic();
+  }
+  return (plane ? null : periodicCopy(w)) ?? (w.edges.length > 1 || !plainKind(keep(new oc.BRepAdaptor_Curve(w.edges[0].wrapped)).GetType()) || isClosedBSpline(w) ? smoothLoop(w) : null);
+}
+
+/**
+ * A straight prism, or prisms stacked (flat faces on parallel planes — a cap may be in pieces —, the sides square between
+ * them: a cylinder stretched to an oval, an oval ring from Offset pushed up, a narrower oval pushed up off a wider one)
+ * made again as one prism per step, each from its section: each edge made anew where it sits, a closed loop of curves
+ * made one periodic curve (no seam for a boolean to trip over). Null for any other solid, if there was no seam to take
+ * out, or if the pieces don't come out the same (size, volume).
+ */
+function periodicPrism(s: Solid): Solid[] | null {
+  const faces = s.faces;
+  const flat = faces.filter((f) => f.geomType === "PLANE"), sides = faces.filter((f) => f.geomType !== "PLANE");
+  if (flat.length < 2 || !sides.length || sides.some((f) => f.geomType !== "EXTRUSION_SURFACE" && f.geomType !== "BSPLINE_SURFACE")) return null;
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    const n = norm3(flat[0].normalAt(flat[0].center).toTuple() as V3);
+    const facing = (f: Face) => dot3(norm3(f.normalAt(f.center).toTuple() as V3), n);
+    if (flat.some((f) => Math.abs(Math.abs(facing(f)) - 1) > 1e-7)) return null;
+    // The sides square to the flat faces: swept along them, or a free-form side standing straight up (a stretched cylinder's)
+    for (const f of sides) {
+      if (f.geomType === "EXTRUSION_SURFACE") {
+        const d = keep(keep(new oc.BRepAdaptor_Surface(f.wrapped, true)).Direction());
+        if (Math.abs(Math.abs(d.X() * n[0] + d.Y() * n[1] + d.Z() * n[2]) - 1) > 1e-7) return null;
+      } else {
+        for (const u of [0.1, 0.5, 0.9]) {
+          for (const v of [0.1, 0.5, 0.9]) {
+            if (Math.abs(dot3(norm3(f.normalAt(f.pointOnSurface(u, v)).toTuple() as V3), n)) > 1e-6) return null;
+          }
+        }
+      }
+    }
+    // The heights of the flat faces, along n; each step's section: of the one face facing out at either end, the larger
+    // (a shoulder between two steps is a ring — not a section, and smaller than the section it lies on)
+    const level = (f: Face) => dot3(f.center.toTuple() as V3, n);
+    const levels: number[] = [];
+    for (const l of flat.map(level).sort((x, y) => x - y)) if (!levels.length || l - levels[levels.length - 1] > 1e-4) levels.push(l);
+    if (levels.length < 2) return null;
+    const at = (l: number, dir: number) => flat.filter((f) => Math.abs(level(f) - l) <= 1e-4 && facing(f) * dir > 0);
+    const steps: { face: Face; from: number; h: number }[] = [];
+    for (let i = 0; i + 1 < levels.length; i++) {
+      const ends = [at(levels[i], -1), at(levels[i + 1], 1)].filter((x) => x.length === 1).map((x) => x[0]);
+      const face = ends.sort((x, y) => measureArea(y) - measureArea(x))[0];
+      if (!face) return null;
+      steps.push({ face, from: level(face), h: (Math.abs(level(face) - levels[i]) <= 1e-4 ? levels[i + 1] : levels[i]) - level(face) });
+    }
+    let seamed = false;
+    const T = oc.GeomAbs_CurveType;
+    const plainKind = (k: unknown) => k === T.GeomAbs_Line || k === T.GeomAbs_Circle || k === T.GeomAbs_Ellipse || k === T.GeomAbs_BSplineCurve;
+    const remade = (w: Wire): Wire => {
+      const one = seamlessEdge(w, keep);
+      if (one) {
+        seamed = true;
+        return assembleWire([one]);
+      }
+      const edges = w.edges.map((e) => {
+        const ad = keep(new oc.BRepAdaptor_Curve(e.wrapped));
+        if (!plainKind(ad.GetType())) {
+          // An offset curve (an Offset ring's inside) and the like: a cubic fitted through it — a boolean's result with
+          // the offset curve was whole, but broken once written out and read back (as the app's background kernel does)
+          const u0 = ad.FirstParameter(), u1 = ad.LastParameter(), N = 256;
+          const arr = keep(new oc.NCollection_Array1_gp_Pnt(1, N + 1));
+          for (let i = 0; i <= N; i++) arr.SetValue(i + 1, keep(ad.Value(u0 + ((u1 - u0) * i) / N)));
+          const fit = keep(new oc.GeomAPI_PointsToBSpline(arr, 3, 8, oc.GeomAbs_Shape.GeomAbs_C2, 1e-5));
+          if (!fit.IsDone()) throw new Error("no fit");
+          const ne = keep(new oc.BRepBuilderAPI_MakeEdge(fit.Curve() as never)).Edge();
+          return cast(e.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? ne.Reversed() : ne) as Edge;
+        }
+        // (made again from its curve where it is: a placement on the shape isn't carried along — see edgeLoopFace)
+        const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0);
+        const ne = keep(new oc.BRepBuilderAPI_MakeEdge(c.returnValue as never, c.First as never, c.Last as never)).Edge();
+        return cast(e.wrapped.Orientation() === oc.TopAbs_Orientation.TopAbs_REVERSED ? ne.Reversed() : ne) as Edge;
+      });
+      return assembleWire(edges);
+    };
+    const pieces: Solid[] = [];
+    for (const { face: cap, h } of steps) {
+      const [outer, ...holes] = [cap.clone().outerWire(), ...cap.clone().innerWires()].map(remade); // (outerWire / innerWires delete the face)
+      let face = makeFace(outer);
+      if (holes.length) {
+        const cut = boolean("cut", face as unknown as Shape3D, holes.map((x) => makeFace(x) as unknown as Shape3D)).faces;
+        if (cut.length !== 1) return null;
+        face = cut[0];
+      }
+      // (mended: offset-curve edges — an Offset ring's inside — can come out a hair off their faces)
+      pieces.push(mended(basicFaceExtrusion(face, new Vector([n[0] * h, n[1] * h, n[2] * h])) as unknown as Solid));
+    }
+    if (!seamed) return null; // (nothing a boolean trips over: not this trouble)
+    // (a solid already broken — an Offset ring made on a pushed-up face: its volume a little off — the same size will do;
+    // its edges were made again exactly where they were)
+    const v0 = solidVolume(s), v1 = pieces.reduce((t, x) => t + solidVolume(x), 0);
+    const b0 = s.boundingBox.bounds.flat(), bs = pieces.map((x) => x.boundingBox.bounds.flat());
+    const b1 = b0.map((_, i) => (i < 3 ? Math.min : Math.max)(...bs.map((b) => b[i])));
+    // (0.5 %: a free-form side fitted through points by an older Scale stands a little off its caps' outlines — the
+    // caps' sections came to 0.12 % less than the solid; a wrong section is far more)
+    const tol = isValidShape(s) ? 5e-3 : 1e-2;
+    return pieces.every((x) => isValidShape(x)) && b0.every((c, i) => Math.abs(c - b1[i]) < 1e-3) && Math.abs(v1 - v0) <= tol * Math.max(1, v0) ? pieces : null;
+  } catch {
+    return null;
+  } finally {
+    for (const o of tmp) o.delete();
+  }
 }
 
 /** A whole sphere (one spherical face): its centre, else null. */

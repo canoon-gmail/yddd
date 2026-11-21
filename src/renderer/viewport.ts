@@ -134,6 +134,22 @@ const CHUNK_SIZE = 256;
 /** The most triangles kept from views no longer on screen (see Viewport.kept): ~3 million, ~70 MB. */
 const KEEP_TRIANGLES = 3_000_000;
 const COLORS = { solid: 0x9aa5b1, region: 0x6f9bd1, hover: 0xc0c4c8, selected: 0xf0d78c };
+/** How far a selected face's colour is drawn as it is, not shaded (the right side / underside stayed a dull brown-yellow). */
+const SELECTED_UNSHADED = 0.75;
+
+/** A batched face material whose selected faces keep their light yellow from any side: the shaded colour mixed towards the plain one by the vertices' `glow` attribute (1 on a selected face). */
+function unshadedWhenSelected<M extends THREE.Material>(mat: M): M {
+  mat.onBeforeCompile = (sh) => {
+    sh.vertexShader = sh.vertexShader
+      .replace("#include <common>", "#include <common>\nattribute float glow;\nvarying float vGlow;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGlow = glow;");
+    sh.fragmentShader = sh.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying float vGlow;")
+      .replace("#include <opaque_fragment>", `outgoingLight = mix(outgoingLight, diffuseColor.rgb, vGlow * ${SELECTED_UNSHADED.toFixed(2)});\n#include <opaque_fragment>`);
+  };
+  mat.customProgramCacheKey = () => "glow";
+  return mat;
+}
 /** Flat faces: a light see-through fill (the grid shows through) under a blue outline; drawn without depth, so two on one plane blend, not flicker. */
 const REGION_OPACITY = 0.5;
 /** While sketching: how much of their usual opacity the model's bodies and edges keep (they can't be edited there). */
@@ -193,8 +209,8 @@ export class Viewport {
   private glowXf: { ids: Set<number>; matrix: THREE.Matrix4 } | null = null;
   private glow: SilhouetteGlow | null = null;
   private batchMats = {
-    solid: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }),
-    region: new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: REGION_OPACITY, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
+    solid: unshadedWhenSelected(new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0.05, roughness: 0.55, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 })),
+    region: unshadedWhenSelected(new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, metalness: 0, roughness: 0.7, side: THREE.DoubleSide, transparent: true, opacity: REGION_OPACITY, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })),
   };
   private ghostRoot = new THREE.Group();
   private overlayRoot = new THREE.Group();
@@ -1071,7 +1087,7 @@ export class Viewport {
         nv += v.vertexCount;
         ni += v.mesh.geometry.index!.count;
       }
-      const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), col = new Float32Array(nv * 3);
+      const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), col = new Float32Array(nv * 3), glow = new Float32Array(nv);
       const idx = new Uint32Array(ni);
       const geom = new THREE.BufferGeometry();
       const mesh = new THREE.Mesh(geom, op < 1 ? this.lookMat(kind, null, op, true) : kind === "face" ? this.batchMats.region : this.batchMats.solid);
@@ -1096,6 +1112,7 @@ export class Viewport {
       geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
       geom.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
       geom.setAttribute("color", new THREE.BufferAttribute(col, 3));
+      geom.setAttribute("glow", new THREE.BufferAttribute(glow, 1)); // (1: selected, see unshadedWhenSelected)
       geom.setIndex(new THREE.BufferAttribute(idx, 1));
       geom.computeBoundingSphere();
       c.root.add(mesh);
@@ -1170,7 +1187,7 @@ export class Viewport {
     let m = this.lookMats.get(key);
     if (!m) {
       const from = batched ? (kind === "face" ? this.batchMats.region : this.batchMats.solid) : kind === "face" ? this.mats.regionFaces[0] : this.mats.faces[0];
-      const mat = from.clone();
+      const mat = batched ? unshadedWhenSelected(from.clone()) : from.clone(); // (clone() leaves the shader change behind)
       if (color !== null) mat.color.setHex(color);
       m = { mat, kind, op };
       this.lookMats.set(key, m);
@@ -2589,6 +2606,11 @@ export class Viewport {
       arr[k + 2] = c.b;
     }
     attr.needsUpdate = true;
+    const glow = v.slot.mesh.geometry.getAttribute("glow") as THREE.BufferAttribute | undefined;
+    if (glow) {
+      (glow.array as Float32Array).fill(level === 2 && fi >= 0 ? 1 : 0, v.slot.vOffset + a, v.slot.vOffset + b); // (a selected face; a whole solid keeps its shading)
+      glow.needsUpdate = true;
+    }
   }
 
   private setOverlayLines(lines: LineSegments2, pts: number[]): void {
@@ -2684,6 +2706,13 @@ export class Viewport {
         this.markDirty(id);
       }
     }
+    this.requestRender();
+  }
+
+  /** Quick preview objects (e.g. Offset's ring while dragging) in place of the preview: cleared with it. */
+  showGhostObjects(objects: THREE.Object3D[]): void {
+    this.clearGhost();
+    for (const o of objects) this.ghostRoot.add(o);
     this.requestRender();
   }
 
