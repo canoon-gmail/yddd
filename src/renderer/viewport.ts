@@ -203,7 +203,8 @@ export class Viewport {
   /** The X / Y / Z axis lines (left out of a snapshot). */
   private axes: THREE.Line[] = [];
   /** Dimension text labels (HTML over the canvas) and the 3D point each one sits at. */
-  private dimLabels: { el: HTMLElement; at: THREE.Vector3 }[] = [];
+  /** `tip`: a label's point its arrow points at (hidden behind a solid: the label hidden too). */
+  private dimLabels: { el: HTMLElement; at: THREE.Vector3; parts: THREE.Object3D[]; tip?: THREE.Vector3 }[] = [];
   private dimLabelBox: HTMLElement | null = null;
   /** Labels' arrowheads (filled cones, the tip at `at`): kept the same size on screen. */
   private labelArrows: { mesh: THREE.Mesh; at: THREE.Vector3 }[] = [];
@@ -494,11 +495,13 @@ export class Viewport {
     this.flushBatches();
     this.sizeLabelArrows();
     this.sizeGuideDashes();
+    // (dimensions behind a solid hidden before drawing, not a frame later: they flickered)
+    this.camera.updateMatrixWorld();
+    this.placeDimLabels();
     this.renderer.render(this.scene, this.camera);
     this.renderGlow();
     this.renderOverlay();
     this.renderInset();
-    this.placeDimLabels();
     this.placeLockIcons();
     const key = this.camera.matrixWorld.elements.join() + this.camera.projectionMatrix.elements.join() + this.canvas.width + "x" + this.canvas.height;
     if (key !== this.viewKey) {
@@ -1888,6 +1891,7 @@ export class Viewport {
     }
     this.dimLabelBox.innerHTML = "";
     this.dimLabels = [];
+    this.dimBehind = { key: "", at: 0, hidden: [] };
     this.labelArrows = [];
     const all: [ShownDimension, number][] = list.map((d, i) => [d, i]);
     for (const p of preview ? (Array.isArray(preview) ? preview : [preview as ShownDimension]) : []) all.push([p, -1]);
@@ -1897,18 +1901,21 @@ export class Viewport {
       if (len < 1e-9 && d.kind !== "label") continue;
       const u = b.clone().sub(a).normalize();
       const color = i === selected ? 0xffd166 : d.kind === "label" ? 0x7ee787 : i < 0 ? 0x8fd3ff : 0xe6e9ee;
+      // (its lines and arrowhead: hidden with its text)
+      const parts: THREE.Object3D[] = [];
       const draw = (pts: THREE.Vector3[]) => {
         const lines = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
         lines.renderOrder = 16;
         this.dimRoot.add(lines);
+        parts.push(lines);
       };
-      const label = (text: string, at: THREE.Vector3) => {
+      const label = (text: string, at: THREE.Vector3, tip?: THREE.Vector3) => {
         const el = document.createElement("div");
         el.className = `dim-label${d.kind === "label" ? " note" : ""}${i === selected ? " sel" : ""}${i < 0 ? " preview" : ""}`;
         el.dataset.i = String(i);
         el.textContent = text;
         this.dimLabelBox!.appendChild(el);
-        this.dimLabels.push({ el, at });
+        this.dimLabels.push({ el, at, parts, tip });
       };
       if (d.kind === "angle") {
         const g = angleDimLines(a, b, new THREE.Vector3(...d.c!), d.r ?? 1);
@@ -1928,9 +1935,10 @@ export class Viewport {
           head.position.copy(a);
           head.renderOrder = 16;
           this.dimRoot.add(head);
+          parts.push(head);
           this.labelArrows.push({ mesh: head, at: a });
         }
-        label(d.text || "Label", b);
+        label(d.text || "Label", b, a);
         continue;
       }
       if (d.kind === "radius") {
@@ -1960,6 +1968,8 @@ export class Viewport {
       draw(pts);
       label(d.text ?? num(len), a2.clone().add(b2).multiplyScalar(0.5));
     }
+    // (new texts on their points — those behind a solid hidden — before the page is painted)
+    this.placeDimLabels();
     this.requestRender();
   }
 
@@ -2001,13 +2011,33 @@ export class Viewport {
     for (const { mesh, at } of this.labelArrows) mesh.scale.setScalar(this.worldPerPixel(at) * 20);
   }
 
-  /** Keep the dimension texts on their points (after every render: the camera may have moved). */
+  /** Which dimension texts are behind a solid, for the view / scene in `key` (worked out at most every 60 ms while orbiting). */
+  private dimBehind: { key: string; at: number; hidden: boolean[] } = { key: "", at: 0, hidden: [] };
+  private dimBehindTimer = 0;
+
+  /** Keep the dimension texts on their points (before every render: the camera may have moved); a text behind a solid hidden. */
   private placeDimLabels(): void {
     if (!this.dimLabels.length) return;
+    const key = this.camera.matrixWorld.elements.join() + this.camera.projectionMatrix.elements.join() + this.stamp + "/" + this.xray;
+    const c = this.dimBehind;
+    if (key !== c.key || c.hidden.length !== this.dimLabels.length) {
+      const now = performance.now();
+      if (c.hidden.length === this.dimLabels.length && now - c.at < 60) {
+        // (orbiting: the last answer for now, worked out again shortly)
+        if (!this.dimBehindTimer) this.dimBehindTimer = window.setTimeout(() => ((this.dimBehindTimer = 0), this.requestRender()), 60);
+      } else {
+        const n = this.dimLabels.length, tips = this.dimLabels.map((x) => x.tip ?? x.at);
+        const h = this.hiddenPoints([...this.dimLabels.map((x) => x.at), ...tips]);
+        this.dimBehind = { key, at: now, hidden: h.slice(0, n).map((x, i) => x || h[n + i]) };
+      }
+    }
+    const behind = this.dimBehind.hidden;
     const p = new THREE.Vector3();
-    for (const { el, at } of this.dimLabels) {
+    for (const [i, { el, at, parts }] of this.dimLabels.entries()) {
       p.copy(at).project(this.camera);
-      const off = p.z < -1 || p.z > 1;
+      // (the one being typed in stays)
+      const hide = behind[i] && el.tagName !== "INPUT", off = p.z < -1 || p.z > 1 || hide;
+      for (const o of parts) o.visible = !hide;
       el.style.display = off ? "none" : "";
       if (!off) el.style.transform = `translate(${((p.x + 1) / 2) * this.width}px, ${((1 - p.y) / 2) * this.height}px) translate(-50%, -50%)`;
     }
