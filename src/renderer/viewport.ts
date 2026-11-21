@@ -1379,11 +1379,13 @@ export class Viewport {
     bodies?: Set<number>,
     /** Also the bodies hidden under an op's preview (see snappable). */
     underGhost = false,
-  ): { view: BodyView; edgeId: number; point: THREE.Vector3; d: number } | null {
+    /** Only edges whose nearest point lies at this screen offset (px) from the cursor. */
+    toward?: (ox: number, oy: number) => boolean,
+  ): { view: BodyView; edgeId: number; point: THREE.Vector3; d: number; ox: number; oy: number } | null {
     const r = this.canvas.getBoundingClientRect();
     const px = cx - r.left;
     const py = cy - r.top;
-    let best: { view: BodyView; edgeId: number; point: THREE.Vector3; d: number } | null = null;
+    let best: { view: BodyView; edgeId: number; point: THREE.Vector3; d: number; ox: number; oy: number } | null = null;
     let bestD = tol;
     const pickRay = this.ray(cx, cy);
     const a = new THREE.Vector3();
@@ -1403,8 +1405,9 @@ export class Viewport {
           const dx = bx - ax, dy = by - ay;
           const len2 = dx * dx + dy * dy;
           const t = len2 > 0 ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / len2)) : 0;
-          const d = Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
-          if (d >= bestD) continue;
+          const ox = ax + dx * t - px, oy = ay + dy * t - py;
+          const d = Math.hypot(ox, oy);
+          if (d >= bestD || (toward && !toward(ox, oy))) continue;
           a.fromArray(v.edgePos, k * 3);
           b.fromArray(v.edgePos, k * 3 + 3);
           // Closest point of the 3D segment to the pick ray (lerping by the screen-space t is off under perspective).
@@ -1415,7 +1418,7 @@ export class Viewport {
             if (this.behind(depth, faceDist)) continue; // hidden behind a face
           }
           bestD = d;
-          best = { view: v, edgeId: v.edgeIds[e], point: world, d };
+          best = { view: v, edgeId: v.edgeIds[e], point: world, d, ox, oy };
         }
       }
     }
@@ -1427,6 +1430,21 @@ export class Viewport {
     const hit = this.raycastFaces(cx, cy, undefined, this.locked);
     const e = this.pickEdge(cx, cy, hit ? hit.distance : null, tol, (b, id) => !this.isCoil(b, id) && only(b, id));
     return e ? { kind: "edge", body: e.view.body.id, id: e.edgeId, point: e.point } : null;
+  }
+
+  /** Second click on the selected solid `body`: its edge near the cursor, else its face under the cursor — but in the
+   *  middle of a face narrow on screen (another edge across from the cursor, about as near), the face. */
+  drillPick(cx: number, cy: number, body: number): Pick | null {
+    const hit = this.raycastFaces(cx, cy, body, this.locked);
+    if (hit?.view.body.kind === "mesh") return null; // (a mesh: always whole)
+    const ok = (b: number, id: number) => b === body && !this.isCoil(b, id);
+    const e = this.pickEdge(cx, cy, hit ? hit.distance : null, undefined, ok);
+    const across = e && hit
+      ? this.pickEdge(cx, cy, hit.distance, 2 * e.d, (b, id) => id !== e.edgeId && ok(b, id), undefined, false,
+          (ox, oy) => ox * e.ox + oy * e.oy < -0.5 * Math.hypot(ox, oy) * e.d)
+      : null;
+    if (e && !across) return { kind: "edge", body, id: e.edgeId, point: e.point };
+    return hit ? { kind: "face", body, id: hit.faceId, point: hit.point } : null;
   }
 
   /** A thread's helix (see coiled): not hovered or picked in Edge mode. */

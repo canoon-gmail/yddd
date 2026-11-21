@@ -1256,8 +1256,8 @@ export class App implements ToolHost {
     } else if (this.mode === "body" && this.selection.length === 1 && sameItem(this.selection[0], item)) {
       // Second click on the selected solid: drill down to the edge (if close to one) or face under the cursor.
       // (Only on that body: another solid in the same place — e.g. a copy — must not get in the way.)
-      let sub = this.viewport.pick(e.clientX, e.clientY, "edge", item.body);
-      if (!sub) sub = this.viewport.pick(e.clientX, e.clientY, "face", item.body);
+      // (in the middle of a narrow face, both its long edges near: the face)
+      const sub = this.viewport.drillPick(e.clientX, e.clientY, item.body);
       if (sub && sub.body === item.body && sub.kind !== "body" && !this.wholeSolidOf(sub)) {
         this.setMode(sub.kind === "edge" ? "edge" : "face");
         this.setSelection([{ kind: sub.kind, body: sub.body, id: sub.id }]);
