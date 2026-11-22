@@ -6500,6 +6500,8 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   // Union / intersect come out the same whichever solid goes first, but OpenCascade can fail one way round and not the
   // other ("Courbes non jointives": two solids sharing round edges — a slot's plate and its rim) — copies for the swap
   const swap = (op === "union" || op === "intersect") && tools.length ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
+  // Part of a sphere (a cap) in one: copies for its spheres made again — see spheresRemade
+  const capped = [target, ...tools].some((x) => !sphereCenter(x) && x.faces.some((f) => f.geomType === "SPHERE")) ? [target, ...tools].map((x) => deepCopy(x) as Solid) : null;
   let first: Solid | null = null, failed: unknown = null;
   try {
     first = booleanOpOnce(op, target, tools);
@@ -6528,6 +6530,19 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
     try {
       const r = booleanOpOnce(op, swap.tools[0], [swap.target, ...swap.tools.slice(1)]);
       if (isValidShape(r)) return r;
+    } catch {
+      // (the first try's result / error below)
+    }
+  }
+  // Again with the spheres of a cap made again, their poles off the edges
+  if (capped) {
+    try {
+      const remade = capped.map((x) => spheresRemade(x));
+      if (remade.some(Boolean)) {
+        const [t, ...rest] = capped.map((x, i) => remade[i] ?? x);
+        const r = booleanOpOnce(op, t, rest);
+        if (isValidShape(r)) return r;
+      }
     } catch {
       // (the first try's result / error below)
     }
@@ -6749,6 +6764,71 @@ function periodicPrism(s: Solid): Solid[] | null {
 function sphereCenter(x: Solid): V3 | null {
   const f = x.faces;
   return f.length === 1 && f[0].geomType === "SPHERE" ? curvedFaceCenter(f[0]) : null;
+}
+
+/**
+ * A solid with part of a sphere (a cap: a sphere cut flat) with each spherical face made again on the same sphere, its
+ * pole in the middle of the face — the same edges. Null if it has none or the remade solid isn't the same. A cap whose
+ * pole lay on its rim (a sphere turned, then cut) failed every union with a cylinder it sat on; turning it about its
+ * axis kept the pole on the rim.
+ */
+function spheresRemade(x: Solid): Solid | null {
+  const faces = x.faces.filter((f) => f.geomType === "SPHERE");
+  if (!faces.length || sphereCenter(x) || [...iterTopo(x.wrapped, "shell")].length !== 1) return null;
+  const tmp: { delete(): void }[] = [];
+  const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
+  try {
+    // (sewn up again: the mended face has its own copies of the edges)
+    const sew = keep(new oc.BRepBuilderAPI_Sewing(1e-6, true, true, true, false));
+    for (const f of x.faces) if (f.geomType !== "SPHERE") sew.Add(f.wrapped);
+    for (const f of faces) {
+      const s = keep(keep(new oc.BRepAdaptor_Surface(f.wrapped, true)).Sphere()), loc = keep(s.Location());
+      const c: V3 = [loc.X(), loc.Y(), loc.Z()], mid = sub3(f.center.toTuple() as V3, c);
+      if (Math.hypot(...mid) < 1e-6 * s.Radius()) return null;
+      const n = norm3(mid), sph = keep(new oc.gp_Sphere(keep(new oc.gp_Ax3(keep(new oc.gp_Pnt(...c)), keep(new oc.gp_Dir(...n)))), s.Radius()));
+      const fwd = oc.TopoDS.Face((f.wrapped as unknown as { Oriented(o: unknown): unknown }).Oriented(oc.TopAbs_Orientation.TopAbs_FORWARD) as never);
+      const outer = oc.BRepTools.OuterWire(fwd);
+      const holes: unknown[] = [];
+      const ex = keep(new oc.TopExp_Explorer(fwd, oc.TopAbs_ShapeEnum.TopAbs_WIRE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+      for (; ex.More(); ex.Next()) if (!(ex.Current() as unknown as { IsSame(o: unknown): boolean }).IsSame(outer)) holes.push(oc.TopoDS.Wire(ex.Current()));
+      // (the loops kept on the old face's side or turned over: on a sphere either way round bounds a face — the one
+      // with the old face's area)
+      const build = (flip: boolean) => {
+        const w = (o: unknown) => (flip ? oc.TopoDS.Wire((o as { Reversed(): unknown }).Reversed() as never) : o);
+        const mk = keep(new oc.BRepBuilderAPI_MakeFace(sph, w(outer) as never, true));
+        for (const h of holes) mk.Add(w(h) as never);
+        if (!mk.IsDone()) return null;
+        const fix = keep(new oc.ShapeFix_Face(mk.Face()));
+        fix.Perform();
+        const made = mended(new Face(fix.Face()) as never) as unknown as Face;
+        return isValidShape(made) && Math.abs(measureArea(made) - area) <= 1e-3 * area ? made : null;
+      };
+      const area = measureArea(f);
+      let made = build(false) ?? build(true);
+      if (!made) return null;
+      // (facing the way the old face did)
+      if (dot3(made.normalAt(made.center).toTuple() as V3, f.normalAt(f.center).toTuple() as V3) < 0) made = made.flipOrientation();
+      sew.Add(made.wrapped);
+    }
+    sew.Perform(keep(new oc.Message_ProgressRange()));
+    const shells = [...iterTopo(sew.SewedShape(), "shell")];
+    if (shells.length !== 1) return null;
+    const made = keep(new oc.BRepBuilderAPI_MakeSolid(oc.TopoDS.Shell(shells[0] as never))).Solid();
+    oc.BRepLib.OrientClosedSolid(made);
+    const r = mended(cast(made) as Solid);
+    const v0 = solidVolume(x);
+    return r.wrapped.ShapeType() === oc.TopAbs_ShapeEnum.TopAbs_SOLID && isValidShape(r) && Math.abs(solidVolume(r) - v0) <= 1e-4 * Math.abs(v0) ? r : null;
+  } catch {
+    return null;
+  } finally {
+    for (const o of tmp) {
+      try {
+        o.delete();
+      } catch {
+        // already owned by OpenCascade
+      }
+    }
+  }
 }
 
 function booleanOpOnce(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
