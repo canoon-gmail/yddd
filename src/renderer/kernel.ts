@@ -4977,8 +4977,12 @@ function inPieces(e: Edge): Edge[] {
   return out;
 }
 
-/** `s` as it is if OpenCascade's check passes, else mended with ShapeFix_Shape (when that passes). */
-function mended<T extends Shape3D>(s: T): T {
+/**
+ * `s` as it is if OpenCascade's check passes, else mended with ShapeFix_Shape (when that passes). Also for a background
+ * kernel's result read back here: written out as text (15 digits) a face whose loops nearly touch (a ring offset to about
+ * its curve's radius) could come back failing the check — Sphere minus such a ring was refused as "broken".
+ */
+export function mended<T extends Shape3D>(s: T): T {
   if (isValidShape(s as unknown as Shape)) return s;
   const fx = new oc.ShapeFix_Shape(s.wrapped), pr = new oc.Message_ProgressRange();
   try {

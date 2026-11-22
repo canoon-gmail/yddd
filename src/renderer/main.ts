@@ -11,6 +11,7 @@ import {
   circleOf,
   curveBounds,
   isValidShape,
+  mended,
   faceEdgeIds,
   moveEdges,
   splitFaceByLine,
@@ -2661,9 +2662,9 @@ export class App implements ToolHost {
         for (const host of hosts) {
           const flats = byHost.get(host.id)!;
           const solid = this.solidOf(host.id, "Punch");
-          const result = heavy && this.bgKernel.ready
+          const result = mended(heavy && this.bgKernel.ready
             ? solidFrom(await this.bgKernel.run({ op: "punch", target: serializeShape(solid), flats: flats.map((f) => serializeShape(f.shape)) }))
-            : punchHoles(solid, flats.map((f) => f.shape));
+            : punchHoles(solid, flats.map((f) => f.shape)));
           if (!isValidShape(result)) throw new Error(`OpenCascade couldn't punch "${host.name}" exactly (the result came out broken) — nothing changed`);
           made.set(host.id, solidPieces(result).map((p) => ({ p, v: solidVolume(p) })).sort((a, b) => b.v - a.v).map(({ p }) => p));
         }
@@ -4696,9 +4697,10 @@ export class App implements ToolHost {
     const tools = toolIds.map((id) => this.doc.get(id)!);
     if (target.kind === "face" || tools.some((b) => b.kind === "face")) return this.applyFaceBoolean(op, target, tools, label, keep);
     // A heavy one (`background`) in the background kernel: the app stays live, the busy dialog's Stop ends it
-    const result = background && this.bgKernel.ready
+    // (mended: the background kernel's result, valid there, can come back here failing the check — see mended)
+    const result = mended(background && this.bgKernel.ready
       ? solidFrom(await this.bgKernel.run({ op: "boolean", kind: op, target: serializeShape(this.solidOf(targetId, label)), tools: toolIds.map((id) => serializeShape(this.solidOf(id, label))) }))
-      : booleanOp(op, this.solidOf(targetId, label), toolIds.map((id) => this.solidOf(id, label)));
+      : booleanOp(op, this.solidOf(targetId, label), toolIds.map((id) => this.solidOf(id, label))));
     if (!this.doc.get(targetId) || toolIds.some((id) => !this.doc.get(id))) return null; // (gone meanwhile)
     if (result.faces.length === 0) throw new Error("result is empty (the solids do not overlap?)");
     // (broken even at 10× size — see booleanOp: not kept, e.g. a union that silently lost the second solid)
