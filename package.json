@@ -17,7 +17,7 @@
     "dev": "npm run build:main && node scripts/dev.mjs",
     "bench": "npm run build && YDDD_STRESS=${N:-2000} YDDD_BENCH=1 electron .",
     "bench:ops": "npm run build && YDDD_BENCH=ops electron .",
-    "dist": "npm run build && electron-builder --linux deb",
+    "dist": "npm run build && electron-builder --linux deb tar.gz",
     "dist:win": "npm run build && electron-builder --win zip --x64"
   },
   "devDependencies": {
