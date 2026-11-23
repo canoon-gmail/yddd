@@ -1670,7 +1670,7 @@ export class GuideTool implements Tool {
         objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), AXIS_COLORS[this.hoverAxis], 3, 0.5));
       } else if (this.hoverGuide) {
         const r2 = this.axisRef(this.hoverGuide.k, undefined, this.hoverGuide.o);
-        objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), 0xffd166));
+        objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), 0xffffff, 2, 0.45)); // (as a guide under the cursor in a sketch)
       }
     } else {
       const r = this.ref;

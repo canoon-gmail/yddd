@@ -42,7 +42,10 @@ export class KeyCast {
       return;
     }
     if (!this.on || (e.repeat && this.last?.text === this.name(e)) || ["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
-    const typed = e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.altKey && !e.metaKey;
+    // (Shift + a letter is a command — "Shift + g" — except while typing in a field)
+    const t = e.target as HTMLElement;
+    const field = t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable;
+    const typed = e.key.length === 1 && e.key !== " " && !e.ctrlKey && !e.altKey && !e.metaKey && !(e.shiftKey && /^[a-z]$/i.test(e.key) && !field);
     const l = this.last;
     if (typed && l?.typed && performance.now() - l.at < JOIN_MS && l.el.isConnected) {
       l.text += e.key;
@@ -53,7 +56,7 @@ export class KeyCast {
   }
 
   private name(e: KeyboardEvent): string {
-    const key = KEY_NAMES[e.key] ?? (e.key.length === 1 ? e.key.toUpperCase() : e.key);
+    const key = KEY_NAMES[e.key] ?? (e.key.length === 1 ? e.key.toLowerCase() : e.key); // (letters as typed without Shift: "Shift + g", "Ctrl + z")
     return [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.metaKey && "Meta", e.shiftKey && "Shift", key].filter(Boolean).join(" + ");
   }
 
