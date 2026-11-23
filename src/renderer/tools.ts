@@ -175,7 +175,7 @@ const snapValue = (n: number, step: number) => (step > 0 ? Math.round(n / step) 
 
 // ------------------------------------------------------------------ base class
 
-abstract class DrawTool implements Tool {
+export abstract class DrawTool implements Tool {
   abstract readonly name: string;
   protected abstract readonly hints: string[];
   protected stage = 0;
@@ -1535,8 +1535,8 @@ export interface EdgeSides {
  * click adds the guide line(s). Guides are snap targets (Ctrl) for drawing and moving.
  */
 const AXIS_COLORS = [0xe5484d, 0x30a46c, 0x3e8bff];
-/** Within ~4° of an axis on screen, a 2-point guide (or a measurement) locks onto it. */
-const AXIS_LOCK_COS = Math.cos((4 * Math.PI) / 180);
+/** Within ~2° of an axis on screen, a 2-point guide (or a measurement) locks onto it. */
+const AXIS_LOCK_COS = Math.cos((2 * Math.PI) / 180);
 
 /**
  * Axis lock: when the cursor's direction from `p1` is within a few degrees (on screen) of a world
@@ -1597,6 +1597,11 @@ export class GuideTool implements Tool {
   private across: { name: string; lo: number; hi: number } | null = null;
   /** The reference is a world axis (not an edge): no face, so the guide may go either side. */
   private onAxis = false;
+  /** Axis reference through this point: the origin for a world axis, a point on the guide for a guide parallel to one. */
+  private axisO = new THREE.Vector3();
+  private fromGuide = false;
+  /** Guide parallel to a world axis under the cursor (highlighted: click it for a guide parallel to it). */
+  private hoverGuide: { k: number; o: THREE.Vector3 } | null = null;
   /** Axis reference: where along the axis it was clicked (the offset line is drawn there), the last pointer event. */
   private axisAt = 0;
   private lastEvent: PointerEvent | null = null;
@@ -1616,7 +1621,7 @@ export class GuideTool implements Tool {
   private emitState(): void {
     const at = (p: THREE.Vector3) => `point (${p.toArray().map((n) => fmt(n)).join(", ")})`;
     const step = this.p1 ? "second" : this.ref ? "offset" : "start";
-    const from = this.p1 ? at(this.p1) : this.ref ? (this.onAxis ? `${"XYZ"[this.axisOf(this.ref).k]} axis` : "edge") : null;
+    const from = this.p1 ? at(this.p1) : this.ref ? (this.onAxis ? `${"XYZ"[this.axisOf(this.ref).k]} ${this.fromGuide ? "guide" : "axis"}` : "edge") : null;
     this.onState({ step, from, dist: this.dist, count: this.count });
   }
 
@@ -1663,6 +1668,9 @@ export class GuideTool implements Tool {
       else if (this.hoverAxis >= 0) {
         const r2 = this.axisRef(this.hoverAxis);
         objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), AXIS_COLORS[this.hoverAxis], 3, 0.5));
+      } else if (this.hoverGuide) {
+        const r2 = this.axisRef(this.hoverGuide.k, undefined, this.hoverGuide.o);
+        objs.push(this.host.viewport.glowLine(this.v(r2.a), this.v(r2.b), 0xffd166));
       }
     } else {
       const r = this.ref;
@@ -1674,7 +1682,7 @@ export class GuideTool implements Tool {
       }
       if (ax && this.dist > 1e-9) {
         // Offset line from the axis to the guide, in the colour of the direction it moves (X red, Y green, Z blue).
-        const p0 = new THREE.Vector3().setComponent(ax.k, this.axisAt);
+        const p0 = this.axisO.clone().setComponent(ax.k, this.axisAt);
         objs.push(line(p0, p0.clone().addScaledVector(this.v(r.inward), this.dist * this.count), AXIS_COLORS[ax.slide]));
       }
     }
@@ -1688,7 +1696,7 @@ export class GuideTool implements Tool {
         ? this.axisHint()
         : this.ref
         ? `Guide line: move across the face under the cursor (${this.host.viewport.snapTip("points / grid")}) · type a distance or Tab for distance / % / count · Enter / click add · Esc cancel`
-        : "Guide line: click a reference edge or an X / Y / Z axis (parallel guide), or click a point — corner / midpoint / centre, Ctrl: any snap — to draw a guide through two points (in Top / Front / Right view: anywhere)";
+        : "Guide line: click a reference edge, an X / Y / Z axis or a guide along one (parallel guide), or click a point — corner / midpoint / centre, Ctrl: any snap — to draw a guide through two points (in Top / Front / Right view: anywhere)";
     this.host.hint(this.typed ? `${t}   ⌨ ${this.typed}_` : t);
     this.emitState();
   }
@@ -1697,7 +1705,7 @@ export class GuideTool implements Tool {
     const { k, slide } = this.axisOf(this.ref!);
     const name = (i: number) => `${"XYZ"[i]} (${["red", "green", "blue"][i]})`;
     const other = k === 2 ? ` — press ${"XY"[1 - slide]} to move along ${"XY"[1 - slide]} instead` : "";
-    return `Guide parallel to the ${"XYZ"[k]} axis, moving along ${name(slide)}${other} · either side (${this.host.viewport.snapTip("points / grid")}) · type a distance or Tab for distance / count · Enter / click add · Esc cancel`;
+    return `Guide parallel to the ${"XYZ"[k]} ${this.fromGuide ? "guide" : "axis"}, moving along ${name(slide)}${other} · either side (${this.host.viewport.snapTip("points / grid")}) · type a distance or Tab for distance / count · Enter / click add · Esc cancel`;
   }
 
   /**
@@ -1760,11 +1768,12 @@ export class GuideTool implements Tool {
   }
 
   /**
-   * A world axis as a reference "edge": a long segment along it through the origin. X and Y
-   * guides slide on the ground (X along Y, Y along X — always at z = 0; G moves a guide anywhere
-   * else); a Z guide slides along X or Y, whichever faces the camera more. Either side, any distance.
+   * A world axis as a reference "edge": a long segment along it through the origin (or through `o`:
+   * a guide parallel to that axis). X and Y guides slide on the ground (X along Y, Y along X — at the
+   * reference's height; G moves a guide anywhere else); a Z guide slides along X or Y, whichever faces
+   * the camera more. Either side, any distance.
    */
-  private axisRef(k: number, slideAxis?: number): RefEdge {
+  private axisRef(k: number, slideAxis?: number, o: THREE.Vector3 = this.axisO): RefEdge {
     const vp = this.host.viewport;
     let slide = slideAxis ?? (k === 0 ? 1 : 0);
     if (k === 2 && slideAxis === undefined) {
@@ -1773,6 +1782,7 @@ export class GuideTool implements Tool {
     }
     const half = Math.max(500, vp.worldPerPixel(new THREE.Vector3()) * 1500);
     const a: V3 = [0, 0, 0], b: V3 = [0, 0, 0], inward: V3 = [0, 0, 0];
+    for (let i = 0; i < 3; i++) a[i] = b[i] = i === k ? 0 : o.getComponent(i);
     a[k] = -half;
     b[k] = half;
     inward[slide] = 1;
@@ -1784,13 +1794,22 @@ export class GuideTool implements Tool {
     return { k: r.a.findIndex((x, i) => x !== r.b[i]), slide: r.inward.findIndex((x) => x !== 0) };
   }
 
-  /** Where along world axis k the cursor ray passes closest (the point clicked on the axis). */
-  private alongAxis(e: PointerEvent, k: number): number {
+  /** Where along world axis k (through `o`) the cursor ray passes closest (the point clicked on the axis). */
+  private alongAxis(e: PointerEvent, k: number, o: THREE.Vector3 = this.axisO): number {
     const ray = this.host.viewport.ray(e.clientX, e.clientY);
     const d = new THREE.Vector3().setComponent(k, 1);
-    const b = ray.direction.dot(d), w = ray.origin;
+    const b = ray.direction.dot(d), w = ray.origin.clone().sub(o);
     const den = 1 - b * b;
     return den < 1e-9 ? 0 : (b * w.dot(ray.direction) - w.dot(d)) / den;
+  }
+
+  /** A guide parallel to a world axis under the cursor: that axis and a point on it (its axis coordinate 0), or null. */
+  private guideUnder(e: PointerEvent): { k: number; o: THREE.Vector3 } | null {
+    const g = this.host.viewport.guideLine(this.host.viewport.guideAt(e.clientX, e.clientY));
+    if (!g) return null;
+    const dir = g.b.clone().sub(g.a).normalize();
+    const k = [dir.x, dir.y, dir.z].findIndex((c) => Math.abs(c) > 0.9999);
+    return k < 0 ? null : { k, o: g.a.setComponent(k, 0) };
   }
 
   private edgeUnder(e: PointerEvent): EdgeSides | null {
@@ -1805,9 +1824,11 @@ export class GuideTool implements Tool {
       // how far across it the guide is ("· 50% across Box 1").
       const { k, slide } = this.axisOf(r);
       const signed = this.dist * r.inward[slide];
-      const at = new THREE.Vector3().setComponent(k, this.axisAt).addScaledVector(this.v(r.inward), this.dist);
-      const across = this.across ? ` · ${fmt(((signed - this.across.lo) / (this.across.hi - this.across.lo)) * 100)}% across ${this.across.name}` : "";
-      this.host.hud(`${"XYZ"[slide]} = ${fmt(signed)} mm${across}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
+      const pos = this.axisO.getComponent(slide) + signed;
+      const at = this.axisO.clone().setComponent(k, this.axisAt).addScaledVector(this.v(r.inward), this.dist);
+      const across = this.across ? ` · ${fmt(((pos - this.across.lo) / (this.across.hi - this.across.lo)) * 100)}% across ${this.across.name}` : "";
+      const label = this.fromGuide ? `${fmt(signed)} mm from guide · ${"XYZ"[slide]} = ${fmt(pos)}` : `${"XYZ"[slide]} = ${fmt(signed)} mm`;
+      this.host.hud(`${label}${across}${this.count > 1 ? ` ×${this.count}` : ""}`, at);
       this.emitState();
       return;
     }
@@ -1831,12 +1852,16 @@ export class GuideTool implements Tool {
       const h = sp ? null : this.edgeUnder(e);
       // No point or edge here: a world axis line under the cursor (a reference too).
       const ax = sp || h ? -1 : this.host.viewport.axisUnder(e.clientX, e.clientY);
+      // Else a guide along an axis (a reference like an axis).
+      const g = sp || h || ax >= 0 ? null : this.guideUnder(e);
       // Main view, nothing else here: a click starts a 2-point guide at this point.
-      const vpt = sp || h || ax >= 0 ? null : this.viewPoint(e);
+      const vpt = sp || h || ax >= 0 || g ? null : this.viewPoint(e);
       if (vpt) this.host.viewport.showSnapMarker({ point: vpt, kind: "axis" });
-      if (h?.faces[0].ref.id !== this.hoverSides?.faces[0].ref.id || ax !== this.hoverAxis) {
+      const gChanged = !g !== !this.hoverGuide || (g && this.hoverGuide && (g.k !== this.hoverGuide.k || !g.o.equals(this.hoverGuide.o)));
+      if (h?.faces[0].ref.id !== this.hoverSides?.faces[0].ref.id || ax !== this.hoverAxis || gChanged) {
         this.hoverSides = h;
         this.hoverAxis = ax;
+        this.hoverGuide = g;
         this.draw();
       }
       return;
@@ -1849,7 +1874,8 @@ export class GuideTool implements Tool {
       const k = r.a.findIndex((x, i) => x !== r.b[i]);
       const slide = r.inward.findIndex((x) => x !== 0);
       const nk = [0, 1, 2].find((j) => j !== k && j !== slide)!;
-      const plane = new THREE.Plane(new THREE.Vector3().setComponent(nk, 1), 0);
+      const o = this.axisO;
+      const plane = new THREE.Plane(new THREE.Vector3().setComponent(nk, 1), -o.getComponent(nk));
       const vp = this.host.viewport;
       const sp = vp.snapping(e) ? vp.snapPoint(e.clientX, e.clientY) : null;
       vp.showSnapMarker(sp);
@@ -1857,11 +1883,11 @@ export class GuideTool implements Tool {
       // behind it in a slanted view); and how far across that solid the guide is.
       const hit = vp.faceUnder(e.clientX, e.clientY);
       let d: number;
-      if (sp) d = sp.point.getComponent(slide);
+      if (sp) d = sp.point.getComponent(slide) - o.getComponent(slide);
       else {
         const p = hit ? hit.point : vp.ray(e.clientX, e.clientY).intersectPlane(plane, new THREE.Vector3());
         if (!p) return;
-        d = snapValue(p.getComponent(slide), this.host.snapStep(e));
+        d = snapValue(p.getComponent(slide) - o.getComponent(slide), this.host.snapStep(e));
       }
       const inward: V3 = [0, 0, 0];
       inward[slide] = d < 0 ? -1 : 1;
@@ -1919,19 +1945,24 @@ export class GuideTool implements Tool {
       const h = this.edgeUnder(e);
       if (!h) {
         const ax = this.host.viewport.axisUnder(e.clientX, e.clientY);
-        const vpt = ax < 0 ? this.viewPoint(e) : null;
+        const g = ax < 0 ? this.guideUnder(e) : null;
+        const vpt = ax < 0 && !g ? this.viewPoint(e) : null;
         if (vpt) {
           this.p1 = vpt;
           this.draw();
           this.updateHint();
           return;
         }
-        if (ax < 0) return this.host.hint("Guide line: click a straight edge next to a flat face, or an X / Y / Z axis — or, in Top / Front / Right view, any two points");
-        this.ref = this.axisRef(ax);
+        if (ax < 0 && !g) return this.host.hint("Guide line: click a straight edge next to a flat face, an X / Y / Z axis or a guide along one — or, in Top / Front / Right view, any two points");
+        const k = g ? g.k : ax;
+        this.axisO = g ? g.o : new THREE.Vector3();
+        this.fromGuide = !!g;
+        this.ref = this.axisRef(k);
         this.onAxis = true;
-        this.axisAt = this.alongAxis(e, ax);
+        this.axisAt = this.alongAxis(e, k);
         this.dist = 0;
         this.hoverAxis = -1;
+        this.hoverGuide = null;
         this.draw();
         this.updateHint();
         return;

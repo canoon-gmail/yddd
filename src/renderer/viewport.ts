@@ -2110,6 +2110,12 @@ export class Viewport {
     return best;
   }
 
+  /** Guide line i's ends (copies), or null. */
+  guideLine(i: number): { a: THREE.Vector3; b: THREE.Vector3 } | null {
+    const g = this.guides[i];
+    return g ? { a: g.a.clone(), b: g.b.clone() } : null;
+  }
+
   /** Grid step used to round points snapped onto the world axis lines. */
   axisSnapStep = 1;
 
@@ -2335,9 +2341,13 @@ export class Viewport {
     return out;
   }
 
-  /** Keep only points not hidden behind any body (as seen from the camera), not counting the bodies in `skip`. */
+  /**
+   * Keep only points not hidden behind any body (as seen from the camera), not counting the bodies in `skip` — nor
+   * hidden ones or see-through ones (a picture under the model, seen from below, hid every mark); in X-ray none are hidden.
+   */
   visiblePoints<T extends { point: THREE.Vector3 }>(pts: T[], skip?: Set<number>): T[] {
-    const meshes = [...this.views.values()].filter((v) => !skip?.has(v.body.id)).map((v) => v.mesh);
+    if (this.xray) return pts;
+    const meshes = [...this.views.values()].filter((v) => this.snappable(v) && this.opacityOf(v.body.id) >= 1 && !skip?.has(v.body.id)).map((v) => v.mesh);
     const eye = this.camera.position;
     const tol = Math.max(0.05, (eye.distanceTo(this.controls.target) * 2e-3) / this.depthScale);
     return pts.filter((p) => {

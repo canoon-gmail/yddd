@@ -181,7 +181,9 @@ import {
 } from "./kernel";
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
 import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, type TransformResult, type GizmoFrame, type SnapKind } from "./viewport";
-import { BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type TextJob, type Tool, type ToolHost, type PropField } from "./tools";
+import { DrawTool, BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type TextJob, type Tool, type ToolHost, type PropField } from "./tools";
+import { KeyCast } from "./keycast";
+import { Stopwatch } from "./stopwatch";
 import { ICONS, KNIFE_CURSOR, MEASURE_CURSOR, TAPE_CURSOR } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
@@ -441,6 +443,8 @@ export class App implements ToolHost {
       if (cmd) this.run(cmd);
     });
     this.bindViewportEvents();
+    new KeyCast($("viewport"), () => this.tool instanceof DrawTool); // (hidden: Ctrl + Shift + F1)
+    new Stopwatch($("viewport")); // (hidden: Ctrl + Shift + F5)
     this.bindKeys();
     this.bindStatusBar();
 
