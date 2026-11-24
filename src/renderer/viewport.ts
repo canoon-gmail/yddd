@@ -152,6 +152,8 @@ function unshadedWhenSelected<M extends THREE.Material>(mat: M): M {
 }
 /** Flat faces: a light see-through fill (the grid shows through) under a blue outline; drawn without depth, so two on one plane blend, not flicker. */
 const REGION_OPACITY = 0.5;
+/** A body being moved or turned (G, Shift+G, R, Shift+R): see-through, at most this opaque. */
+const MOVING_OPACITY = 0.5;
 /** While sketching: how much of their usual opacity the model's bodies and edges keep (they can't be edited there). */
 const DIM = 0.35;
 
@@ -1034,6 +1036,14 @@ export class Viewport {
 
   /** Bodies being dragged by the gizmo render on their own (so they can move); all others render batched. */
   private placeView(v: BodyView): void {
+    // (drawn after the batches: a copy just made by Shift+D lies on its original — the same depth — and the batch drawn
+    // later won, hiding the copy's selected colour)
+    v.mesh.renderOrder = this.xfSet.has(v.body.id) ? 1 : 0;
+    // (moved / turned by G, Shift+G, R, Shift+R: see-through, so what's behind / under it — and the snap points there — shows while placing it)
+    if (!this.isPicture(v)) {
+      const mats = this.viewMats(v.body);
+      v.mesh.material = this.xfSet.has(v.body.id) ? mats.map((m) => this.seeThrough(m)) : mats;
+    }
     if (this.xfSet.has(v.body.id) || this.isPicture(v)) this.bodyRoot.add(v.group);
     else v.group.removeFromParent();
   }
@@ -1172,6 +1182,21 @@ export class Viewport {
   /** A body's colour when not hovered / selected. */
   private baseColor(b: Body): number {
     return this.looks.get(b.id)?.color ?? (b.kind === "face" ? COLORS.region : COLORS.solid);
+  }
+
+  private seeThroughMats = new WeakMap<THREE.Material, THREE.Material>();
+
+  /** `m` see-through, for a body being moved (its opacity as it is now, at most MOVING_OPACITY). */
+  private seeThrough(m: THREE.Material): THREE.Material {
+    let c = this.seeThroughMats.get(m);
+    if (!c) {
+      this.seeThroughMats.set(m, (c = m.clone()));
+      c.transparent = true;
+      c.depthWrite = false;
+      c.needsUpdate = true; // (once: its shader made the first time; the opacity is only a value after that)
+    }
+    c.opacity = Math.min(m.opacity, MOVING_OPACITY);
+    return c;
   }
 
   /** A body's own mesh's materials (normal, hover, selected), used while it is moved on its own. */

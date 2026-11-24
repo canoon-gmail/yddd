@@ -95,8 +95,8 @@ export interface OpDrag {
   shift?: { key: string; origin: V3; dir: V3; unit: number };
   /** Other fields set to the same value while dragging (e.g. Scale's edge grip: X and Y together). */
   also?: string[];
-  /** Fields set when the handle is grabbed (e.g. Scale: the grip opposite stays put). */
-  sets?: Record<string, number>;
+  /** Fields set when the handle is grabbed (e.g. Scale: the grip opposite stays put) — or worked out from the values then (`shift`: Shift held). */
+  sets?: Record<string, number> | ((values: Record<string, number>, shift: boolean) => Record<string, number>);
   /** Where the handle is shown for these values (default: origin + dir × value) — e.g. a Scale grip on the scaled box. */
   at?: (values: Record<string, number>) => V3;
   /** Double-click on the handle: the value to set and apply at once (e.g. Push/Pull through to the face behind), or why not. */

@@ -341,7 +341,7 @@ export class App implements ToolHost {
     result: OpOutcome | null;
     key: string;
     /** Drag reference: line parameter and field value when the mouse first moved. */
-    anchor?: { x: number; y: number; v: number; /** where along the drag axis the cursor was (see opDrag) */ s?: number | null };
+    anchor?: { x: number; y: number; v: number; /** where along the drag axis the cursor was (see opDrag) */ s?: number | null; /** the `also` fields' values then */ also?: number[] };
     /** Full-precision value of a snapped drag; used while the field still shows its rounded text. */
     exact?: { key: string; shown: string; value: number };
     dragQueued?: boolean;
@@ -577,7 +577,8 @@ export class App implements ToolHost {
         h.classList.add("dragging");
         this.op.anchor = undefined;
         this.op.active = i;
-        const sets = dragsOf(this.op.spec)[i]?.sets;
+        const given = dragsOf(this.op.spec)[i]?.sets;
+        const sets = typeof given === "function" ? given(this.opValues().values, e.shiftKey) : given;
         let changed = false;
         for (const [k, v] of Object.entries(sets ?? {})) {
           const input = this.op.inputs.find((x) => x.dataset.key === k);
@@ -2099,7 +2100,8 @@ export class App implements ToolHost {
       return tRay > 0 ? sAxis : null;
     };
     if (!op.anchor) {
-      op.anchor = { x: e.clientX, y: e.clientY, v: this.opNum(input) || 0, s: along(e.clientX, e.clientY) };
+      const alsoNow = (drag.also ?? []).map((k) => op.inputs.find((i) => i.dataset.key === k)).map((i) => (i ? this.opNum(i) || 0 : 0));
+      op.anchor = { x: e.clientX, y: e.clientY, v: this.opNum(input) || 0, s: along(e.clientX, e.clientY), also: alsoNow };
       return;
     }
     const unit = this.dragUnit(drag);
@@ -2117,10 +2119,15 @@ export class App implements ToolHost {
     }
     if (drag.min !== undefined) v = Math.max(drag.min, v);
     op.exact = sp ? { key: drag.key, shown: fmt(v), value: v } : undefined;
-    const also = (drag.also ?? []).map((k) => op.inputs.find((i) => i.dataset.key === k)).filter((i): i is OpInput => !!i);
-    if (fmt(v) === input.value && also.every((i) => i.value === input.value)) return;
+    // (the `also` fields by the same ratio, from their values when grabbed — Scale's edge grip after X alone was 34%: Y,
+    // still 100%, jumped to 34% when it was set the same)
+    const also = (drag.also ?? []).map((k, n) => {
+      const i = op.inputs.find((x) => x.dataset.key === k), was = op.anchor!.also?.[n];
+      return i ? { i, value: fmt(was !== undefined && op.anchor!.v > 1e-9 ? (was * v) / op.anchor!.v : v) } : null;
+    }).filter((x): x is { i: OpInput; value: string } => !!x);
+    if (fmt(v) === input.value && also.every((a) => a.i.value === a.value)) return;
     input.value = fmt(v);
-    for (const i of also) i.value = input.value;
+    for (const a of also) a.i.value = a.value;
     const units = drag.units ?? (drag.unit ? "%" : "mm");
     this.hud(sp ? `${fmt(v)} ${units} · ${sp.kind}` : `${fmt(v)} ${units}`, drag.at ? new THREE.Vector3(...drag.at(this.opValues().values)) : O.clone().addScaledVector(D, v * unit));
     // (worked out in the background kernel, with an instant preview — Push/Pull on a free-form solid: that one while
@@ -3857,13 +3864,25 @@ export class App implements ToolHost {
     // Shift while dragging (or "From the centre"): about the middle. Fixed point per axis: px / py / pz, -1 low side · 0 middle · 1 high side.
     const centre: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
     const side = (i: number, g: number) => (g < 0 ? lo[i] : g > 0 ? hi[i] : centre[i]);
-    const pk = ["px", "py", "pz"] as const;
+    // A grip grabbed after scaling (another grip, or typed): the box stays where it is — its opposite side the new fixed
+    // point, plus a shift (tx / ty / tz) so that side is where it's shown now (it jumped: the scale so far redone about it)
+    const pk = ["px", "py", "pz"] as const, tk = ["tx", "ty", "tz"] as const;
     const factors = (v: Record<string, number>): V3 => [v.s * (v.x ?? 100) / 1e4, v.s * (v.y ?? 100) / 1e4, v.s * (v.z ?? 100) / 1e4];
     const pivotOf = (v: Record<string, number>): V3 => (v.center ? centre : [0, 1, 2].map((i) => side(i, v[pk[i]])) as V3);
+    const shiftOf = (v: Record<string, number>): V3 => [0, 1, 2].map((i) => v[tk[i]] ?? 0) as V3;
     /** Where box point `p` goes for these values. */
     const moved = (v: Record<string, number>, p: V3): V3 => {
-      const f = factors(v), o = pivotOf(v);
-      return [0, 1, 2].map((i) => o[i] + f[i] * (p[i] - o[i])) as V3;
+      const f = factors(v), o = pivotOf(v), t = shiftOf(v);
+      return [0, 1, 2].map((i) => o[i] + t[i] + f[i] * (p[i] - o[i])) as V3;
+    };
+    /** Grabbing grip `g` (Shift: about the centre): its fixed point, and the shift keeping the box where it is. */
+    const grab = (g: number[]) => (v: Record<string, number>, shift: boolean): Record<string, number> => {
+      // (the "From the centre" box itself follows Shift on the first drag step — see opDrag)
+      const out: Record<string, number> = {};
+      for (const i of [0, 1, 2]) out[pk[i]] = g[i] !== 0 ? -g[i] : v[pk[i]];
+      const o = pivotOf({ ...out, center: shift ? 1 : 0 }), now = moved(v, o);
+      for (const i of [0, 1, 2]) out[tk[i]] = +(now[i] - o[i]).toFixed(9);
+      return out;
     };
     const flat = [0, 1, 2].map((i) => size[i] < 1e-9);
     const live = [0, 1, 2].filter((i) => !flat[i]);
@@ -3884,7 +3903,7 @@ export class App implements ToolHost {
       drags.push({
         origin: from, dir, unit: len / 100, look: "grip", color: even ? "#ffd84a" : on.length === 1 ? axisColor[on[0]] : "#e8e8e8",
         ...(even ? { key: "s" } : { key: keys[0], also: keys.slice(1), mul: "s" }),
-        sets: Object.fromEntries(on.map((i) => [pk[i], -g[i]])),
+        sets: grab(g),
         at: (v) => moved(v, rest),
         title: `Drag to scale ${even ? "evenly" : `along ${keys.join(" + ").toUpperCase()}`} — the opposite side stays put (Shift: about the centre)`,
         shift: { key: "center", origin: centre, dir, unit: Math.hypot(...half) / 100 },
@@ -3918,20 +3937,24 @@ export class App implements ToolHost {
         { key: "px", label: "", value: 0, type: "hidden" },
         { key: "py", label: "", value: 0, type: "hidden" },
         { key: "pz", label: "", value: -1, type: "hidden" },
+        ...tk.map((key) => ({ key, label: "", value: 0, type: "hidden" as const })),
       ],
       compute: (v) => {
-        const pivot = pivotOf(v), f = factors(v);
+        const pivot = pivotOf(v), f = factors(v), shift = shiftOf(v), shifted = shift.some((k) => Math.abs(k) > 1e-9);
         if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
         // Preview: the current meshes stretched on the GPU (instant); the exact solids are built on Apply.
         const matrix = new THREE.Matrix4()
-          .makeTranslation(...pivot)
+          .makeTranslation(pivot[0] + shift[0], pivot[1] + shift[1], pivot[2] + shift[2])
           .multiply(new THREE.Matrix4().makeScale(...f))
           .multiply(new THREE.Matrix4().makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
         this.setDimMove(new Map(ids.map((id) => [id, { matrix }])));
         return {
           ghost: new Map(),
           xform: { ids, matrix },
-          commit: () => this.replaceOutcome(new Map(ids.map((id) => [id, scaleShape(this.doc.get(id)!.shape, f, pivot)])), "Scale").commit(),
+          commit: () => this.replaceOutcome(new Map(ids.map((id) => {
+            const scaled = scaleShape(this.doc.get(id)!.shape, f, pivot);
+            return [id, shifted ? translateShape(scaled, shift) : scaled];
+          })), "Scale").commit(),
         };
       },
       drag: drags.length ? drags : undefined,

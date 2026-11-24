@@ -429,6 +429,8 @@ export function asPreview<T>(fn: () => T): T {
 
 /** Distance (mm) below which booleans treat faces and edges as coinciding. */
 const BOOLEAN_FUZZ = 1e-5;
+/** The fuzz booleans use now: BOOLEAN_FUZZ, larger while booleanOp tries again (see missedOverlap). */
+let booleanFuzz = BOOLEAN_FUZZ;
 
 function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], glue: "off" | "shift" | "full"): Shape3D {
   const builder =
@@ -443,7 +445,7 @@ function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], 
     builder.SetNonDestructive(true);
     // Faces / edges this close count as touching: e.g. a face pushed up to another's height
     // through a display-mesh (float32) point is off by ~1e-6 mm, which would leave a hairline step.
-    builder.SetFuzzyValue(BOOLEAN_FUZZ);
+    builder.SetFuzzyValue(booleanFuzz);
     // Oriented bounding boxes to rule out face pairs that can't touch: axis-aligned ones of solids
     // turned off X / Y / Z (e.g. a circular copy's sweeps round a cylinder) all overlap — 7 s → 1 s.
     builder.SetUseOBB(true);
@@ -6505,7 +6507,7 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   let first: Solid | null = null, failed: unknown = null;
   try {
     first = booleanOpOnce(op, target, tools);
-    if (isValidShape(first)) return first;
+    if (isValidShape(first)) return missedOverlap(op, target, tools, first) ?? first;
   } catch (e) {
     failed = e;
   }
@@ -6568,6 +6570,39 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   }
   if (first) return first;
   throw failed;
+}
+
+/**
+ * A valid result that plainly missed where the solids cross — a union still in pieces, an intersection empty, a
+ * subtraction with nothing taken off, though they touch: worked out again with a larger fuzz, that result if it's valid
+ * and right; null if it isn't (or nothing looked missed). A half and its mirror copy overlapping (free-form sides meeting
+ * the mirror plane nearly square on, so each meets its copy almost tangent): at 1e-5 OpenCascade found no crossing at
+ * all — union two solids, intersection empty; at 1e-4 right (the union's volume = both − their common part).
+ */
+function missedOverlap(op: BooleanOp, target: Solid, tools: Solid[], first: Solid): Solid | null {
+  if (!tools.length) return null;
+  const v0 = solidVolume(target), tiny = 1e-6 * Math.max(1, v0);
+  const missed = op === "union" ? solidPieces(first).length > 1
+    : op === "intersect" ? !first.faces.length
+    : Math.abs(solidVolume(first) - v0) < tiny;
+  if (!missed || !tools.some((t) => shapesTouch(target, t))) return null;
+  for (const fuzz of [1e-4, 1e-3]) {
+    booleanFuzz = fuzz;
+    try {
+      // (copies: a failed try changes the solids it was given; the first try, valid, left them as they were)
+      const r = booleanOpOnce(op, deepCopy(target) as Solid, tools.map((t) => deepCopy(t) as Solid));
+      if (!isValidShape(r)) continue;
+      const right = op === "union" ? solidPieces(r).length < solidPieces(first).length
+        : op === "intersect" ? r.faces.length > 0
+        : solidVolume(r) < v0 - tiny;
+      if (right) return r;
+    } catch {
+      // (the next fuzz)
+    } finally {
+      booleanFuzz = BOOLEAN_FUZZ;
+    }
+  }
+  return null;
 }
 
 /**
