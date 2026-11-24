@@ -153,7 +153,7 @@ function unshadedWhenSelected<M extends THREE.Material>(mat: M): M {
 /** Flat faces: a light see-through fill (the grid shows through) under a blue outline; drawn without depth, so two on one plane blend, not flicker. */
 const REGION_OPACITY = 0.5;
 /** A body being moved or turned (G, Shift+G, R, Shift+R): see-through, at most this opaque. */
-const MOVING_OPACITY = 0.5;
+const MOVING_OPACITY = 0.7;
 /** While sketching: how much of their usual opacity the model's bodies and edges keep (they can't be edited there). */
 const DIM = 0.35;
 

@@ -458,6 +458,8 @@ async function createWindow(): Promise<void> {
   const params = new URLSearchParams();
   if (process.env.YDDD_STRESS) params.set("stress", process.env.YDDD_STRESS);
   if (process.env.YDDD_THREADS) params.set("threads", process.env.YDDD_THREADS);
+  // YDDD_TIMING=1: each Apply's time, step by step, in a toast (development)
+  if (process.env.YDDD_TIMING) params.set("timing", "1");
   const q = params.size ? `?${params}` : "";
   if (DEV_URL) await win.loadURL(DEV_URL + q);
   // The page stays at app://y3d (the app's old name): its origin keys the saved settings (localStorage).

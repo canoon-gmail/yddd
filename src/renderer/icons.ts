@@ -106,6 +106,23 @@ export const TAPE_CURSOR = (() => {
 })();
 
 /**
+ * Sketch Scan's cursor (the user's drawing): an arrow pointing down left — the point is its tip — with a QR-style scan
+ * frame up right (corner brackets round a few code squares); grey-blue with dark outlines, light frame on a dark edge.
+ */
+export const SCAN_CURSOR = (() => {
+  const frame = "M17 6 V2 H21 M27 2 H31 V6 M17 12 V16 H21";
+  const code = "M20 5 h2 v2 h-2 Z M20 10.5 h2 v2 h-2 Z M25.5 5.5 h2.5 M25.5 9 v2 M25.5 13 h2.5";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+    <path d="M2 30 L3 14 L7 18 L11 12 L14.5 15.5 L10.5 21 L18 28 Z" fill="#9aa5b1" stroke="#1b1d20" stroke-width="1.6" stroke-linejoin="round"/>
+    <g fill="none" stroke-linecap="square">
+      <path d="${frame} ${code}" stroke="#1b1d20" stroke-width="2.4"/>
+      <path d="${frame} ${code}" stroke="#e1e4e7" stroke-width="1.2"/>
+    </g>
+  </svg>`;
+  return `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") 2 30, crosshair`;
+})();
+
+/**
  * Sketch Fillet's cursor: a crosshair (the point: its centre) with a belt beside it — a big and a small round end joined
  * by straight lines, as F makes; dark, light outlines.
  */

@@ -49,6 +49,7 @@ import {
   booleanOp,
   tessellate,
   translateShape,
+  isPolyhedral,
   rotateShape,
   mirrorShape,
   cloneShape,
@@ -184,6 +185,7 @@ import { Viewport, sameItem, type Pick as VpPick, type SelItem, type SelMode, ty
 import { DrawTool, BoxTool, CylinderTool, SphereTool, ConeTool, PolygonTool, TextTool, PointMoveTool, GuideTool, DivideFaceTool, type EdgeSides, type GuideState, type TextSettings, type TextJob, type Tool, type ToolHost, type PropField } from "./tools";
 import { KeyCast } from "./keycast";
 import { Stopwatch } from "./stopwatch";
+import { Calculator } from "./calculator";
 import { ICONS, KNIFE_CURSOR, MEASURE_CURSOR, TAPE_CURSOR } from "./icons";
 import { BIRD_HOUSE } from "./birdhouse";
 import { CABLE_STORAGE_BOX } from "./cablebox";
@@ -324,6 +326,7 @@ export class App implements ToolHost {
   private tool: Tool | null = null;
   /** Every command's keys (keymap.ts: the defaults, or the user's own — "/" changes them). */
   private keys: Keys = loadKeys();
+  private calculator!: Calculator;
   /**
    * Pending two-key chord (e.g. B C): its second-key map, when the first key was pressed and the tool it started (B: Box) —
    * while that tool is still open and not clicked in, the second key counts however long after (B, a pause, S: Sphere).
@@ -403,7 +406,7 @@ export class App implements ToolHost {
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   nutBoltDefaults = { size: 2, length: 30, thread: 20, clearance: 0.3 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1, loftWall: 0 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1, curveFaceSink: 0.2, loftWall: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -445,6 +448,7 @@ export class App implements ToolHost {
     this.bindViewportEvents();
     new KeyCast($("viewport"), () => this.tool instanceof DrawTool); // (hidden: Ctrl + Shift + F1)
     new Stopwatch($("viewport")); // (hidden: Ctrl + Shift + F5)
+    this.calculator = new Calculator($("viewport"));
     this.bindKeys();
     this.bindStatusBar();
 
@@ -1090,6 +1094,7 @@ export class App implements ToolHost {
       case "help.shortcuts": return this.toggleHelp();
       case "help.keys": return openKeysPanel({ keys: () => this.keys, setKeys: (k) => this.setKeys(k), run: (cmd) => this.run(cmd) });
       case "help.birdhouse": return this.toggleTutorial(BIRD_HOUSE);
+      case "help.calculator": return this.calculator.toggle();
       case "help.cablebox": return this.toggleTutorial(CABLE_STORAGE_BOX);
       case "help.house": return this.toggleTutorial(HOUSE);
       case "help.planter": return this.toggleTutorial(PLANTER);
@@ -2343,6 +2348,8 @@ export class App implements ToolHost {
     const op = this.op;
     if (!op) return;
     clearTimeout(op.timer);
+    const t0 = performance.now(), marks: [string, number][] = [];
+    const mark = (what: string) => marks.push([what, performance.now()]);
     while (op.spec.computeAsync && this.bgKernel.ready && this.op === op) {
       const { key } = this.opValues();
       if (op.key === key && op.result) break;
@@ -2354,9 +2361,12 @@ export class App implements ToolHost {
       await op.job.done;
     }
     if (this.op !== op) return;
+    mark("waiting for its preview");
     const result = this.previewOp();
     if (!result) return;
+    mark("preview again");
     op.spec.remember?.(this.opValues().values);
+    this.docChangeMs = 0;
     let done: { select: number[]; solidMode?: boolean; then?: () => void } | null;
     try {
       // (a transform preview builds the exact result only now — in the background kernel if it can: Stop / Esc ends it)
@@ -2370,10 +2380,26 @@ export class App implements ToolHost {
     }
     if (!done) return void this.toast(`${op.spec.label}: the model changed meanwhile — nothing changed`, "error");
     if (this.op === op) this.closeOpPanel();
+    const shown = this.docChangeMs;
+    mark(`result (${result.commitAsync && this.bgKernel.ready ? "background kernel" : "here"})`);
     const { select, solidMode, then } = done;
     this.opApplied = select;
     if (solidMode) this.setMode("body");
     this.setSelection(this.mode === "body" ? select.map((id) => ({ kind: "body", body: id, id: 0 })) : []);
+    mark("selection");
+    if (this.timing) {
+      // (after the next frame is drawn: what the view took to draw the new meshes)
+      requestAnimationFrame(() => setTimeout(() => {
+        mark("drawn");
+        let at = t0;
+        const steps = marks.map(([what, t]) => {
+          const ms = t - at;
+          at = t;
+          return what.startsWith("result") ? `${what} ${Math.round(ms - shown)} ms + model shown ${Math.round(shown)} ms` : `${what} ${Math.round(ms)} ms`;
+        });
+        this.toast(`${op.spec.label}: ${Math.round(at - t0)} ms — ${steps.join(" · ")}`);
+      }, 0));
+    }
     if (then) return then();
     this.toast(`${op.spec.label} applied`);
   }
@@ -3157,12 +3183,17 @@ export class App implements ToolHost {
       label: "Curve face",
       note: "On: —",
       hint: `Curve face: ${todo.toLowerCase()} · click again to move it · Enter apply · Esc cancel`,
-      fields: [{ key: "length", label: "Length (mm)", value: this.defaults.curveFaceLength, step: 0.5, min: 0 }],
-      compute: ({ length }) => {
+      fields: [
+        { key: "length", label: "Length (mm)", value: this.defaults.curveFaceLength, step: 0.5, min: 0 },
+        // (sunk a little into the face: a Union with it then overlaps cleanly — lying exactly on a cup's side it could fail;
+        // 0: exactly on it, e.g. for a print in two colours)
+        { key: "sink", label: "Into the surface (mm)", value: this.defaults.curveFaceSink, step: 0.1, min: 0 },
+      ],
+      compute: ({ length, sink }) => {
         if (!target) throw new OpWaiting(todo);
         const t = target, host = this.doc.get(t.bodyId);
         if (!host || !isBrep(host)) throw new OpWaiting(todo);
-        const pieces = curveFacesOnto(faces, host.shape as Shape, t.faceId, t.at, length);
+        const pieces = curveFacesOnto(faces, host.shape as Shape, t.faceId, t.at, length, sink);
         return {
           ghost: new Map(pieces.map((p, i) => [-(i + 1), p as Shape])),
           hide: [...logoIds],
@@ -3179,7 +3210,10 @@ export class App implements ToolHost {
           },
         };
       },
-      remember: ({ length }) => (this.defaults.curveFaceLength = length),
+      remember: ({ length, sink }) => {
+        this.defaults.curveFaceLength = length;
+        this.defaults.curveFaceSink = sink;
+      },
       pick: (e) => {
         const t = targetAt(e);
         if (!t) return;
@@ -3857,6 +3891,8 @@ export class App implements ToolHost {
       }
     }
     const size = [0, 1, 2].map((i) => hi[i] - lo[i]);
+    // (the ones with curved faces: scaled not evenly, they're stretched — slow; see commitAsync below)
+    const curved = ids.filter((id) => { const b = this.doc.get(id)!; return isBrep(b) && !isPolyhedral(b.shape as Shape); });
     // Text (its letters, flat or pushed) keeps its shape: only the ring, scaling evenly
     const text = ids.every((id) => !!this.doc.get(id)!.text);
     // Typed values: about the bottom centre (the base stays put). The grips (as in SketchUp) on the outline box: a corner
@@ -3941,6 +3977,11 @@ export class App implements ToolHost {
       ],
       compute: (v) => {
         const pivot = pivotOf(v), f = factors(v), shift = shiftOf(v), shifted = shift.some((k) => Math.abs(k) > 1e-9);
+        const scaled = (s: Geom): Geom => {
+          const r = scaleShape(s, f, pivot);
+          return shifted ? translateShape(r, shift) : r;
+        };
+        const uneven = Math.abs(f[0] - f[1]) > 1e-9 || Math.abs(f[1] - f[2]) > 1e-9;
         if (f.some((k) => !(k > 1e-6))) throw new Error("Scale must be greater than 0");
         // Preview: the current meshes stretched on the GPU (instant); the exact solids are built on Apply.
         const matrix = new THREE.Matrix4()
@@ -3951,10 +3992,19 @@ export class App implements ToolHost {
         return {
           ghost: new Map(),
           xform: { ids, matrix },
-          commit: () => this.replaceOutcome(new Map(ids.map((id) => {
-            const scaled = scaleShape(this.doc.get(id)!.shape, f, pivot);
-            return [id, shifted ? translateShape(scaled, shift) : scaled];
-          })), "Scale").commit(),
+          commit: () => this.replaceOutcome(new Map(ids.map((id) => [id, scaled(this.doc.get(id)!.shape)])), "Scale").commit(),
+          // Not evenly with curved faces (stretched one by one — 21 solids on Z alone froze the window): in the background
+          // kernel behind the busy dialog (Stop / Esc: nothing changes); paths, meshes and flat-sided ones right here
+          commitAsync: !uneven || !curved.length ? undefined : async () => {
+            const before = ids.map((id) => this.doc.get(id));
+            const shapes = curved.map((id) => this.doc.get(id)!.shape as Shape);
+            const done = await this.bgKernel.run({ op: "scale", breps: shapes.map((s) => this.brepFor(s).brep), f, pivot, shift });
+            if (done.op !== "scale" || ids.some((id, k) => this.doc.get(id) !== before[k])) return null;
+            const made = new Map<number, Geom>(curved.map((id, k) => [id, solidFrom(done.shapes[k])]));
+            for (const id of ids) if (!made.has(id)) made.set(id, scaled(this.doc.get(id)!.shape));
+            this.doc.replaceShapes(new Map(ids.map((id) => [id, made.get(id)!])), "Scale");
+            return { select: ids };
+          },
         };
       },
       drag: drags.length ? drags : undefined,
@@ -7704,7 +7754,21 @@ export class App implements ToolHost {
   /** The shapes of the history of the model just opened (linked as copies once it's shown: see onDocChange). */
   private loadedHistoryShapes: BodyGeom["shape"][] = [];
 
+  /** YDDD_TIMING=1 (development): each Apply's steps timed, shown in a toast — see applyOpWhenReady. */
+  private readonly timing = new URLSearchParams(location.search).get("timing") === "1";
+  /** The time the last model change took to show (onDocChange: the view's meshes, panels, dimensions), ms. */
+  private docChangeMs = 0;
+
   private onDocChange(): void {
+    const t0 = performance.now();
+    try {
+      this.onDocChangeNow();
+    } finally {
+      this.docChangeMs = performance.now() - t0;
+    }
+  }
+
+  private onDocChangeNow(): void {
     if (this.justLoaded) {
       this.justLoaded = false;
       this.linkArrayCopies();

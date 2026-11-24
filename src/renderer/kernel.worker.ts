@@ -31,6 +31,8 @@ import {
   serializeShape,
   shellSolid,
   pushPullMany,
+  scaleShape,
+  translateShape,
   revolveFace,
   sweepFace,
   boxFromFace,
@@ -78,6 +80,8 @@ export type KernelJob =
   | { op: "nutbolt"; o: NutBolt; at: V3[] }
   /** Push/Pull's exact result on Apply: faces by place in `shape.faces`, each pushed `d` mm along its normal. */
   | { op: "pushpull"; brep: string; faces: number[]; prints?: ShapePrint[]; d: number }
+  /** Scale's Apply, not evenly (curved faces stretched: slow): each shape scaled by `f` about `pivot`, then moved by `shift`. */
+  | { op: "scale"; breps: string[]; f: V3; pivot: V3; shift: V3 }
   /** Revolve / Sweep of a flat face (by place in the shape's faces); `join`: the result joined to that shape (a solid's face). */
   | { op: "revolve"; brep: string; face: number; print?: ShapePrint; axis: Axis; angle: number; join: boolean }
   | { op: "sweep"; brep: string; face: number; print?: ShapePrint; path: string; toPath: boolean; round: boolean; turn: number; scale: number; twist: number; endScale: number; start?: V3; join: boolean }
@@ -109,6 +113,7 @@ export type KernelJobResult =
   | ({ op: "boolean" } & JobSolid)
   | ({ op: "punch" } & JobSolid)
   | ({ op: "pushpull" } & JobSolid)
+  | { op: "scale"; shapes: JobSolid[] }
   | ({ op: "revolve" } & JobSolid)
   | ({ op: "sweep" } & JobSolid)
   | ({ op: "boxFromFace" } & JobSolid)
@@ -175,6 +180,11 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
       const shape = solidOf(job.brep);
       return { op: "pushpull", ...made(pushPullMany(shape, job.faces.map((i, k) => placeOf(shape.faces, i, job.prints?.[k], "face").hashCode), job.d)) };
     }
+    case "scale":
+      return { op: "scale", shapes: job.breps.map((b) => {
+        const scaled = scaleShape(deserialize(b), job.f, job.pivot) as Solid;
+        return made(job.shift.some((k) => Math.abs(k) > 1e-9) ? translateShape(scaled, job.shift) : scaled);
+      }) };
     case "revolve": {
       const shape = deserialize(job.brep);
       const solid = revolveFace(shape, faceAt(shape, job.face, job.print), job.axis, job.angle);

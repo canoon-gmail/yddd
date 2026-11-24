@@ -24,7 +24,7 @@ import * as THREE from "three";
 import type { Tool, ToolHost } from "./tools";
 import { flatFaceBoolean, joinFlatFaces, sketchFaces, sketchOfShape, sketchPath, tessellate, type Shape, type SketchLoop, type SketchSeg, type V3, type Wire } from "./kernel";
 import { circleSize, num, parseLen, typedUnit } from "./format";
-import { FILLET_CURSOR, ICONS, TAPE_CURSOR } from "./icons";
+import { FILLET_CURSOR, ICONS, SCAN_CURSOR, TAPE_CURSOR } from "./icons";
 import { scanGrid, type GP, type ScanOptions } from "./scan";
 
 /** A point in the sketch plane: [u, v] along the frame's x / y. */
@@ -4274,7 +4274,7 @@ export class SketchTool implements Tool {
 
   private renderPanel(): void {
     // (Select: the arrow; drawing: the crosshair)
-    this.host.viewport.canvas.style.cursor = this.mode === "select" ? "default" : this.mode === "guide" ? TAPE_CURSOR : this.mode === "round" ? FILLET_CURSOR : "crosshair";
+    this.host.viewport.canvas.style.cursor = this.mode === "select" ? "default" : this.mode === "guide" ? TAPE_CURSOR : this.mode === "round" ? FILLET_CURSOR : this.mode === "scan" ? SCAN_CURSOR : "crosshair";
     const nSel = this.selected.length;
     const tips: Record<Mode, string> = {
       select: this.mirroring ? "Mirror: point at a mark beyond a side (red ±X, green ±Y) to see the copy there, click to keep it · Esc / right click / a click elsewhere: cancel"

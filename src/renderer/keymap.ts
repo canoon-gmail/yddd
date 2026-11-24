@@ -137,6 +137,7 @@ export const COMMANDS: Command[] = [
     ["help.house", "Walkthrough: House"],
     ["help.planter", "Walkthrough: Planter"],
     ["help.propeller", "Walkthrough: Propeller"],
+    ["help.calculator", "Calculator (bottom right of the view)"],
   ]),
 ];
 

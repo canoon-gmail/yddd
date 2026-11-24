@@ -6702,14 +6702,20 @@ function seamlessEdge(w: Wire, keep: <T>(o: T) => T, plane?: { o: V3; n: V3 }): 
  */
 function periodicPrism(s: Solid): Solid[] | null {
   const faces = s.faces;
-  const flat = faces.filter((f) => f.geomType === "PLANE"), sides = faces.filter((f) => f.geomType !== "PLANE");
-  if (flat.length < 2 || !sides.length || sides.some((f) => f.geomType !== "EXTRUSION_SURFACE" && f.geomType !== "BSPLINE_SURFACE")) return null;
+  const planes = faces.filter((f) => f.geomType === "PLANE"), sides = faces.filter((f) => f.geomType !== "PLANE");
+  if (planes.length < 2 || !sides.length || sides.some((f) => f.geomType !== "EXTRUSION_SURFACE" && f.geomType !== "BSPLINE_SURFACE")) return null;
   const tmp: { delete(): void }[] = [];
   const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
   try {
-    const n = norm3(flat[0].normalAt(flat[0].center).toTuple() as V3);
+    // The axis: a swept side's direction (else the first flat face's normal); flat faces square to it are the caps, flat
+    // faces along it straight sides — an outline of lines and curves pushed up (a closed curve's seam in it: union and
+    // subtract failed, "U parameters out of range") has both
+    const swept = sides.find((f) => f.geomType === "EXTRUSION_SURFACE");
+    const n = swept ? (() => { const d = keep(keep(new oc.BRepAdaptor_Surface(swept.wrapped, true)).Direction()); return norm3([d.X(), d.Y(), d.Z()]); })()
+      : norm3(planes[0].normalAt(planes[0].center).toTuple() as V3);
     const facing = (f: Face) => dot3(norm3(f.normalAt(f.center).toTuple() as V3), n);
-    if (flat.some((f) => Math.abs(Math.abs(facing(f)) - 1) > 1e-7)) return null;
+    const flat = planes.filter((f) => Math.abs(Math.abs(facing(f)) - 1) <= 1e-7);
+    if (flat.length < 2 || planes.some((f) => !flat.includes(f) && Math.abs(facing(f)) > 1e-7)) return null;
     // The sides square to the flat faces: swept along them, or a free-form side standing straight up (a stretched cylinder's)
     for (const f of sides) {
       if (f.geomType === "EXTRUSION_SURFACE") {
@@ -7345,7 +7351,7 @@ export function mirrorShape<T extends Geom>(shape: T, point: V3, normal: V3): T 
  * exact. Edges are stretched the same way and shared between faces, then the faces are repaired
  * (trimming curves, seams, poles) and sewn back into a solid.
  */
-function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
+function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0, prisms = true): Shape {
   // Round things whose axis runs along X, Y or Z, the other two stretched alike, stay round — a cylinder stretched along
   // its own axis is still one (a pin made longer): rebuilt as a true cylinder / circle, radius × those two, not as
   // B-splines (booleans on them ~9× slower; holes, rims, radius dimensions no longer found)
@@ -7373,6 +7379,18 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
   // seam — stretch each half, and fuse them back.
   const allRound = shape.faces.every((fc) => fc.geomType === "PLANE" || staysRound(fc));
   const wrap = !isFaceShape(shape) && shape.faces.length > 1 ? wrappingAxis(shape) : null;
+  // Every round face staying round (a cylinder standing up, made taller): rebuilt whole first — no cut in half and fuse
+  // (two booleans a solid: 21 parts scaled on Z alone took seconds); kept if it's valid with just the volume the
+  // stretch gives, else the halves below
+  if (wrap && depth < 4 && allRound) {
+    try {
+      const whole = stretchCurved(shape, f, center, 4, prisms);
+      const want = solidVolume(shape as Solid) * f[0] * f[1] * f[2];
+      if (isValidShape(whole) && Math.abs(solidVolume(whole as Solid) - want) <= 1e-5 * Math.max(1, Math.abs(want))) return whole;
+    } catch {
+      // (the halves below)
+    }
+  }
   let halves: { above: Solid | null; below: Solid | null } | null = null;
   if (wrap && depth < 4) {
     // Cut through the axis, well away from the seam (u = 0); OpenCascade's boolean can fail at
@@ -7389,7 +7407,7 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
   }
   if (wrap && depth < 4 && halves) {
     const { above, below } = halves;
-    const parts = [above, below].filter((p): p is Solid => !!p).map((p) => stretchCurved(p, f, center, depth + 1));
+    const parts = [above, below].filter((p): p is Solid => !!p).map((p) => stretchCurved(p, f, center, depth + 1, prisms));
     if (parts.length === 1) return parts[0];
     let fused = boolean("fuse", parts[0] as Shape3D, parts[1] as Shape3D);
     // (the halves of a face that stayed round: one face again — a true cylinder is one face, as before the stretch)
@@ -7493,6 +7511,25 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
       if (!ax.Direct()) ax3.YReverse();
       return new oc.Geom_CylindricalSurface(ax3, cyl.Radius() * k); // (not freed: the new face uses it)
     };
+    /**
+     * A wall swept straight along a line (a pushed outline's side: a B-spline slid along its direction) stretched: still
+     * one — its curve's control points moved, its direction stretched — made as a prism of that curve. As a B-spline
+     * surface (stretchedSurface) it came out exact too, but the mesher filled it: 21 small parts made 10× taller on Z,
+     * 860 triangles a wall → 55 000, ~4 s; as an extrusion the mesher knows it's straight along it. Null if not one.
+     */
+    const prismSurface = (face: Face): unknown => {
+      if (!prisms || face.geomType !== "EXTRUSION_SURFACE") return null;
+      const ad = keep(new oc.BRepAdaptor_Surface(face.wrapped, true)), basis = keep(ad.BasisCurve());
+      if (basis.GetType() !== oc.GeomAbs_CurveType.GeomAbs_BSplineCurve) return null;
+      const c = keep(new oc.Geom_BSplineCurve(keep(basis.BSpline()))); // (a copy: never edit the shape's own curve)
+      for (let i = 1; i <= c.NbPoles(); i++) c.SetPole(i, map(keep(c.Pole(i))) as never);
+      const d = keep(ad.Direction()), D: V3 = [d.X() * f[0], d.Y() * f[1], d.Z() * f[2]];
+      const edge = keep(new oc.BRepBuilderAPI_MakeEdge(c as never, c.FirstParameter(), c.LastParameter()));
+      if (!edge.IsDone()) return null;
+      const prism = keep(new oc.BRepPrimAPI_MakePrism(edge.Edge(), keep(new oc.gp_Vec(D[0], D[1], D[2])), false, false));
+      const ex = keep(new oc.TopExp_Explorer(prism.Shape(), oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+      return ex.More() ? oc.BRep_Tool.Surface(oc.TopoDS.Face(ex.Current())) : null; // (not freed: the new face uses it)
+    };
     type Outline = NonNullable<ReturnType<typeof wireOf>>;
     /** A curved face on `surf` with these outlines, its trimming curves made on the new surface. */
     const curvedFace = (surf: unknown, outer: Outline, holes: Outline[]) => {
@@ -7535,7 +7572,7 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0): Shape {
         const pln = keep(new oc.gp_Pln(map(keep(pos.Location())) as never, keep(new oc.gp_Dir(n.X() / f[0], n.Y() / f[1], n.Z() / f[2]))));
         mk = keep(new oc.BRepBuilderAPI_MakeFace(pln, outer, true));
       } else {
-        const round = staysRound(face) ? roundCylinder(face) : null;
+        const round = staysRound(face) ? roundCylinder(face) : prismSurface(face);
         const surf = round ?? stretchedSurface(face, keep, map, shape.faces.length === 1);
         if (!surf) throw fail(`${face.geomType.toLowerCase().replace("cylindre", "cylinder")} faces are not supported`);
         lastSurface = surf;
@@ -7866,7 +7903,15 @@ export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
     const map = (p: V3): V3 => [center[0] + (p[0] - center[0]) * f[0], center[1] + (p[1] - center[1]) * f[1], center[2] + (p[2] - center[2]) * f[2]];
     return assembleWire(shape.edges.map((e) => makeLine(map(e.startPoint.toTuple() as V3), map(e.endPoint.toTuple() as V3))));
   }
-  if (!isPolyhedral(shape)) return stretchCurved(shape, f, center);
+  if (!isPolyhedral(shape)) {
+    try {
+      return stretchCurved(shape, f, center);
+    } catch (e) {
+      // (its swept walls made as prisms didn't work out: again the old way, as B-splines)
+      if (!shape.faces.some((x) => x.geomType === "EXTRUSION_SURFACE")) throw e;
+      return stretchCurved(shape, f, center, 0, false);
+    }
+  }
   const map = (p: V3): V3 => [center[0] + (p[0] - center[0]) * f[0], center[1] + (p[1] - center[1]) * f[1], center[2] + (p[2] - center[2]) * f[2]];
   const faces = shape.faces.map((src) => {
     // outerWire / innerWires delete the face they are called on.
@@ -8677,9 +8722,13 @@ function upRightOn(n: V3): { up: V3; right: V3 } {
  * from the click (letters keep their width; on a cylinder or a cone exactly, elsewhere as near the click's sizes as the
  * face allows). Onto a flat face: just laid flat on it. The logo's middle goes to the click; its up (the world Z along
  * its plane — lying flat: the world Y) to the up along the clicked face (the same rule). Throws for an extrusion's face.
+ * `sink`: how far the solids reach into the face (their backs that far inside it), so a Union with the solid is a clean
+ * overlap: backs lying exactly on a cup's side (the same surface) made the union fail — a logo of 86 curved sides on a
+ * tapered cup, every way; sunk 0.2 mm it joined.
  */
-export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: number, at: V3, length: number): Solid[] {
+export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: number, at: V3, length: number, sink = 0): Solid[] {
   if (!(length > 0)) throw new Error("Curve face: the length must be more than 0");
+  if (!(sink >= 0)) throw new Error("Curve face: into the surface can't be less than 0");
   const tf = findFace(target, targetFaceId);
   if (!tf) throw new Error("Curve face: the face isn't there any more");
   if (tf.geomType === "EXTRUSION_SURFACE") throw new Error("Curve face: that face can't take it — click a round side (a cup, a glass, a bottle) or a flat face");
@@ -8708,7 +8757,8 @@ export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: numbe
         let g = cast(b.Shape()) as Face;
         b.delete();
         if (dot3(g.normalAt().toTuple() as V3, nT) < 0) g = g.flipOrientation();
-        return extrudeFace(g, g.hashCode, length);
+        if (sink > 0) g = translateShape(g, [-nT[0] * sink, -nT[1] * sink, -nT[2] * sink]);
+        return extrudeFace(g, g.hashCode, length + sink);
       });
     } finally {
       trsf.delete();
@@ -8874,8 +8924,17 @@ export function curveFacesOnto(faces: Face[], target: Shape, targetFaceId: numbe
       if (!isValidShape(wrapped)) throw new Error("Curve face: the wrapped face isn't valid");
       const mid = wrapped.center.toTuple() as V3;
       if (dot3(normalAtUV(wrapped, 0.5, 0.5), outAt(mid)) < 0) wrapped = wrapped.flipOrientation();
+      // (sunk: its back an offset of the wrapped face, that far into the face — then pushed out by length and that)
+      let back: unknown = wrapped.wrapped;
+      if (sink > 0) {
+        const off = keep(new oc.BRepOffsetAPI_MakeOffsetShape());
+        off.PerformBySimple(wrapped.wrapped, -sink);
+        const ex = keep(new oc.TopExp_Explorer(off.Shape(), oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+        if (!ex.More()) throw new Error("Curve face: the face couldn't be sunk into the surface — try 0 for Into the surface");
+        back = oc.TopoDS.Face(ex.Current());
+      }
       const thick = keep(new oc.BRepOffsetAPI_MakeThickSolid());
-      thick.MakeThickSolidBySimple(wrapped.wrapped, length);
+      thick.MakeThickSolidBySimple(back as never, length + sink);
       let solid = cast(thick.Shape()) as Solid;
       // (the simple offset can make it inside out: turned the right way)
       if (solidVolume(solid) < 0) solid = cast(oc.TopoDS.Solid((solid.wrapped as unknown as { Reversed(): unknown }).Reversed() as never)) as Solid;

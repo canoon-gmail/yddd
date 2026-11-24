@@ -103,6 +103,8 @@ export const MENUS: { label: string; items: MenuItem[] }[] = [
       { label: "Planter", cmd: "help.planter" },
       { label: "Propeller", cmd: "help.propeller" },
       "-",
+      { label: "Calculator", cmd: "help.calculator" },
+      "-",
       { label: "Clear Old Recovery Files…", act: "clear-recoveries" },
     ],
   },

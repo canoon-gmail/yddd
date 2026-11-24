@@ -590,3 +590,24 @@ body.tutorial-open #toasts { right: 666px; } /* clear of the panel (sidebar 270 
   padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border); background: #3a3e45; color: #e8eaed; font-size: 13px; cursor: pointer;
 }
 #stopwatch button:hover { filter: brightness(1.25); }
+
+/* Help → Calculator: bottom right of the view */
+#calculator {
+  position: absolute; right: 12px; bottom: 12px; z-index: 40; width: 196px; padding: 6px 8px 8px; display: flex; flex-direction: column; gap: 4px;
+  border-radius: 8px; background: rgba(20, 22, 26, 0.92); border: 1px solid rgba(255, 255, 255, 0.18); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+#calculator[hidden] { display: none; }
+.calc-head { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; }
+#calculator .calc-close { padding: 0 6px; border: none; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+#calculator .calc-close:hover { color: #fff; }
+.calc-last { min-height: 14px; color: var(--muted); font: 11px ui-monospace, monospace; text-align: right; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.calc-line {
+  width: 100%; box-sizing: border-box; padding: 4px 6px; text-align: right; font: 600 18px ui-monospace, monospace; color: #fff;
+  background: #121418; border: 1px solid var(--border); border-radius: 5px;
+}
+.calc-line:focus { outline: none; border-color: var(--accent); }
+.calc-pad { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.calc-pad button { padding: 6px 0; border-radius: 5px; border: 1px solid var(--border); background: #3a3e45; color: #e8eaed; font-size: 14px; cursor: pointer; }
+.calc-pad button.calc-op { background: #2c3036; color: var(--accent); }
+.calc-pad button.calc-eq { background: var(--accent); color: #111; border-color: transparent; font-weight: 600; }
+.calc-pad button:hover { filter: brightness(1.25); }
