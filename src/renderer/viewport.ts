@@ -3347,9 +3347,12 @@ export class Viewport {
     for (const id of ids) {
       const v = this.views.get(id);
       if (!v) continue;
-      // (a path has no surface — an empty mesh: its own bounds instead)
-      const one = new THREE.Box3().setFromObject(v.mesh);
-      if (one.isEmpty() && v.body.kind === "path") {
+      // (the exact box, not the display mesh's: a cylinder lying along X is drawn as a polygon round its axis, its mesh's
+      // box a little lopsided — the gizmo 0.0045 mm off the axis, snapped onto a sphere's centre it stayed that far off
+      // and the union then lost the sphere; a mesh body: its triangles' box; a path has no surface: its own bounds)
+      const one = new THREE.Box3();
+      if (v.body.kind === "mesh") one.setFromObject(v.mesh);
+      else {
         const [lo, hi] = v.body.shape.boundingBox.bounds;
         one.set(new THREE.Vector3(...lo), new THREE.Vector3(...hi));
       }

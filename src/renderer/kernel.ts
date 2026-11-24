@@ -6369,6 +6369,11 @@ export function splitFacesByPlane(shape: Solid, faceIds: number[], point: V3, no
 }
 
 export function splitByPlane(shape: Solid, point: V3, normal: V3): { above: Solid | null; below: Solid | null } {
+  // A whole sphere: cut turned about its centre (the same sphere, its poles off at an odd angle) — through its poles (an
+  // upright plane through its centre: a guide off the side of a box the sphere was snapped to) it came back as one
+  // broken piece, nothing on the other side (as booleanOp turns spheres)
+  const sc = sphereCenter(shape);
+  if (sc) shape = rotateShape(shape, 41, sc, [0.3, 0.7, 0.2]) as Solid;
   // One split by the plane, its pieces sorted by side (half the work of the two booleans below:
   // 17 sweeps cut at once took ~2 s); the booleans if the split fails.
   const fast = splitByPlaneOnce(shape, point, normal);
@@ -6504,10 +6509,19 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   const swap = (op === "union" || op === "intersect") && tools.length ? { target: deepCopy(target) as Solid, tools: tools.map((x) => deepCopy(x) as Solid) } : null;
   // Part of a sphere (a cap) in one: copies for its spheres made again — see spheresRemade
   const capped = [target, ...tools].some((x) => !sphereCenter(x) && x.faces.some((f) => f.geomType === "SPHERE")) ? [target, ...tools].map((x) => deepCopy(x) as Solid) : null;
+  // (a union also has to hold every solid — see unionHoldsAll: one that dropped a solid is tried again the other ways too)
+  const parts = [target, ...tools];
+  // (and with every solid touching the target: one piece — two unjoined pieces mean it missed where they cross)
+  let allTouch: boolean | null = null;
+  const good = (r: Solid) => isValidShape(r) && (op !== "union" || (unionHoldsAll(r, parts) && (solidPieces(r).length === 1 || !(allTouch ??= tools.every((t) => shapesTouch(target, t))))));
   let first: Solid | null = null, failed: unknown = null;
   try {
     first = booleanOpOnce(op, target, tools);
-    if (isValidShape(first)) return missedOverlap(op, target, tools, first) ?? first;
+    if (isValidShape(first)) {
+      const again = missedOverlap(op, target, tools, first);
+      if (again) return again;
+      if (good(first)) return first;
+    }
   } catch (e) {
     failed = e;
   }
@@ -6522,7 +6536,7 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       };
       const inTools = spheres.tools.some((x) => sphereCenter(x));
       const r = booleanOpOnce(op, inTools ? spheres.target : turn(spheres.target), inTools ? spheres.tools.map(turn) : spheres.tools);
-      if (isValidShape(r)) return r;
+      if (good(r)) return r;
     } catch {
       // (the first try's result / error below)
     }
@@ -6531,7 +6545,7 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   if (swap) {
     try {
       const r = booleanOpOnce(op, swap.tools[0], [swap.target, ...swap.tools.slice(1)]);
-      if (isValidShape(r)) return r;
+      if (good(r)) return r;
     } catch {
       // (the first try's result / error below)
     }
@@ -6543,7 +6557,7 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       if (remade.some(Boolean)) {
         const [t, ...rest] = capped.map((x, i) => remade[i] ?? x);
         const r = booleanOpOnce(op, t, rest);
-        if (isValidShape(r)) return r;
+        if (good(r)) return r;
       }
     } catch {
       // (the first try's result / error below)
@@ -6563,13 +6577,30 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
         r = t;
         for (const pcs of rest) r = booleanOp("intersect", r, [pcs.length === 1 ? pcs[0] : booleanOp("union", pcs[0], pcs.slice(1))]);
       } else r = booleanOp(op, t, rest.flat());
-      if (isValidShape(r)) return r;
+      if (good(r)) return r;
     } catch {
       // (the first try's result / error below)
     }
   }
+  // (a union that dropped a solid every way: refused, rather than kept without it)
+  if (first && op === "union" && isValidShape(first) && !good(first))
+    throw new Error("Union: OpenCascade left part of a solid out (they meet almost exactly, edge to edge) — nothing changed; move one a hair (e.g. 0.01 mm) and try again");
   if (first) return first;
   throw failed;
+}
+
+/**
+ * A union holds every solid it was made of: its box round each one's box (quick — run on every union). A sphere at a
+ * cylinder's end, the same radius, 0.000001 mm off its axis (a snap read off the display mesh): the union came back as
+ * the cylinder alone — valid, the sphere gone.
+ */
+function unionHoldsAll(r: Solid, parts: Solid[]): boolean {
+  if (!r.faces.length) return false;
+  const [lo, hi] = r.boundingBox.bounds;
+  return parts.every((x) => {
+    const [a, b] = x.boundingBox.bounds, tol = 1e-4 * Math.max(1, ...[0, 1, 2].map((i) => b[i] - a[i]));
+    return [0, 1, 2].every((i) => a[i] >= lo[i] - tol && b[i] <= hi[i] + tol);
+  });
 }
 
 /**
@@ -6582,7 +6613,8 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
 function missedOverlap(op: BooleanOp, target: Solid, tools: Solid[], first: Solid): Solid | null {
   if (!tools.length) return null;
   const v0 = solidVolume(target), tiny = 1e-6 * Math.max(1, v0);
-  const missed = op === "union" ? solidPieces(first).length > 1
+  const holdsAll = (r: Solid) => unionHoldsAll(r, [target, ...tools]);
+  const missed = op === "union" ? solidPieces(first).length > 1 || !holdsAll(first)
     : op === "intersect" ? !first.faces.length
     : Math.abs(solidVolume(first) - v0) < tiny;
   if (!missed || !tools.some((t) => shapesTouch(target, t))) return null;
@@ -6592,7 +6624,7 @@ function missedOverlap(op: BooleanOp, target: Solid, tools: Solid[], first: Soli
       // (copies: a failed try changes the solids it was given; the first try, valid, left them as they were)
       const r = booleanOpOnce(op, deepCopy(target) as Solid, tools.map((t) => deepCopy(t) as Solid));
       if (!isValidShape(r)) continue;
-      const right = op === "union" ? solidPieces(r).length < solidPieces(first).length
+      const right = op === "union" ? solidPieces(r).length === 1 && holdsAll(r)
         : op === "intersect" ? r.faces.length > 0
         : solidVolume(r) < v0 - tiny;
       if (right) return r;

@@ -3904,7 +3904,10 @@ export class App implements ToolHost {
     // point, plus a shift (tx / ty / tz) so that side is where it's shown now (it jumped: the scale so far redone about it)
     const pk = ["px", "py", "pz"] as const, tk = ["tx", "ty", "tz"] as const;
     const factors = (v: Record<string, number>): V3 => [v.s * (v.x ?? 100) / 1e4, v.s * (v.y ?? 100) / 1e4, v.s * (v.z ?? 100) / 1e4];
-    const pivotOf = (v: Record<string, number>): V3 => (v.center ? centre : [0, 1, 2].map((i) => side(i, v[pk[i]])) as V3);
+    // (the Scale field given as more / less mm — "+5mm", "-2mm": about the middle, which stays put; a plain
+    // size or % keeps the bottom centre put, as before)
+    const sizeByMm = () => /^[+-]\d*\.?\d+(mm|in|")$/.test((this.op?.inputs.find((i) => i.dataset.key === "s")?.value ?? "").trim().toLowerCase().replace(/\s+/g, ""));
+    const pivotOf = (v: Record<string, number>): V3 => (v.center || sizeByMm() ? centre : [0, 1, 2].map((i) => side(i, v[pk[i]])) as V3);
     const shiftOf = (v: Record<string, number>): V3 => [0, 1, 2].map((i) => v[tk[i]] ?? 0) as V3;
     /** Where box point `p` goes for these values. */
     const moved = (v: Record<string, number>, p: V3): V3 => {
