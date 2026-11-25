@@ -432,7 +432,7 @@ const BOOLEAN_FUZZ = 1e-5;
 /** The fuzz booleans use now: BOOLEAN_FUZZ, larger while booleanOp tries again (see missedOverlap). */
 let booleanFuzz = BOOLEAN_FUZZ;
 
-function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], glue: "off" | "shift" | "full"): Shape3D {
+function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], glue: "off" | "shift" | "full", merge = true): Shape3D {
   const builder =
     kind === "fuse" ? new oc.BRepAlgoAPI_Fuse() : kind === "cut" ? new oc.BRepAlgoAPI_Cut() : new oc.BRepAlgoAPI_Common();
   const args = new oc.NCollection_List_TopoDS_Shape();
@@ -453,8 +453,17 @@ function booleanOnce(kind: "fuse" | "cut" | "common", a: Shape3D, b: Shape3D[], 
     if (glue !== "off") builder.SetGlue(glue === "full" ? oc.BOPAlgo_GlueEnum.BOPAlgo_GlueFull : oc.BOPAlgo_GlueEnum.BOPAlgo_GlueShift);
     builder.Build();
     if (builder.HasErrors()) throw new Error(`boolean ${kind} failed`);
+    if (!merge) return cast(builder.Shape()) as Shape3D;
+    // Faces / edges on the same surface merged — checked if it merged any: a half sphere fused with a solid whose side
+    // lay on the sphere's flat face, and two mirrored halves meeting exactly on the mirror plane, came back broken
+    // (28 → 23 faces), the plain result valid. That result is spoilt by the merge too (its shapes changed in place):
+    // the boolean run again without it.
+    const before = cast(builder.Shape()) as Shape3D, nf = before.faces.length, ne = before.edges.length;
     builder.SimplifyResult(true, true, 1e-3);
-    return cast(builder.Shape()) as Shape3D;
+    const merged = cast(builder.Shape()) as Shape3D;
+    if ((merged.faces.length === nf && merged.edges.length === ne) || isValidShape(merged)) return merged;
+    const plain = booleanOnce(kind, a, b, glue, false);
+    return isValidShape(plain) ? plain : merged;
   } finally {
     args.delete();
     tools.delete();
@@ -6525,6 +6534,15 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   } catch (e) {
     failed = e;
   }
+  // Broken (or failed): again with copies, which don't carry the display mesh. Two mirrored halves meeting on the mirror
+  // plane failed OpenCascade's check once meshed (a sphere face and two flat ones), as did everything made of them; the
+  // copies joined fine.
+  try {
+    const r = booleanOpOnce(op, deepCopy(target) as Solid, tools.map((x) => deepCopy(x) as Solid));
+    if (good(r)) return r;
+  } catch {
+    // (the first try's result / error below)
+  }
   // Broken (or failed) with a whole sphere: again with the spheres among the tools (else the target) turned about their
   // centres — the same solids, their seam and poles elsewhere. OpenCascade misses where two spheres cross with their
   // poles on parallel axes (r 0.66 and 0.33: the union came back as the first one alone, broken); turned, it's right.
@@ -6904,30 +6922,41 @@ function spheresRemade(x: Solid): Solid | null {
   }
 }
 
+/**
+ * A boolean's result with its faces / edges on the same surface merged (simplify) — merged on a copy, kept only if that
+ * merged nothing or is valid, else the result as it was. Two mirrored halves glued on the mirror plane: valid, 16 faces;
+ * merged, 14 and broken — and the merge broke the result it was given too, in place (so no going back without a copy).
+ */
+function tidied(r: Shape3D): Solid {
+  const merged = (deepCopy(r) as Shape3D).simplify() as Solid;
+  if ((merged.faces.length === r.faces.length && merged.edges.length === r.edges.length) || isValidShape(merged)) return merged;
+  return isValidShape(r) ? (r as Solid) : merged;
+}
+
 function booleanOpOnce(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   if (op === "union") {
     const sliced = slicedUnion(target, tools);
-    if (sliced) return sliced.simplify() as Solid;
+    if (sliced) return tidied(sliced);
   }
   // Cut / fuse with all the tools at once: one pass instead of one per tool on an ever more complex
   // result (36 array copies: ~5× faster). Common with several tools would mean "∩ their union", so it
   // stays one at a time, as does anything the single pass fails on.
   if (op !== "intersect" && tools.length > 1) {
     try {
-      return boolean(op === "union" ? "fuse" : "cut", target, tools).simplify() as Solid;
+      return tidied(boolean(op === "union" ? "fuse" : "cut", target, tools));
     } catch {
       // one tool at a time below
     }
   }
   if (op === "union" && tools.length === 1) {
     const glued = gluedUnion(target, tools[0]);
-    if (glued) return glued.simplify() as Solid;
+    if (glued) return tidied(glued);
   }
   let result = target;
   for (const tool of tools) {
     result = boolean(op === "union" ? "fuse" : op === "subtract" ? "cut" : "common", result, tool);
   }
-  return result.simplify();
+  return tidied(result);
 }
 
 /** Whether a face is a B-spline with more than HEAVY_POLES control points (a thread's: ~16 turns in one face). */
@@ -7033,7 +7062,9 @@ function gluedUnion(a: Solid, b: Solid): Shape3D | null {
   }
   if (!sharedA.size) return null;
   try {
-    let r: Shape3D | null = booleanOnce("fuse", a, [b], "full");
+    // (copies: the glued fuse's merge changes the solids it shares faces with in place — two mirrored halves came out
+    // broken, and every try after this one failed with them)
+    let r: Shape3D | null = booleanOnce("fuse", deepCopy(a) as Solid, [deepCopy(b) as Solid], "full");
     // Broken (a head's mirrored halves, small faces meeting at the mirror plane: every fuse left a sliver of the
     // shared face): the two sewn together without the shared faces instead — the same solid
     if (!isValidShape(r as Shape)) r = sewnUnion(a, sharedA, b, sharedB);
@@ -7041,9 +7072,29 @@ function gluedUnion(a: Solid, b: Solid): Shape3D | null {
     // (touching only on the shared faces: the volumes add up — else they overlap somewhere glue can't see)
     const want = solidVolume(a) + solidVolume(b);
     if (Math.abs(solidVolume(r as Solid) - want) > 1e-4 * Math.max(1, want)) return null;
-    return pointsOutside(a, sharedA, b) && pointsOutside(b, sharedB, a) ? r : null;
+    // (on copies: meshing a solid can leave it failing OpenCascade's check — see booleanOp — and the solids given here may
+    // be copies made without the mesh for just that reason; one that has its display mesh already as it is: meshing it
+    // changes nothing, and no copy to mesh again)
+    const ca = displayMeshed(a) ? a : (deepCopy(a) as Solid), cb = displayMeshed(b) ? b : (deepCopy(b) as Solid);
+    const same = (from: Solid, to: Solid, s: Set<number>) => new Set(from.faces.flatMap((f, i) => (s.has(f.hashCode) ? [to.faces[i].hashCode] : [])));
+    return pointsOutside(ca, same(a, ca, sharedA), cb) && pointsOutside(cb, same(b, cb, sharedB), ca) ? r : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Whether tessellate would leave `s` as it is: its display mesh made in the background kernel (kept beside it), or every
+ * face it meshes in place meshed already — all but the linear-extrusion faces (meshed as stand-ins, see meshFaces; a trimmed
+ * one meshed in place, so meshed already on a body too). A copy (deepCopy: no mesh) has a face that isn't: false.
+ */
+function displayMeshed(s: Solid): boolean {
+  if (meshedElsewhere.has(s)) return true;
+  const loc = new oc.TopLoc_Location();
+  try {
+    return s.faces.every((f) => f.geomType === "EXTRUSION_SURFACE" || oc.BRep_Tool.Triangulation(f.wrapped, loc, 0) !== null);
+  } finally {
+    loc.delete();
   }
 }
 
@@ -7085,11 +7136,20 @@ function pointsOutside(a: Solid, skip: Set<number>, b: Solid): boolean {
     lo[k % 3] = Math.min(lo[k % 3], P[k]);
     hi[k % 3] = Math.max(hi[k % 3], P[k]);
   }
-  // The vertices on `a`'s other faces, at most ~600 of them (evenly picked)
+  // The vertices on `a`'s other faces, at most ~600 of them (evenly picked) — not those along the border of a face in
+  // `skip`: they lie on `b`'s surface, where the ray counts them inside about half the time (two mirrored halves: all
+  // 46 found inside on the mirror plane, past the 40 below — refused). Neighbouring faces are meshed with the same
+  // points along the edge they share: the same position.
+  const key = (i: number) => `${ma.vertices[i * 3]},${ma.vertices[i * 3 + 1]},${ma.vertices[i * 3 + 2]}`;
+  const onSkipped = new Set<string>();
+  for (const g of ma.faceGroups) {
+    if (!skip.has(g.faceId)) continue;
+    for (let k = g.start; k < g.start + g.count; k++) onSkipped.add(key(ma.triangles[k]));
+  }
   const ids = new Set<number>();
   for (const g of ma.faceGroups) {
     if (skip.has(g.faceId)) continue;
-    for (let k = g.start; k < g.start + g.count; k++) ids.add(ma.triangles[k]);
+    for (let k = g.start; k < g.start + g.count; k++) if (!onSkipped.has(key(ma.triangles[k]))) ids.add(ma.triangles[k]);
   }
   const all = [...ids], step = Math.max(1, Math.floor(all.length / 600));
   const D: V3 = [0.5773, 0.5774, 0.5775]; // (a ray off the axes: not along an edge of a box's mesh)
