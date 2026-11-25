@@ -88,7 +88,7 @@ export type KernelJob =
   | { op: "boxFromFace"; brep: string; face: number; print?: ShapePrint; o: BoxFromFace }
   | { op: "boxLid"; brep: string; o: BoxLid }
   /** Loft through closed outlines (paths / flat faces as BREP text), in order; `wall` > 0: a pipe that thick (see loftPipe). */
-  | { op: "loft"; outlines: string[]; wall: number }
+  | { op: "loft"; outlines: string[]; wall: number; smooth?: boolean }
   | { op: "boxDividers"; brep: string; o: BoxDividers }
   /**
    * The Text tool's letters (one face per outline): flat in `frame` at `anchor`, or (`wrap`) round a curved face. `fontData`:
@@ -200,7 +200,7 @@ async function run(job: KernelJob): Promise<KernelJobResult> {
       return { op: "boxFromFace", ...made(boxFromFace(shape, faceAt(shape, job.face, job.print), job.o)) };
     }
     case "loft":
-      return { op: "loft", ...made(loftPipe(job.outlines.map((b) => deserialize(b) as unknown as Parameters<typeof loftPipe>[0][number]), job.wall)) };
+      return { op: "loft", ...made(loftPipe(job.outlines.map((b) => deserialize(b) as unknown as Parameters<typeof loftPipe>[0][number]), job.wall, job.smooth)) };
     case "boxLid":
       return { op: "boxLid", ...made(boxLid(solidOf(job.brep), job.o)) };
     case "boxDividers":

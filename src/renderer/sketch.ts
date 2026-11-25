@@ -246,6 +246,34 @@ function tangentArc(a: P, t: P, b: P): Seg | null {
   return { kind: "arc", a, m: [c[0] + Math.abs(r) * Math.cos(mid), c[1] + Math.abs(r) * Math.sin(mid)], b };
 }
 
+/**
+ * An arc's point dragged to q (sketch Select): k 1 its middle — the arc through it; k 0 / 2 an end — the arc through its
+ * middle to there, the line / arc / Curve joined on at that end (the one before / after; closed: round) moved with it.
+ * Null when that can't be (an arc squeezed straight, a joined freeform curve that isn't a Curve).
+ */
+function arcPointMoved(segs: Seg[], si: number, k: number, q: P, closed: boolean): Seg[] | null {
+  const g = segs[si] as Extract<Seg, { kind: "arc" }>, n = segs.length, out = [...segs];
+  if (k === 1) {
+    const a = threePointArc(g.a, q, g.b);
+    return a && ((out[si] = a), out);
+  }
+  const me = k === 0 ? threePointArc(q, g.m, g.b) : threePointArc(g.a, g.m, q);
+  if (!me) return null;
+  out[si] = me;
+  const ni = k === 0 ? (si > 0 ? si - 1 : closed ? n - 1 : -1) : si < n - 1 ? si + 1 : closed ? 0 : -1;
+  const h = ni >= 0 && ni !== si ? segs[ni] : null;
+  const end = k === 0 ? "b" : "a";
+  if (!h || dist(h[end], k === 0 ? g.a : g.b) > 1e-6) return out;
+  let moved: Seg | null;
+  if (h.kind === "line") moved = { ...h, [end]: q };
+  else if (h.kind === "arc") moved = end === "a" ? threePointArc(q, h.m, h.b) : threePointArc(h.a, h.m, q);
+  else if (h.ctrl && !h.closed) moved = controlCurve(h.ctrl.map((p, i) => (i === (end === "a" ? 0 : h.ctrl!.length - 1) ? q : p)), false);
+  else moved = null;
+  if (!moved) return null;
+  out[ni] = moved;
+  return out;
+}
+
 /** Arc from a to b through p, stored with its middle point. */
 function threePointArc(a: P, p: P, b: P): Seg | null {
   if (same(a, b) || same(a, p) || same(p, b)) return null;
@@ -748,8 +776,8 @@ export class SketchTool implements Tool {
   private first: P | null = null;
   /** Curve being drawn: the control points clicked after `first`. */
   private thru: P[] = [];
-  /** Select: a Curve's control point being dragged (see splineHandles), from the state before; the one under the cursor ("item:seg:k"). */
-  private ptDrag: { item: Item; seg: number; k: number; snap: string; moved: boolean } | null = null;
+  /** Select: a Curve's control point / an arc's end or middle being dragged (see splineHandles), from the state before (its lines: segs0); the one under the cursor ("item:seg:k"). */
+  private ptDrag: { item: Item; seg: number; k: number; snap: string; moved: boolean; segs0: Seg[] } | null = null;
   private ptHover: string | null = null;
   /** First arc with nothing to be tangent to: its end point, waiting for a point it passes through. */
   private arcEnd: P | null = null;
@@ -1507,7 +1535,10 @@ export class SketchTool implements Tool {
       return best.p;
     }
     const sp = free ? null : vp.snapPoint(e.clientX, e.clientY);
-    if (sp && sp.kind !== "axis") {
+    // (a point on an axis line / guide: only if it's in the sketch's plane — a sketch on the ground, on the axes;
+    // one on a raised face isn't, the axes below it)
+    const inPlane = (w: THREE.Vector3) => Math.abs(w.clone().sub(this.frame.origin).dot(this.frame.z)) < 1e-6;
+    if (sp && (sp.kind !== "axis" || inPlane(sp.point))) {
       const p = this.local(sp.point);
       vp.showSnapMarker({ point: this.world(p), kind: sp.kind });
       return p;
@@ -2112,12 +2143,21 @@ export class SketchTool implements Tool {
     this.update();
   }
 
-  /** Select: the control points of the selected Curves, to drag (not an end where it joins on to other lines). */
+  /**
+   * Select: the points of the selected lines to drag — a Curve's control points (not an end where it joins on to other
+   * lines), an arc's ends and middle (k 0 / 1 / 2; an end joined to another arc: that one's only).
+   */
   private splineHandles(): { item: Item; seg: number; k: number; p: P }[] {
     const out: { item: Item; seg: number; k: number; p: P }[] = [];
     for (const it of this.selected) {
       const l = it.kind === "loop" ? this.loops[it.i] : null, segs = l ? (l.kind === "path" ? l.segs : []) : this.opens[it.i] ?? [];
       segs.forEach((g, si) => {
+        if (g.kind === "arc") {
+          const prev = si > 0 ? segs[si - 1] : l ? segs[segs.length - 1] : null;
+          if (!(prev && prev !== g && prev.kind === "arc" && dist(prev.b, g.a) < 1e-6)) out.push({ item: it, seg: si, k: 0, p: g.a });
+          out.push({ item: it, seg: si, k: 1, p: g.m }, { item: it, seg: si, k: 2, p: g.b });
+          return;
+        }
         const q = g.kind === "spline" ? g.ctrl : null;
         if (!q || g.kind !== "spline") return;
         const last = q.length - 1;
@@ -2172,15 +2212,20 @@ export class SketchTool implements Tool {
       const step = this.host.snapStep(e);
       if (step > 0) q = [Math.round(q[0] / step) * step, Math.round(q[1] / step) * step];
     }
-    const segs = dr.item.kind === "loop" ? (this.loops[dr.item.i] as Extract<Loop, { kind: "path" }>).segs : this.opens[dr.item.i];
-    const g = segs[dr.seg] as Extract<Seg, { kind: "spline" }>;
-    const moved = g.ctrl!.map((p, k) => (k === dr.k ? q! : p));
-    const next = segs.map((x, i) => (i === dr.seg ? controlCurve(moved, !!g.closed) : x));
+    const segs = dr.segs0, g = segs[dr.seg];
+    let next: Seg[] | null;
+    if (g.kind === "arc") next = arcPointMoved(segs, dr.seg, dr.k, q, dr.item.kind === "loop");
+    else {
+      const c = g as Extract<Seg, { kind: "spline" }>;
+      const moved = c.ctrl!.map((p, k) => (k === dr.k ? q! : p));
+      next = segs.map((x, i) => (i === dr.seg ? controlCurve(moved, !!c.closed) : x));
+    }
+    if (!next) return; // (an arc squeezed straight: left as it was)
     if (dr.item.kind === "loop") this.loops = this.loops.map((l, i) => (i === dr.item.i ? ({ ...l, segs: next } as Loop) : l));
     else this.opens = this.opens.map((o, i) => (i === dr.item.i ? next : o));
     dr.moved = true;
     this.version++;
-    this.host.hud(`Control point ${num(q[0])}, ${num(q[1])}`, this.world(q));
+    this.host.hud(`${g.kind === "arc" ? (dr.k === 1 ? "Arc middle" : "Arc end") : "Control point"} ${num(q[0])}, ${num(q[1])}`, this.world(q));
     this.update();
   }
 
@@ -2822,7 +2867,8 @@ export class SketchTool implements Tool {
       }
       const pt = this.splineHandleAt(e);
       if (pt) {
-        this.ptDrag = { ...pt, snap: JSON.stringify(this.state()), moved: false };
+        const segs0 = pt.item.kind === "loop" ? (this.loops[pt.item.i] as Extract<Loop, { kind: "path" }>).segs : this.opens[pt.item.i];
+        this.ptDrag = { ...pt, snap: JSON.stringify(this.state()), moved: false, segs0 };
         return this.update();
       }
       const it = this.itemAt(e);
@@ -4280,7 +4326,7 @@ export class SketchTool implements Tool {
       select: this.mirroring ? "Mirror: point at a mark beyond a side (red ±X, green ±Y) to see the copy there, click to keep it · Esc / right click / a click elsewhere: cancel"
         : this.moving ? `Move: drag the red arrow (X), the green (Y) or the yellow square (free) — ${this.host.viewport.stepTip("grid steps, catches on points")} · Tab / type dx,dy + Enter: exact · Enter / click elsewhere: done · Esc / right click: cancel`
         : this.scaling ? `Scale / rotate: drag the red square (X), green (Y), the yellow ring (even)${this.scaling.curves ? " — unevenly, arcs / circles become freeform curves" : ""} or the blue ring (rotate) — ${this.host.viewport.stepTip("round steps, 15°")} · Tab: exact %, ° · Enter / click elsewhere: apply · Esc / right click: cancel`
-        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag a Curve's blue points to reshape it" : ""} · drag to move (${this.host.viewport.stepTip("grid steps, catches on points")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · M: mirror · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : this.selGuides.length ? `${this.selGuides.length > 1 ? `${this.selGuides.length} guide lines` : "Guide line"} selected · Del: remove · Shift+D: a copy, slid off it · Shift+click: add / remove` : "Click an outline, a path or a guide line to select it · Shift+click to add more · drag a face object / path from the Bodies panel onto the view to edit it here",
+        : nSel ? `${nSel} selected${this.splineHandles().length ? " · drag the blue points (Curves, arcs) to reshape" : ""} · drag to move (${this.host.viewport.stepTip("grid steps, catches on points")}), G: move gizmo, or type dx,dy + Enter · S: scale / rotate (or type a % + Enter) · M: mirror · Shift+D: duplicate · J: join · Shift+click: add / remove · Del: delete` : this.selGuides.length ? `${this.selGuides.length > 1 ? `${this.selGuides.length} guide lines` : "Guide line"} selected · Del: remove · Shift+D: a copy, slid off it · Shift+click: add / remove` : "Click an outline, a path or a guide line to select it · Shift+click to add more · drag a face object / path from the Bodies panel onto the view to edit it here",
       line: this.first ? "Click the next point (near a circle / arc: where the line just touches it) · click the start point to close · Enter / double-click: done (left open: a path) · type a length + Enter" : "Click the first point (corners, middles, crossings, centres snap) · type x,y + Enter",
       arc: !this.first ? "Click where the arc starts"
         : this.arcR ? `R ${num(this.arcR)} set — move the mouse to the side the arc should ${this.path.length ? "turn" : "bulge"}, then click (or Enter: place it, done) · Esc: clear R`

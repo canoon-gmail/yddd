@@ -97,6 +97,8 @@ interface BodyBase {
   readonly picture?: PictureRecord;
   /** Made by Macro → Gear (flat, or pushed into a solid): its numbers — a mating gear is made from them. */
   readonly gear?: GearRecord;
+  /** A circle sized by Fit to paths: the two paths (ids) it touches — changing one sizes it again (see Doc.followFits). */
+  readonly fit?: { readonly paths: readonly [number, number] };
 }
 
 /** "solid" = closed 3D body, "face" = flat planar face (extrude it with Push/Pull). */
@@ -283,9 +285,20 @@ export class Doc {
    */
   linkCopies: ((prev: Snapshot, next: Snapshot, arrays: readonly ArrayRecord[], label: string) => { bodies: Snapshot; arrays: readonly ArrayRecord[] } | null) | null = null;
 
+  /**
+   * Fit to paths circles following their paths (set by the app; it needs the kernel): a linked path changed → its
+   * circles sized again, in the same step; a circle changed by hand (or its path gone) → its link dropped. Null = nothing.
+   */
+  followFits: ((prev: Snapshot, next: Snapshot, label: string) => Snapshot | null) | null = null;
+
+  private followed(next: Snapshot, label: string): Snapshot {
+    return this.followFits && next !== this.snapshot ? this.followFits(this.snapshot, next, label) ?? next : next;
+  }
+
   commit(next: Snapshot, label: string, guides: readonly Guide[] = this.guideList, dims: readonly Dimension[] = this.dimList, arrays: readonly ArrayRecord[] = this.arrayList, looks: GroupLooks = this.lookMap): void {
     const linked = this.linkCopies && next !== this.snapshot && arrays.length ? this.linkCopies(this.snapshot, next, arrays, label) : null;
     if (linked) ({ bodies: next, arrays } = linked);
+    next = this.followed(next, label);
     dims = this.relinked(dims, next);
     this.undoStack.push(this.entry(label));
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
@@ -303,6 +316,7 @@ export class Doc {
   /** Fold a change into the last undo step (e.g. placing a fresh copy right after Duplicate). */
   amend(next: Snapshot): void {
     if (!this.undoStack.length) return this.commit(next, "Edit");
+    next = this.followed(next, "Edit");
     this.redoStack = [];
     this.dimList = this.relinked(this.dimList, next);
     this.arrayList = liveArrays(this.arrayList, next);

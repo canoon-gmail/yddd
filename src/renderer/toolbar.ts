@@ -46,6 +46,7 @@ export const TOOLBAR: { title: string; items: ToolbarItem[]; drawer?: boolean }[
       { cmd: "op.chamfer", icon: "chamfer", label: "Chamfer" },
       { cmd: "op.shell", icon: "shell", label: "Shell" },
       { cmd: "op.curveFace", icon: "curveFace", label: "Curve face" },
+      { cmd: "op.fitPaths", icon: "fitPaths", label: "Fit to paths" },
       { cmd: "op.offset", icon: "offset", label: "Offset" },
       { cmd: "edit.mirror", icon: "mirror", label: "Mirror" },
       { cmd: "op.cut", icon: "cut", label: "Cut by guide or axis" },

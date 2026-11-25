@@ -86,6 +86,10 @@ export function isFaceShape(shape: Shape): shape is Face {
 export function kindOf(shape: Shape): "solid" | "face" {
   return isFaceShape(shape) ? "face" : "solid";
 }
+/** A path's shape (a wire: lines only). */
+export function isWire(g: Geom): g is Wire {
+  return g instanceof Wire;
+}
 export type V3 = [number, number, number];
 
 /**
@@ -3676,6 +3680,53 @@ export function circleOfEdge(shape: Shape, edgeId: number): { center: V3; normal
   return { center, normal: n.map((x) => x / len) as V3, r: Math.hypot(...sub3(p, center)) };
 }
 
+/**
+ * Fit to paths: each circle (a flat face of one circle edge) sized and moved in its own plane to touch both paths — where
+ * its plane crosses each path (the crossing nearest its centre), its diameter the distance between the two points, its
+ * centre their middle; facing as it did. Null for a circle whose plane misses a path, or a face that isn't one circle.
+ * (Each path walked in 200 steps an edge, a crossing then found by halving: exact to ~1e-12 of the edge, instant.)
+ */
+export function fitCirclesToPaths(circles: Face[], paths: [Wire, Wire]): (Face | null)[] {
+  const crossings = (w: Wire, c: V3, n: V3): V3[] => {
+    const out: V3[] = [];
+    for (const e of w.edges) {
+      const at = (t: number) => e.pointAt(t).toTuple() as V3;
+      const side = (p: V3) => dot3(sub3(p, c), n);
+      let t0 = 0, s0 = side(at(0));
+      if (s0 === 0) out.push(at(0));
+      for (let i = 1; i <= 200; i++) {
+        const t1 = i / 200, p1 = at(t1), s1 = side(p1);
+        if (s1 === 0) out.push(p1);
+        else if (s0 !== 0 && s0 < 0 !== s1 < 0) {
+          let a = t0, b = t1;
+          for (let k = 0; k < 40; k++) {
+            const m = (a + b) / 2;
+            if (side(at(m)) < 0 === s0 < 0) a = m;
+            else b = m;
+          }
+          out.push(at((a + b) / 2));
+        }
+        t0 = t1;
+        s0 = s1;
+      }
+    }
+    return out;
+  };
+  return circles.map((f) => {
+    if (f.edges.length !== 1 || f.edges[0].geomType !== "CIRCLE") return null;
+    const circle = circleOfEdge(f as unknown as Shape, f.edges[0].hashCode);
+    if (!circle) return null;
+    const n = f.normalAt().toTuple() as V3;
+    const nearest = (ps: V3[]) => ps.reduce<V3 | null>((b, p) => (!b || Math.hypot(...sub3(p, circle.center)) < Math.hypot(...sub3(b, circle.center)) ? p : b), null);
+    const a = nearest(crossings(paths[0], circle.center, n)), b = nearest(crossings(paths[1], circle.center, n));
+    if (!a || !b) return null;
+    const r = Math.hypot(...sub3(a, b)) / 2;
+    if (!(r > 1e-6)) return null;
+    const mid: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+    return makeCircleFace({ origin: mid, x: [1, 0, 0], y: [0, 1, 0], z: n }, mid, r);
+  });
+}
+
 /** Id of the edge running between `a` and `b` (either direction), if any. */
 export function edgeBetween(shape: Shape, a: V3, b: V3, tol = 1e-5): number | null {
   const near = (p: V3, q: V3) => Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]) < tol;
@@ -4313,6 +4364,47 @@ export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number
   const r = prismShell(shape, faceIds, thickness) ?? thickSolid(shape, faceIds, thickness, true);
   if (r) return r;
   throw first ?? new Error("Shell: the geometry kernel could not hollow this solid (try a smaller thickness)");
+}
+
+/**
+ * Thicken: a face (any surface — a curved one off a loft: an armour plate) made a solid `thickness` thick, square to the
+ * surface everywhere: out (the way the face points), in, or half each side (`side` 0 / 1 / 2). OpenCascade's simple
+ * thicken (as Curve face's): it fails where the surface curves tighter than the thickness on the inside of the bend.
+ */
+export function thickenFace(face: Face, thickness: number, side: 0 | 1 | 2 = 0): Solid {
+  if (!(thickness > 0)) throw new Error("Thicken: the thickness must be more than 0");
+  const tmp: { delete(): void }[] = [];
+  const keep = <T extends { delete(): void }>(o: T): T => (tmp.push(o), o);
+  try {
+    let from: unknown = face.wrapped;
+    if (side === 2) {
+      // (half each side: from an offset of the face half the thickness back, the whole thickness out)
+      const off = keep(new oc.BRepOffsetAPI_MakeOffsetShape());
+      off.PerformBySimple(face.wrapped, -thickness / 2);
+      const ex = keep(new oc.TopExp_Explorer(off.Shape(), oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE));
+      if (!ex.More()) throw new Error("Thicken: the face couldn't be offset — try a smaller thickness, or Out / In");
+      from = oc.TopoDS.Face(ex.Current());
+    }
+    const thick = keep(new oc.BRepOffsetAPI_MakeThickSolid());
+    thick.MakeThickSolidBySimple(from as never, side === 1 ? -thickness : thickness);
+    if (!thick.IsDone()) throw new Error("Thicken: OpenCascade couldn't thicken this face — try a smaller thickness");
+    const solids = [...iterTopo(thick.Shape(), "solid")];
+    if (solids.length !== 1) throw new Error("Thicken: OpenCascade couldn't thicken this face — try a smaller thickness");
+    let solid = cast(solids[0]) as Solid;
+    // (the simple thicken can make it inside out: turned the right way)
+    if (solidVolume(solid) < 0) solid = cast(oc.TopoDS.Solid((solid.wrapped as unknown as { Reversed(): unknown }).Reversed() as never)) as Solid;
+    if (!isValidShape(solid) || !(solidVolume(solid) > 1e-9))
+      throw new Error("Thicken: the result isn't a valid solid — the surface curves too tightly for that thickness (try less, or the other side)");
+    return solid;
+  } finally {
+    for (const o of tmp) {
+      try {
+        o.delete();
+      } catch {
+        // already owned by OpenCascade
+      }
+    }
+  }
 }
 
 /**
@@ -6169,9 +6261,10 @@ function loftThrough(outlines: (Wire | Face)[], smooth: boolean, solid: boolean)
  * same way, and that taken out of the loft — open at both ends, the outside where the outlines are; on a sloping part
  * the wall's a little thinner (measured across, not square to the slope). `wall` 0: the solid loft. (Thickening the
  * loft's sides instead — OpenCascade's simple offset — makes garbage at a corner's crease: a circle to a rectangle.)
+ * `smooth`: one smooth surface through them all (see loftOutlines), the inside too.
  */
-export function loftPipe(outlines: (Wire | Face)[], wall: number): Solid {
-  if (!(wall > 0)) return loftOutlines(outlines);
+export function loftPipe(outlines: (Wire | Face)[], wall: number, smooth = false): Solid {
+  if (!(wall > 0)) return loftOutlines(outlines, smooth);
   // (outerWire uses up its face: copies' — see loftThrough)
   const inner = outlines.map((o) => {
     // (its edges made again where they are: an outline moved carries a placement, which the offset applied a second time —
@@ -6204,7 +6297,7 @@ export function loftPipe(outlines: (Wire | Face)[], wall: number): Solid {
     return translateShape(f, [out[0] * ext, out[1] * ext, out[2] * ext]) as Face;
   };
   const n = inner.length;
-  const outer = loftOutlines(outlines), core = loftOutlines([past(inner[0], inner[1]), ...inner, past(inner[n - 1], inner[n - 2])]);
+  const outer = loftOutlines(outlines, smooth), core = loftOutlines([past(inner[0], inner[1]), ...inner, past(inner[n - 1], inner[n - 2])], smooth);
   const pieces = solidPieces(booleanOp("subtract", outer, [core]));
   if (pieces.length !== 1 || !isValidShape(pieces[0]) || !(solidVolume(pieces[0]) < solidVolume(outer))) throw new Error("Loft: the wall came out broken (try a thinner wall)");
   return pieces[0];

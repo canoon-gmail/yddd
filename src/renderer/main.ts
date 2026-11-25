@@ -178,6 +178,8 @@ import {
   edgePrint,
   loftOutlines,
   loftPipe,
+  fitCirclesToPaths,
+  thickenFace,
   type ShapePrint,
 } from "./kernel";
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
@@ -310,7 +312,7 @@ const STL_QUALITY_KEY = "yddd.stlQuality";
 
 
 /** A body as saved in a .yddd file (see App.savedBody). */
-type SavedBody = { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord };
+type SavedBody = { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; fit?: Body["fit"] };
 
 /** What Ctrl+C leaves for every YDDD window (see App.copySelection). */
 type CopiedObjects = { format: "yddd-copy"; version: number; from: string; bodies: SavedBody[]; looks?: GroupLooks; images?: Record<string, string> };
@@ -406,7 +408,7 @@ export class App implements ToolHost {
   gearMateDefaults = { teeth: 12, ratio: 0, around: 0 };
   nutBoltDefaults = { size: 2, length: 30, thread: 20, clearance: 0.3 };
   batteryDefaults = { battery: 0, columns: 4, rows: 2, depth: 60, clearance: 0.6, wall: 1.6, floor: 1.6, diameter: 20, length: 50 };
-  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1, curveFaceSink: 0.2, loftWall: 0 };
+  private defaults = { fillet: 1, chamfer: 1, pushpullNew: false, bumpIn: false, bumpLength: 1, shell: 1, offset: 5, offsetRound: false, offsetRing: false, offsetFill: true, offsetJoin: true, edgesWhich: 0, revolveAngle: 360, joinNew: false, sweepRound: 0, sweepTurn: 0, curveFaceLength: 1, curveFaceSink: 0.2, loftWall: 0, thicken: 2, thickenSide: 0 };
 
   private hudEl = $("hud");
   private hudAnchor: THREE.Vector3 | null = null;
@@ -437,6 +439,7 @@ export class App implements ToolHost {
       else if (this.dimMove?.xf) this.setDimMove(null);
     };
     this.doc.linkCopies = (prev, next, arrays, label) => this.linkCopies(prev, next, arrays, label);
+    this.doc.followFits = (prev, next, label) => this.followFits(prev, next, label);
     this.buildToolbar();
     this.buildCornerTools();
     this.renderRecent();
@@ -1013,6 +1016,8 @@ export class App implements ToolHost {
       case "op.revolve": return this.opRevolve();
       case "op.sweep": return this.opSweep();
       case "op.loft": return this.opLoft();
+      case "op.fitPaths": return this.fitToPaths();
+      case "op.thicken": return this.opThicken();
       case "op.cut": return this.startCut();
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
@@ -2746,6 +2751,70 @@ export class App implements ToolHost {
     this.toast(`Closed: "${nb.name}", a solid`);
   }
 
+  /**
+   * Fit to paths: the selected circles (face objects) each sized and moved in its own plane to touch the two selected
+   * paths — e.g. an upper arm's cross-sections between its left and right outline, then Loft. Instant; one undo step.
+   * A circle whose plane misses a path is left as it is (named). Array copies aren't linked here: each gets its own size.
+   * The fitted circles stay linked to the two paths (see followFits).
+   */
+  private fitToPaths(): void {
+    const bodies = [...new Set(this.selection.map((s) => s.body))].map((id) => this.doc.get(id)).filter((b): b is Body => !!b);
+    const paths = bodies.filter((b) => b.kind === "path");
+    const isCircle = (b: Body) => b.kind === "face" && isBrep(b) && (b.shape as Shape).faces.length === 1 && (b.shape as Shape).faces[0].edges.length === 1 && (b.shape as Shape).faces[0].edges[0].geomType === "CIRCLE";
+    const circles = bodies.filter(isCircle);
+    if (paths.length !== 2 || !circles.length || circles.length + 2 !== bodies.length)
+      return this.toast("Fit to paths: select the circles and two paths (Shift+click to add) — each circle is sized to touch both paths", "error");
+    let made: ReturnType<typeof fitCirclesToPaths>;
+    try {
+      made = fitCirclesToPaths(circles.map((b) => (b.shape as Shape).faces[0]), [paths[0].shape as Wire, paths[1].shape as Wire]);
+    } catch (e) {
+      return this.toast(errorMessage(e), "error");
+    }
+    const shapes = new Map<number, Geom>(), missed: string[] = [];
+    circles.forEach((b, i) => (made[i] ? shapes.set(b.id, made[i] as unknown as Geom) : missed.push(b.name)));
+    if (!shapes.size) return this.toast("Fit to paths: no circle's plane crosses both paths — the paths must run through the circles' planes", "error");
+    // (each fitted circle linked to the paths: change one — edit it in the sketch, move it — and they're sized again)
+    const fit = { paths: [paths[0].id, paths[1].id] as const };
+    this.doc.commit(this.doc.bodies.map((b) => (shapes.has(b.id) ? { ...withShape(b, shapes.get(b.id)!), fit } : b)), "Fit to paths");
+    const n = shapes.size, left = missed.length ? ` — ${missed.length} left as they were (their plane misses a path): ${missed.slice(0, 4).join(", ")}${missed.length > 4 ? "…" : ""}` : "";
+    this.toast(`Fit to paths: ${n} circle${n > 1 ? "s" : ""} sized to touch both paths${left}`, missed.length ? "error" : undefined);
+  }
+
+  /**
+   * Fit to paths circles following their paths (Doc.followFits): one of a circle's two paths changed shape → the circle
+   * sized again to touch both (where its plane now misses one: left as it is, still linked). The link is dropped when
+   * the circle itself is changed by hand (not with both its paths), is a new copy of one (Duplicate / Paste) or a path is gone.
+   */
+  private followFits(prev: readonly Body[], next: readonly Body[], label: string): readonly Body[] | null {
+    if (label === "Fit to paths" || !next.some((b) => b.fit)) return null;
+    const before = new Map(prev.map((b) => [b.id, b])), now = new Map(next.map((b) => [b.id, b]));
+    let changed = false;
+    const out = next.map((b) => {
+      if (!b.fit) return b;
+      const was = before.get(b.id), ps = b.fit.paths.map((id) => now.get(id));
+      const unlink = () => {
+        changed = true;
+        const { fit: _, ...rest } = b;
+        return rest as Body;
+      };
+      if (!was || ps.some((p) => p?.kind !== "path")) return unlink();
+      const pathsChanged = ps.filter((p) => before.get(p!.id)?.shape !== p!.shape).length;
+      // (moved / turned / scaled together with both its paths: still linked, as it was made)
+      if (was.shape !== b.shape) return pathsChanged === 2 ? b : unlink();
+      if (!pathsChanged) return b;
+      let made: ReturnType<typeof fitCirclesToPaths>[number] = null;
+      try {
+        made = fitCirclesToPaths([(b.shape as Shape).faces[0]], [ps[0]!.shape as Wire, ps[1]!.shape as Wire])[0];
+      } catch {
+        made = null;
+      }
+      if (!made) return b;
+      changed = true;
+      return withShape(b, made as unknown as Geom);
+    });
+    return changed ? out : null;
+  }
+
   /** Only whole letters of pushed Text tool texts selected (Solid mode — e.g. a text group, after its first P). */
   private pushedLettersSelected(): boolean {
     return this.selection.length > 0 && this.selection.every((s) => {
@@ -3823,7 +3892,7 @@ export class App implements ToolHost {
   /**
    * Loft: a solid through two or more closed outlines — paths, flat face objects or a solid's flat faces, selected
    * (Shift+click to add) — e.g. a circle to a slot above it; lined up first so it isn't twisted (see loftOutlines), in
-   * order along the way from the first to the last. Apply: a new solid "Loft N", the outlines left as they are; one undo step.
+   * order along the way from the first to the last; Smooth (3 or more): one surface through them all. Apply: a new solid "Loft N", the outlines left as they are; one undo step.
    */
   private opLoft(): void {
     type Outline = Wire | Shape["faces"][number];
@@ -3850,6 +3919,9 @@ export class App implements ToolHost {
     const sorted = picked.map((o) => ({ o, k: mid(o).dot(along) })).sort((a, b) => a.k - b.k).map(({ o }) => o);
     const runLength = (os: Outline[]) => os.slice(1).reduce((n, o, i) => n + mid(o).distanceTo(mid(os[i])), 0);
     const outlines = runLength(picked) < runLength(sorted) - 1e-6 ? picked : sorted;
+    // Smooth: offered with 3 or more outlines; ticked at first when they're all curves (circles, ovals — an arm's
+    // sections), not with a straight side among them (a circle under a slot: a pipe adapter stays straight between them)
+    const many = outlines.length >= 3, curvy = outlines.every((o) => o.edges.every((e) => e.geomType !== "LINE"));
     const outcome = (solid: Solid): OpOutcome => ({
       ghost: new Map([[-1, solid]]),
       commit: () => {
@@ -3861,13 +3933,63 @@ export class App implements ToolHost {
     this.startOp({
       title: "Loft",
       label: "Loft",
-      note: `${outlines.length} outlines — straight between each two`,
+      note: `${outlines.length} outlines`,
       // (0: a solid; more: a pipe — that thick inward, the outside where the outlines are, open at both ends)
-      fields: [{ key: "wall", label: "Wall thickness (mm, 0 = solid)", value: this.defaults.loftWall, step: 0.5, min: 0 }],
-      compute: ({ wall }) => outcome(loftPipe(outlines, wall)),
+      // Smooth (3 or more outlines — with two it's the same): one surface through them all, no line or crease at each
+      // outline (an upper arm through 12 circles: 11 straight bands, 10 rings drawn); off: straight between each two
+      fields: [
+        { key: "wall", label: "Wall thickness (mm, 0 = solid)", value: this.defaults.loftWall, step: 0.5, min: 0 },
+        ...(many ? [{ key: "smooth", label: "Smooth (one surface through all the outlines)", value: curvy ? 1 : 0, type: "checkbox" as const }] : []),
+      ],
+      compute: ({ wall, smooth }) => outcome(loftPipe(outlines, wall, many && !!smooth)),
       // (in the background kernel: a loft through detailed outlines can take a while)
-      computeAsync: async ({ wall }) => outcome(solidFrom(await this.bgKernel.run({ op: "loft", outlines: outlines.map((o) => this.brepFor(o).brep), wall }))),
+      computeAsync: async ({ wall, smooth }) => outcome(solidFrom(await this.bgKernel.run({ op: "loft", outlines: outlines.map((o) => this.brepFor(o).brep), wall, smooth: many && !!smooth }))),
       remember: ({ wall }) => (this.defaults.loftWall = wall),
+    });
+  }
+
+  /**
+   * Thicken (from the / list — no button, no key): the selected faces — face objects, or a solid's faces (Face mode: a
+   * loft's curved side) — each made a solid that thick, square to the surface: out (the way the face points), in, or
+   * half each side. An armour plate: Fit to paths, Loft, Cut, its outer face thickened. The faces stay as they were.
+   */
+  private opThicken(): void {
+    const faces: Shape["faces"][number][] = [];
+    const seen = new Set<string>();
+    for (const s of this.selection) {
+      const b = this.doc.get(s.body);
+      if (!b || !isBrep(b)) continue;
+      if (b.kind === "face") {
+        if (!seen.has(`${b.id}`)) faces.push(...(b.shape as Shape).faces);
+        seen.add(`${b.id}`);
+      } else if (s.kind === "face" && !seen.has(`${b.id}:${s.id}`)) {
+        seen.add(`${b.id}:${s.id}`);
+        const f = findFace(b.shape as Shape, s.id);
+        if (f) faces.push(f);
+      }
+    }
+    if (!faces.length) return this.toast("Thicken: select a face — a face object, or a solid's face in Face mode (2), e.g. a loft's curved side", "error");
+    const SIDES = ["Out (the way the face points)", "In", "Both sides (half each)"];
+    this.startOp({
+      title: "Thicken",
+      label: "Thicken",
+      note: `${faces.length} face${faces.length > 1 ? "s" : ""}`,
+      fields: [
+        { key: "t", label: "Thickness (mm)", value: this.defaults.thicken, step: 0.5, min: 0 },
+        { key: "side", label: "Side", type: "select", options: SIDES, value: this.defaults.thickenSide },
+      ],
+      compute: ({ t, side }) => {
+        const solids = faces.map((f) => thickenFace(f, t, side as 0 | 1 | 2));
+        return {
+          ghost: new Map(solids.map((x, i) => [-(i + 1), x])),
+          commit: () => {
+            const made = solids.map((x) => this.doc.makeBody(x, "Thicken"));
+            this.doc.commit([...this.doc.bodies, ...made], "Thicken");
+            return { select: made.map((b) => b.id), solidMode: true };
+          },
+        };
+      },
+      remember: ({ t, side }) => Object.assign(this.defaults, { thicken: t, thickenSide: side }),
     });
   }
 
@@ -5718,7 +5840,7 @@ export class App implements ToolHost {
       const taken = new Set(tool.taken); // (the objects edited — and any dragged in meanwhile)
       this.endSketch();
       const nextGuides = this.sketchGuides(tool, guides);
-      const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...paths.map((w) => this.doc.makeBody(w, "Path", "path"))].map((m) => (group ? { ...m, group } : m));
+      const made = [...faces.map((f) => this.doc.makeBody(f, "Sketch", "face")), ...this.keptPaths(paths, [...taken]).map(({ wire, was }) => (was ? (withShape(was, wire as unknown as Geom) as Body) : this.doc.makeBody(wire, "Path", "path")))].map((m) => (group ? { ...m, group } : m));
       this.doc.commit([...this.doc.bodies.filter((b) => !taken.has(b.id)), ...made], "Edit in sketch", nextGuides ?? this.doc.guides);
       if (nextGuides) this.showGuides();
       this.setMode("body");
@@ -5732,6 +5854,25 @@ export class App implements ToolHost {
     tool.viewRadius = box.getBoundingSphere(new THREE.Sphere()).radius * 1.25; // (the outlines and a little round them)
     tool.taken = [...ids];
     this.openSketch(tool.load(loops, opens).loadGuides(this.doc.guides));
+  }
+
+  /**
+   * Edit in sketch: the paths it gives back, each with the edited path it stands for (its id and name kept — a Fit to
+   * paths circle stays linked to it) when as many came back as were taken in: each to the nearest one (box middles).
+   */
+  private keptPaths(wires: Wire[], taken: number[]): { wire: Wire; was?: Body }[] {
+    const olds = taken.map((id) => this.doc.get(id)).filter((b): b is Body => b?.kind === "path");
+    if (!wires.length || olds.length !== wires.length) return wires.map((wire) => ({ wire }));
+    const mid = (s: Wire) => {
+      const bb = curveBounds(s);
+      return bb ? new THREE.Vector3(...bb[0]).add(new THREE.Vector3(...bb[1])).multiplyScalar(0.5) : new THREE.Vector3();
+    };
+    const left = olds.map((b) => ({ b, m: mid(b.shape as Wire) }));
+    return wires.map((wire) => {
+      const m = mid(wire);
+      const i = left.reduce((best, o, k) => (o.m.distanceTo(m) < left[best].m.distanceTo(m) ? k : best), 0);
+      return { wire, was: left.splice(i, 1)[0].b };
+    });
   }
 
   /**
@@ -6917,7 +7058,7 @@ export class App implements ToolHost {
   /**
    * Mirror (M): a mirrored copy of the selected objects beyond one side of their box — click a
    * ±X / ±Y / ±Z mark; the mirror plane is that side, so the copy touches the original. Then (or
-   * instead) a click on a guide line moves the plane to it, square to that axis — the right leg
+   * instead) a click on a guide line (or a straight path, or a world axis line) moves the plane to it, square to that axis — the right leg
    * mirrored about the body's middle guide: the left leg (no mark clicked: the axis the guide lies
    * across, the one the objects are furthest from it along). The copies stay apart (Union joins
    * them). One undo step; a whole group's copies go in a new group (as Duplicate). To flip: delete the original.
@@ -6968,24 +7109,41 @@ export class App implements ToolHost {
       if (this.op) this.op.exact = { key: "at", shown: a.value, value: at };
       a.dispatchEvent(new Event("input", { bubbles: true }));
     };
-    /** The guide line under the cursor and where the plane goes there (side `dir`), or why not; null: no guide. */
-    const guidePlane = (e: PointerEvent): { guide: number; dir: number; at: number } | { guide: number; error: string } | null => {
+    /**
+     * The guide line — or straight path (not one being mirrored) — under the cursor and where the plane goes there
+     * (side `dir`), or why not; null: neither. `guide`: the guide's index (a path: -1, `path` its id).
+     */
+    const guidePlane = (e: PointerEvent): ({ guide: number; path?: number; axis?: number } & ({ dir: number; at: number } | { error: string })) | null => {
       const g = this.viewport.guideAt(e.clientX, e.clientY);
-      if (g < 0) return null;
-      const { a, b } = this.doc.guides[g];
+      if (g >= 0) return { guide: g, ...linePlane(this.doc.guides[g], "guide") };
+      const p = this.viewport.pick(e.clientX, e.clientY, "body"), pb = p && this.doc.get(p.body);
+      if (pb?.kind !== "path" || ids.includes(pb.id)) {
+        // A world axis line (red X / green Y / blue Z): the mirror plane through the origin
+        const w = this.viewport.axisUnder(e.clientX, e.clientY);
+        if (w < 0) return null;
+        const b: V3 = [0, 0, 0];
+        b[w] = 1;
+        return { guide: -1, axis: w, ...linePlane({ a: [0, 0, 0], b }, `${"XYZ"[w]} axis line`) };
+      }
+      const line = this.straightPath(pb.id);
+      if (!line) return { guide: -1, path: pb.id, error: `"${pb.name}" isn't one straight line — only a straight path (or a guide line) can be the mirror line` };
+      return { guide: -1, path: pb.id, ...linePlane(line, "path") };
+    };
+    /** The mirror plane on the line a–b (a guide / path), square to an axis it lies across. */
+    const linePlane = ({ a, b }: { a: V3; b: V3 }, what: string): { dir: number; at: number } | { error: string } => {
       const d = [0, 1, 2].map((k) => b[k] - a[k]), len = Math.hypot(...d) || 1;
       const mid = [0, 1, 2].map((k) => (a[k] + b[k]) / 2);
       const across = (k: number) => Math.abs(d[k]) / len < 0.05; // (within ~3° of square to axis k)
       const cur = Number(input("dir")?.value ?? 0);
       let axis = cur >= 1 ? (cur - 1) >> 1 : -1;
-      if (axis >= 0 && !across(axis)) return { guide: g, error: `That guide runs along ${"XYZ"[axis]} — click one across it (or another ±X / ±Y / ±Z mark)` };
+      if (axis >= 0 && !across(axis)) return { error: `That ${what} runs along ${"XYZ"[axis]} — click one across it (or another ±X / ±Y / ±Z mark)` };
       if (axis < 0) {
         const ks = [0, 1, 2].filter(across);
-        if (!ks.length) return { guide: g, error: "That guide is slanted — click a ±X / ±Y / ±Z mark first, then a guide square to it" };
+        if (!ks.length) return { error: `That ${what} is slanted — click a ±X / ±Y / ±Z mark first, then a ${what} square to it` };
         axis = ks.reduce((best, k) => (Math.abs(c[k] - mid[k]) > Math.abs(c[best] - mid[best]) ? k : best), ks[0]);
       }
-      // (the side of the objects facing the guide)
-      return { guide: g, dir: axis * 2 + (mid[axis] >= c[axis] ? 0 : 1), at: mid[axis] };
+      // (the side of the objects facing the line)
+      return { dir: axis * 2 + (mid[axis] >= c[axis] ? 0 : 1), at: mid[axis] };
     };
     let pickedGuide = -1;
     /** The side setSide last set: picked in the Side list instead, the plane goes to that side of the box. */
@@ -7005,9 +7163,9 @@ export class App implements ToolHost {
       applyLabel: "Done",
       fields: [
         { key: "dir", label: "Side", type: "select", options: ["— click a mark —", ...DIRS], value: 0 },
-        { key: "at", label: "Mirror plane at (mm along that axis — click a guide line)", value: NaN, step: 1, off: (v) => !(v.dir >= 1) },
+        { key: "at", label: "Mirror plane at (mm along that axis — click a guide line, straight path or axis line)", value: NaN, step: 1, off: (v) => !(v.dir >= 1) },
       ],
-      hint: "Mirror: click a ±X / ±Y / ±Z mark — the copy appears beyond that side, touching it · then a guide line: the mirror plane there (e.g. the body's middle: the other leg) · Enter or Done apply · Esc cancel",
+      hint: "Mirror: click a ±X / ±Y / ±Z mark — the copy appears beyond that side, touching it · then a guide line, a straight path or an axis line (red X / green Y / blue Z, through the origin): the mirror plane there (e.g. the body's middle: the other leg) · Enter or Done apply · Esc cancel",
       pick: (e) => {
         const t = guidePlane(e);
         if (!t) return;
@@ -7018,6 +7176,9 @@ export class App implements ToolHost {
       hover: (e) => {
         const t = guidePlane(e);
         this.viewport.setGuides(this.doc.guides, pickedGuide, t ? t.guide : -1);
+        // (a path under the cursor lit, as a guide is)
+        this.viewport.setHighlight(this.selection, t?.path !== undefined ? { kind: "body", body: t.path, id: 0 } : null);
+        this.hud(t?.axis !== undefined ? `${"XYZ"[t.axis]} axis — mirror through the origin` : null);
         this.viewport.canvas.style.cursor = t ? ("error" in t ? "not-allowed" : "pointer") : "crosshair";
       },
       // ±X / ±Y / ±Z marks just outside the objects' sides (axis colours)
@@ -7039,7 +7200,7 @@ export class App implements ToolHost {
         });
       })(),
       compute: ({ dir: d, at }) => {
-        if (!(d >= 1)) throw new OpWaiting("Click a ±X / ±Y / ±Z mark (the side to mirror across) or a guide line (the mirror plane)");
+        if (!(d >= 1)) throw new OpWaiting("Click a ±X / ±Y / ±Z mark (the side to mirror across), a guide line, a straight path or an axis line (the mirror plane)");
         const dir = d - 1;
         if (d !== sideSet) {
           sideSet = d;
@@ -7054,7 +7215,7 @@ export class App implements ToolHost {
         const got = results(dir, at);
         const ghost = new Map<number, Shape>();
         got.forEach(({ b, image }, j) => {
-          if (b.kind === "solid" || b.kind === "face") ghost.set(-(j + 1), image as Shape);
+          if (b.kind === "solid" || b.kind === "face" || b.kind === "path") ghost.set(-(j + 1), image as Shape); // (a path: its lines)
         });
         return {
           ghost,
@@ -7280,7 +7441,8 @@ export class App implements ToolHost {
    * anything once the group is taken apart (Ctrl+Shift+G).
    */
   private linkCopies(prev: readonly Body[], next: readonly Body[], arrays: readonly ArrayRecord[], label: string): { bodies: readonly Body[]; arrays: readonly ArrayRecord[] } | null {
-    if (label === "Move") return null;
+    // (Fit to paths: each copy its own size — not one copied onto the rest)
+    if (label === "Move" || label === "Fit to paths") return null;
     const before = new Map(prev.map((b) => [b.id, b])), after = new Map(next.map((b) => [b.id, b]));
     const replaced = new Map<number, Body>();
     const records = arrays.map((rec) => {
@@ -9054,6 +9216,8 @@ export class App implements ToolHost {
       ...(b.group ? { group: b.group } : {}),
       ...(b.text ? { text: b.text } : {}),
       ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}),
+      // (path ids: only read back with the history, where ids are kept)
+      ...(b.fit ? { fit: b.fit } : {}),
     };
   }
 
@@ -9077,7 +9241,7 @@ export class App implements ToolHost {
     // History: body / shape references — negative: the model's own bodies[-r - 1]; else the history's lists.
     const bodyRef = new Map<Body, number>(cur.map((b, i) => [b, -(i + 1)]));
     const shapeRef = new Map<object, number>(cur.map((b, i) => [b.shape, -(i + 1)]));
-    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; s: number }[] = [];
+    const pool: { id: number; name: string; kind: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; fit?: Body["fit"]; s: number }[] = [];
     const shapes: string[] = [];
     let size = 0;
     const refBody = (b: Body): number => {
@@ -9091,7 +9255,7 @@ export class App implements ToolHost {
         shapeRef.set(b.shape, sr);
       }
       r = pool.length;
-      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}), s: sr });
+      pool.push({ id: b.id, name: b.name, kind: b.kind, ...(b.group ? { group: b.group } : {}), ...(b.text ? { text: b.text } : {}), ...(b.look ? { look: b.look } : {}), ...(b.locked ? { locked: true as const } : {}), ...(b.picture ? { picture: b.picture } : {}), ...(b.gear ? { gear: b.gear } : {}), ...(b.fit ? { fit: b.fit } : {}), s: sr });
       bodyRef.set(b, r);
       return r;
     };
@@ -9163,7 +9327,7 @@ export class App implements ToolHost {
   private loadModel(text: string, filePath: string | null): void {
     const json = JSON.parse(text) as {
       format: string;
-      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord }[];
+      bodies: { name: string; kind?: BodyKind; brep?: string; mesh?: string; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; fit?: Body["fit"] }[];
       looks?: GroupLooks;
       images?: Record<string, string>;
       guides?: Guide[];
@@ -9187,7 +9351,7 @@ export class App implements ToolHost {
     const h = json.history;
     if (h && Array.isArray(h.ids) && h.ids.length === bodies.length) {
       try {
-        const current = bodies.map((b, i) => ({ ...b, id: h.ids[i] }) as Body);
+        const current = bodies.map((b, i) => ({ ...b, id: h.ids[i], ...(json.bodies[i].fit ? { fit: json.bodies[i].fit } : {}) }) as Body);
         const made = new Map<number, Body>();
         const shapeOf = new Map<number, BodyGeom["shape"]>();
         const body = (r: number): Body => {
@@ -9197,7 +9361,7 @@ export class App implements ToolHost {
             const p = h.bodies[r];
             let shape = p.s < 0 ? current[-p.s - 1].shape : shapeOf.get(p.s);
             if (!shape) shapeOf.set(p.s, (shape = geom(p.kind, h.shapes[p.s]).shape));
-            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}), ...(p.locked ? { locked: true as const } : {}), ...(p.picture ? { picture: p.picture } : {}), ...(p.gear ? { gear: p.gear } : {}) } as Body;
+            b = { id: p.id, name: p.name, kind: p.kind, shape, ...(p.group ? { group: p.group } : {}), ...(p.text ? { text: p.text } : {}), ...(p.look ? { look: p.look } : {}), ...(p.locked ? { locked: true as const } : {}), ...(p.picture ? { picture: p.picture } : {}), ...(p.gear ? { gear: p.gear } : {}), ...(p.fit ? { fit: p.fit } : {}) } as Body;
             made.set(r, b);
           }
           return b;

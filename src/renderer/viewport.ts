@@ -15,7 +15,7 @@ import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import type { Body, Dimension, Look } from "./document";
 import { deg, num } from "./format";
 import { ICONS } from "./icons";
-import { tessellate, circleOf, pointCenter, kindOf, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, needsBackgroundMesh, standInTessellation, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
+import { tessellate, circleOf, pointCenter, kindOf, isWire, curvedFaceCenter, nearestOnEdge, rigidSource, movedIds, isMesh, needsBackgroundMesh, standInTessellation, type Geom, type Shape, type Tessellation, type TriMesh, type V3 } from "./kernel";
 import { imageUrl } from "./picture";
 
 /** A dimension on screen: a panel's measurement may say more than its length ("2 squares · 83.5"). */
@@ -2733,7 +2733,8 @@ export class Viewport {
     }
     let k = -1;
     for (const [id, shape] of shapes) {
-      const view = this.buildView({ id: k--, name: "", kind: kindOf(shape), shape }, true);
+      // (a path's shape too: drawn as a path, lines only)
+      const view = this.buildView((isWire(shape) ? { id: k--, name: "", kind: "path", shape } : { id: k--, name: "", kind: kindOf(shape), shape }) as Body, true);
       this.ghostRoot.add(view.group);
       const orig = this.views.get(id);
       if (orig) {

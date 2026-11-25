@@ -22,7 +22,7 @@ export interface SavedHistory {
   ids: number[];
   dims?: Dimension[];
   arrays?: ArrayRecord[];
-  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; s: number }[];
+  bodies: { id: number; name: string; kind: Body["kind"]; group?: string; text?: TextRecord; look?: Look; locked?: true; picture?: PictureRecord; gear?: GearRecord; fit?: Body["fit"]; s: number }[];
   shapes: string[];
   undo: SavedStep[];
   redo: SavedStep[];
