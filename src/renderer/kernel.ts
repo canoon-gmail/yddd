@@ -5883,12 +5883,21 @@ function arcSpine(path: Wire): Wire {
     if (!arcs) return path;
     edges.push(...arcs);
   }
-  return assembleWire(edges);
+  try {
+    return assembleWire(edges);
+  } catch {
+    return path; // (arcs that still don't join: swept along the path as it is)
+  }
 }
 
 /** A flat freeform edge as arcs / lines end to end (see arcSpine); null if it isn't flat or won't fit. */
 function biarcs(e: Edge): Edge[] | null {
-  const at = (t: number) => e.pointAt(t).toTuple() as V3, tan = (t: number) => norm3(e.tangentAt(t).toTuple() as V3);
+  // Its ends exactly on its vertices: two curves meeting at one vertex can end 0.0000004 mm apart (within its
+  // tolerance) — arcs from the curves' own ends didn't join ("disconnected wire": no sweep along that path)
+  const verts = [...iterTopo(e.wrapped, "vertex")].map((v) => { const p = oc.BRep_Tool.Pnt(v as never), q: V3 = [p.X(), p.Y(), p.Z()]; p.delete(); return q; });
+  const onVertex = (p: V3): V3 => verts.reduce((a, v) => (Math.hypot(...sub3(v, p)) < Math.hypot(...sub3(a, p)) ? v : a), p);
+  const at = (t: number): V3 => { const p = e.pointAt(t).toTuple() as V3; return t === 0 || t === 1 ? onVertex(p) : p; };
+  const tan = (t: number) => norm3(e.tangentAt(t).toTuple() as V3);
   // Its plane: the normal from the turning of its tangent (a straight edge would be a LINE already)
   const samples = Array.from({ length: 33 }, (_, i) => i / 32);
   const pts = samples.map(at);
