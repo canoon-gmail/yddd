@@ -4366,6 +4366,46 @@ export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number
   throw first ?? new Error("Shell: the geometry kernel could not hollow this solid (try a smaller thickness)");
 }
 
+/** A whole sphere (one spherical face): its centre and radius, else null. */
+export function sphereOf(x: Geom): { center: V3; r: number } | null {
+  if (isMesh(x) || !(x instanceof OcShape)) return null;
+  const f = (x as Shape).faces;
+  const center = f.length === 1 && f[0].geomType === "SPHERE" ? curvedFaceCenter(f[0]) : null;
+  if (!center) return null;
+  const [lo, hi] = x.boundingBox.bounds;
+  return { center, r: Math.max(...[0, 1, 2].map((i) => hi[i] - lo[i])) / 2 };
+}
+
+/**
+ * Hull of two spheres: the skin pulled tight round both — each sphere's far side, joined by the cone touching both
+ * (an ice-cream cone; a tiny sphere at the tip: its point, as round as that sphere). Its side profile revolved about
+ * the line through the centres. One inside the other: the bigger one.
+ */
+export function hullSpheres(a: { center: V3; r: number }, b: { center: V3; r: number }): Solid {
+  const d = Math.hypot(...sub3(b.center, a.center));
+  if (d + Math.min(a.r, b.r) <= Math.max(a.r, b.r) + 1e-9) {
+    const big = a.r >= b.r ? a : b;
+    return makeSphereAt(big.center, big.r);
+  }
+  const u = norm3(sub3(b.center, a.center));
+  // (any direction square to the axis: the profile's plane)
+  const w = norm3(cross3(u, Math.abs(u[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
+  // where the cone touches: at angle phi from the axis on both spheres (from a's centre towards b: 90° − asin((ra − rb) / d))
+  const phi = Math.PI / 2 - Math.asin((a.r - b.r) / d);
+  const on = (s: { center: V3; r: number }, t: number): V3 =>
+    [0, 1, 2].map((k) => s.center[k] + s.r * (Math.cos(t) * u[k] + Math.sin(t) * w[k])) as V3;
+  const back = on(a, Math.PI), ta = on(a, phi), tb = on(b, phi), front = on(b, 0);
+  const edges = [
+    makeThreePointArc(new Vector(back), new Vector(on(a, (Math.PI + phi) / 2)), new Vector(ta)),
+    makeLine(new Vector(ta), new Vector(tb)),
+    makeThreePointArc(new Vector(tb), new Vector(on(b, phi / 2)), new Vector(front)),
+    makeLine(new Vector(front), new Vector(back)),
+  ];
+  const solid = revolution(makeFace(assembleWire(edges)), a.center, u, 360) as Solid;
+  if (!isValidShape(solid) || solidVolume(solid) <= 1e-9) throw new Error("Hull: the result is not a valid solid");
+  return solid;
+}
+
 /**
  * Thicken: a face (any surface — a curved one off a loft: an armour plate) made a solid `thickness` thick, square to the
  * surface everywhere: out (the way the face points), in, or half each side (`side` 0 / 1 / 2). OpenCascade's simple
@@ -7534,6 +7574,45 @@ export function mirrorShape<T extends Geom>(shape: T, point: V3, normal: V3): T 
 }
 
 /**
+ * Per-axis scale that failed whole: the solid cut in half through its box's middle — across X, Y or Z, the first that
+ * works — each half stretched and the two fused again. Round faces about different axes (a heart: two mirrored
+ * ice-cream cones unioned, their cones turned opposite ways) can't all be cut away from their seams in one go; each
+ * half has one. Null if no cut gives a valid solid of the stretched volume.
+ */
+function stretchInHalves(shape: Shape, f: V3, center: V3): Shape | null {
+  if (isFaceShape(shape) || !(shape instanceof OcShape) || [...iterTopo(shape.wrapped, "solid")].length !== 1) return null;
+  const [lo, hi] = shape.boundingBox.bounds;
+  const mid: V3 = [0, 1, 2].map((i) => (lo[i] + hi[i]) / 2) as V3;
+  const want = solidVolume(shape as Solid) * f[0] * f[1] * f[2];
+  // Cuts across a plane the shape is mirrored in first (its faces' centres mirrored land on faces' centres: a heart's
+  // middle — its two lobes apart), else the longest side first. (A heart a little taller than wide was cut across Z
+  // first: the lobes not apart, each half stretched in pieces again and again — over a minute, then failed.)
+  const centres = shape.faces.map((fc) => fc.center.toTuple() as V3);
+  const tol = 1e-4 * Math.max(1, ...[0, 1, 2].map((i) => hi[i] - lo[i]));
+  const mirrored = (k: number) => centres.every((c) => {
+    const m: V3 = [...c] as V3;
+    m[k] = 2 * mid[k] - c[k];
+    return centres.some((d) => Math.hypot(...sub3(d, m)) < tol);
+  });
+  const sym = [0, 1, 2].map(mirrored);
+  const order = [0, 1, 2].sort((a, b) => Number(sym[b]) - Number(sym[a]) || hi[b] - lo[b] - (hi[a] - lo[a]));
+  for (const k of order) {
+    try {
+      const n: V3 = [0, 0, 0];
+      n[k] = 1;
+      const { above, below } = splitByPlane(shape as Solid, mid, n);
+      if (!above || !below) continue;
+      const [a, b] = [above, below].map((p) => stretchCurved(p, f, center));
+      const fused = boolean("fuse", a as Shape3D, b as Shape3D) as Shape;
+      if (isValidShape(fused) && [...iterTopo(fused.wrapped, "solid")].length === 1 && Math.abs(solidVolume(fused as Solid) - want) <= 1e-3 * Math.max(1, Math.abs(want))) return fused;
+    } catch {
+      // the next axis
+    }
+  }
+  return null;
+}
+
+/**
  * Scale about `center` by per-axis factors. Equal factors work on any shape; different
  * ones rebuild the shape from its scaled corners, so they need flat faces and straight edges.
  */
@@ -7636,12 +7715,15 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0, prisms = true
       return out;
     };
     const buildEdge = (e: { wrapped: unknown }): Built => {
+      if (oc.BRep_Tool.Degenerated(e.wrapped as never)) return null;
       const c = oc.BRep_Tool.Curve(e.wrapped as never, 0, 0);
       if (!c.returnValue || (c.returnValue as unknown as { IsNull?: () => boolean }).IsNull?.()) return null; // degenerate (a pole): rebuilt by the face repair
       // (Geometry that ends up in the new shape is not freed here.)
       const bs = oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true)) as never);
       for (let i = 1; i <= bs.NbPoles(); i++) bs.SetPole(i, map(keep(bs.Pole(i))));
-      const p0 = vertexAt(keep(bs.Pole(1))), p1 = vertexAt(keep(bs.Pole(bs.NbPoles())));
+      // (its ends where the curve starts and ends: on its end control points unless the B-spline isn't clamped)
+      const end0 = keep(bs.Value(bs.FirstParameter())), end1 = keep(bs.Value(bs.LastParameter()));
+      const p0 = vertexAt(end0), p1 = vertexAt(end1);
       // A circle (arc) whose axis runs along X / Y / Z, the other two stretched alike: still a circle, the same way round
       if ((e as { geomType?: string }).geomType === "CIRCLE") {
         const ad = keep(new oc.BRepAdaptor_Curve(e.wrapped as never)), circ = keep(ad.Circle()), ax = keep(circ.Position());
@@ -7661,7 +7743,18 @@ function stretchCurved(shape: Shape, f: V3, center: V3, depth = 0, prisms = true
         }
       }
       // Explicit end parameters: on a closed curve (a full circle) both ends are the same vertex.
-      const mk = keep(new oc.BRepBuilderAPI_MakeEdge(bs as never, p0.v as never, p1.v as never, bs.FirstParameter(), bs.LastParameter()));
+      let mk = keep(new oc.BRepBuilderAPI_MakeEdge(bs as never, p0.v as never, p1.v as never, bs.FirstParameter(), bs.LastParameter()));
+      if (!mk.IsDone()) {
+        // (a vertex shared with the edge next to it is where that edge ends — up to 0.00001 mm from this one's end, past
+        // the vertex's tolerance: a boolean's intersection curves meet that loosely. Its end control points moved onto the
+        // vertices, again)
+        const at0 = keep(oc.BRep_Tool.Pnt(p0.v as never)), at1 = keep(oc.BRep_Tool.Pnt(p1.v as never));
+        if (end0.Distance(at0) < 1e-4 && end1.Distance(at1) < 1e-4 && p0.k !== p1.k) {
+          bs.SetPole(1, at0);
+          bs.SetPole(bs.NbPoles(), at1);
+          mk = keep(new oc.BRepBuilderAPI_MakeEdge(bs as never, p0.v as never, p1.v as never, bs.FirstParameter(), bs.LastParameter()));
+        }
+      }
       if (!mk.IsDone()) throw fail("an edge could not be rebuilt");
       return { edge: mk.Edge() as { Reversed(): never }, a: p0.k, b: p1.k };
     };
@@ -8102,8 +8195,14 @@ export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
       return stretchCurved(shape, f, center);
     } catch (e) {
       // (its swept walls made as prisms didn't work out: again the old way, as B-splines)
-      if (!shape.faces.some((x) => x.geomType === "EXTRUSION_SURFACE")) throw e;
-      return stretchCurved(shape, f, center, 0, false);
+      if (shape.faces.some((x) => x.geomType === "EXTRUSION_SURFACE")) {
+        try {
+          return stretchCurved(shape, f, center, 0, false);
+        } catch {
+          // (halves, below)
+        }
+      }
+      return stretchInHalves(shape, f, center) ?? (() => { throw e; })();
     }
   }
   const map = (p: V3): V3 => [center[0] + (p[0] - center[0]) * f[0], center[1] + (p[1] - center[1]) * f[1], center[2] + (p[2] - center[2]) * f[2]];

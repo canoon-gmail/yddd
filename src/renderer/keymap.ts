@@ -79,6 +79,7 @@ export const COMMANDS: Command[] = [
     ["op.loft", "Loft: a solid through closed outlines (a circle to a slot)"],
     ["op.fitPaths", "Fit to paths: circles sized to touch two paths (cross-sections between two outlines, then Loft)"],
     ["op.thicken", "Thicken: a face (a loft's curved side, a face object) made a solid that thick — an armour plate"],
+    ["op.hull", "Hull: two spheres wrapped in one skin — an ice-cream cone, a pill (a heart: Hull, Mirror, Union, Scale Y)"],
     ["op.cut", "Cut by guide or axis"],
     ["op.splitFace", "Split face by guide"],
     ["tool.divideFace", "Divide face"],

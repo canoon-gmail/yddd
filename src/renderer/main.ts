@@ -180,6 +180,8 @@ import {
   loftPipe,
   fitCirclesToPaths,
   thickenFace,
+  hullSpheres,
+  sphereOf,
   type ShapePrint,
 } from "./kernel";
 import { Doc, copySlots, isBrep, lookOf, withShape, type ArrayRecord, type Body, type BodyGeom, type Dimension, type GearRecord, type GroupLooks, type Guide, type HistoryEntry, type Look, type ShapeBody, type TextRecord } from "./document";
@@ -560,6 +562,21 @@ export class App implements ToolHost {
     return !!box && (box as HTMLInputElement).checked;
   }
 
+  /** A drag's `sets` (e.g. Scale's fixed point for the grip grabbed, Shift: the centre) put in its fields; true: one changed. */
+  private applyDragSets(drag: OpDrag | undefined, shift: boolean): boolean {
+    const given = drag?.sets;
+    const sets = typeof given === "function" ? given(this.opValues().values, shift) : given;
+    let changed = false;
+    for (const [k, v] of Object.entries(sets ?? {})) {
+      const input = this.op?.inputs.find((x) => x.dataset.key === k);
+      if (input && input.value !== String(v)) {
+        input.value = String(v);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   private dragOrigin(drag: OpDrag): V3 {
     return this.dragShifted(drag) ? drag.shift!.origin : drag.origin;
   }
@@ -584,17 +601,7 @@ export class App implements ToolHost {
         h.classList.add("dragging");
         this.op.anchor = undefined;
         this.op.active = i;
-        const given = dragsOf(this.op.spec)[i]?.sets;
-        const sets = typeof given === "function" ? given(this.opValues().values, e.shiftKey) : given;
-        let changed = false;
-        for (const [k, v] of Object.entries(sets ?? {})) {
-          const input = this.op.inputs.find((x) => x.dataset.key === k);
-          if (input && input.value !== String(v)) {
-            input.value = String(v);
-            changed = true;
-          }
-        }
-        if (changed) this.scheduleOpPreview();
+        if (this.applyDragSets(dragsOf(this.op.spec)[i], e.shiftKey)) this.scheduleOpPreview();
         this.opDrag(e);
       });
       h.addEventListener("pointermove", (e) => {
@@ -1018,6 +1025,7 @@ export class App implements ToolHost {
       case "op.loft": return this.opLoft();
       case "op.fitPaths": return this.fitToPaths();
       case "op.thicken": return this.opThicken();
+      case "op.hull": return this.opHull();
       case "op.cut": return this.startCut();
       case "op.splitFace": return this.startSplitFace();
       case "tool.guide": return this.startGuide();
@@ -2088,7 +2096,12 @@ export class App implements ToolHost {
     // Shift: its checkbox follows (e.g. Scale about the centre), the preview with it.
     const box = drag.shift && (op.inputs.find((i) => i.dataset.key === drag.shift!.key) as HTMLInputElement | undefined);
     if (box && box.checked !== e.shiftKey) {
+      // (pressed / let go mid-drag: the fixed point worked out again so the box stays where it is — from the values
+      // before the box flips — and the drag goes on from the value now; measured from the old origin and unit it
+      // jumped, to below 0 %)
+      if (op.anchor) this.applyDragSets(drag, e.shiftKey);
       box.checked = e.shiftKey;
+      op.anchor = undefined;
       this.scheduleOpPreview();
       this.positionHandle();
     }
@@ -3990,6 +4003,37 @@ export class App implements ToolHost {
         };
       },
       remember: ({ t, side }) => Object.assign(this.defaults, { thicken: t, thickenSide: side }),
+    });
+  }
+
+  /**
+   * Hull (from the / list — no button, no key): two spheres wrapped in one skin pulled tight round both — an ice-cream
+   * cone, a pill. A heart: a big sphere and a tiny one at the tip (as round as that), Hull, Mirror, Union, Scale Y.
+   * The spheres go (Keep: they stay).
+   */
+  private opHull(): void {
+    const ids = this.selectedBodyIds();
+    const spheres = ids.map((id) => sphereOf(this.doc.get(id)!.shape));
+    if (ids.length !== 2 || spheres.some((s) => !s)) {
+      return this.toast("Hull: select two spheres (a tiny one makes a point — an ice-cream cone; two the same: a pill)", "error");
+    }
+    const [a, b] = spheres as { center: V3; r: number }[];
+    this.startOp({
+      title: "Hull",
+      label: "Hull",
+      note: `<span class="op-help">The two spheres wrapped in one skin, a cone touching both. A heart: a big sphere and a tiny one at the tip → Hull → Mirror → Union → Scale Y 60 %</span>`,
+      fields: [{ key: "keep", label: "Keep the spheres", value: 0, type: "checkbox" }],
+      compute: ({ keep }) => {
+        const solid = hullSpheres(a, b);
+        return {
+          ghost: new Map([[-1, solid]]),
+          commit: () => {
+            const made = this.doc.makeBody(solid, "Hull");
+            this.doc.commit([...this.doc.bodies.filter((x) => keep || !ids.includes(x.id)), made], "Hull");
+            return { select: [made.id], solidMode: true };
+          },
+        };
+      },
     });
   }
 
@@ -9938,7 +9982,7 @@ async function boot(): Promise<void> {
     inchFields();
     const app = new App();
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
-    (window as unknown as { ydddKernel: object }).ydddKernel = { loftOutlines, loftPipe, guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, extrudeFaceScaled, edgeLoopFace, offsetFace, makeSphereAt, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
+    (window as unknown as { ydddKernel: object }).ydddKernel = { loftOutlines, loftPipe, guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, extrudeFaceScaled, edgeLoopFace, offsetFace, makeSphereAt, mirrorShape, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();
     const stress = Number(new URLSearchParams(location.search).get("stress"));
     if (stress > 0) app.loadStressScene(Math.min(stress, 50000));
