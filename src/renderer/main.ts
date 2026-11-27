@@ -3009,14 +3009,16 @@ export class App implements ToolHost {
   }
 
   /** Faces moved by a push/pull, per body (cached per op: the document doesn't change while it is open). */
-  private ppMoves = new Map<string, Map<number, V3>>();
+  private ppMoves = new Map<string, ReturnType<typeof pushPullMoves>>();
 
   /**
    * Instant push/pull drag preview: shift the faces (and the fillets they carry) in the display meshes; flat face
-   * objects (`flats`: id → normal) drawn as the prisms they'd make.
+   * objects (`flats`: id → normal) drawn as the prisms they'd make. Faces with anything but straight walls round them
+   * (see pushPullMoves): their prisms drawn on the solids as they are instead.
    */
   private dragPushPull(perBody: Map<number, number[]>, d: number, flats: Map<number, V3> = new Map()): boolean {
-    const moves = new Map<number, Map<number, V3>>();
+    const moves = new Map<number, Map<number, V3>>(), prisms = new Map<number, Map<number, V3>>();
+    let prism = false;
     try {
       for (const [id, faces] of perBody) {
         const k = `${this.doc.version}:${id}:${faces.join()}`;
@@ -3026,12 +3028,18 @@ export class App implements ToolHost {
           m = pushPullMoves(this.solidOf(id, "Push/Pull"), faces);
           this.ppMoves.set(k, m);
         }
-        moves.set(id, new Map([...m].map(([f, n]) => [f, [n[0] * d, n[1] * d, n[2] * d] as V3])));
+        prism ||= m.prism;
+        const by = (f: number, n: V3) => [f, [n[0] * d, n[1] * d, n[2] * d] as V3] as const;
+        moves.set(id, new Map([...m.moves].map(([f, n]) => by(f, n))));
+        // (a prism for each picked face only: the fillets a flat face carries move with it only when Apply can)
+        prisms.set(id, new Map(faces.map((f) => by(f, m.moves.get(f)!))));
       }
     } catch {
       return false;
     }
-    this.viewport.showGhostDeformed(moves, new Map([...flats].map(([id, n]) => [id, [n[0] * d, n[1] * d, n[2] * d] as V3])));
+    const extrude = new Map([...flats].map(([id, n]) => [id, [n[0] * d, n[1] * d, n[2] * d] as V3]));
+    if (prism) this.viewport.showGhostPrisms(prisms, d < 0, extrude);
+    else this.viewport.showGhostDeformed(moves, extrude);
     return true;
   }
 

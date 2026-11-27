@@ -278,6 +278,8 @@ export class Viewport {
     outlineSelected: new LineMaterial({ color: 0x1e88ff, linewidth: 2 }),
     previewFill: new THREE.MeshStandardMaterial({ color: 0x5aa9ff, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false }),
     previewLine: new THREE.LineBasicMaterial({ color: 0x8fd3ff, depthTest: false, transparent: true }),
+    /** What a push takes away (showGhostPrisms): seen through the solid. */
+    previewCut: new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthTest: false, depthWrite: false }),
     cursor: new THREE.MeshBasicMaterial({ color: 0xffe066, depthTest: false, transparent: true }),
     // Snap markers (square = corner, circle = centre, ...): fat lines, a plain line is always 1px.
     snapMarker: new LineMaterial({ color: 0x4ade80, linewidth: 2.5, depthTest: false, transparent: true }),
@@ -2920,6 +2922,76 @@ export class Viewport {
       this.ghostRoot.add(group);
       v.group.visible = false;
       this.markDirty(id);
+    }
+    for (const [id, d] of extrude) this.addGhostPrism(id, d);
+    this.requestRender();
+  }
+
+  /**
+   * Instant push/pull drag preview where the faces round the moved ones aren't walls (see pushPullMoves): the solids
+   * as they are, each moved face's prism drawn from its own triangles — the face, a copy moved by its offset, walls
+   * along its border between them. Pulled out (`cut` false): looks like the solid; pushed in: what goes, seen through it.
+   * `extrude`: flat face objects shown pushed out by that offset (see addGhostPrism).
+   */
+  showGhostPrisms(moves: Map<number, Map<number, V3>>, cut: boolean, extrude: Map<number, V3> = new Map()): void {
+    this.clearGhost();
+    for (const [id, faces] of moves) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      const P = v.mesh.geometry.attributes.position.array as ArrayLike<number>;
+      const T = v.mesh.geometry.index!.array as ArrayLike<number>;
+      const groups = v.mesh.geometry.groups;
+      const pos: number[] = [], idx: number[] = [], lines: number[] = [];
+      for (const [faceId, d] of faces) {
+        const gi = v.faceIndex.get(faceId);
+        if (gi === undefined || !groups[gi]) continue;
+        const { start, count } = groups[gi];
+        // (the face's points, then the same moved)
+        const local = new Map<number, number>();
+        const at = (k: number) => {
+          let i = local.get(k);
+          if (i === undefined) {
+            local.set(k, (i = pos.length / 3));
+            pos.push(P[k * 3], P[k * 3 + 1], P[k * 3 + 2], P[k * 3] + d[0], P[k * 3 + 1] + d[1], P[k * 3 + 2] + d[2]);
+          }
+          return i;
+        };
+        // Its border: triangle sides used once (inside the face each is shared by two)
+        const sides = new Map<string, [number, number]>();
+        for (let t = start; t + 2 < start + count; t += 3) {
+          const tri = [at(T[t]), at(T[t + 1]), at(T[t + 2])];
+          idx.push(tri[0], tri[2], tri[1], tri[0] + 1, tri[1] + 1, tri[2] + 1); // (the start face turned over)
+          for (let s = 0; s < 3; s++) {
+            const a = tri[s], b = tri[(s + 1) % 3], key = a < b ? `${a},${b}` : `${b},${a}`;
+            if (sides.has(key)) sides.delete(key);
+            else sides.set(key, [a, b]);
+          }
+        }
+        // (a quad per side, corners its own: flat shaded, not smoothed into the face)
+        for (const [a, b] of sides.values()) {
+          const q = pos.length / 3;
+          for (const c of [a, b, b + 1, a + 1]) pos.push(pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2]);
+          idx.push(q, q + 1, q + 2, q, q + 2, q + 3);
+          lines.push(...pos.slice(a * 3, a * 3 + 3), ...pos.slice(b * 3, b * 3 + 3), ...pos.slice(a * 3 + 3, a * 3 + 6), ...pos.slice(b * 3 + 3, b * 3 + 6));
+        }
+      }
+      if (!idx.length) continue;
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(pos), 3));
+      geom.setIndex(idx);
+      geom.computeVertexNormals();
+      const group = new THREE.Group();
+      const mesh = new THREE.Mesh(geom, cut ? this.mats.previewCut : this.mats.faces[0]);
+      mesh.raycast = () => {};
+      group.add(mesh);
+      if (lines.length) {
+        const eg = new LineSegmentsGeometry();
+        eg.setPositions(lines);
+        const l = new LineSegments2(eg, this.mats.edge);
+        l.raycast = () => {};
+        group.add(l);
+      }
+      this.ghostRoot.add(group);
     }
     for (const [id, d] of extrude) this.addGhostPrism(id, d);
     this.requestRender();

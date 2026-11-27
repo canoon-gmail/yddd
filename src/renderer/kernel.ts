@@ -2134,6 +2134,13 @@ function sweepFaces(shape: Solid, faces: { face: Face; n: V3; radial?: boolean }
   return result;
 }
 
+/** Whether a face runs straight along `n` (square to it all over: a box's side, a pocket's wall, a letter's sides). */
+function wallAlong(f: Face, n: V3): boolean {
+  return f.geomType === "PLANE"
+    ? Math.abs(dot3(norm3(f.normalAt().toTuple() as V3), n)) < 1e-9
+    : [0, 0.5, 1].every((u) => [0, 0.5, 1].every((v) => Math.abs(dot3(normalAtUV(f, u, v), n)) < 1e-7));
+}
+
 /**
  * Push/pull as a stretch, without sweeping the faces: where everything beyond a plane just inside
  * the moved faces is those faces plus walls running straight along `n`, cut the solid there, shift
@@ -2165,10 +2172,7 @@ function stretchPushPull(shape: Solid, moved: Face[], n: V3, distance: number): 
     const R = 2 * Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) + 10;
     const c: V3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
     const tol = 1e-6 * Math.max(1, R);
-    const straight = (f: Face) =>
-      f.geomType === "PLANE"
-        ? Math.abs(dot3(norm3(f.normalAt().toTuple() as V3), n)) < 1e-9
-        : [0, 0.5, 1].every((u) => [0, 0.5, 1].every((v) => Math.abs(dot3(normalAtUV(f, u, v), n)) < 1e-7));
+    const straight = (f: Face) => wallAlong(f, n);
     // Beyond the cut, every other face must be a straight wall (else the outer piece below isn't just the moved faces
     // and walls): told before the split, which takes a while on free-form faces — e.g. the floor of a letter cut into
     // a gear's top, the top beside it (~0.4 s saved).
@@ -3411,8 +3415,10 @@ function faceWithNormal(shape: Solid, faceId: number): { face: Face; n: V3 } {
  * The faces a push/pull of `faceIds` moves, each with its direction: the faces themselves and,
  * for flat ones, the fillets they carry along. Used for an instant (mesh) preview while dragging;
  * throws for a curved wall, which doesn't move that way (the real preview is shown instead).
+ * `prism`: the faces round them aren't all walls straight along the way they move — the preview
+ * stretching them (Viewport.showGhostDeformed) would be wrong: show the faces' prisms instead.
  */
-export function pushPullMoves(shape: Solid, faceIds: number[]): Map<number, V3> {
+export function pushPullMoves(shape: Solid, faceIds: number[]): { moves: Map<number, V3>; prism: boolean } {
   const out = new Map<number, V3>();
   const selected = new Set(faceIds);
   for (const id of faceIds) {
@@ -3422,7 +3428,11 @@ export function pushPullMoves(shape: Solid, faceIds: number[]): Map<number, V3> 
     out.set(id, n);
     if (face.geomType === "PLANE") for (const g of tangentChain(shape, face, n)) if (!selected.has(g.hashCode) && !out.has(g.hashCode)) out.set(g.hashCode, n);
   }
-  return out;
+  // (stretching anything else — a heart's curved lobes round a small flat face on its top — dragged a whole lobe out
+  // while Apply cut a slot)
+  const moved = shape.faces.filter((f) => out.has(f.hashCode));
+  const prism = shape.faces.some((g) => !out.has(g.hashCode) && moved.some((f) => f.edges.some((e) => g.edges.some((x) => x.isSame(e))) && !wallAlong(g, out.get(f.hashCode)!)));
+  return { moves: out, prism };
 }
 
 /**
@@ -3430,7 +3440,7 @@ export function pushPullMoves(shape: Solid, faceIds: number[]): Map<number, V3> 
  * none ([0, 0, 0]) if it is on none — e.g. a linked dimension's ends, for its preview. Throws as pushPullMoves.
  */
 export function pushPullPointMoves(shape: Solid, faceIds: number[], pts: V3[]): V3[] {
-  const moves = [...pushPullMoves(shape, faceIds)].map(([id, n]) => ({ face: findFace(shape, id), n }));
+  const moves = [...pushPullMoves(shape, faceIds).moves].map(([id, n]) => ({ face: findFace(shape, id), n }));
   const [lo, hi] = shape.boundingBox.bounds;
   const tol = 1e-5 * Math.max(1, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]));
   return pts.map((p) => moves.find((m) => m.face && distToFace(m.face, p) < tol)?.n ?? [0, 0, 0]);
