@@ -3473,6 +3473,19 @@ function pushPullOrSplit(shape: Solid, picked: { face: Face; n: V3 }[], distance
   } catch (e) {
     first = e;
   }
+  // A preview's booleans glue (see `previewing`), which assumes faces don't cross: pushed on past the solid's far side
+  // (a groove run out through the back of a plate) it gained volume — the drag said "wrong" where Apply works. Again
+  // without it.
+  if (previewing) {
+    previewing = false;
+    try {
+      return checkedPushPull(shape, pushPullFaces(shape, picked, distance), distance);
+    } catch {
+      // (wrong this way too: the split below, as a preview)
+    } finally {
+      previewing = true;
+    }
+  }
   const r = splitPushPull(shape, picked, distance);
   if (r) return r;
   throw first;
