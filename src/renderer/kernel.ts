@@ -6669,6 +6669,11 @@ function splitByPlaneOnce(shape: Solid, point: V3, normal: V3): { above: Solid |
       else if (bottom < -tol) below.push(p);
       else return null;
     }
+    // All of it there: a plane right along a solid's seam (a sphere scaled unevenly — cut in half there, stretched and
+    // fused again — cut through that middle) gave one half back and lost the other, which read as the plane missing it
+    const whole = solidVolume(shape), got = [...above, ...below].reduce((v, p) => v + solidVolume(p), 0);
+    // (1 %: a piece missing is half or so; measured volumes of a fused solid's pieces can add up 0.015 % over it)
+    if (Math.abs(got - whole) > 0.01 * Math.max(1, Math.abs(whole))) return null;
     const one = (ps: Solid[]) => (ps.length === 1 ? ps[0] : ps.length ? (makeCompound(ps) as unknown as Solid) : null);
     return { above: one(above), below: one(below) };
   } catch {
