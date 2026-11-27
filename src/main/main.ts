@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol } from "electron";
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -188,6 +188,23 @@ function registerIpc(): void {
       return null;
     }
   });
+  // The settings (see renderer/settings.ts): a file every YDDD open reads at once — localStorage's database, held by one
+  // process, made a second YDDD wait ~4 s and run without them. Only the first YDDD open saves changes to it (see
+  // takeSettings); another one's changes last until it closes. Read and written synchronously, a few hundred bytes.
+  ipcMain.on("settings-load", (e) => (e.returnValue = readSettings()));
+  ipcMain.on("settings-set", (_e, key: string, value: string | null) => {
+    if (!settingsOwner) return;
+    const all = readSettings() ?? {};
+    if (value === null) delete all[key];
+    else all[key] = value;
+    const file = settingsFile(), tmp = `${file}.${process.pid}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(all, null, 1)); // never leave a half-written file
+      renameSync(tmp, file);
+    } catch (err) {
+      console.error("settings not saved:", err);
+    }
+  });
   ipcMain.handle("read-file", async (_e, filePath: string) => {
     try {
       return await readFile(filePath, "utf8");
@@ -290,6 +307,55 @@ let crashed = false;
 /** The objects copied with Ctrl+C (see "clip-write"), shared by every YDDD window of this user. */
 function clipFile(): string {
   return path.join(recoveryDir(), "clipboard.yddd");
+}
+
+/** The settings file (see "settings-load"); a test run's in its own folder. */
+function settingsFile(): string {
+  return path.join(recoveryDir(), "settings.json");
+}
+
+/** This YDDD saves the settings: the first one open (see takeSettings). */
+let settingsOwner = false;
+
+/**
+ * The settings are this YDDD's to save if no other YDDD open has them: settings.owner holds the process id of the one
+ * that has (left behind by one that crashed: taken over). Given up when it quits — a YDDD started after that has them.
+ */
+function takeSettings(): void {
+  const file = path.join(recoveryDir(), "settings.owner");
+  for (let tries = 0; tries < 2 && !settingsOwner; tries++) {
+    try {
+      writeFileSync(file, String(process.pid), { flag: "wx" }); // (made only if it isn't there: two starting at once can't both have it)
+      settingsOwner = true;
+    } catch {
+      const pid = Number(readFileSync(file, "utf8"));
+      if (pid > 0 && running(pid)) return;
+      try {
+        unlinkSync(file);
+      } catch {
+        return;
+      }
+    }
+  }
+  if (settingsOwner) {
+    app.on("will-quit", () => {
+      try {
+        if (Number(readFileSync(file, "utf8")) === process.pid) unlinkSync(file);
+      } catch {
+        // (gone already)
+      }
+    });
+  }
+}
+
+/** The saved settings, null if there's no settings file yet (or it can't be read). */
+function readSettings(): Record<string, string> | null {
+  try {
+    const all = JSON.parse(readFileSync(settingsFile(), "utf8")) as unknown;
+    return all && typeof all === "object" && !Array.isArray(all) ? (all as Record<string, string>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function recoveryDir(): string {
@@ -495,6 +561,7 @@ app.whenReady().then(async () => {
   // A test run starts clean (a leftover recovery file would stop it with the Recover question).
   if (process.env.YDDD_TEST) for (const f of await leftoverRecoveries()) await unlink(f).catch(() => {});
   registerAppProtocol();
+  takeSettings();
   // (the background kernel's own process, one per window: see kernelHost.ts)
   registerKernelHost(DEV_URL ?? "app://y3d/");
   registerIpc();

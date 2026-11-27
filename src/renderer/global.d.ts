@@ -10,6 +10,8 @@ interface YDDDApi {
   /** Objects copied with Ctrl+C, for any YDDD window (a file of YDDD's own, not the system clipboard). */
   clipWrite(data: string): Promise<void>;
   clipRead(): Promise<string | null>;
+  /** The settings file (see settings.ts): all of it (null: none yet), and one setting changed (null: removed). */
+  settings?: { load(): Record<string, string> | null; set(key: string, value: string | null): void };
   /** The system's TrueType / OpenType fonts (for Text), and one's file contents (null: not listed / unreadable). */
   listFonts(): Promise<{ family: string; style: string; file: string }[]>;
   readFont(file: string): Promise<Uint8Array | null>;

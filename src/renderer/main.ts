@@ -3,6 +3,7 @@
  * operation panel, outliner, file I/O, keyboard shortcuts and native menu.
  */
 import ClipperLib from "clipper-lib";
+import "./settings";
 import "./migrate";
 import "./style.css";
 import * as THREE from "three";
