@@ -417,6 +417,22 @@ async function createWindow(): Promise<void> {
       sandbox: true,
     },
   });
+  // YDDD_STARTUP=1: the start-up timing (see boot() in the renderer) printed here, then quit once the background kernel is ready
+  if (process.env.YDDD_STARTUP) {
+    // (YDDD_STARTUP=$(date +%s%3N): from when the command was typed, Electron's own loading counted)
+    const t0 = Number(process.env.YDDD_STARTUP);
+    const started = t0 > 1e12 ? t0 : Date.now() - process.uptime() * 1000;
+    const log = (what: string, at = Date.now()) => console.log(`[startup] ${what}: ${Math.round(at - started)} ms`);
+    log("window created");
+    win.webContents.once("did-start-loading", () => log("page asked for"));
+    win.once("ready-to-show", () => log("first paint"));
+    win.webContents.on("console-message", (details) => {
+      const m = /^\[startup\] (.*) @(\d+)$/.exec((details as unknown as { message: string }).message);
+      if (!m) return;
+      log(m[1], Number(m[2]));
+      if (m[1] === "background kernel ready") setTimeout(() => app.quit(), 500);
+    });
+  }
   win.on("close", (e) => void onWindowClose(e));
   win.on("closed", () => {
     win = null;

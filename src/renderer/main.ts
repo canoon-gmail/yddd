@@ -9975,12 +9975,19 @@ export class App implements ToolHost {
 
 // ================================================================ bootstrap
 
+/** Start-up timing (the clock time, ms), in the console — YDDD_STARTUP=1 prints them in the terminal, from the app's start. */
+const startupMark = (what: string) => console.info(`[startup] ${what} @${Math.round(performance.timeOrigin + performance.now())}`);
+
 async function boot(): Promise<void> {
   const loading = $("loading");
   try {
+    startupMark("page loaded");
     await initKernel();
+    startupMark("kernel ready");
     inchFields();
     const app = new App();
+    startupMark("window built");
+    requestAnimationFrame(() => requestAnimationFrame(() => startupMark("first frame")));
     (window as unknown as { ydddApp: App }).ydddApp = app; // handy for debugging in DevTools
     (window as unknown as { ydddKernel: object }).ydddKernel = { loftOutlines, loftPipe, guideSpans, offsetFaces, offsetFacesQuick, sideWallFaceIds, facesBorderEdgeIds, curveFacesOnto, linkSimilarCopies, liesOnSolid, edgeFaceIds, closeShapes, pathEnds, lineWire, probePoints, isValidShape, serializeShape, deserialize, rotateShape, translateShape, scaleShape, pushPull, makeCylinder, makeCone, sweepFace, pointCenter, pullToPoint, solidTips, roundTip, tipRadiusMax, gridfinityBin, gridfinityBaseplate, boltSolid, nutSolid, threadCutter, labelledCutter, nutTrap, METRIC_SIZES, guidePlaneNormal, roughBounds, optimalBounds, wrappedTextFaces, makeBox, importStl, parseStl, exportStl, importStep, exportStep, solidVolume, faceInfo, booleanOp, tessellate, splitFaceByLine, makeCircleFace, makeRectFace, makePolygonFace, makeTextFaces, loadTextFont, BUILT_IN_FONTS, boxFromFace, boxLid, boxDividers, offsetRing, roundSome, meshForExport, write3mf, revolveFace, extrudeFace, extrudeFaceScaled, edgeLoopFace, offsetFace, makeSphereAt, mirrorShape, sketchPath, filletEdges, chamferEdges, shellSolid, splitByPlane, solidPieces, roundRim, resizeRounds, fillRounds, holeAt, edgeChain, circleOf, fillHoles, resizeHoles, seamEdgeIds, smoothSurfaceFaces, standInTessellation, needsBackgroundMesh }; // used by the tests and npm run bench:ops
     loading.remove();

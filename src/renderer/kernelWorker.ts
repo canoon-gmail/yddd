@@ -95,6 +95,7 @@ export class KernelWorker {
         this.readyWaiters.splice(0).forEach((f) => f());
         this.threads = m.threads ?? 1;
         if (!m.ready) console.warn("background kernel failed to start:", m.error);
+        else console.info(`[startup] background kernel ready @${Math.round(performance.timeOrigin + performance.now())}`);
         return;
       }
       const p = m.id !== undefined ? this.pending.get(m.id) : undefined;
