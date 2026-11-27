@@ -6318,7 +6318,10 @@ function alignedOutlines(wires: Wire[]): Wire[] {
     // each meeting its own one — a circle under a slot: the front arc under the front side, an end arc under each end
     const angle = (v: V3, n: V3, x: V3) => { const d = dirIn(v, n), y = cross3(n, x); return Math.atan2(dot3(d, y), dot3(d, x)); };
     const turn = (a: number) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-    const corners = [...new Map(ref.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]).map((p) => [p.map((x) => x.toFixed(6)).join(), p])).values()]
+    // (the same corner once — matched by distance: by its digits, a circle's start and end, -1e-15 and 0, came out as
+    // two corners and the circle cut in two, one piece of no length: "command not done", every loft of circles facing Y / Z)
+    const ends = ref.edges.flatMap((e) => [e.startPoint.toTuple() as V3, e.endPoint.toTuple() as V3]);
+    const corners = ends.filter((p, i) => ends.findIndex((q) => Math.hypot(...sub3(p, q)) < 1e-6) === i)
       .map((p) => turn(angle(sub3(p, R.centre), R.normal, refDir))).sort((x, y) => x - y);
     const facing = (a: number) => S.pts.reduce((best, p) => {
       const d = (q: V3) => Math.abs(Math.atan2(Math.sin(angleOf(q) - a), Math.cos(angleOf(q) - a)));
@@ -6341,6 +6344,8 @@ function alignedOutlines(wires: Wire[]): Wire[] {
     // (along the curve's own parameter: in the outline's direction unless its edge is reversed)
     const order = us.map((u, i) => ({ u, i })).sort((x, y) => x.u - y.u);
     const period = u1 - u0;
+    // (two corners facing the same point of it: a piece of no length, which OpenCascade refuses — left as it is)
+    if (order.some(({ u }, k) => k > 0 && u - order[k - 1].u < 1e-9 * Math.max(1, period))) return out;
     const piece = (a: number, b: number) => { const mk = new oc.BRepBuilderAPI_MakeEdge(curve as never, a as never, b as never); try { return cast(mk.Edge()) as Edge; } finally { mk.delete(); } };
     if (!curve.IsPeriodic()) return out; // (a closed curve that isn't periodic: left to OpenCascade)
     const edges = order.map(({ u }, k) => piece(u, k + 1 < order.length ? order[k + 1].u : order[0].u + period));
