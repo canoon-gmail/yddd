@@ -1183,6 +1183,56 @@ function circumcentre(a: V3, b: V3, c: V3): V3 {
   return add3(a, t.map((k) => k / (2 * n2)) as V3);
 }
 
+/** Distance from `p` to the segment a–b. */
+function distToSegment(p: V3, a: V3, b: V3): number {
+  const ab = sub3(b, a), l2 = dot3(ab, ab), t = l2 > 0 ? Math.max(0, Math.min(1, dot3(sub3(p, a), ab) / l2)) : 0;
+  return Math.hypot(...sub3(p, [a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]]));
+}
+
+/** How close (mm) a curve of higher degree fitted as degree 2 for the sketch stays to it (see quadraticFit). */
+const SKETCH_FIT_TOL = 1e-3;
+
+/**
+ * A B-spline curve of degree 3 or more as one of degree 2 (what the sketch edits), through points along it: within
+ * SKETCH_FIT_TOL of it (checked between the points too), its ends where it ends. Null if it can't be got that close.
+ */
+function quadraticFit(bs: { FirstParameter(): number; LastParameter(): number; NbKnots(): number; Value(u: number): { X(): number; Y(): number; Z(): number; delete(): void } }, keep: <T>(o: T) => T): ReturnType<typeof oc.GeomConvert.CurveToBSplineCurve> | null {
+  const u0 = bs.FirstParameter(), u1 = bs.LastParameter();
+  const at = (u: number): V3 => {
+    const p = bs.Value(u);
+    const out: V3 = [p.X(), p.Y(), p.Z()];
+    p.delete();
+    return out;
+  };
+  for (const n of [Math.max(60, 20 * bs.NbKnots()), 400]) {
+    const arr = keep(new oc.NCollection_Array1_gp_Pnt(1, n + 1));
+    for (let i = 0; i <= n; i++) arr.SetValue(i + 1, keep(new oc.gp_Pnt(...at(u0 + ((u1 - u0) * i) / n))));
+    try {
+      const fit = keep(new oc.GeomAPI_PointsToBSpline(arr, 2, 2, oc.GeomAbs_Shape.GeomAbs_C1, SKETCH_FIT_TOL / 2));
+      if (!fit.IsDone()) continue;
+      const q = keep(fit.Curve());
+      // (between the points it went through too: each one's distance to the fitted curve, finely sampled)
+      const m = 8 * n, fine: V3[] = [];
+      for (let i = 0; i <= m; i++) {
+        const p = q.Value(q.FirstParameter() + ((q.LastParameter() - q.FirstParameter()) * i) / m);
+        fine.push([p.X(), p.Y(), p.Z()]);
+        p.delete();
+      }
+      let worst = 0;
+      for (let i = 0; i < 2 * n && worst <= SKETCH_FIT_TOL; i++) {
+        const p = at(u0 + ((u1 - u0) * (i + 0.5)) / (2 * n));
+        let best = Infinity;
+        for (let j = 0; j < m; j++) best = Math.min(best, distToSegment(p, fine[j], fine[j + 1]));
+        worst = Math.max(worst, best);
+      }
+      if (worst <= SKETCH_FIT_TOL) return q as never;
+    } catch {
+      // (not fitted: more points, or none)
+    }
+  }
+  return null;
+}
+
 /** One edge as sketch segments (a degree-1 spline: its straight pieces). */
 function sketchSegsOfEdge(e: Edge, name: string): SketchSeg[] {
   const a = e.startPoint.toTuple() as V3, b = e.endPoint.toTuple() as V3;
@@ -1192,15 +1242,22 @@ function sketchSegsOfEdge(e: Edge, name: string): SketchSeg[] {
   const keep = <T>(o: T): T => (tmp.push(o as unknown as { delete(): void }), o);
   try {
     const c = oc.BRep_Tool.Curve(e.wrapped, 0, 0);
-    const bs = keep(oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true)) as never));
+    let bs = keep(oc.GeomConvert.CurveToBSplineCurve(keep(new oc.Geom_TrimmedCurve(c.returnValue, c.First, c.Last, true, true)) as never));
     if (bs.IsPeriodic()) bs.SetNotPeriodic();
     const pole = (i: number): V3 => {
       const p = keep(bs.Pole(i));
       return [p.X(), p.Y(), p.Z()];
     };
-    const deg = bs.Degree();
+    let deg = bs.Degree();
     if (deg === 1) return Array.from({ length: bs.NbPoles() - 1 }, (_, i) => ({ kind: "line", a: pole(i + 1), b: pole(i + 2) }) as SketchSeg);
-    if (deg !== 2) throw new Error(`Sketch: "${name}" has a freeform curve the sketch can't edit (degree ${deg})`);
+    if (deg > 2) {
+      // A higher degree (an edge copied off a solid — Duplicate edge: degree 5): fitted again as degree 2 through points
+      // along it, SKETCH_FIT_TOL close
+      const fit = quadraticFit(bs, keep);
+      if (!fit) throw new Error(`Sketch: "${name}" has a freeform curve the sketch can't edit (degree ${deg})`);
+      bs = fit;
+      deg = 2;
+    }
     // Pieces end to end: every inside knot twice (2n + 1 control points, every 2nd one on the curve).
     for (let i = 2; i < bs.NbKnots(); i++) if (bs.Multiplicity(i) < 2) bs.IncreaseMultiplicity(i, 2);
     const n = bs.NbPoles();
