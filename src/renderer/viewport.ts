@@ -1567,6 +1567,17 @@ export class Viewport {
               cz += q[2];
             }
             add(cx / 16, cy / 16, cz / 16, 1);
+            // A circle: its 4 quarter points too, square to the world's X / Y / Z as far as its plane allows (a circular
+            // face's edge, a half sphere's rim) — like an arc's middle
+            const ci = ed.geomType === "CIRCLE" ? circleOf(v.body.shape as Shape, ed.hashCode) : null;
+            if (ci) {
+              const n = new THREE.Vector3(...ci.normal).normalize();
+              const u = new THREE.Vector3(1, 0, 0).projectOnPlane(n);
+              if (u.lengthSq() < 1e-6) u.set(0, 1, 0).projectOnPlane(n);
+              u.normalize().multiplyScalar(ci.radius);
+              const w = n.clone().cross(u);
+              for (const [a, b] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) add(ci.center[0] + a * u.x + b * w.x, ci.center[1] + a * u.y + b * w.y, ci.center[2] + a * u.z + b * w.z, 2, 0, 1);
+            }
           } else {
             add(p0[0], p0[1], p0[2], 0);
             add(p1[0], p1[1], p1[2], 0);
