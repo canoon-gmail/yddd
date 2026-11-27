@@ -111,6 +111,8 @@ export interface GizmoFrame {
 }
 
 export type SnapKind = "vertex" | "center" | "midpoint" | "axis" | "edge" | "tangent";
+/** A guide along an X / Y / Z axis runs at least this far (mm) each way: shorter ones are short guides (their middle snaps). */
+export const AXIS_GUIDE_HALF = 500;
 const SNAP_KINDS: SnapKind[] = ["vertex", "center", "midpoint"];
 const SNAP_PX = 10;
 /** While a move is dragged with snapping: the marks of the solid under the cursor shown within this many px of it. */
@@ -1866,20 +1868,24 @@ export class Viewport {
       if (faceHit && c.view.snaps!.inner[c.i] && faceHit.view === c.view) return true;
       return !this.hiddenFrom(p.fromArray(c.view.snaps!.pts, c.i * 3), exclude);
     }) ?? null;
-    // Where guides cross (each other or an axis): like a corner.
-    let cross: { d: number; p: THREE.Vector3 } | null = null;
+    // Where guides cross (each other or an axis): like a corner. The middle of a short guide (drawn between two points or
+    // beside an edge — not one along an axis, see AXIS_GUIDE_HALF): like an edge's middle.
+    let cross: { d: number; p: THREE.Vector3; kind: SnapKind } | null = null;
     const near: BodyView[] = [];
     for (const [id, v] of this.views) if (this.snappable(v) && !exclude?.has(id) && !this.awayFrom(v, px, py, SNAP_PX)) near.push(v);
-    for (const c of this.guideCrossings(near)) {
+    const mids = this.guides
+      .filter((g, i) => i !== this.snapSkipGuide && !this.hiddenGuides.has(i) && g.a.distanceTo(g.b) < 2 * AXIS_GUIDE_HALF - 1e-6)
+      .map((g) => ({ c: g.a.clone().add(g.b).multiplyScalar(0.5), kind: "midpoint" as const, rank: 2 }));
+    for (const { c, kind, rank } of [...this.guideCrossings(near).map((c) => ({ c, kind: "vertex" as const, rank: 0 })), ...mids]) {
       p.copy(c).project(this.camera);
       if (p.z < -1 || p.z > 1) continue;
-      const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py);
-      if (d > SNAP_PX || (cross && d >= cross.d) || (best && d >= best.score)) continue;
+      const d = Math.hypot(((p.x + 1) / 2) * this.width - px, ((1 - p.y) / 2) * this.height - py), score = d + rank * 4;
+      if (d > SNAP_PX || (cross && score >= cross.d) || (best && score >= best.score)) continue;
       if (faceHit && this.behind(this.camera.position.distanceTo(c), faceHit.distance)) continue;
       if (this.hiddenFrom(c, exclude)) continue;
-      cross = { d, p: c };
+      cross = { d: score, p: c, kind };
     }
-    if (cross) return { point: cross.p.clone(), kind: "vertex" };
+    if (cross) return { point: cross.p.clone(), kind: cross.kind };
     // World origin (0,0,0) is always a vertex-type snap point.
     p.set(0, 0, 0).project(this.camera);
     if (p.z >= -1 && p.z <= 1) {

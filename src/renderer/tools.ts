@@ -10,7 +10,7 @@
  * can also type exact dimensions (e.g. "40,25" then Enter for a rectangle).
  */
 import * as THREE from "three";
-import type { Viewport, SnapKind, GizmoFrame } from "./viewport";
+import { AXIS_GUIDE_HALF, type Viewport, type SnapKind, type GizmoFrame } from "./viewport";
 import {
   planarFaceFrame,
   axisCrossEdge,
@@ -1780,7 +1780,7 @@ export class GuideTool implements Tool {
       const view = vp.camera.getWorldDirection(new THREE.Vector3());
       slide = Math.abs(view.y) >= Math.abs(view.x) ? 0 : 1; // looking along Y: slide along X
     }
-    const half = Math.max(500, vp.worldPerPixel(new THREE.Vector3()) * 1500);
+    const half = Math.max(AXIS_GUIDE_HALF, vp.worldPerPixel(new THREE.Vector3()) * 1500);
     const a: V3 = [0, 0, 0], b: V3 = [0, 0, 0], inward: V3 = [0, 0, 0];
     for (let i = 0; i < 3; i++) a[i] = b[i] = i === k ? 0 : o.getComponent(i);
     a[k] = -half;
