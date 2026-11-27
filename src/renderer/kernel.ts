@@ -8281,6 +8281,13 @@ export function scaleShape(shape: Geom, f: V3, center: V3): Geom {
     return assembleWire(shape.edges.map((e) => makeLine(map(e.startPoint.toTuple() as V3), map(e.endPoint.toTuple() as V3))));
   }
   if (!isPolyhedral(shape)) {
+    // A whole sphere turned about its centre first (the same sphere): stretched as it was made, its seams lay in the
+    // world planes through its centre — the planes a Cut along the red / green / blue axis line uses, where the split
+    // lost half of it (see splitByPlaneOnce). Turned, they lie at odd angles, out of the way (as splitByPlane turns one).
+    // (about a slanted axis: turned about all three world axes at once — about one alone, the seams in the plane square
+    // to it would stay there)
+    const sc = isFaceShape(shape) ? null : sphereCenter(shape as Solid);
+    if (sc) shape = rotateShape(shape, 41, sc, [0.3, 0.7, 0.2]) as Shape;
     try {
       return stretchCurved(shape, f, center);
     } catch (e) {
