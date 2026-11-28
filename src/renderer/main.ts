@@ -7859,8 +7859,16 @@ export class App implements ToolHost {
           }
           if (gapIn && gapIn !== document.activeElement) gapIn.value = fmt(g);
         } else {
+          // Flat along the direction (a flat face copied along Z) with no gap: they'd all lie on each other — a gap of
+          // its largest size to start with, put in the field (not while it's being typed in)
+          const gapIn = input("gap");
+          if (size < 1e-6 && gap < 1e-6 && gapIn && gapIn !== document.activeElement) {
+            gap = +fmt(Math.max(...[0, 1, 2].map((k) => hi[k] - lo[k]))) || 10;
+            gapIn.value = fmt(gap);
+            typed.gap = gap;
+          }
           const step = size + gap;
-          if (!(step > 1e-6)) throw new Error("Gap too small: the copies would be on top of each other");
+          if (!(step > 1e-6)) throw new Error(size < 1e-6 ? `Flat along ${"XYZ"[axis]}: type a gap — the distance between the copies` : "Gap too small: the copies would be on top of each other");
           offsets = Array.from({ length: n + 1 }, (_, k) => sign * step * k);
         }
         const moveOrig = Math.abs(offsets[0]) > 1e-9;
