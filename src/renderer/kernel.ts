@@ -4441,8 +4441,18 @@ export function shellSolid(shape: Solid, faceIds: Set<number>, thickness: number
   } catch (e) {
     first = e;
   }
-  const r = prismShell(shape, faceIds, thickness) ?? thickSolid(shape, faceIds, thickness, true);
-  if (r) return r;
+  try {
+    const r = prismShell(shape, faceIds, thickness) ?? thickSolid(shape, faceIds, thickness, true);
+    if (r) return r;
+  } catch (e) {
+    first ??= e;
+  }
+  try {
+    const r = slabShell(shape, faceIds, thickness);
+    if (r) return r;
+  } catch (e) {
+    first ??= e;
+  }
   throw first ?? new Error("Shell: the geometry kernel could not hollow this solid (try a smaller thickness)");
 }
 
@@ -4548,6 +4558,23 @@ function thickSolid(shape: Solid, faceIds: Set<number>, thickness: number, inter
     faces.delete();
     builder.delete();
   }
+}
+
+/**
+ * Shell made of slabs: each face kept thickened inward by `thickness` on its own (a single face's offset, which works
+ * where OpenCascade's shell of the whole solid fails), the slabs joined and trimmed to the solid (at the open faces they
+ * poke out a little where the walls lean). Null if that isn't one valid solid with about the slabs' volume (a slab
+ * built the wrong way, out of the solid, is trimmed away). A loft (rounded rectangles, ruled faces) shelled through its
+ * small end, or with a capsule cut flat on top: OpenCascade's shell failed every way. Where two kept faces meet in a
+ * valley the slabs leave a groove inside the wall, under the valley: thinner there, never open.
+ */
+function slabShell(shape: Solid, faceIds: Set<number>, thickness: number): Solid | null {
+  const slabs = shape.faces.filter((f) => !faceIds.has(f.hashCode)).map((f) => thickenFace(f, thickness, 1));
+  if (!slabs.length) return null;
+  const walls = slabs.length === 1 ? slabs[0] : booleanOp("union", slabs[0], slabs.slice(1));
+  const r = booleanOp("intersect", walls, [shape]);
+  const v = solidVolume(r), sum = slabs.reduce((a, x) => a + solidVolume(x), 0);
+  return isValidShape(r) && solidPieces(r).length === 1 && v > 0.5 * sum && v < solidVolume(shape) - 1e-9 ? r : null;
 }
 
 /**
