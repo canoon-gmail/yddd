@@ -6781,7 +6781,12 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   const parts = [target, ...tools];
   // (and with every solid touching the target: one piece — two unjoined pieces mean it missed where they cross)
   let allTouch: boolean | null = null;
-  const good = (r: Solid) => isValidShape(r) && (op !== "union" || (unionHoldsAll(r, parts) && (solidPieces(r).length === 1 || !(allTouch ??= tools.every((t) => shapesTouch(target, t))))));
+  // (a subtraction / intersection that missed where they cross — nothing taken off, nothing in common — though they
+  // touch: tried again the other ways too)
+  let anyTouch: boolean | null = null;
+  const good = (r: Solid) => isValidShape(r) && (op !== "union"
+    ? !missedCrossing(op, target, tools, r) || !(anyTouch ??= tools.some((t) => shapesTouch(target, t)))
+    : unionHoldsAll(r, parts) && (solidPieces(r).length === 1 || !(allTouch ??= tools.every((t) => shapesTouch(target, t)))));
   let first: Solid | null = null, failed: unknown = null;
   try {
     first = booleanOpOnce(op, target, tools);
@@ -6859,6 +6864,11 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       // (the first try's result / error below)
     }
   }
+  // Broken or missed every way: done on halves (see splitBoolean)
+  if (tools.length && (!first || !good(first))) {
+    const r = splitBoolean(op, target, tools);
+    if (r) return r;
+  }
   // (a union that dropped a solid every way: refused, rather than kept without it)
   if (first && op === "union" && isValidShape(first) && !good(first))
     throw new Error("Union: OpenCascade left part of a solid out (they meet almost exactly, edge to edge) — nothing changed; move one a hair (e.g. 0.01 mm) and try again");
@@ -6881,34 +6891,71 @@ function unionHoldsAll(r: Solid, parts: Solid[]): boolean {
 }
 
 /**
- * A valid result that plainly missed where the solids cross — a union still in pieces, an intersection empty, a
- * subtraction with nothing taken off, though they touch: worked out again with a larger fuzz, that result if it's valid
- * and right; null if it isn't (or nothing looked missed). A half and its mirror copy overlapping (free-form sides meeting
- * the mirror plane nearly square on, so each meets its copy almost tangent): at 1e-5 OpenCascade found no crossing at
- * all — union two solids, intersection empty; at 1e-4 right (the union's volume = both − their common part).
+ * Whether a result plainly missed where the solids cross — a union in pieces or without one of them, an intersection of
+ * no volume, a subtraction with nothing taken off. (Right too if they only touch: the caller checks that.)
+ */
+function missedCrossing(op: BooleanOp, target: Solid, tools: Solid[], r: Solid): boolean {
+  const v0 = solidVolume(target), tiny = 1e-6 * Math.max(1, v0);
+  return op === "union" ? solidPieces(r).length > 1 || !unionHoldsAll(r, [target, ...tools])
+    : op === "intersect" ? !r.faces.length || Math.abs(solidVolume(r)) < tiny
+    : Math.abs(solidVolume(r) - v0) < tiny;
+}
+
+/**
+ * A valid result that plainly missed where the solids cross (see missedCrossing), though they touch: worked out again
+ * with a larger fuzz, that result if it's valid and right, else cut in halves (see splitBoolean); null if none is (or
+ * nothing looked missed). A half and its mirror copy overlapping (free-form sides meeting the mirror plane nearly square
+ * on, so each meets its copy almost tangent): at 1e-5 OpenCascade found no crossing at all — union two solids,
+ * intersection empty; at 1e-4 right (the union's volume = both − their common part).
  */
 function missedOverlap(op: BooleanOp, target: Solid, tools: Solid[], first: Solid): Solid | null {
-  if (!tools.length) return null;
-  const v0 = solidVolume(target), tiny = 1e-6 * Math.max(1, v0);
-  const holdsAll = (r: Solid) => unionHoldsAll(r, [target, ...tools]);
-  const missed = op === "union" ? solidPieces(first).length > 1 || !holdsAll(first)
-    : op === "intersect" ? !first.faces.length
-    : Math.abs(solidVolume(first) - v0) < tiny;
-  if (!missed || !tools.some((t) => shapesTouch(target, t))) return null;
+  if (!tools.length || !missedCrossing(op, target, tools, first) || !tools.some((t) => shapesTouch(target, t))) return null;
   for (const fuzz of [1e-4, 1e-3]) {
     booleanFuzz = fuzz;
     try {
       // (copies: a failed try changes the solids it was given; the first try, valid, left them as they were)
       const r = booleanOpOnce(op, deepCopy(target) as Solid, tools.map((t) => deepCopy(t) as Solid));
-      if (!isValidShape(r)) continue;
-      const right = op === "union" ? solidPieces(r).length === 1 && holdsAll(r)
-        : op === "intersect" ? r.faces.length > 0
-        : solidVolume(r) < v0 - tiny;
-      if (right) return r;
+      if (isValidShape(r) && !missedCrossing(op, target, tools, r)) return r;
     } catch {
       // (the next fuzz)
     } finally {
       booleanFuzz = BOOLEAN_FUZZ;
+    }
+  }
+  return splitBoolean(op, target, tools);
+}
+
+/**
+ * The boolean done on halves: every solid (copies) cut in two by a slanted plane through the middle of where they
+ * overlap — the halves joined; each half of the target with the tools' halves taken off; the common parts of each pair
+ * of halves. The result if it's valid and didn't miss the crossing, else null. A stretched half sphere and its mirror
+ * copy (Sphere, Scale unevenly, Cut in half, Mirror) cross in a loop on the mirror plane: OpenCascade found three of its
+ * four pieces but not the 4 mm where one face crosses its own mirror image (at any fuzz, moved or turned a little too),
+ * so it saw no crossing — the union broken or the first solid alone. Its faces cut in two, it finds the whole loop.
+ */
+function splitBoolean(op: BooleanOp, target: Solid, tools: Solid[]): Solid | null {
+  const [lo, hi] = target.boundingBox.bounds;
+  const boxes = tools.map((t) => t.boundingBox.bounds);
+  const mid = [0, 1, 2].map((i) => (Math.max(lo[i], Math.min(...boxes.map((b) => b[0][i]))) + Math.min(hi[i], Math.max(...boxes.map((b) => b[1][i])))) / 2) as V3;
+  // (at odd angles: not along a world plane, where seams and flat faces lie)
+  for (const n of [[0.2, 0.3, 0.9], [0.9, 0.2, 0.3]] as V3[]) {
+    try {
+      const halves = [target, ...tools].map((x) => splitByPlaneOnce(deepCopy(x) as Solid, mid, n));
+      if (halves.some((h) => !h)) continue;
+      const [tp, ...tl] = halves.map((h) => [h!.above, h!.below].filter((x): x is Solid => !!x));
+      let pieces: Solid[];
+      if (op === "union") pieces = [...tp, ...tl.flat()];
+      else if (op === "subtract") pieces = tp.map((p) => booleanOpOnce("subtract", p, tl.flat()));
+      else {
+        pieces = tp;
+        for (const t of tl) pieces = pieces.flatMap((p) => t.map((q) => booleanOpOnce("intersect", p, [q])));
+      }
+      pieces = pieces.filter((p) => p.faces.length);
+      if (!pieces.length) continue;
+      const r = pieces.length === 1 ? pieces[0] : booleanOpOnce("union", pieces[0], pieces.slice(1));
+      if (isValidShape(r) && !missedCrossing(op, target, tools, r)) return r;
+    } catch {
+      // (the next plane)
     }
   }
   return null;
