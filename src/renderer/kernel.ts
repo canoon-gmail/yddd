@@ -6781,12 +6781,7 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
   const parts = [target, ...tools];
   // (and with every solid touching the target: one piece — two unjoined pieces mean it missed where they cross)
   let allTouch: boolean | null = null;
-  // (a subtraction / intersection that missed where they cross — nothing taken off, nothing in common — though they
-  // touch: tried again the other ways too)
-  let anyTouch: boolean | null = null;
-  const good = (r: Solid) => isValidShape(r) && (op !== "union"
-    ? !missedCrossing(op, target, tools, r) || !(anyTouch ??= tools.some((t) => shapesTouch(target, t)))
-    : unionHoldsAll(r, parts) && (solidPieces(r).length === 1 || !(allTouch ??= tools.every((t) => shapesTouch(target, t)))));
+  const good = (r: Solid) => isValidShape(r) && (op !== "union" || (unionHoldsAll(r, parts) && (solidPieces(r).length === 1 || !(allTouch ??= tools.every((t) => shapesTouch(target, t))))));
   let first: Solid | null = null, failed: unknown = null;
   try {
     first = booleanOpOnce(op, target, tools);
@@ -6864,8 +6859,8 @@ export function booleanOp(op: BooleanOp, target: Solid, tools: Solid[]): Solid {
       // (the first try's result / error below)
     }
   }
-  // Broken or missed every way: done on halves (see splitBoolean)
-  if (tools.length && (!first || !good(first))) {
+  // A union broken or missed every way: done on halves (see splitBoolean)
+  if (op === "union" && tools.length && (!first || !good(first))) {
     const r = splitBoolean(op, target, tools);
     if (r) return r;
   }
@@ -6891,20 +6886,20 @@ function unionHoldsAll(r: Solid, parts: Solid[]): boolean {
 }
 
 /**
- * Whether a result plainly missed where the solids cross — a union in pieces or without one of them, an intersection of
- * no volume, a subtraction with nothing taken off. (Right too if they only touch: the caller checks that.)
+ * Whether a result plainly missed where the solids cross — a union in pieces or without one of them, an intersection
+ * with nothing in it, a subtraction with nothing taken off. (Right too if they only touch: the caller checks that.)
  */
 function missedCrossing(op: BooleanOp, target: Solid, tools: Solid[], r: Solid): boolean {
   const v0 = solidVolume(target), tiny = 1e-6 * Math.max(1, v0);
   return op === "union" ? solidPieces(r).length > 1 || !unionHoldsAll(r, [target, ...tools])
-    : op === "intersect" ? !r.faces.length || Math.abs(solidVolume(r)) < tiny
+    : op === "intersect" ? !r.faces.length
     : Math.abs(solidVolume(r) - v0) < tiny;
 }
 
 /**
  * A valid result that plainly missed where the solids cross (see missedCrossing), though they touch: worked out again
- * with a larger fuzz, that result if it's valid and right, else cut in halves (see splitBoolean); null if none is (or
- * nothing looked missed). A half and its mirror copy overlapping (free-form sides meeting the mirror plane nearly square
+ * with a larger fuzz, that result if it's valid and right, else (a union) cut in halves (see splitBoolean); null if
+ * none is (or nothing looked missed). A half and its mirror copy overlapping (free-form sides meeting the mirror plane nearly square
  * on, so each meets its copy almost tangent): at 1e-5 OpenCascade found no crossing at all — union two solids,
  * intersection empty; at 1e-4 right (the union's volume = both − their common part).
  */
@@ -6922,7 +6917,9 @@ function missedOverlap(op: BooleanOp, target: Solid, tools: Solid[], first: Soli
       booleanFuzz = BOOLEAN_FUZZ;
     }
   }
-  return splitBoolean(op, target, tools);
+  // (a union only: a subtraction / intersection that only touches — a lid on its box — looks the same, and would go
+  // through every split for nothing)
+  return op === "union" ? splitBoolean(op, target, tools) : null;
 }
 
 /**
